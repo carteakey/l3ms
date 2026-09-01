@@ -232,6 +232,23 @@ previously downloaded unsloth heads vanished from
 `models/unsloth/Qwen3.8-Flash-Next-GGUF/MTP/` between runs (cause
 unknown — re-downloaded shared-Q8_0; keep an eye on it).
 
+**#28104 test (2026-09-01, final for today).** Built open PR #28104's head
+(175b66c51: NextN/MTP port to master — sidecar+in-file loading, draft
+graph, full checkpoints + ON_DEVICE server flags, replay fix, defer
+gather). **First build that loads the agentionai sidecar at ncmoe 46/32k**
+— the draft-KV sizing is solved in this port. Performance: code 17.3 →
+15.9 (after cherry-picking the graph-key fix, fe4c55bed), prose 12-13.7,
+acceptance 0.65-0.80 — **still behind the old build's 19.9-25.0** at
+identical placement. Also: #28104 lacks borrow support (shared heads
+reject with `token_embd.weight not found`). Measured conclusion: the port
+is functionally complete and VRAM-clean, but on this box it loses to the
+old build today; the residual delta is either the 30-commit base gap
+(#27941/#28123/#28023 perf+correctness) or per-run speculation-pool
+variance that single probes can't separate. Practical call: MTP tier
+stays on 0b7d6d57d; re-test #28104 (or its merged form) when it lands
+upstream WITH a probe protocol that controls pool state (fixed warm-up
+sequence, same-prompt acceptance logging).
+
 **Master+#144 merge attempt (2026-09-01, blocked on draft-KV sizing).**
 Merged unsloth #144 (586b15ef8) onto fresh master (9d817213a) — branch
 `unsloth-mtp-onmaster` @ aac87ec23 in the llama.cpp-unsloth worktree.
