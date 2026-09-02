@@ -6,16 +6,55 @@ Internal record of every decision, measurement, and next step for serving
 `docs/qwen3-8-flash-next-local-post.md` (published writeup),
 `docs/bench-results.md` (bench numbers).
 
-Status: 2026-08-31. Serving live via llama-swap, three tiers, all smoke-tested.
+Status: 2026-09-01 (end of the two-day MTP campaign). Serving live via
+llama-swap, three tiers, all smoke-tested.
 
 ---
+
+## 0. Session summary — where everything stands (2026-09-01)
+
+**Live tiers (all smoke-tested through the router):**
+
+| tier | entry | binary | commit | measured (steady state) |
+| --- | --- | --- | --- | --- |
+| gold | `qwen38-flash-next` | `vendor/llama.cpp-master` | master `9d817213a` | prose 19.6-19.7 · spec-warm 25.6-26.1 · pp 198-200 t/s @ 64k |
+| exp | `qwen38-flash-next-exp` | `llama-server-exp` | `e1748dbd5` (master + #28023 #28068 #27941) | parity with gold; #28023/#27941 now upstream, so the delta is #28068 only |
+| MTP | `qwen38-flash-next-mtp` | old MTP build `0b7d6d57d` | #27836 + detached patch (host ckpt + p-min 0.7 gating) | code 25.0 · prose ~19.5 @ 32k — still the fastest MTP on 12 GB |
+
+**Hardware final state**: RAM 5600 MT/s (was 5000; tg-neutral, keep for
+gaming), governor/EPP performance (persistence unit committed), spill-free,
+page-in protocol documented.
+
+**Every MTP path tested and closed** (details in §9.1):
+
+| path | result |
+| --- | --- |
+| hand-merge of #28123+#28118+#28120+#28061 onto #27836 | round-2 VRAM OOM (on-device checkpoints don't fit) |
+| ON_DEVICE cherry-pick alone on the proven build | round-2 `memory buffer mismatch` abort — state-sizing gap, hits qwen4exp everywhere, not VRAM-related |
+| unsloth #144 base build | works, 19.8 max (ncmoe 47 penalty), VRAM-blocked from best placement |
+| unsloth prebuilt release `b10715-mix` | loads everything, 5-7 t/s — host-checkpoint pathology, ON_DEVICE missing |
+| **#28104 port (open PR)** | **loads the sidecar at ncmoe 46/32k — the only build that does on master lineage — but tg 15.9-17.3, behind the old build** |
+
+**The single unlock**: #28104 (or #27836+#28097+#28118) merging upstream.
+On that day: `git fetch` gold, point `--spec-draft-model` at the staged
+unsloth head (`models/unsloth/Qwen3.8-Flash-Next-GGUF/MTP/`), re-run the
+§9.4 ladder with a pool-controlled probe protocol. Base-decode gains
+(#27992, #27977, QSA sparsity) ride the same refresh.
+
+**Key quantified facts** (all measured, see §5-§6): one CPU expert layer
+(ncmoe 46→47) costs ~13% tg; DRAM-side latency is 43 of 86.8 ns/hop and
+timing changes are tg-neutral; the speculation pool makes single tg probes
+±30% noisy — always warm it and log acceptance.
+
+---
+
 
 ## 1. Hardware envelope (yeti-cachy)
 
 | component | detail | implication |
 | --- | --- | --- |
 | GPU | RTX 4070, 12.28 GiB | KV + compute + fit-placed weights; full at 11.3/12.28 with fit-target 512 |
-| RAM | 4×16 GB DDR5-4800 spec, running 5000 MT/s (i5-12600K, 2DPC) | random-access latency is the decode limiter; see §9.3 for clock plan |
+| RAM | 4×16 GB Corsair Vengeance DDR5-6000C36, running 5600 MT/s (i5-12600K, 2DPC, ASRock B760M) | random-access latency is the decode limiter; 5600 measured tg-neutral (§9.3) |
 | SSD | SN770 Gen4, ~6 GB/s | hosts the 38.4 GB n-gram shard; µs-latency vs ~50 ms/token budget → PLE offload is free |
 | swap | zram 61.6 GiB (compressed, in-RAM) | zram metrics are noise for spill detection; use `read_bytes` |
 | access | Tailscale 100.110.126.24, LAN 192.168.0.36, llama-swap :8080 | Bearer auth via `LLAMA_SWAP_API_KEY` |

@@ -57,6 +57,12 @@ Three router tiers share one AtomicChat AD-4.27bpw quant:
   (`build/bin/llama-server` in the same clone, branch `pr-test-exp-mtp`),
   32k ctx cap, opt-in.
 
+MTP upgrade status (2026-09-01): every alternative tested and closed —
+see the internal doc §0/§9.1. The unlock is upstream #28104 (or
+#27836+#28097+#28118) merging; until then 0b7d6d57d is the fastest MTP
+that exists on 12 GB. Do not hand-merge MTP PR branches — three separate
+hand-merges all failed for named reasons.
+
 Gotchas:
 
 - The exp clone's build dir serves two branches: `llama-server` = MTP binary,
