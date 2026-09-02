@@ -18,6 +18,8 @@
 ### Fixed
 - llama-swap v247 API alignment (src/llama_swap.rs): model state now parses the nested `status.value` field from `/v1/models` (top-level `state`/`status` strings still honored for older routers) — states no longer show "unknown"; model load switched from the nonexistent `POST /models/load` to `GET /upstream/{model}/load` (verified live: triggers the on-demand startup path and holds until health-check); per-model unload moved to `POST /api/models/unload` with the existing `{"model": id}` body (verified live: `DELETE /upstream/{model}` does not evict a still-starting process, the API endpoint does).
 
+- Model Browser auto-scan: entering the Browser tab (F4, palette, or tab cycling) now scans the GGUF path automatically when it has never been scanned or changed since the last scan (mirrors the Chat tab auto-connect); manual `r` rescan unchanged. Previously the table sat empty until a manual scan.
+
 ## [0.7.0] - 2026-08-31
 
 The Rust port remains in progress under `CAR-97`; these entries describe

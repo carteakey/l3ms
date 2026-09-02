@@ -1213,6 +1213,8 @@ impl App {
             if self.chat_client.is_none() && !self.chat_connection_pending {
                 self.start_chat_connect();
             }
+        } else if self.tab == Tab::Browser {
+            self.ensure_browser_scan();
         }
         true
     }
@@ -2001,15 +2003,22 @@ impl App {
             OpenWorkbench => self.tab = Tab::Workbench,
             OpenModelOps => self.tab = Tab::ModelOps,
             OpenChat => self.tab = Tab::Chat,
-            OpenBrowser => self.tab = Tab::Browser,
+            OpenBrowser => {
+                self.tab = Tab::Browser;
+                self.ensure_browser_scan();
+            }
             OpenDownload => self.tab = Tab::Download,
             OpenJobs => self.tab = Tab::Jobs,
             OpenMaintenance => self.tab = Tab::Maintenance,
             PreviousTab => {
                 self.tab =
-                    Tab::from_index((self.tab.index() + TAB_NAMES.len() - 1) % TAB_NAMES.len())
+                    Tab::from_index((self.tab.index() + TAB_NAMES.len() - 1) % TAB_NAMES.len());
+                self.ensure_browser_scan();
             }
-            NextTab => self.tab = Tab::from_index(self.tab.index() + 1),
+            NextTab => {
+                self.tab = Tab::from_index(self.tab.index() + 1);
+                self.ensure_browser_scan();
+            }
             WorkbenchSelectPrevious => {
                 let count = self.visible_model_count();
                 select_previous_table(&mut self.model_state, count);
@@ -3138,6 +3147,15 @@ impl App {
                 result,
             });
         });
+    }
+
+    /// Scan the GGUF browser path when it has never been scanned or changed
+    /// since the last scan.
+    fn ensure_browser_scan(&mut self) {
+        let path = PathBuf::from(expand_tilde(&self.browser_path));
+        if !self.browser_scanning && self.browser_scanned_root != path {
+            self.scan_browser();
+        }
     }
 
     fn scan_browser(&mut self) {
