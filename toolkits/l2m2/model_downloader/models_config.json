@@ -1,0 +1,44 @@
+{
+  "base_models_dir": "/home/kchauhan/models",
+  "models": [
+    {
+      "enabled": true,
+      "repo_id": "unsloth/Qwen-Image-Edit-2511-GGUF",
+      "local_dir": "/mnt/lab/models/unsloth/Qwen-Image-Edit-2511-GGUF",
+      "allow_patterns": [
+        "*Q3_K_L*"
+      ],
+      "ignore_patterns": [],
+      "revision": "",
+      "force_download": false,
+      "max_workers": null,
+      "description": "Qwen Image Edit 2511 Q3_K_L"
+    },
+    {
+      "enabled": true,
+      "repo_id": "unsloth/LTX-2.3-GGUF",
+      "local_dir": "/mnt/lab/models/unsloth/LTX-2.3-GGUF",
+      "allow_patterns": [
+        "ltx-2.3-22b-dev-Q3_K_M.gguf"
+      ],
+      "ignore_patterns": [],
+      "revision": "",
+      "force_download": false,
+      "max_workers": null,
+      "description": "LTX-2.3 22B video gen Q3_K_M"
+    },
+    {
+      "enabled": true,
+      "repo_id": "unsloth/Qwen-Image-2512-GGUF",
+      "local_dir": "/mnt/lab/models/unsloth/Qwen-Image-2512-GGUF",
+      "allow_patterns": [
+        "qwen-image-2512-Q3_K_M.gguf"
+      ],
+      "ignore_patterns": [],
+      "revision": "",
+      "force_download": false,
+      "max_workers": null,
+      "description": "Qwen Image 2512 Q3_K_M"
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+/target/
+/.venv/
+/.toolkit/
+/models/
+/vendor/
+.env
+__pycache__/
+*.pyc
+*.log
+.DS_Store
