@@ -291,6 +291,24 @@ check_runtime() {
         missing=1
     fi
 
+    local blender_bin="${L3MS_BLENDER_BIN:-$HOME/.local/bin/blender}"
+    if [[ -x "$blender_bin" ]]; then
+        ok "Blender: $("$blender_bin" --version | head -n 1) at $blender_bin"
+        local addon_file="$HOME/.config/blender/5.2/scripts/addons/blender_mcp.py"
+        if [[ -f "$addon_file" ]]; then
+            ok "Blender MCP addon: $addon_file"
+        else
+            warn "Blender MCP addon missing at $addon_file"
+        fi
+        if ss -tlpn 2>/dev/null | grep -q ":9876 "; then
+            ok "Blender MCP listener: active on port 9876"
+        else
+            ok "Blender MCP listener: idle on port 9876 (run GUI and press N -> MCP for Blender -> Start MCP Server)"
+        fi
+    else
+        warn "Blender not found at $blender_bin"
+    fi
+
     return "$missing"
 }
 

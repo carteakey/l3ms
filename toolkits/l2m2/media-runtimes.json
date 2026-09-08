@@ -66,6 +66,28 @@
         "Use --instrumental for a no-vocals tag preset or --lyrics/--lyrics-file for a supplied lyric sheet.",
         "Memory saver is enabled for the 12 GB Yeti profile; keep llama-swap GPU models unloaded during generation."
       ]
+    },
+    {
+      "id": "blender-3d",
+      "name": "Blender 3D scene & mesh generation",
+      "runtime": "Blender 5.2 / blender-mcp",
+      "variant": "Blender 5.2.1 LTS, local socket MCP bridge (port 9876)",
+      "tasks": ["3d", "render", "image"],
+      "inputs": ["text", "python"],
+      "status": "local",
+      "script": "media-models/generate-blender-3d.sh",
+      "description": "Interactive and headless 3D modeling, asset creation, material styling, and rendering in Blender 5.2.1 LTS via Model Context Protocol (blender-mcp) or direct Python execution.",
+      "requirements": [
+        "Blender 5.2.1 LTS at ~/.local/bin/blender",
+        "blender_mcp addon installed and enabled in Blender user preferences",
+        "blender-mcp CLI server runner via uv tool / uvx",
+        "MCP client configured at ~/.gemini/config/mcp_config.json"
+      ],
+      "notes": [
+        "Interactive: in Blender 3D Viewport, press N -> MCP for Blender -> Start MCP Server (port 9876).",
+        "MCP integration supports live scene inspection, object creation/manipulation, shader nodes, and viewport capture.",
+        "Headless: script also supports direct background Python execution and image rendering without GUI."
+      ]
     }
   ]
 }
