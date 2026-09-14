@@ -18,13 +18,15 @@ pub enum CommandContext {
     Download,
     Jobs,
     Maintenance,
+    ParamBuilder,
 }
 
 impl CommandContext {
-    /// The seven top-level TUI tabs, in navigation order.
-    pub const TABS: [Self; 7] = [
+    /// The eight top-level TUI tabs, in navigation order.
+    pub const TABS: [Self; 8] = [
         Self::Workbench,
         Self::ModelOps,
+        Self::ParamBuilder,
         Self::Chat,
         Self::Browser,
         Self::Download,
@@ -42,6 +44,7 @@ impl CommandContext {
             Self::Download => "download",
             Self::Jobs => "jobs",
             Self::Maintenance => "maintenance",
+            Self::ParamBuilder => "param-builder",
         }
     }
 }
@@ -60,11 +63,20 @@ pub enum CommandId {
     ShowPalette,
     OpenWorkbench,
     OpenModelOps,
+    OpenParamBuilder,
     OpenChat,
     OpenBrowser,
     OpenDownload,
     OpenJobs,
     OpenMaintenance,
+    ParamBuilderToggleFocus,
+    ParamBuilderNextParam,
+    ParamBuilderPrevParam,
+    ParamBuilderCycleValue,
+    ParamBuilderSaveToYaml,
+    ParamBuilderImportEntry,
+    ParamBuilderOpenPresets,
+    ParamBuilderClearAll,
     PreviousTab,
     NextTab,
 
@@ -76,6 +88,7 @@ pub enum CommandId {
     WorkbenchLoadModel,
     WorkbenchUnloadModel,
     WorkbenchClearLog,
+    WorkbenchCycleLayout,
 
     ModelOpsToggleMode,
     ModelOpsSelectPrevious,
@@ -153,17 +166,26 @@ pub enum CommandId {
 impl CommandId {
     /// Every command identifier. Kept in declaration order for completeness
     /// checks and integrations which want to validate their dispatch table.
-    pub const ALL: [Self; 86] = [
+    pub const ALL: [Self; 96] = [
         Self::Quit,
         Self::ShowHelp,
         Self::ShowPalette,
         Self::OpenWorkbench,
         Self::OpenModelOps,
+        Self::OpenParamBuilder,
         Self::OpenChat,
         Self::OpenBrowser,
         Self::OpenDownload,
         Self::OpenJobs,
         Self::OpenMaintenance,
+        Self::ParamBuilderToggleFocus,
+        Self::ParamBuilderNextParam,
+        Self::ParamBuilderPrevParam,
+        Self::ParamBuilderCycleValue,
+        Self::ParamBuilderSaveToYaml,
+        Self::ParamBuilderImportEntry,
+        Self::ParamBuilderOpenPresets,
+        Self::ParamBuilderClearAll,
         Self::PreviousTab,
         Self::NextTab,
         Self::WorkbenchSelectPrevious,
@@ -174,6 +196,7 @@ impl CommandId {
         Self::WorkbenchLoadModel,
         Self::WorkbenchUnloadModel,
         Self::WorkbenchClearLog,
+        Self::WorkbenchCycleLayout,
         Self::ModelOpsToggleMode,
         Self::ModelOpsSelectPrevious,
         Self::ModelOpsSelectNext,
@@ -250,11 +273,20 @@ impl CommandId {
             Self::ShowPalette => "global.show-palette",
             Self::OpenWorkbench => "global.open-workbench",
             Self::OpenModelOps => "global.open-model-ops",
+            Self::OpenParamBuilder => "global.open-param-builder",
             Self::OpenChat => "global.open-chat",
             Self::OpenBrowser => "global.open-browser",
             Self::OpenDownload => "global.open-download",
             Self::OpenJobs => "global.open-jobs",
             Self::OpenMaintenance => "global.open-maintenance",
+            Self::ParamBuilderToggleFocus => "param-builder.toggle-focus",
+            Self::ParamBuilderNextParam => "param-builder.next-param",
+            Self::ParamBuilderPrevParam => "param-builder.prev-param",
+            Self::ParamBuilderCycleValue => "param-builder.cycle-value",
+            Self::ParamBuilderSaveToYaml => "param-builder.save-to-yaml",
+            Self::ParamBuilderImportEntry => "param-builder.import-entry",
+            Self::ParamBuilderOpenPresets => "param-builder.open-presets",
+            Self::ParamBuilderClearAll => "param-builder.clear-all",
             Self::PreviousTab => "global.previous-tab",
             Self::NextTab => "global.next-tab",
             Self::WorkbenchSelectPrevious => "workbench.select-previous",
@@ -265,6 +297,7 @@ impl CommandId {
             Self::WorkbenchLoadModel => "workbench.load-model",
             Self::WorkbenchUnloadModel => "workbench.unload-model",
             Self::WorkbenchClearLog => "workbench.clear-log",
+            Self::WorkbenchCycleLayout => "workbench.cycle-layout",
             Self::ModelOpsToggleMode => "model-ops.toggle-mode",
             Self::ModelOpsSelectPrevious => "model-ops.select-previous",
             Self::ModelOpsSelectNext => "model-ops.select-next",
@@ -444,9 +477,90 @@ pub static COMMANDS: &[CommandSpec] = &[
         ["run", "bench", "navigate", "switch"]
     ),
     command!(
-        OpenChat,
+        OpenParamBuilder,
         Global,
         "F3 / Alt+3",
+        "Param Builder",
+        "Open Param Builder tab",
+        true,
+        ["flags", "llama-server", "params", "navigate", "switch"]
+    ),
+    command!(
+        ParamBuilderToggleFocus,
+        ParamBuilder,
+        "Tab / Ctrl+L",
+        "Toggle focus",
+        "Toggle focus between param list and cmd preview",
+        true,
+        ["focus", "pane"]
+    ),
+    command!(
+        ParamBuilderNextParam,
+        ParamBuilder,
+        "j / Down",
+        "Next param",
+        "Select the next parameter",
+        true,
+        ["navigate"]
+    ),
+    command!(
+        ParamBuilderPrevParam,
+        ParamBuilder,
+        "k / Up",
+        "Previous param",
+        "Select the previous parameter",
+        true,
+        ["navigate"]
+    ),
+    command!(
+        ParamBuilderCycleValue,
+        ParamBuilder,
+        "Enter / Space",
+        "Change value",
+        "Cycle, toggle, or edit the selected parameter",
+        true,
+        ["edit", "toggle"]
+    ),
+    command!(
+        ParamBuilderSaveToYaml,
+        ParamBuilder,
+        "Ctrl+S",
+        "Save to llama-swap.yaml",
+        "Write the built flags into a model entry's cmd block (snapshot + SIGHUP)",
+        true,
+        ["write", "apply", "save"]
+    ),
+    command!(
+        ParamBuilderImportEntry,
+        ParamBuilder,
+        "Ctrl+I",
+        "Import from entry",
+        "Load an existing llama-swap.yaml entry's flags into the builder",
+        true,
+        ["load", "read"]
+    ),
+    command!(
+        ParamBuilderOpenPresets,
+        ParamBuilder,
+        "Alt+P",
+        "Presets",
+        "Apply a built-in parameter preset",
+        true,
+        ["preset", "template"]
+    ),
+    command!(
+        ParamBuilderClearAll,
+        ParamBuilder,
+        "Ctrl+X",
+        "Clear all params",
+        "Reset every parameter and custom flag to unset",
+        true,
+        ["reset", "wipe"]
+    ),
+    command!(
+        OpenChat,
+        Global,
+        "F4 / Alt+4",
         "Chat",
         "Open Chat tab",
         true,
@@ -455,7 +569,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     command!(
         OpenBrowser,
         Global,
-        "F4 / Alt+4",
+        "F5 / Alt+5",
         "Model Browser",
         "Open Model Browser tab",
         true,
@@ -464,7 +578,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     command!(
         OpenDownload,
         Global,
-        "F5 / Alt+5",
+        "F6 / Alt+6",
         "Download",
         "Open Download tab",
         true,
@@ -473,7 +587,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     command!(
         OpenJobs,
         Global,
-        "F6 / Alt+6",
+        "F7 / Alt+7",
         "Jobs",
         "Open Jobs tab",
         true,
@@ -482,7 +596,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     command!(
         OpenMaintenance,
         Global,
-        "F7 / Alt+7",
+        "F8 / Alt+8",
         "Maintenance",
         "Open Maintenance tab",
         true,
@@ -577,6 +691,15 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Workbench: clear activity log",
         true,
         ["output"]
+    ),
+    command!(
+        WorkbenchCycleLayout,
+        Workbench,
+        "v",
+        "Cycle layout",
+        "Workbench: cycle view layout (dashboard, split, classic, bench, jobs, gpu)",
+        true,
+        ["view", "layout", "monitor", "telemetry", "gpu"]
     ),
     command!(
         ModelOpsToggleMode,

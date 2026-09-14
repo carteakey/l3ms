@@ -8,11 +8,6 @@ the operational files remain useful throughout the migration.
 
 - `llama-swap.yaml` declares models that can be served.
 - `bench-models/bench-*.sh` declares benchmark entry points.
-- `media-runtimes.json` declares standard music/video capabilities and the
-  runtime variant selected for each host profile.
-- `media-models/*.sh` contains the editable upstream-runtime wrappers. The
-  Rust CLI invokes them with argv-safe arguments and never interprets prompts
-  or input paths as shell source.
 - `model_downloader/models_config.json` declares model downloads.
 - The repository is authoritative for code and public documentation.
 - Linear issue `CAR-97` is authoritative for the committed Rust-port work.
@@ -152,7 +147,7 @@ Malformed top-level job state is never overwritten until an explicit clear.
 ## Migration boundary
 
 The Rust binary currently provides the headless llama-swap run/list workflow,
-benchmark and media-profile execution, typed stores, and a functional
+benchmark execution, typed stores, and a functional
 seven-view TUI. The TUI
 now includes streamed chat with request parameters, an executable searchable
 command palette, context-derived help, supervised processes, and live

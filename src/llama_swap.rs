@@ -30,6 +30,14 @@ pub struct SwapModel {
     pub state: String,
     pub name: String,
     pub description: String,
+    /// Unix timestamp from the `/v1/models` `created` field, when present.
+    pub created: Option<u64>,
+    /// Config-level disable flag. Filled from `llama-swap.yaml` by the app
+    /// layer because llama-swap v247 does not expose it over `/v1/models`.
+    pub disabled: bool,
+    /// Size in bytes of the GGUF files backing the entry's `-m` path,
+    /// resolved on disk by the app layer. `None` when unresolvable.
+    pub size_bytes: Option<u64>,
 }
 
 /// Blocking llama-swap API client.
@@ -233,6 +241,9 @@ pub(crate) fn parse_models(body: &str) -> Result<Vec<SwapModel>> {
             state: normalize_state(entry).to_owned(),
             name: text_field(entry, "name"),
             description: text_field(entry, "description"),
+            created: entry.get("created").and_then(Value::as_u64),
+            disabled: false,
+            size_bytes: None,
         });
     }
 
@@ -331,6 +342,7 @@ mod tests {
                 {"id":"mystery", "state":"surprising"},
                 {"id":"nested", "status":{"value":"loaded"}},
                 {"id":"nested-idle", "status":{"value":"unloaded"}},
+                {"id":"timed", "created":1788318354},
                 {"id":"", "loaded":true},
                 null
             ]
@@ -342,14 +354,23 @@ mod tests {
                 .iter()
                 .map(|model| model.id.as_str())
                 .collect::<Vec<_>>(),
-            ["alpha", "idle", "mystery", "nested", "nested-idle", "zeta"]
+            [
+                "alpha",
+                "idle",
+                "mystery",
+                "nested",
+                "nested-idle",
+                "timed",
+                "zeta"
+            ]
         );
         assert_eq!(models[0].state, "loading");
         assert_eq!(models[1].state, "unloaded");
         assert_eq!(models[2].state, "unknown");
         assert_eq!(models[3].state, "loaded");
         assert_eq!(models[4].state, "unloaded");
-        assert_eq!(models[5].name, "Zeta");
+        assert_eq!(models[5].created, Some(1_788_318_354));
+        assert_eq!(models[6].name, "Zeta");
     }
 
     #[test]

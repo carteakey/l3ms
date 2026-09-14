@@ -19,6 +19,43 @@ pub struct ResourceSnapshot {
     pub network_tx_bytes: Option<u64>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GpuTelemetry {
+    pub name: String,
+    pub total_vram_mib: u64,
+    pub used_vram_mib: u64,
+    pub free_vram_mib: u64,
+    pub gpu_util_percent: u32,
+    pub mem_util_percent: u32,
+    pub temperature_c: u32,
+    pub power_watts: f64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SystemMemoryTelemetry {
+    pub total_ram_mib: u64,
+    pub available_ram_mib: u64,
+    pub used_ram_mib: u64,
+    pub total_swap_mib: u64,
+    pub free_swap_mib: u64,
+    pub used_swap_mib: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ServerIoTelemetry {
+    pub pid: u32,
+    pub read_bytes: u64,
+    pub read_rate_bytes_per_sec: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SystemTelemetrySnapshot {
+    pub resource_summary: String,
+    pub gpu: Option<GpuTelemetry>,
+    pub memory: Option<SystemMemoryTelemetry>,
+    pub server_io: Option<ServerIoTelemetry>,
+}
+
 impl ResourceSnapshot {
     pub fn render(&self, subject: &str, elapsed_seconds: Option<u64>) -> String {
         let gpu = self
@@ -247,6 +284,147 @@ fn parse_proc_net_dev(text: &str) -> Option<(u64, u64)> {
     found.then_some((rx, tx))
 }
 
+pub fn query_gpu_telemetry() -> Option<GpuTelemetry> {
+    let output = Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=gpu_name,memory.total,memory.used,memory.free,utilization.gpu,utilization.memory,temperature.gpu,power.draw",
+            "--format=csv,noheader,nounits",
+        ])
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_nvidia_smi_gpu_query(&String::from_utf8_lossy(&output.stdout))
+}
+
+pub fn parse_nvidia_smi_gpu_query(output: &str) -> Option<GpuTelemetry> {
+    for line in output.lines() {
+        let fields = line.split(',').map(str::trim).collect::<Vec<_>>();
+        if fields.len() < 8 {
+            continue;
+        }
+        let name = fields[0].to_string();
+        let total_vram_mib = fields[1].parse().unwrap_or(0);
+        let used_vram_mib = fields[2].parse().unwrap_or(0);
+        let free_vram_mib = fields[3].parse().unwrap_or(0);
+        let gpu_util_percent = fields[4].parse().unwrap_or(0);
+        let mem_util_percent = fields[5].parse().unwrap_or(0);
+        let temperature_c = fields[6].parse().unwrap_or(0);
+        let power_watts = fields[7].parse().unwrap_or(0.0);
+        if total_vram_mib > 0 || !name.is_empty() {
+            return Some(GpuTelemetry {
+                name,
+                total_vram_mib,
+                used_vram_mib,
+                free_vram_mib,
+                gpu_util_percent,
+                mem_util_percent,
+                temperature_c,
+                power_watts,
+            });
+        }
+    }
+    None
+}
+
+pub fn query_system_memory() -> Option<SystemMemoryTelemetry> {
+    #[cfg(target_os = "linux")]
+    {
+        let text = fs::read_to_string("/proc/meminfo").ok()?;
+        parse_proc_meminfo(&text)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+pub fn parse_proc_meminfo(text: &str) -> Option<SystemMemoryTelemetry> {
+    let mut total_ram_kib = 0_u64;
+    let mut avail_ram_kib = 0_u64;
+    let mut total_swap_kib = 0_u64;
+    let mut free_swap_kib = 0_u64;
+    for line in text.lines() {
+        let Some((key, val_str)) = line.split_once(':') else {
+            continue;
+        };
+        let num = val_str
+            .split_whitespace()
+            .next()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+        match key.trim() {
+            "MemTotal" => total_ram_kib = num,
+            "MemAvailable" => avail_ram_kib = num,
+            "SwapTotal" => total_swap_kib = num,
+            "SwapFree" => free_swap_kib = num,
+            _ => {}
+        }
+    }
+    if total_ram_kib == 0 {
+        return None;
+    }
+    let total_ram_mib = total_ram_kib / 1024;
+    let available_ram_mib = avail_ram_kib / 1024;
+    let used_ram_mib = total_ram_mib.saturating_sub(available_ram_mib);
+    let total_swap_mib = total_swap_kib / 1024;
+    let free_swap_mib = free_swap_kib / 1024;
+    let used_swap_mib = total_swap_mib.saturating_sub(free_swap_mib);
+    Some(SystemMemoryTelemetry {
+        total_ram_mib,
+        available_ram_mib,
+        used_ram_mib,
+        total_swap_mib,
+        free_swap_mib,
+        used_swap_mib,
+    })
+}
+
+pub fn query_server_io(
+    pid: u32,
+    prev_read_bytes: Option<u64>,
+    elapsed_secs: Option<f64>,
+) -> Option<ServerIoTelemetry> {
+    #[cfg(target_os = "linux")]
+    {
+        let path = format!("/proc/{pid}/io");
+        let text = fs::read_to_string(&path).ok()?;
+        let read_bytes = parse_proc_io(&text)?;
+        let read_rate_bytes_per_sec = match (prev_read_bytes, elapsed_secs) {
+            (Some(prev), Some(elapsed)) if elapsed > 0.0 => {
+                let delta = read_bytes.saturating_sub(prev);
+                Some(delta as f64 / elapsed)
+            }
+            _ => None,
+        };
+        Some(ServerIoTelemetry {
+            pid,
+            read_bytes,
+            read_rate_bytes_per_sec,
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (pid, prev_read_bytes, elapsed_secs);
+        None
+    }
+}
+
+pub fn parse_proc_io(text: &str) -> Option<u64> {
+    for line in text.lines() {
+        if let Some((key, val)) = line.split_once(':') {
+            if key.trim() == "read_bytes" {
+                return val.trim().parse::<u64>().ok();
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,6 +487,47 @@ mod tests {
     fn parses_proc_network_counters() {
         let text = "Inter-| Receive | Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n eth0: 100 1 0 0 0 0 0 0 200 2 0 0 0 0 0 0\n";
         assert_eq!(parse_proc_net_dev(text), Some((100, 200)));
+    }
+
+    #[test]
+    fn parses_nvidia_smi_gpu_query() {
+        let sample = "NVIDIA GeForce RTX 4070, 12282, 11678, 225, 42, 15, 44, 115.5\n";
+        let gpu = parse_nvidia_smi_gpu_query(sample).expect("valid gpu parse");
+        assert_eq!(gpu.name, "NVIDIA GeForce RTX 4070");
+        assert_eq!(gpu.total_vram_mib, 12282);
+        assert_eq!(gpu.used_vram_mib, 11678);
+        assert_eq!(gpu.free_vram_mib, 225);
+        assert_eq!(gpu.gpu_util_percent, 42);
+        assert_eq!(gpu.mem_util_percent, 15);
+        assert_eq!(gpu.temperature_c, 44);
+        assert!((gpu.power_watts - 115.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn parses_proc_meminfo() {
+        let text = "MemTotal:       64629304 kB\n\
+                    MemFree:          886480 kB\n\
+                    MemAvailable:   55785092 kB\n\
+                    SwapTotal:      20971516 kB\n\
+                    SwapFree:       15728636 kB\n";
+        let mem = parse_proc_meminfo(text).expect("valid meminfo parse");
+        assert_eq!(mem.total_ram_mib, 63114);
+        assert_eq!(mem.available_ram_mib, 54477);
+        assert_eq!(mem.used_ram_mib, 8637);
+        assert_eq!(mem.total_swap_mib, 20479);
+        assert_eq!(mem.free_swap_mib, 15359);
+        assert_eq!(mem.used_swap_mib, 5120);
+    }
+
+    #[test]
+    fn parses_proc_io() {
+        let text = "rchar: 122905434\n\
+                    wchar: 5192\n\
+                    syscr: 30397\n\
+                    syscw: 150\n\
+                    read_bytes: 25495613440\n\
+                    write_bytes: 24576\n";
+        assert_eq!(parse_proc_io(text), Some(25495613440));
     }
 
     fn aggregate_without_gpu(processes: &[ProcessSample], pids: &HashSet<u32>) -> ResourceSnapshot {

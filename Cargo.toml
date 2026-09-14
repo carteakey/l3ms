@@ -1,6 +1,6 @@
 [package]
 name = "l3ms"
-version = "0.8.0"
+version = "1.0.0"
 edition = "2021"
 description = "Keyboard-first terminal toolkit for homelab LLM workflows"
 license = "MIT"

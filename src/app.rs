@@ -39,7 +39,11 @@ use crate::{
     script_lint::lint_shell_script,
     script_store::{collect_scripts_in, command_for_script, pretty_name, ScriptMode},
     state_store::{self, ChatSession, ChatSessionList, ChatSessionSummary, SavedChatSession},
-    telemetry::{find_process_named, snapshot_descendants, snapshot_process_group},
+    telemetry::{
+        find_process_named, query_gpu_telemetry, query_server_io, query_system_memory,
+        snapshot_descendants, snapshot_process_group, GpuTelemetry, ServerIoTelemetry,
+        SystemMemoryTelemetry, SystemTelemetrySnapshot,
+    },
     text_buffer::TextBuffer,
     theme,
 };
@@ -55,8 +59,8 @@ use ratatui::{
     style::{Style, Stylize},
     text::{Line, Span, Text},
     widgets::{
-        Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState, Tabs,
-        Wrap,
+        Block, Borders, Cell, Clear, Gauge, List, ListItem, ListState, Paragraph, Row, Sparkline,
+        Table, TableState, Tabs, Wrap,
     },
     Frame, Terminal,
 };
@@ -131,6 +135,41 @@ impl Tab {
 enum OpsMode {
     Run,
     Bench,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorkbenchLayout {
+    #[default]
+    Dashboard,
+    SplitVertical,
+    Classic,
+    FocusBench,
+    FocusJobs,
+    FocusGpu,
+}
+
+impl WorkbenchLayout {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Dashboard => Self::SplitVertical,
+            Self::SplitVertical => Self::Classic,
+            Self::Classic => Self::FocusBench,
+            Self::FocusBench => Self::FocusJobs,
+            Self::FocusJobs => Self::FocusGpu,
+            Self::FocusGpu => Self::Dashboard,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Dashboard => "Dashboard (4-pane)",
+            Self::SplitVertical => "Split Vertical",
+            Self::Classic => "Classic (2-pane)",
+            Self::FocusBench => "Focus: Benchmarks",
+            Self::FocusJobs => "Focus: Jobs",
+            Self::FocusGpu => "Focus: GPU Monitor",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -264,7 +303,7 @@ enum BackgroundEvent {
         request_id: u64,
         result: Result<DownloadPreflight, String>,
     },
-    Telemetry(Result<Option<String>, String>),
+    Telemetry(Result<SystemTelemetrySnapshot, String>),
 }
 
 struct App {
@@ -363,6 +402,14 @@ struct App {
     telemetry: String,
     telemetry_pending: bool,
     telemetry_last_started: Option<Instant>,
+    workbench_layout: WorkbenchLayout,
+    gpu_telemetry: Option<GpuTelemetry>,
+    sys_memory: Option<SystemMemoryTelemetry>,
+    server_io: Option<ServerIoTelemetry>,
+    gpu_util_history: VecDeque<u64>,
+    vram_history: VecDeque<u64>,
+    last_server_read_bytes: Option<u64>,
+    last_server_read_time: Option<Instant>,
 }
 
 impl App {
@@ -500,6 +547,14 @@ impl App {
             telemetry: "Resources: idle".into(),
             telemetry_pending: false,
             telemetry_last_started: None,
+            workbench_layout: WorkbenchLayout::default(),
+            gpu_telemetry: None,
+            sys_memory: None,
+            server_io: None,
+            gpu_util_history: VecDeque::with_capacity(60),
+            vram_history: VecDeque::with_capacity(60),
+            last_server_read_bytes: None,
+            last_server_read_time: None,
         };
         if let Some(warning) = config_warning {
             app.status = "Download config needs attention".into();
@@ -1025,11 +1080,31 @@ impl App {
                 }
                 BackgroundEvent::Telemetry(result) => {
                     self.telemetry_pending = false;
-                    self.telemetry = match result {
-                        Ok(Some(snapshot)) => snapshot,
-                        Ok(None) => "Resources: idle".into(),
-                        Err(error) => format!("Resources: unavailable ({error})"),
-                    };
+                    match result {
+                        Ok(snapshot) => {
+                            self.telemetry = snapshot.resource_summary;
+                            if let Some(gpu) = &snapshot.gpu {
+                                self.gpu_util_history.push_back(gpu.gpu_util_percent as u64);
+                                if self.gpu_util_history.len() > 60 {
+                                    self.gpu_util_history.pop_front();
+                                }
+                                self.vram_history.push_back(gpu.used_vram_mib);
+                                if self.vram_history.len() > 60 {
+                                    self.vram_history.pop_front();
+                                }
+                            }
+                            if let Some(io) = &snapshot.server_io {
+                                self.last_server_read_bytes = Some(io.read_bytes);
+                                self.last_server_read_time = Some(Instant::now());
+                            }
+                            self.gpu_telemetry = snapshot.gpu;
+                            self.sys_memory = snapshot.memory;
+                            self.server_io = snapshot.server_io;
+                        }
+                        Err(error) => {
+                            self.telemetry = format!("Resources: unavailable ({error})");
+                        }
+                    }
                 }
             }
         }
@@ -1055,28 +1130,48 @@ impl App {
             (running.process_group, elapsed)
         });
         let monitor_swap = self.loaded_model_id.is_some();
-        if running_target.is_none() && !monitor_swap {
-            self.telemetry = "Resources: idle".into();
-            return;
-        }
+        let last_server_read = self.last_server_read_bytes;
+        let last_server_time = self.last_server_read_time;
 
         self.telemetry_pending = true;
         self.telemetry_last_started = Some(Instant::now());
         let sender = self.sender.clone();
         thread::spawn(move || {
-            let result = if let Some((process_group, elapsed)) = running_target {
+            let res_summary = if let Some((process_group, elapsed)) = running_target {
                 snapshot_process_group(process_group)
-                    .map(|snapshot| Some(snapshot.render("procs", Some(elapsed))))
-            } else {
-                find_process_named("llama-swap").and_then(|process| {
-                    process.map_or(Ok(None), |process| {
+                    .map(|snapshot| snapshot.render("procs", Some(elapsed)))
+                    .unwrap_or_else(|error| format!("procs: unavailable ({error:#})"))
+            } else if monitor_swap {
+                find_process_named("llama-swap")
+                    .ok()
+                    .flatten()
+                    .and_then(|process| {
                         snapshot_descendants(process)
-                            .map(|snapshot| Some(snapshot.render("upstreams", None)))
+                            .map(|snapshot| snapshot.render("upstreams", None))
+                            .ok()
                     })
-                })
-            }
-            .map_err(|error| format!("{error:#}"));
-            let _ = sender.send(BackgroundEvent::Telemetry(result));
+                    .unwrap_or_else(|| "Resources: idle".into())
+            } else {
+                "Resources: idle".into()
+            };
+
+            let gpu = query_gpu_telemetry();
+            let memory = query_system_memory();
+            let server_io = find_process_named("llama-server")
+                .ok()
+                .flatten()
+                .and_then(|pid| {
+                    let elapsed = last_server_time.map(|t| t.elapsed().as_secs_f64());
+                    query_server_io(pid, last_server_read, elapsed)
+                });
+
+            let snapshot = SystemTelemetrySnapshot {
+                resource_summary: res_summary,
+                gpu,
+                memory,
+                server_io,
+            };
+            let _ = sender.send(BackgroundEvent::Telemetry(Ok(snapshot)));
         });
     }
 
@@ -2033,6 +2128,10 @@ impl App {
             WorkbenchLoadModel => self.model_action(true),
             WorkbenchUnloadModel => self.model_action(false),
             WorkbenchClearLog => self.clear_activity_log("Workbench"),
+            WorkbenchCycleLayout => {
+                self.workbench_layout = self.workbench_layout.next();
+                self.status = format!("Workbench layout: {}", self.workbench_layout.label());
+            }
             ModelOpsToggleMode => {
                 if self.script_input_target == Some(ScriptEditorTarget::Bench) {
                     self.leave_script_editor();
@@ -2199,6 +2298,15 @@ impl App {
             MaintenanceReloadScript => self.reload_script_editor(ScriptEditorTarget::Maintenance),
             MaintenanceRestoreScript => self.open_script_versions(ScriptEditorTarget::Maintenance),
             MaintenanceClearLog => self.clear_activity_log("Maintenance"),
+            OpenParamBuilder
+            | ParamBuilderToggleFocus
+            | ParamBuilderNextParam
+            | ParamBuilderPrevParam
+            | ParamBuilderCycleValue
+            | ParamBuilderSaveToYaml
+            | ParamBuilderImportEntry
+            | ParamBuilderOpenPresets
+            | ParamBuilderClearAll => {}
         }
         if matches!(
             command_id,
@@ -2236,6 +2344,34 @@ impl App {
             KeyCode::Char('r') => self.refresh_models(),
             KeyCode::Enter | KeyCode::Char('l') => self.model_action(true),
             KeyCode::Char('s') => self.model_action(false),
+            KeyCode::Char('v') => {
+                let _ = self.execute_command(CommandId::WorkbenchCycleLayout);
+            }
+            KeyCode::Char('1') => {
+                self.workbench_layout = WorkbenchLayout::Dashboard;
+                self.status = format!("Workbench layout: {}", self.workbench_layout.label());
+            }
+            KeyCode::Char('2') => {
+                self.workbench_layout = WorkbenchLayout::SplitVertical;
+                self.status = format!("Workbench layout: {}", self.workbench_layout.label());
+            }
+            KeyCode::Char('3') => {
+                self.workbench_layout = WorkbenchLayout::Classic;
+                self.status = format!("Workbench layout: {}", self.workbench_layout.label());
+            }
+            KeyCode::Char('4') => {
+                self.workbench_layout = WorkbenchLayout::FocusBench;
+                self.status = format!("Workbench layout: {}", self.workbench_layout.label());
+            }
+            KeyCode::Char('5') => {
+                self.workbench_layout = WorkbenchLayout::FocusJobs;
+                self.status = format!("Workbench layout: {}", self.workbench_layout.label());
+            }
+            KeyCode::Char('6') => {
+                self.workbench_layout = WorkbenchLayout::FocusGpu;
+                self.status = format!("Workbench layout: {}", self.workbench_layout.label());
+            }
+            KeyCode::Char('b') => self.run_selected_bench(),
             _ => {}
         }
     }
@@ -3867,11 +4003,186 @@ impl App {
     }
 
     fn draw_workbench(&mut self, frame: &mut Frame, area: Rect) {
-        let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
-            .split(area);
-        self.draw_models_table(frame, chunks[0], "Models");
+        match self.workbench_layout {
+            WorkbenchLayout::Dashboard => {
+                let rows = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+                    .split(area);
+                let top_cols = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+                    .split(rows[0]);
+                let bot_cols = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .split(rows[1]);
+
+                self.draw_models_table(frame, top_cols[0], "Models");
+                self.draw_gpu_monitor(frame, top_cols[1]);
+                self.draw_workbench_fast_actions(frame, bot_cols[0]);
+                self.draw_workbench_ops(frame, bot_cols[1]);
+            }
+            WorkbenchLayout::SplitVertical => {
+                let cols = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+                    .split(area);
+                self.draw_models_table(frame, cols[0], "Models");
+                let right_rows = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+                    .split(cols[1]);
+                self.draw_gpu_monitor(frame, right_rows[0]);
+                self.draw_workbench_fast_actions(frame, right_rows[1]);
+            }
+            WorkbenchLayout::Classic => {
+                let chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+                    .split(area);
+                self.draw_models_table(frame, chunks[0], "Models");
+                self.draw_workbench_fast_actions(frame, chunks[1]);
+            }
+            WorkbenchLayout::FocusBench => {
+                let panes = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
+                    .split(area);
+                self.draw_bench_list_widget(frame, panes[0]);
+                self.draw_script_editor(frame, panes[1], ScriptEditorTarget::Bench);
+            }
+            WorkbenchLayout::FocusJobs => {
+                self.draw_jobs(frame, area);
+            }
+            WorkbenchLayout::FocusGpu => {
+                self.draw_gpu_monitor_expanded(frame, area);
+            }
+        }
+    }
+
+    fn draw_gpu_monitor(&self, frame: &mut Frame, area: Rect) {
+        let title = format!(
+            "Hardware & GPU (nvidia-smi) · v layout ({})",
+            self.workbench_layout.label()
+        );
+        let block = theme::block().title(title).borders(Borders::ALL);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        if inner.height < 2 || inner.width < 10 {
+            return;
+        }
+
+        let mut lines = Vec::new();
+
+        if let Some(gpu) = &self.gpu_telemetry {
+            lines.push(Line::from(vec![
+                Span::styled("GPU:  ", theme::title()),
+                Span::styled(
+                    format!(
+                        "{} · {}°C · {:.1}W",
+                        gpu.name, gpu.temperature_c, gpu.power_watts
+                    ),
+                    theme::text(),
+                ),
+            ]));
+
+            let vram_used_gib = gpu.used_vram_mib as f64 / 1024.0;
+            let vram_total_gib = gpu.total_vram_mib as f64 / 1024.0;
+            let vram_pct = (gpu.used_vram_mib * 100)
+                .checked_div(gpu.total_vram_mib)
+                .unwrap_or(0);
+            let vram_style = if vram_pct > 90 {
+                theme::warning()
+            } else {
+                theme::text()
+            };
+            lines.push(Line::from(vec![
+                Span::styled("VRAM: ", theme::title()),
+                Span::styled(
+                    format!("{vram_used_gib:.2}/{vram_total_gib:.2} GiB ({vram_pct}%)"),
+                    vram_style,
+                ),
+                Span::raw("  Load: "),
+                Span::styled(
+                    format!("{}%", gpu.gpu_util_percent),
+                    if gpu.gpu_util_percent > 80 {
+                        theme::title()
+                    } else {
+                        theme::dim()
+                    },
+                ),
+            ]));
+        } else {
+            lines.push(Line::from(Span::styled(
+                "GPU: nvidia-smi polling / idle",
+                theme::dim(),
+            )));
+        }
+
+        if let Some(mem) = &self.sys_memory {
+            let ram_used = mem.used_ram_mib as f64 / 1024.0;
+            let ram_total = mem.total_ram_mib as f64 / 1024.0;
+            let ram_pct = (mem.used_ram_mib * 100)
+                .checked_div(mem.total_ram_mib)
+                .unwrap_or(0);
+            let swap_used = mem.used_swap_mib as f64 / 1024.0;
+            lines.push(Line::from(vec![
+                Span::styled("RAM:  ", theme::title()),
+                Span::raw(format!(
+                    "{ram_used:.1}/{ram_total:.1} GiB ({ram_pct}%) · zram: {swap_used:.1} GiB"
+                )),
+            ]));
+        }
+
+        if let Some(io) = &self.server_io {
+            let io_text = io.read_rate_bytes_per_sec.map_or_else(
+                || format!("read: {:.1} MB", io.read_bytes as f64 / (1024.0 * 1024.0)),
+                |rate| {
+                    if rate < 1024.0 * 1024.0 {
+                        format!("read: {:.1} KB/s (PLE normal)", rate / 1024.0)
+                    } else {
+                        format!(
+                            "read: {:.1} MB/s (HOT EXPERT SPILL!)",
+                            rate / (1024.0 * 1024.0)
+                        )
+                    }
+                },
+            );
+            lines.push(Line::from(vec![
+                Span::styled("IO:   ", theme::title()),
+                Span::styled(io_text, theme::dim()),
+            ]));
+        }
+
+        let text_height = (lines.len() as u16).min(inner.height);
+        if inner.height > text_height + 1 && !self.gpu_util_history.is_empty() {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(text_height), Constraint::Min(1)])
+                .split(inner);
+
+            frame.render_widget(Paragraph::new(lines).style(theme::text()), chunks[0]);
+
+            let spark_data: Vec<u64> = self.gpu_util_history.iter().copied().collect();
+            let sparkline = Sparkline::default()
+                .block(
+                    Block::default()
+                        .title("GPU Util Trend (60s)")
+                        .title_style(theme::dim())
+                        .borders(Borders::NONE),
+                )
+                .data(&spark_data)
+                .max(100)
+                .style(theme::title());
+            frame.render_widget(sparkline, chunks[1]);
+        } else {
+            frame.render_widget(Paragraph::new(lines).style(theme::text()), inner);
+        }
+    }
+
+    fn draw_workbench_fast_actions(&self, frame: &mut Frame, area: Rect) {
         let model = self.selected_model();
         let text = if let Some(model) = model {
             Text::from(vec![
@@ -3881,19 +4192,254 @@ impl App {
                 Line::from(""),
                 Line::from(model.description),
                 Line::from(""),
-                Line::from("Enter/l load · s unload · r refresh"),
-                Line::from("/ filter · F2 full operations · F3 chat"),
+                Line::from("Enter/l load · s unload · r refresh · b run bench"),
+                Line::from("v cycle layout · 1-6 layout · / filter · F3 chat"),
             ])
         } else {
-            Text::from("No model selected\n\nr refreshes llama-swap")
+            Text::from(
+                "No model selected\n\nr refreshes llama-swap\nv cycles workbench layout\n1-6 jumps between views",
+            )
         };
         frame.render_widget(
             Paragraph::new(text)
                 .style(theme::text())
-                .block(theme::block().title("Fast actions").borders(Borders::ALL))
+                .block(
+                    theme::block()
+                        .title("Fast actions & profile")
+                        .borders(Borders::ALL),
+                )
                 .wrap(Wrap { trim: false }),
-            chunks[1],
+            area,
         );
+    }
+
+    fn draw_workbench_ops(&mut self, frame: &mut Frame, area: Rect) {
+        let running_label = self.running_process.as_ref().map_or_else(
+            || "idle".to_string(),
+            |p| format!("PID {} active", p.process_group),
+        );
+        let title = format!("Benchmarks & Quick Ops ({running_label})");
+        let visible = self
+            .visible_bench_scripts()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let items = if visible.is_empty() {
+            vec![ListItem::new("No bench scripts match the filter")]
+        } else {
+            visible
+                .iter()
+                .take(10)
+                .map(|path| ListItem::new(relative_display(&self.root, path)))
+                .collect::<Vec<_>>()
+        };
+        let list = List::new(items)
+            .style(theme::text())
+            .block(
+                theme::block()
+                    .title(format!("{title} · b run bench · 4 bench · 5 jobs"))
+                    .borders(Borders::ALL),
+            )
+            .highlight_symbol("▶ ")
+            .highlight_style(theme::title());
+        frame.render_stateful_widget(list, area, &mut self.bench_state);
+    }
+
+    fn draw_gpu_monitor_expanded(&self, frame: &mut Frame, area: Rect) {
+        let title = format!(
+            "Hardware & GPU Performance Analyzer · nvidia-smi · v layout ({})",
+            self.workbench_layout.label()
+        );
+        let block = theme::block().title(title).borders(Borders::ALL);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+            .split(inner);
+
+        let left_rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(6),
+                Constraint::Length(3),
+                Constraint::Length(5),
+                Constraint::Min(2),
+            ])
+            .split(cols[0]);
+
+        let mut status_lines = Vec::new();
+        if let Some(gpu) = &self.gpu_telemetry {
+            status_lines.push(Line::from(vec![
+                Span::styled("Device:  ", theme::title()),
+                Span::styled(&gpu.name, theme::text()),
+            ]));
+            status_lines.push(Line::from(vec![
+                Span::styled("Temp:    ", theme::title()),
+                Span::styled(format!("{} °C", gpu.temperature_c), theme::text()),
+                Span::raw("   Power: "),
+                Span::styled(format!("{:.1} W", gpu.power_watts), theme::text()),
+            ]));
+            status_lines.push(Line::from(vec![
+                Span::styled("GPU Core Util:  ", theme::title()),
+                Span::styled(format!("{}%", gpu.gpu_util_percent), theme::text()),
+                Span::raw("  Memory Controller: "),
+                Span::styled(format!("{}%", gpu.mem_util_percent), theme::text()),
+            ]));
+        } else {
+            status_lines.push(Line::from(Span::styled(
+                "No NVIDIA GPU detected via nvidia-smi",
+                theme::warning(),
+            )));
+        }
+        frame.render_widget(
+            Paragraph::new(status_lines).style(theme::text()),
+            left_rows[0],
+        );
+
+        if let Some(gpu) = &self.gpu_telemetry {
+            let vram_pct = (gpu.used_vram_mib * 100)
+                .checked_div(gpu.total_vram_mib)
+                .unwrap_or(0) as u16;
+            let vram_label = format!(
+                "VRAM: {:.2} / {:.2} GiB ({}%)",
+                gpu.used_vram_mib as f64 / 1024.0,
+                gpu.total_vram_mib as f64 / 1024.0,
+                vram_pct
+            );
+            let gauge = Gauge::default()
+                .block(
+                    Block::default()
+                        .title("VRAM Allocation")
+                        .borders(Borders::NONE),
+                )
+                .gauge_style(theme::selected())
+                .percent(vram_pct)
+                .label(vram_label);
+            frame.render_widget(gauge, left_rows[1]);
+        }
+
+        let mut mem_lines = Vec::new();
+        if let Some(mem) = &self.sys_memory {
+            let ram_pct = (mem.used_ram_mib * 100)
+                .checked_div(mem.total_ram_mib)
+                .unwrap_or(0);
+            mem_lines.push(Line::from(vec![
+                Span::styled("Host RAM: ", theme::title()),
+                Span::raw(format!(
+                    "{:.1}/{:.1} GiB ({}%) · Free: {:.1} GiB",
+                    mem.used_ram_mib as f64 / 1024.0,
+                    mem.total_ram_mib as f64 / 1024.0,
+                    ram_pct,
+                    mem.available_ram_mib as f64 / 1024.0
+                )),
+            ]));
+            mem_lines.push(Line::from(vec![
+                Span::styled("Swap/zram:", theme::title()),
+                Span::raw(format!(
+                    " {:.1}/{:.1} GiB (used: {:.1} GiB)",
+                    mem.used_swap_mib as f64 / 1024.0,
+                    mem.total_swap_mib as f64 / 1024.0,
+                    mem.used_swap_mib as f64 / 1024.0
+                )),
+            ]));
+        }
+        if let Some(io) = &self.server_io {
+            mem_lines.push(Line::from(vec![
+                Span::styled("Server Disk Read: ", theme::title()),
+                Span::raw(format!(
+                    "{:.2} GiB cumulative",
+                    io.read_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+                )),
+            ]));
+            if let Some(rate) = io.read_rate_bytes_per_sec {
+                let status_str = if rate < 1024.0 * 1024.0 {
+                    format!("{:.1} KB/s (Normal PLE traffic)", rate / 1024.0)
+                } else {
+                    format!(
+                        "{:.1} MB/s (HOT EXPERT SPILL / NVMe THRASHING!)",
+                        rate / (1024.0 * 1024.0)
+                    )
+                };
+                mem_lines.push(Line::from(vec![
+                    Span::styled("Spill Rate:       ", theme::title()),
+                    Span::styled(status_str, theme::warning()),
+                ]));
+            }
+        }
+        frame.render_widget(Paragraph::new(mem_lines).style(theme::text()), left_rows[2]);
+
+        let right_rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(cols[1]);
+
+        let gpu_data: Vec<u64> = self.gpu_util_history.iter().copied().collect();
+        let spark_gpu = Sparkline::default()
+            .block(
+                Block::default()
+                    .title("GPU Utilization Trend (Last 60s)")
+                    .borders(Borders::ALL)
+                    .title_style(theme::title()),
+            )
+            .data(&gpu_data)
+            .max(100)
+            .style(theme::title());
+        frame.render_widget(spark_gpu, right_rows[0]);
+
+        let vram_data: Vec<u64> = self.vram_history.iter().copied().collect();
+        let vram_max = self
+            .gpu_telemetry
+            .as_ref()
+            .map_or(12288, |g| g.total_vram_mib);
+        let spark_vram = Sparkline::default()
+            .block(
+                Block::default()
+                    .title("VRAM History (Last 60s)")
+                    .borders(Borders::ALL)
+                    .title_style(theme::warning()),
+            )
+            .data(&vram_data)
+            .max(vram_max)
+            .style(theme::warning());
+        frame.render_widget(spark_vram, right_rows[1]);
+    }
+
+    fn draw_bench_list_widget(&mut self, frame: &mut Frame, area: Rect) {
+        let visible = self
+            .visible_bench_scripts()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        if visible.is_empty() {
+            self.bench_state.select(None);
+        }
+        let items = if visible.is_empty() {
+            vec![ListItem::new("No bench scripts match the current filter")]
+        } else {
+            visible
+                .iter()
+                .map(|path| ListItem::new(relative_display(&self.root, path)))
+                .collect::<Vec<_>>()
+        };
+        let filter = if self.bench_filter.is_empty() {
+            String::new()
+        } else {
+            format!(" · filter: {}", self.bench_filter)
+        };
+        let list = List::new(items)
+            .style(theme::text())
+            .block(
+                theme::block()
+                    .title(format!(
+                        "Bench scripts{filter} · / filter · ↑/↓ select · Ctrl+U editor"
+                    ))
+                    .borders(Borders::ALL),
+            )
+            .highlight_symbol("▶ ")
+            .highlight_style(theme::title());
+        frame.render_stateful_widget(list, area, &mut self.bench_state);
     }
 
     fn draw_model_ops(&mut self, frame: &mut Frame, area: Rect) {
@@ -3920,39 +4466,7 @@ impl App {
                     .direction(Direction::Horizontal)
                     .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
                     .split(chunks[1]);
-                let visible = self
-                    .visible_bench_scripts()
-                    .into_iter()
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if visible.is_empty() {
-                    self.bench_state.select(None);
-                }
-                let items = if visible.is_empty() {
-                    vec![ListItem::new("No bench scripts match the current filter")]
-                } else {
-                    visible
-                        .iter()
-                        .map(|path| ListItem::new(relative_display(&self.root, path)))
-                        .collect::<Vec<_>>()
-                };
-                let filter = if self.bench_filter.is_empty() {
-                    String::new()
-                } else {
-                    format!(" · filter: {}", self.bench_filter)
-                };
-                let list = List::new(items)
-                    .style(theme::text())
-                    .block(
-                        theme::block()
-                            .title(format!(
-                                "Bench scripts{filter} · / filter · ↑/↓ select · Ctrl+U editor"
-                            ))
-                            .borders(Borders::ALL),
-                    )
-                    .highlight_symbol("▶ ")
-                    .highlight_style(theme::title());
-                frame.render_stateful_widget(list, panes[0], &mut self.bench_state);
+                self.draw_bench_list_widget(frame, panes[0]);
                 self.draw_script_editor(frame, panes[1], ScriptEditorTarget::Bench);
             }
         }
@@ -6599,6 +7113,9 @@ mod tests {
                     state: "loaded".into(),
                     name: String::new(),
                     description: String::new(),
+                    created: None,
+                    disabled: false,
+                    size_bytes: None,
                 }],
             })
             .unwrap();
@@ -6643,12 +7160,18 @@ mod tests {
                 state: "loaded".into(),
                 name: String::new(),
                 description: String::new(),
+                created: None,
+                disabled: false,
+                size_bytes: None,
             },
             SwapModel {
                 id: "chat-other".into(),
                 state: "unloaded".into(),
                 name: String::new(),
                 description: String::new(),
+                created: None,
+                disabled: false,
+                size_bytes: None,
             },
         ];
         app.initialize_chat_model_selection();
@@ -7211,6 +7734,91 @@ mod tests {
                 panic!("process group did not stop after TERM");
             }
             thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn workbench_layout_cycles_and_shortcuts_work() {
+        let fixture = AppFixture::new();
+        let mut app = fixture.app();
+        app.tab = Tab::Workbench;
+        assert_eq!(app.workbench_layout, WorkbenchLayout::Dashboard);
+
+        // Press 'v' to cycle
+        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.workbench_layout, WorkbenchLayout::SplitVertical);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.workbench_layout, WorkbenchLayout::Classic);
+
+        // Direct jumps via 1-6
+        app.handle_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.workbench_layout, WorkbenchLayout::FocusBench);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.workbench_layout, WorkbenchLayout::FocusJobs);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.workbench_layout, WorkbenchLayout::FocusGpu);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.workbench_layout, WorkbenchLayout::Dashboard);
+    }
+
+    #[test]
+    fn workbench_renders_all_layouts_without_panics() {
+        let fixture = AppFixture::new();
+        let mut app = fixture.app();
+        app.tab = Tab::Workbench;
+
+        // Populate sample telemetry
+        app.gpu_telemetry = Some(GpuTelemetry {
+            name: "NVIDIA GeForce RTX 4070".into(),
+            temperature_c: 44,
+            power_watts: 9.5,
+            used_vram_mib: 11678,
+            free_vram_mib: 604,
+            total_vram_mib: 12282,
+            gpu_util_percent: 0,
+            mem_util_percent: 0,
+        });
+        app.sys_memory = Some(SystemMemoryTelemetry {
+            total_ram_mib: 64000,
+            available_ram_mib: 32000,
+            used_ram_mib: 32000,
+            total_swap_mib: 20000,
+            used_swap_mib: 5000,
+            free_swap_mib: 15000,
+        });
+        app.server_io = Some(ServerIoTelemetry {
+            pid: 12345,
+            read_bytes: 5_000_000,
+            read_rate_bytes_per_sec: Some(5120.0),
+        });
+        for i in 0..30 {
+            app.gpu_util_history.push_back(i * 3);
+            app.vram_history.push_back(11600 + i);
+        }
+
+        let backend = TestBackend::new(140, 45);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        for layout in [
+            WorkbenchLayout::Dashboard,
+            WorkbenchLayout::SplitVertical,
+            WorkbenchLayout::Classic,
+            WorkbenchLayout::FocusBench,
+            WorkbenchLayout::FocusJobs,
+            WorkbenchLayout::FocusGpu,
+        ] {
+            app.workbench_layout = layout;
+            terminal.draw(|frame| app.draw(frame)).unwrap();
         }
     }
 }

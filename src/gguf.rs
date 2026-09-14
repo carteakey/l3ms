@@ -4,7 +4,7 @@
 //! can be many gigabytes and are neither needed nor read by the model browser.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File},
     io::{ErrorKind, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
@@ -511,6 +511,125 @@ pub fn scan_directory(root: impl AsRef<Path>, recursive: bool) -> Result<Vec<Ggu
         });
     }
     Ok(files)
+}
+
+/// Shard position encoded in a split GGUF file name such as
+/// `model-00001-of-00033.gguf`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShardPosition {
+    pub index: u32,
+    pub total: u32,
+}
+
+/// A display grouping for the inventory: either one standalone GGUF file or a
+/// multi-part shard set collapsed into a single entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShardSet {
+    /// Representative file: shard 1 when present, otherwise the lowest index.
+    pub primary: GgufFile,
+    /// Every member file of the set, ordered by shard index.
+    pub members: Vec<GgufFile>,
+    /// Summed byte size across all members.
+    pub total_size: u64,
+    /// Declared shard count for multi-part sets (`None` for standalone files).
+    pub shard_total: Option<u32>,
+    /// True when a multi-part set is missing shards, has duplicates, or is
+    /// otherwise inconsistent with its declared shard count.
+    pub incomplete: bool,
+}
+
+impl ShardSet {
+    /// Newest modification time across all member files.
+    pub fn modified(&self) -> Option<SystemTime> {
+        self.members.iter().filter_map(|file| file.modified).max()
+    }
+}
+
+/// Extract the shard position from a split GGUF file name.
+pub fn shard_position(path: &Path) -> Option<ShardPosition> {
+    shard_parts(path).map(|(_, position)| position)
+}
+
+/// Parse a split GGUF file name into its model-name prefix and shard position.
+fn shard_parts(path: &Path) -> Option<(&str, ShardPosition)> {
+    let stem = path.file_stem()?.to_str()?;
+    let (prefix, total_text) = stem.rsplit_once("-of-")?;
+    if total_text.is_empty() || !total_text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let total = total_text.parse::<u32>().ok()?;
+    let index_bytes = prefix
+        .bytes()
+        .rev()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    if index_bytes == 0 {
+        return None;
+    }
+    let index_text = &prefix[prefix.len() - index_bytes..];
+    let index = index_text.parse::<u32>().ok()?;
+    if index == 0 || total == 0 {
+        return None;
+    }
+    let prefix = &stem[..stem.len() - total_text.len() - "-of-".len() - index_bytes];
+    Some((prefix, ShardPosition { index, total }))
+}
+
+/// Collapse scanned files into display entries: standalone files pass through,
+/// while shard sets sharing a directory, name prefix, and declared total
+/// become a single entry anchored at shard 1 (or the lowest present index).
+pub fn group_shard_sets(files: Vec<GgufFile>) -> Vec<ShardSet> {
+    let mut singles: Vec<GgufFile> = Vec::new();
+    let mut sets: BTreeMap<(PathBuf, String, u32), Vec<(u32, GgufFile)>> = BTreeMap::new();
+    for file in files {
+        match shard_parts(&file.path) {
+            None => singles.push(file),
+            Some((prefix, position)) => {
+                let key = (
+                    file.path
+                        .parent()
+                        .unwrap_or_else(|| Path::new(""))
+                        .to_path_buf(),
+                    prefix.to_owned(),
+                    position.total,
+                );
+                sets.entry(key).or_default().push((position.index, file));
+            }
+        }
+    }
+
+    let mut entries: Vec<ShardSet> = singles
+        .into_iter()
+        .map(|file| ShardSet {
+            total_size: file.size,
+            shard_total: None,
+            incomplete: false,
+            primary: file.clone(),
+            members: vec![file],
+        })
+        .collect();
+    for ((_directory, _prefix, total), mut members) in sets {
+        members.sort_by_key(|(index, _)| *index);
+        let indices: BTreeSet<u32> = members.iter().map(|(index, _)| *index).collect();
+        let complete = members.len() == total as usize
+            && indices.len() == members.len()
+            && indices.iter().next() == Some(&1)
+            && indices.iter().next_back() == Some(&total);
+        let primary_index = members
+            .iter()
+            .position(|(index, _)| *index == 1)
+            .unwrap_or(0);
+        let primary = members[primary_index].1.clone();
+        entries.push(ShardSet {
+            total_size: members.iter().map(|(_, file)| file.size).sum(),
+            shard_total: Some(total),
+            incomplete: !complete,
+            primary,
+            members: members.into_iter().map(|(_, file)| file).collect(),
+        });
+    }
+    entries.sort_by(|left, right| left.primary.path.cmp(&right.primary.path));
+    entries
 }
 
 /// Infer a readable quantization label, preferring recognized GGUF file types.
@@ -1150,5 +1269,125 @@ mod tests {
         push_string(&mut bytes, key);
         bytes.extend_from_slice(&value_type.to_le_bytes());
         bytes
+    }
+
+    fn bare_file(path: &str, size: u64) -> GgufFile {
+        GgufFile {
+            path: PathBuf::from(path),
+            size,
+            quantization: "unknown".to_owned(),
+            modified: None,
+            metadata: None,
+            parse_error: None,
+        }
+    }
+
+    #[test]
+    fn shard_position_parses_split_names() {
+        let parsed = shard_position(Path::new(
+            "/models/quant/Qwen3.8-Flash-Next-AD-4.27bpw-Q4_K_M-M64-00001-of-00033.gguf",
+        ))
+        .unwrap();
+        assert_eq!(parsed.index, 1);
+        assert_eq!(parsed.total, 33);
+        assert!(shard_position(Path::new("single.gguf")).is_none());
+        assert!(shard_position(Path::new("model-of-parts.gguf")).is_none());
+        assert!(shard_position(Path::new("model-00003-of-two.gguf")).is_none());
+        assert!(shard_position(Path::new("model-00000-of-00003.gguf")).is_none());
+        assert!(shard_position(Path::new("model-00002-of-00000.gguf")).is_none());
+        assert!(shard_position(Path::new("model--of-00003.gguf")).is_none());
+    }
+
+    #[test]
+    fn group_shard_sets_collapses_complete_sets() {
+        let files = vec![
+            bare_file("/m/A-00002-of-00003.gguf", 2),
+            bare_file("/m/standalone.gguf", 7),
+            bare_file("/m/A-00003-of-00003.gguf", 3),
+            bare_file("/m/A-00001-of-00003.gguf", 1),
+        ];
+        let sets = group_shard_sets(files);
+        assert_eq!(sets.len(), 2);
+        let set = &sets[0];
+        assert_eq!(set.primary.path, PathBuf::from("/m/A-00001-of-00003.gguf"));
+        assert_eq!(set.members.len(), 3);
+        assert_eq!(set.total_size, 6);
+        assert_eq!(set.shard_total, Some(3));
+        assert!(!set.incomplete);
+        let single = &sets[1];
+        assert_eq!(single.members.len(), 1);
+        assert_eq!(single.total_size, 7);
+        assert_eq!(single.shard_total, None);
+        assert!(!single.incomplete);
+    }
+
+    #[test]
+    fn group_shard_sets_flags_incomplete_and_duplicate_shards() {
+        let missing = group_shard_sets(vec![
+            bare_file("/m/A-00001-of-00003.gguf", 1),
+            bare_file("/m/A-00002-of-00003.gguf", 2),
+        ]);
+        assert_eq!(missing.len(), 1);
+        assert!(missing[0].incomplete);
+        assert_eq!(
+            missing[0].primary.path,
+            PathBuf::from("/m/A-00001-of-00003.gguf")
+        );
+
+        let anchored = group_shard_sets(vec![
+            bare_file("/m/A-00002-of-00003.gguf", 2),
+            bare_file("/m/A-00003-of-00003.gguf", 3),
+        ]);
+        assert!(anchored[0].incomplete);
+        assert_eq!(
+            anchored[0].primary.path,
+            PathBuf::from("/m/A-00002-of-00003.gguf")
+        );
+
+        let mismatched_extension = group_shard_sets(vec![
+            bare_file("/m/A-00001-of-00002.gguf", 1),
+            bare_file("/m/A-00001-of-00002.GGUF", 9),
+            bare_file("/m/A-00002-of-00002.gguf", 2),
+        ]);
+        assert_eq!(mismatched_extension.len(), 1);
+        assert!(mismatched_extension[0].incomplete);
+
+        let stray_lookup = group_shard_sets(vec![
+            bare_file("/m/A-00001-of-00002.gguf", 1),
+            bare_file("/m/A-00002-of-00002.gguf", 2),
+            bare_file("/m/A-00002-of-00002.gguf.bak", 9),
+        ]);
+        assert_eq!(stray_lookup.len(), 2);
+        assert!(!stray_lookup[0].incomplete);
+        assert!(!stray_lookup[1].incomplete);
+    }
+
+    #[test]
+    fn group_shard_sets_separates_directories_and_totals() {
+        let files = vec![
+            bare_file("/m1/A-00001-of-00002.gguf", 1),
+            bare_file("/m2/A-00001-of-00002.gguf", 4),
+            bare_file("/m1/A-00001-of-00003.gguf", 2),
+            bare_file("/m1/A-00002-of-00003.gguf", 3),
+            bare_file("/m1/A-00003-of-00003.gguf", 4),
+        ];
+        let sets = group_shard_sets(files);
+        assert_eq!(sets.len(), 3);
+        // Different totals and directories form distinct sets.
+        let complete = &sets[1];
+        assert_eq!(complete.members.len(), 3);
+        assert_eq!(complete.shard_total, Some(3));
+        assert!(!complete.incomplete);
+        assert!(sets[0].incomplete);
+        assert_eq!(sets[0].shard_total, Some(2));
+        assert_eq!(
+            sets[0].primary.path,
+            PathBuf::from("/m1/A-00001-of-00002.gguf")
+        );
+        assert!(sets[2].incomplete);
+        assert_eq!(
+            sets[2].primary.path,
+            PathBuf::from("/m2/A-00001-of-00002.gguf")
+        );
     }
 }
