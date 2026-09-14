@@ -1,0 +1,19 @@
+0.00.073.083 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.00.073.307 W srv  llama_server: -----------------
+0.00.073.307 W srv  llama_server: CORS is set to allow all origins ('*') and no API key is set
+0.00.073.308 W srv  llama_server: this can be a security risk (cross-origin attacks)
+0.00.073.308 W srv  llama_server: more info: https://github.com/ggml-org/llama.cpp/pull/25655
+0.00.073.308 W srv  llama_server: -----------------
+0.00.074.507 I srv    load_model: loading model '/home/kchauhan/models/qwen38-flash-next/AD-4.27bpw-Q4_K_M-M64/Qwen3.8-Flash-Next-AD-4.27bpw-Q4_K_M-M64-00001-of-00033.gguf'
+0.00.834.223 E llama_model_load: error loading model: borrow_shared_tensor: this model is a draft head without its own 'token_embd.weight'; load it as a draft of its target model, not on its own
+0.00.834.228 E llama_model_load_from_file_impl: failed to load model
+0.00.834.250 W operator(): failed to measure the memory of the extra model, fitting without it: failed to load model
+0.00.834.260 W common_fit_params: failed to fit params to free device memory: n_gpu_layers already set by user to 99, abort
+0.02.053.577 E ggml_backend_cuda_buffer_type_alloc_buffer: allocating 52870.58 MiB on device 0: cudaMalloc failed: out of memory
+0.02.053.579 E alloc_tensor_range: failed to allocate CUDA0 buffer of size 55438819584
+0.02.657.654 E llama_model_load: error loading model: unable to allocate CUDA0 buffer
+0.02.657.658 E llama_model_load_from_file_impl: failed to load model
+0.02.657.663 E cmn  common_init_: failed to load model '/home/kchauhan/models/qwen38-flash-next/AD-4.27bpw-Q4_K_M-M64/Qwen3.8-Flash-Next-AD-4.27bpw-Q4_K_M-M64-00001-of-00033.gguf'
+0.02.657.664 E srv    load_model: failed to load model, '/home/kchauhan/models/qwen38-flash-next/AD-4.27bpw-Q4_K_M-M64/Qwen3.8-Flash-Next-AD-4.27bpw-Q4_K_M-M64-00001-of-00033.gguf'
+0.02.657.666 I srv    operator(): operator(): cleaning up before exit...
+0.02.658.049 E srv  llama_server: exiting due to model loading error

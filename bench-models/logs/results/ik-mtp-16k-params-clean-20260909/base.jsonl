@@ -1,0 +1,7 @@
+{"row_type":"attempt","task":"code","run":1,"ok":true,"stop":"limit","generated":128,"decode_s":6.936465,"decode_tps":18.45320346891392,"stages":[],"error":null}
+{"row_type":"attempt","task":"code","run":2,"ok":true,"stop":"limit","generated":128,"decode_s":6.383437,"decode_tps":20.05189367420717,"stages":[],"error":null}
+{"row_type":"attempt","task":"code","run":3,"ok":true,"stop":"limit","generated":128,"decode_s":6.440819,"decode_tps":19.87324903867039,"stages":[],"error":null}
+{"row_type":"attempt","task":"story","run":1,"ok":true,"stop":"limit","generated":128,"decode_s":6.756729,"decode_tps":18.944077822271694,"stages":[],"error":null}
+{"row_type":"attempt","task":"story","run":2,"ok":true,"stop":"limit","generated":128,"decode_s":6.441269,"decode_tps":19.87186065354513,"stages":[],"error":null}
+{"row_type":"attempt","task":"story","run":3,"ok":true,"stop":"limit","generated":128,"decode_s":6.415653,"decode_tps":19.95120372002663,"stages":[],"error":null}
+{"row_type":"summary","attempts":6,"successes":6,"failures":0,"generated":768,"decode_s":39.374372,"decode_tps":19.50507299519596,"speculative":{"num_drafts":0,"accepted_drafts":0,"draft_tokens":0,"accepted_tokens":0,"acceptance_rate":0.0,"acceptance_length":0.0,"draft_tokens_per_step":0.0,"t_begin_s":0.0,"t_draft_s":0.0,"t_accept_s":0.0,"stages":[]}}

@@ -1,0 +1,7 @@
+== arm: base-fit512-true
+counting: tg 18.99 n=64 | tg 20.92 n=64 | tg 21.27 n=64
+code: tg 17.44 n=320 | tg 17.43 n=320
+0.53.711.806 I slot print_timing: id  0 | task 136 | draft acceptance = 0.97006 (  162 accepted /   167 generated), mean len =  2.74
+1.12.490.487 I slot print_timing: id  0 | task 296 | draft acceptance = 0.96970 (  160 accepted /   165 generated), mean len =  2.72
+== arm: 28243-fit512-true
+   LOAD FAILED

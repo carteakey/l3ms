@@ -6,12 +6,19 @@ Agent and contributor guide for `L3MS`.
 
 Build a keyboard-first, script-first homelab LLM toolkit with strong operational ergonomics.
 
+Scope: local LLM operations, including vision-capable LLMs and embeddings.
+Image generation/editing, audio/music, speech, and video belong in sibling
+`l2m2` (Local Latent Media Machine). Do not reintroduce media runtime dependencies.
+
 ## Engineering Rules
 
 - Prefer deterministic script orchestration over hidden automation.
 - Serving is declared in `llama-swap.yaml`; benching is declared in
   `bench-models/*.sh`. Both are editable text, not hard-parameterized UI
   forms. When serving and benching flags drift, update them together.
+- Standardize bench environment: all bench runs log system frontmatter
+  via `bench-models/bench-env.sh` so performance numbers are contextualized
+  against CPU governor, RAM speed, available memory, and thermals.
 - Treat keyboard control as first-class; mouse workflows are optional.
 - Preserve existing files by default for downloads unless explicitly overridden.
 - Keep version snapshots for both model configs and scripts before writes.
@@ -44,24 +51,27 @@ Build a keyboard-first, script-first homelab LLM toolkit with strong operational
 
 Deep detail, decisions and next steps: `docs/qwen38-flash-next-internal.md`.
 
-Three router tiers share one AtomicChat AD-4.27bpw quant:
+Four router tiers share one AtomicChat AD-4.27bpw quant:
 
 - gold `qwen38-flash-next`: plain upstream master (`vendor/llama.cpp-master`,
-  macro `qwen38_master_server`). Refresh = `git fetch` + rebuild; stays
-  current as qwen4exp PRs merge upstream.
-- exp `qwen38-flash-next-exp`: master + unmerged qwen4exp PRs
+  macro `qwen38_master_server`, commit `b78a39a2f`). 19.35 t/s steady state
+  decode, pp 198-200 t/s @ 64k. Refresh = `git fetch` + rebuild.
+- vision `qwen38-flash-next-vision`: master `b78a39a2f` with `mmproj-F16.gguf`
+  vision projector (`models/unsloth/Qwen3.8-Flash-Next-GGUF/mmproj-F16.gguf`),
+  `-ngl 99 -ncmoe 45` @ 16k ctx, 18.2–18.6 t/s, 10.4 GB VRAM (1.8 GB headroom).
+- MTP `qwen38-flash-next-mtp`: Daniel Han PR #28243 (`d1a92352c` on master)
+  with compact `mtp-Qwen3.8-Flash-Next-shared-Q4_K_M.gguf` (1.78 GB),
+  `vendor/llama.cpp-pr-test-28243/build/bin/llama-server`, macro `qwen38_mtp_server`,
+  `-ngl 99 -ncmoe 45 --spec-draft-n-max 2 --spec-draft-p-min 0.7` @ 16k ctx,
+  **20.65 t/s aggregate** (77–96% acceptance), 11.78 GB VRAM.
+- exp `qwen38-flash-next-exp`: master + unmerged GDN PR #28068
   (`build/bin/llama-server-exp` inside `vendor/llama.cpp-pr-test-28023-28068-27941`,
-  branch `pr-test-28023-28068-27941`). Becomes redundant when its PRs merge;
-  delete the delta then.
-- MTP `qwen38-flash-next-mtp`: exp + #27836 draft head + detached-head patch
-  (`build/bin/llama-server` in the same clone, branch `pr-test-exp-mtp`),
-  32k ctx cap, opt-in.
+  branch `pr-test-28023-28068-27941`). Becomes redundant when merged.
 
-MTP upgrade status (2026-09-01): every alternative tested and closed —
-see the internal doc §0/§9.1. The unlock is upstream #28104 (or
-#27836+#28097+#28118) merging; until then 0b7d6d57d is the fastest MTP
-that exists on 12 GB. Do not hand-merge MTP PR branches — three separate
-hand-merges all failed for named reasons.
+MTP upgrade status (2026-09-14): PR #28243 on master with the 1.78 GB
+`shared-Q4_K_M` head definitively surpasses plain master across all tasks
+(20.65 vs 19.35 t/s), breaking through the 20 t/s barrier on every task
+when paired with `-ncmoe 45`. The old exp clone `0b7d6d57d` is superseded.
 
 Gotchas:
 
@@ -86,7 +96,14 @@ Gotchas:
   first 2-3 fresh-load probes and report steady state; pp probes need unique
   prefixes to defeat KV reuse. A/B harness:
   `bench-models/bench-llama-qwen38-flash-next-build-ab.sh` (stop llama-swap
-  first).
+  first). Standardize system context: all bench scripts must capture the
+  standard system frontmatter via `bench-models/bench-env.sh` (RAM MT/s,
+  topology, CPU governor/EPP, PPD profile, free/available RAM, active anon,
+  ZRAM usage, baseline VRAM, THP, CPU/GPU temperatures). Never compare runs
+  across differing power governors (`powersave` drops decode ~15–25% vs
+  `performance`) or unverified RAM clock states. Runners (`run-llama-bench.sh`,
+  `run-ik-llama-bench.sh`, `run-llama-fit-bench.sh`) write YAML frontmatter to
+  log headers and embed `"sys"` in `logs/results/<model>.jsonl`.
 - Memory-spill check for SSD-offloaded models: with the model loaded, delta
   `/proc/<llama-server-pid>/io read_bytes` across a ~256-token generation.
   Expected ≈ PLE design traffic only (~5 KB/token for qwen4exp n-gram rows);
@@ -118,6 +135,10 @@ Gotchas:
 
 - `src/app.rs`: Ratatui layout, keybindings, workflows, and process supervision
 - `src/cli.rs`: launcher + interactive CLI (`--run`, `--bench`, `--list`)
+- `src/param_registry.rs`: curated `llama-server` flag table (control kinds,
+  categories, house presets) for the Param Builder tab
+- `src/param_builder.rs`: Param Builder state — flag import/export
+  (quote-aware), cmd-block generation, and `llama-swap.yaml` cmd replacement
 - `src/llama_swap.rs`: authenticated llama-swap HTTP boundary
 - `src/config_store.rs`: download config CRUD + validation + snapshots
 - `src/script_store.rs`: script CRUD + snapshots

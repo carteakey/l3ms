@@ -1,0 +1,18 @@
+0.00.064.835 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.00.065.053 W srv  llama_server: -----------------
+0.00.065.054 W srv  llama_server: CORS is set to allow all origins ('*') and no API key is set
+0.00.065.054 W srv  llama_server: this can be a security risk (cross-origin attacks)
+0.00.065.054 W srv  llama_server: more info: https://github.com/ggml-org/llama.cpp/pull/25655
+0.00.065.054 W srv  llama_server: -----------------
+0.00.066.326 I srv    load_model: loading model '/home/kchauhan/models/qwen38-flash-next/AD-4.27bpw-Q4_K_M-M64/Qwen3.8-Flash-Next-AD-4.27bpw-Q4_K_M-M64-00001-of-00033.gguf'
+0.00.489.266 W llama_model_loader: tensor overrides to CPU are used with mmap enabled - consider using --load-mode none for better performance
+0.16.705.396 I cmn          init: llama threadpool init, n_threads = 10
+0.16.705.463 I common_speculative_init_result: loading draft model '/home/kchauhan/models/unsloth/Qwen3.8-Flash-Next-GGUF/MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf'
+0.18.058.390 E ggml_backend_cuda_buffer_type_alloc_buffer: allocating 274.03 MiB on device 0: cudaMalloc failed: out of memory
+0.18.059.338 E ggml_gallocr_reserve_n_impl: failed to allocate CUDA0 buffer of size 287342720
+0.18.059.341 E graph_reserve: failed to allocate compute buffers
+0.18.065.892 E llama_init_from_model: failed to initialize the context: failed to allocate compute pp buffers
+0.18.065.897 E common_speculative_init_result: failed to create MTP context
+0.18.065.902 E srv    load_model: failed to create MTP context
+0.18.065.913 I srv    operator(): operator(): cleaning up before exit...
+0.18.066.676 E srv  llama_server: exiting due to model loading error

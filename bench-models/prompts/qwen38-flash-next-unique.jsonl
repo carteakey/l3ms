@@ -1,0 +1,6 @@
+{"id":"code-1","name":"code-pathlib","category":"code","max_tokens":192,"prompt":"Refactor a Python function that reads JSON with open() into a pathlib implementation. Add useful exception handling and return typed data. Answer with code only."}
+{"id":"code-2","name":"code-rust-lru","category":"code","max_tokens":192,"prompt":"Implement a small fixed-capacity LRU cache in Rust using only the standard library. Include get and insert methods. Answer with code only."}
+{"id":"code-3","name":"code-sql-batch","category":"code","max_tokens":192,"prompt":"Write a PostgreSQL query that returns each customer's latest paid invoice and total paid amount during the prior 90 days. Answer with SQL only."}
+{"id":"story-1","name":"story-radio","category":"story","max_tokens":192,"prompt":"Write a restrained 180-word scene about a radio operator receiving a transmission from an abandoned polar station. Avoid explaining the mystery."}
+{"id":"story-2","name":"story-library","category":"story","max_tokens":192,"prompt":"Write a quiet 180-word scene in which a night librarian discovers that one returned book is still warm. Use concrete sensory details."}
+{"id":"story-3","name":"story-orchard","category":"story","max_tokens":192,"prompt":"Write a 180-word scene about two siblings repairing an irrigation pump in an old orchard before a storm. Keep the dialogue natural."}

@@ -11,15 +11,16 @@ llama-swap, three tiers, all smoke-tested.
 
 ---
 
-## 0. Session summary — where everything stands (2026-09-01)
+## 0. Session summary — where everything stands (2026-09-14)
 
 **Live tiers (all smoke-tested through the router):**
 
 | tier | entry | binary | commit | measured (steady state) |
 | --- | --- | --- | --- | --- |
-| gold | `qwen38-flash-next` | `vendor/llama.cpp-master` | master `9d817213a` | prose 19.6-19.7 · spec-warm 25.6-26.1 · pp 198-200 t/s @ 64k |
+| gold | `qwen38-flash-next` | `vendor/llama.cpp-master` | master `b78a39a2f` | prose 19.1–19.6 · code 19.3–19.6 · aggregate 19.35 t/s · pp 198-200 t/s @ 64k |
+| vision | `qwen38-flash-next-vision` | `vendor/llama.cpp-master` | master `b78a39a2f` + `mmproj-F16.gguf` | 18.2–18.6 t/s @ 16k ctx, 10.4 GB VRAM (-ncmoe 45, 1.8 GB headroom for image/KV) |
+| MTP | `qwen38-flash-next-mtp` | `vendor/llama.cpp-pr-test-28243` | PR #28243 (`d1a92352c` on master `b78a39a2f`) | code 20.4–21.9 · prose 20.0–20.7 · aggregate **20.65 t/s** @ 16k ctx (-ncmoe 45, Q4_K_M head) |
 | exp | `qwen38-flash-next-exp` | `llama-server-exp` | `e1748dbd5` (master + #28023 #28068 #27941) | parity with gold; #28023/#27941 now upstream, so the delta is #28068 only |
-| MTP | `qwen38-flash-next-mtp` | old MTP build `0b7d6d57d` | #27836 + detached patch (host ckpt + p-min 0.7 gating) | code 25.0 · prose ~19.5 @ 32k — still the fastest MTP on 12 GB |
 
 **Hardware final state**: RAM 5600 MT/s (was 5000; tg-neutral, keep for
 gaming), governor/EPP performance (persistence unit committed), spill-free,
@@ -86,23 +87,22 @@ timing changes are tg-neutral; the speculation pool makes single tg probes
    PLE → ΔKLD 0.0005. So BF16-PLE rebuilds (SassyDiffusion, 184.9 GB) are a
    lateral move at huge disk cost (§9.2).
 
-## 3. Serving layout (three tiers)
+## 3. Serving layout (four tiers)
 
 | tier | entry | binary | commit | notes |
 | --- | --- | --- | --- | --- |
-| gold | `qwen38-flash-next` | `vendor/llama.cpp-master/build/bin/llama-server` | master, currently `e4b9af007` | tracks upstream; refresh = `git fetch` + rebuild (ccache ~2 min) |
-| exp | `qwen38-flash-next-exp` | `vendor/llama.cpp-pr-test-28023-28068-27941/build/bin/llama-server-exp` | `e1748dbd5` (master + #28023 #28068 #27941) | A/B vs gold for unmerged fixes |
-| MTP | `qwen38-flash-next-mtp` | same clone, `build/bin/llama-server` | `0b7d6d57d` (exp + #27836 + detached-head patch) | 32k ctx cap, opt-in |
+| gold | `qwen38-flash-next` | `vendor/llama.cpp-master/build/bin/llama-server` | master `b78a39a2f` | tracks upstream; refresh = `git fetch` + rebuild (ccache ~2 min); --fit on --fit-target 512 |
+| vision | `qwen38-flash-next-vision` | `vendor/llama.cpp-master/build/bin/llama-server` | master `b78a39a2f` | multimodal vision tier with `mmproj-F16.gguf`; -ngl 99 -ncmoe 45 @ 16k ctx |
+| MTP | `qwen38-flash-next-mtp` | `vendor/llama.cpp-pr-test-28243/build/bin/llama-server` | PR #28243 `d1a92352c` on master `6d54aa023` | compact `shared-Q4_K_M.gguf` (1.78 GB), -ngl 99 -ncmoe 45, 20.65 t/s aggregate @ 16k ctx |
+| exp | `qwen38-flash-next-exp` | `vendor/llama.cpp-pr-test-28023-28068-27941/build/bin/llama-server-exp` | `e1748dbd5` (master + #28023 #28068 #27941) | A/B vs gold for unmerged GDN #28068 fix |
 
-- All three share the AtomicChat quant; `--parallel 1` mandatory everywhere
+- All four share the AtomicChat quant; `--parallel 1` mandatory everywhere
   (multi-slot corrupts the QSA indexer cache → hallucinations).
-- **Binary-name duality gotcha**: the exp clone's `build/bin/llama-server` is
-  the MTP binary, `llama-server-exp` is the exp binary. Branch switches in
-  that clone require rebuilding both (see AGENTS.md).
-- The detached-head MTP patch is a real commit now (was a dangling dirty
-  file in the obsolete `pr-test-27836` clone).
-- Collapse triggers: #28023/#28068/#27941 merged → delete exp delta;
-  #27836 merged → MTP rides master; then only gold remains.
+- **MTP serving**: PR #28243 on master with the 1.78 GB `shared-Q4_K_M` head
+  saves 870 MiB VRAM over Q8_0, permitting `-ncmoe 45` (+1 MoE layer on GPU)
+  within the 12 GB envelope (11,786 MiB used at 16k ctx) and achieving 20.65 t/s.
+- Collapse triggers: #28068 merged → delete exp delta;
+  #28243 merged → MTP rides master; then only gold/vision/MTP on master remain.
 
 ## 4. Production flags (gold) and why each exists
 
@@ -146,7 +146,11 @@ occupies VRAM → ctx cap) + `--spec-type draft-mtp,ngram-mod
 
 Number identities: **16-17 t/s = spilling (unhealthy) · ~19.5 = healthy prose
 floor · 24.8+ = speculation multiplier on predictable text** (pool 18.9 →
-35.9 t/s on repeated identical prompts, +90%). Note the speculation pool
+35.9 t/s on repeated identical prompts, +90%; fully-warm repeated-prompt
+counting reaches 38-48 with the MTP combo, 2026-09-01 sweep). Honest
+unique-text MTP code floor ≈ 20 t/s on both the old and #144 builds —
+identical-prompt probes measure the ngram pool, not the draft params. Note
+the speculation pool
 goes cold after unrelated generations — a single cold reading (e.g. 16.8)
 is pool state, not a regression; re-probe 1-3× to re-warm.
 
@@ -252,6 +256,106 @@ state-sizing for qwen4exp — #28104/#28118 open, (3) draft-context KV
 sizing on master's hybrid rework — #28104's job. When #28104 (or
 #27836+#28097+#28118) merges, ALL THREE land together and the ladder
 re-runs on plain gold.
+
+**#144 warm-pool param sweep (2026-09-01 evening, sweep script
+`bench-llama-qwen38-flash-next-mtp144-sweep.sh`).** Re-ran the #144-vs-old
+comparison with the proper warm protocol (2 discarded warm-up gens per fresh
+load, 3 counting probes / 2 code probes, steady = last 2) and swept draft
+params. Results (counting steady / code best, t/s):
+
+| arm | build | ncmoe | head | params | counting | code |
+| --- | --- | --- | --- | --- | --- | --- |
+| baseline combo (prod) | 0b7d6d57d | 46 | agentionai Q4_K_M | pmin 0.7 nmax 2 + ngram-mod | 38.6→45.5 | 30.6 (2nd identical probe) |
+| baseline plain | 0b7d6d57d | 46 | agentionai Q4_K_M | pmin 0.7 nmax 2 | 22.7 | 19.8 |
+| baseline p050 | 0b7d6d57d | 46 | agentionai Q4_K_M | pmin 0.5 + ngram-mod | 48.0 | 18.9 (accept 0.67!) |
+| 144 plain | 586b15ef8 | 47 | shared-Q8_0 | pmin 0.7 nmax 2 | 22.4 | 19.9 |
+| 144 p050 | 586b15ef8 | 47 | shared-Q8_0 | pmin 0.5 | 23.9 | 20.5 |
+| 144 p075 | 586b15ef8 | 47 | shared-Q8_0 | pmin 0.75 | 21.7 | 20.4 |
+| 144 nmax3 | 586b15ef8 | 47 | shared-Q8_0 | pmin 0.7 nmax 3 | 23.7 | 19.2 (degrades) |
+| 144 psplit | 586b15ef8 | 47 | shared-Q8_0 | pmin 0.7 p-split 0.10 | 22.1 | 20.7 |
+| 144 ncmoe46 | 586b15ef8 | 46 | shared-Q8_0 | + -ub 512 | — | CUDA OOM at decode |
+
+Findings: (a) **like-for-like (plain draft-mtp, warm) is a dead tie** —
+baseline-plain 22.7/19.8 vs 144-plain 22.4/19.9, and #144 pays an extra
+expert layer on CPU to fit the shared head, i.e. per-layer the #144
+implementation is *more* efficient; the whole remaining gap is the
+ngram-mod combo, which the old build exploits massively on
+spec-friendly/repeated text (mean draft len 45.3 on repeated counting
+prompts) but which collapses to mean len 4.1 on the #144 pin base. (b) The
+recorded "25.0" and today's "30-45" baseline numbers are the same
+ngram-pool multiplier on identical/repeated prompts, not the draft params —
+the honest unique-text MTP floor on this box is **~20 t/s code / ~22-23
+counting** for BOTH builds. (c) Param sweep verdict: pmin 0.7 stays the
+right gate on both builds (0.5 inflates repeated-prompt counting to 48 but
+drops code acceptance to 0.67 and tg to 18.9; 0.75 slightly worse); nmax 3
+hurts code; p-split 0.10 neutral. (d) 144+shared-Q8 at ncmoe 46 OOMs even
+with -ub 512 — geometry closed again. Tier stays on 0b7d6d57d; #144 binary
+preserved as `build/bin/llama-server-mtp144` for future re-runs (worktree
+removed). Note: the exp clone's `build/bin/llama-server` had been left on
+the broken mtp-ondevice build — this session rebuilt it at 0b7d6d57d
+(`llama-server-mtp0b7d` copy kept), so the MTP tier is serving the proven
+binary again.
+
+**#28243 test (2026-09-02, "just against master").** Built PR #28243
+(danielhanchen's shared-modules MTP: borrows the target's embed_tokens/
+lm_head, builds on #27836) onto fresh master via
+`maintenance/llama-test-pr.sh 28243` → `vendor/llama.cpp-pr-test-28243`,
+head `d6d782585` (master `67a17c17c`). Hopes were (a) borrow shrinks the
+head's VRAM cost → ncmoe 46 fits, removing the −13% extra-CPU-layer
+penalty, (b) current-master base gains. Results (same warm protocol):
+
+| arm | counting (steady) | code | note |
+| --- | --- | --- | --- |
+| 28243 + shared-Q8_0, ncmoe 46 | — | — | OOM at load: **274.03 MiB short** — the exact shortfall the #144 build hit; borrow does not shrink the sidecar head's footprint here |
+| same + `-ub 512` | — | — | loads further, OOM at decode (graph capture) |
+| 28243 + shared-Q8_0, ncmoe 47, plain pmin 0.7 | 23.0 | 21.4 | acceptance 0.94, mean len 2.69 |
+| baseline-plain (0b7d6d57d, ncmoe 46, agentionai Q4_K_M) | 23.2 | 20.7 | acceptance 0.95 (day-2 rerun, consistent with 09-01) |
+
+Verdict: **another tie on unique text** (21.4 vs 20.7 code, within noise —
+and 28243 pays the ncmoe 47 penalty), ncmoe 46 still doesn't fit, and the
+274 MiB number being byte-identical across two independent MTP
+implementations confirms it is the shared-head compute-buffer footprint,
+not an implementation bug. PR also pending ggerganov's requested rework
+(reuse `ctx_other`, split CUDA changes to a follow-up) so its head will
+churn. Tier stays on 0b7d6d57d. The ncmoe-46-with-MTP geometry remains
+gated on either a smaller head quant (~250 MiB less: Q3-class or smaller
+embed re-use that actually lands) or upstream fit/borrow changes.
+
+**Fit-vs-static MTP test (2026-09-03, closes the `--fit on` question).**
+Asked whether `--fit on --fit-target 512` could replace the MTP entry's
+static `-fit off -ngl 99 -ncmoe 46`. Findings: (a) with `-ngl 99` set the
+fitter silently aborts ("n_gpu_layers already set by user") — the `-fit on`
+was a no-op and the load OOM'd on full-GPU placement; (b) with `-ngl`
+omitted the fitter runs and knows KV/compute budgeting, and on the old
+build the draft head loads before/around placement so fit-target 512 works:
+counting 21.3 / code 17.4 @ VRAM 11170 MiB; (c) on #28243 + shared head,
+fit-target 512 still OOMs at load (head budgeted differently on that
+stack). Verdict: **static ncmoe 46 beats fit512 by ~16% code (20.7 vs
+17.4) and packs ~440 MiB more** — the manual placement is measurably the
+best geometry, `-fit off` stays in the yaml. Fit-target 6000 (reserving
+unbudgeted-head room the Reddit way) collapses to 8-12 t/s — the fitter
+leaves 3-4 GiB unused and pushes ~10 expert layers to CPU. Sweep script now
+omits `-ngl`/`-ncmoe` when the arm's layer field is empty and takes
+`FITARGS` for fit-mode arms. Fit ladder on #28243 + shared head
+(2026-09-03, bracketed): fit512/fit1024 OOM at load — the fitter logs
+`failed to measure the memory of the extra model, fitting without it`
+(shared-head `borrow_shared_tensor` refusal, the Reddit-reported bug), then
+the head's 2647 MiB lands on an unbudgeted card; **fit3000 is the load
+floor** (22.9 counting / 19.4 code, acceptance 0.97), fit3500 22.3/19.0,
+fit6000 12.4/11.1 — vs static ncmoe 47 on the same build 23.0/21.4. Fit
+mode loads on the old build (agentionai head loads first, fit packs around
+it) but the old build cannot load the shared head at all
+(`token_embd.weight not found` — no borrow). Standing: static placement
+still beats every fit mode; fit3000 is the fallback if static placement
+ever breaks upstream. Floor refined with repeat sessions (2 fresh loads per
+arm): fit2660 = fit2680 = fit2700 within session noise (code 18.4-20.4
+across sessions, ±1.3 t/s session spread > the 20 MiB step deltas;
+counting 21-23) at VRAM 11736 MiB (546 free, no mid-gen OOM) — the load
+floor is fit-target ~2660 and chasing lower is pointless; **fit-mode MTP
+plateaus ~1-1.5 t/s code behind static 47**, which is within the same
+session-noise band: call static parity-to-slightly-ahead. Bench-hygiene
+reinforced: single-session readings cannot separate <2 t/s deltas; repeat
+fresh-load sessions required.
 
 **Unsloth release-binary test (2026-09-01, final MTP chapter).** Tested the
 prebuilt `b10715-mix-86bd2d3` release (their shipping assembly): shared-Q8_0
@@ -454,7 +558,208 @@ spec-warm 26.3 · MTP code 25.0 (32k cap). Gap analysis:
    RAM random-access bound (3.2 GB/token gathers); only bandwidth/latency
    (RAM clocks) or algorithmic cuts (upstream) move it.
 
-### 9.5 Reboot checklist
+### 9.5 ik_llama MTP path (2026-09-08/09)
+
+`ikawrakow/ik_llama.cpp` merged qwen4exp MTP in PR #2369 on 2026-09-02.
+Built current main `1a2a860` locally with CUDA SM89 and tested the existing
+AtomicChat AD-4.27bpw target plus `agentionai-mtp-Q4_K_M.gguf`; the existing
+head is compatible with ik_llama's standard predictor-only layout. Use
+`--spec-type mtp:n_max=1,p_min=0.7`, not llama.cpp's `draft-mtp` spelling.
+
+Short controlled `llama-spec-bench` result at 16k, q8 KV, `--defer-ple`,
+`-ncmoe 46`, three 128-token repeats each:
+
+| task | base t/s (runs 2-3) | MTP t/s (runs 2-3) | acceptance |
+| --- | ---: | ---: | ---: |
+| code | 20.53 / 20.24 | 23.10 / 22.00 | 93.85% |
+| story | 20.45 / 20.22 | 19.58 / 19.29 | 73.61% |
+| aggregate, including cold runs | 19.77 | 20.26 | 83.21% |
+
+Conclusion: MTP now works cleanly on this 4070 with the existing quant and
+head. It is useful for code but slightly slower for prose. Keep it opt-in;
+do not replace the gold tier. `n_max=1` is the correct starting point on 12
+GB because larger draft depth and checkpoint geometry previously erased the
+gain. Repro harness: `bench-models/bench-llama-qwen38-flash-next-ik-mtp.sh`.
+Do not pass `-rtr` with this K-quant hybrid layout; ik_llama warns it can pin
+unsupported row-interleaved K-quant work to CPU and reduce prompt speed.
+
+#### ik_llama optimization checklist
+
+Campaign runner: `bench-models/bench-llama-qwen38-flash-next-ik-campaign.sh`.
+Check an item only after a controlled measurement is recorded here.
+
+- [x] Establish 16k baseline vs MTP `n_max=1,p_min=0.7` at `-ncmoe 46`.
+- [x] Chain `ngram-mod:n_min=4` before MTP using fresh code/story prompts.
+- [x] Sweep MTP `p_min` 0.0/0.5/0.7 at `n_max=1`.
+- [x] Test `n_max=2`; `n_max=3` is unwarranted after the fresh-prompt loss.
+- [x] Bracket `-ncmoe 45/46/47`: 45 target-only loads but MTP draft compute
+      OOMs by 510 MiB; 46 is the minimum working MTP placement; 47 works
+      but pays the additional CPU expert-layer penalty.
+- [x] A/B `-muge`: rejected; it disables mmap/deferred PLE and attempts an
+      83.3 GiB CPU allocation on this model/host.
+- [x] A/B `GGML_CUDA_NO_PINNED`: mandatory `=1`. With pinned memory enabled,
+      ik_llama attempted to pin the 83.3 GiB mapped CPU model, exhausted 64
+      GiB RAM plus zram, and killed the session. Do not repeat.
+- [x] Validate context scaling: MTP-2 works at 32k (16.61 vs base 17.26)
+      but 64k CUDA-OOMs at `-ncmoe 46`; plain 64k completes.
+- [ ] Measure unique-prefix prompt processing at 2k/8k/32k.
+- [ ] Run a 32k-64k agent/tool-call quality and malformed-call screen.
+- [ ] Diagnose `--jinja`/thinking impact as a separate behavior-changing arm.
+
+Explicit non-candidates: `-rtr` (breaks deferred-PLE mmap), multi-GPU,
+multimodal MTP, and a new IQ3_KT download before the existing quant's ladder
+is complete.
+
+**Phase-one result (2026-09-09/11).** The first campaign was contaminated by
+Blender memory pressure and is preserved under
+`bench-models/logs/results/ik-mtp-16k-params-20260909/`; do not cite it.
+The clean repeated-prompt campaign is under
+`ik-mtp-16k-params-clean-20260909/`: base 19.51, MTP-1 19.81-20.90 across
+the p-min arms (identical acceptance/output, so the spread is session noise),
+MTP-2 22.06, and ngram+MTP-1 26.07 t/s. The latter two gains did not survive
+fresh prompts.
+
+Fresh six-prompt corpus (three code, three story; 192 generated tokens each),
+under `ik-mtp-unique-16k-20260909/`:
+
+| arm | aggregate t/s | delta vs base | acceptance / note |
+| --- | ---: | ---: | --- |
+| base | **19.24** | — | wins overall and on 5/6 tasks |
+| MTP-1 p0.7 | 16.51 | -14.2% | 72.4% |
+| MTP-2 p0.7 | 15.96 | -17.0% | 72.0%, accepted span 1.99 |
+| ngram4 + MTP-1 | 12.05 | -37.4% | ngram only 11 calls; MTP 70.3% |
+| ngram4 + MTP-2 | 17.96 | -6.6% | best speculative arm; wins 2/6 tasks |
+
+The earlier “better than gold” conclusion applies only to predictable or
+repeated code. For diverse fresh traffic, gold/plain decode remains the
+correct default. N-gram should be treated as a workload-local accelerator,
+not included in an aggregate speed claim.
+
+Placement bracket on the same fresh corpus: at `-ncmoe 45`, target-only
+completed at 12.97 t/s but the MTP context failed when allocating its 510 MiB
+CUDA compute buffer. At `-ncmoe 47`, base/MTP-2 completed at 10.43/11.62 t/s.
+These were cold-placement probes after reboot and are not comparable to the
+fully paged-in 46 numbers; they establish geometry and direction. Keep 46.
+
+Pinned-memory failure (2026-09-11): removing `GGML_CUDA_NO_PINNED=1` did
+not produce a benchmark. The loader logged `cudaMallocHost: out of memory`
+while trying to pin the 83.3 GiB CPU mapping, then consumed essentially all
+61 GiB RAM and 61 GiB zram before the session died. The reboot returned the
+host to 52 GiB available RAM. The harness now hard-codes no-pinned and uses
+`--prefetch-experts` to establish residency without pinning the PLE/model
+mapping.
+
+**Residency-controlled confirmation (2026-09-11).** After the pinned-memory
+failure/reboot, the unique corpus was rerun with `--prefetch-experts
+--prefetch-experts-threads 8` and mandatory `GGML_CUDA_NO_PINNED=1`:
+
+| 16k arm | aggregate t/s | delta vs base |
+| --- | ---: | ---: |
+| base | **18.26** | — |
+| MTP-1 | 14.67 | -19.7% |
+| MTP-2 | 15.55 | -14.8% |
+| ngram4 + MTP-1 | 16.35 | -10.5% |
+| ngram4 + MTP-2 | 15.84 | -13.3% |
+
+This confirms plain decode as the fresh mixed-traffic winner. At 32k,
+base/MTP-2 were 17.26/16.61 t/s (-3.8% for MTP), so MTP approaches parity
+as context grows. At 64k, base completed at 19.00 t/s but MTP-2 aborted with
+CUDA OOM after target KV (1168.57 MiB), target compute (563 MiB), draft
+weights (2304.21 MiB), and draft compute (510 MiB) were allocated. The safe
+ik_llama MTP cap remains 32k on this 12 GB card.
+
+### 9.7 Upstream Master Refresh & PR #28243 Retest (2026-09-14)
+
+Evaluated refreshed upstream master (`b78a39a2f`, 175 commits newer than September 1 gold `9d817213a`), Daniel Han's revised PR #28243 (`d1a92352c` merged onto master at `6d54aa023`), and live `ik_llama` on the fresh 6-prompt unique corpus (`code-pathlib`, `code-rust-lru`, `code-sql-batch`, `story-radio`, `story-library`, `story-orchard` @ 192 generated tokens, 16k ctx, ncmoe 46):
+
+| Task | Gold (`9d817213a`) | Master (`b78a39a2f`) | PR #28243 `n_max=1` | PR #28243 `n_max=2` | `ik_llama` base | `ik_llama` MTP-1 | `ik_llama` MTP-2 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `code-pathlib` | 17.71 | 19.64 | 17.98 | 19.80 | 17.90 | 18.81 | 15.66 |
+| `code-rust-lru` | 18.92 | 19.28 | 18.00 | 19.80 | 18.45 | 16.38 | 16.18 |
+| `code-sql-batch` | 19.49 | 19.45 | 18.65 | 20.61 | 17.28 | 17.93 | 17.69 |
+| `story-radio` | 18.91 | 19.09 | 16.90 | 18.65 | 18.16 | 14.87 | 15.37 |
+| `story-library` | 19.35 | 19.11 | 17.98 | 18.69 | 18.16 | 14.17 | 15.71 |
+| `story-orchard` | 18.91 | 19.56 | 17.84 | 20.51 | 18.09 | 14.91 | 16.49 |
+| **Aggregate t/s** | **18.86** | **19.35** | **17.88** | **19.65** | **18.00** | **16.01** | **16.15** |
+| **VRAM Used** | 8510 MiB | 8458 MiB | 11406 MiB | 11518 MiB | — | — | — |
+
+Key Findings:
+1. **Master promoted to new Gold baseline:** Upstream master (`b78a39a2f`) delivers 19.35 t/s aggregate (+2.6% over gold `9d817213a`) with code decoding jumping +10.9% on `code-pathlib` (19.64 vs 17.71). VRAM consumption drops by 52 MiB (8458 vs 8510 MiB).
+2. **Master outperforms ik_llama:** Master plain decode (19.35 t/s) beats `ik_llama` base (18.00 t/s) by +7.5% and `ik_llama` MTP-2 (16.15 t/s) by +19.8%. Upstream optimizations (fused MoE reduction, faster Q4_K/Q5_K unpacking with L2 prefetch) completely erase any case for `ik_llama` MTP on fresh traffic.
+3. **PR #28243 (`d1a92352c`):** At `n_max=1`, it regresses to 17.88 t/s (-7.6% vs plain master) despite 80-97% acceptance due to 1-token draft overhead. At `n_max=2`, it reaches 19.65 t/s (+1.5% over master), but consumes 11518 MiB VRAM (+3060 MiB over plain master), leaving only 764 MiB headroom on the 12 GB card and preventing 32k/64k context scaling. Plain master remains the robust operational default.
+
+### 9.8 Layer Fitting, Vision Variant & Shared-Q4_K_M MTP (2026-09-14)
+
+Following the upstream master refresh, three further operational frontiers were evaluated:
+
+#### 1. Layer Fitting on Gold (Unlocking Slack VRAM)
+Each Qwen3.8-Flash-Next MoE layer requires **1,138 MiB** VRAM on GPU. At 16k context, static `-ncmoe 46` left 3,824 MiB unallocated (8,458 MiB used). Fitting additional MoE layers to GPU yielded:
+- `-ncmoe 46` (2 MoE on GPU): 8,796 MiB VRAM
+- `-ncmoe 45` (3 MoE on GPU): 9,934 MiB VRAM (+1,138 MiB), +38% decode throughput in side-by-side probes.
+- `-ncmoe 44` (4 MoE on GPU): 11,072 MiB VRAM (leaves 1,210 MiB free headroom at 16k ctx).
+- At 64k context (production gold config): `--fit on --fit-target 512` automatically allocates 10,714 MiB, outperforming static `-ncmoe 46` by +0.64 t/s while maintaining safe dynamic headroom.
+
+#### 2. Multimodal / Vision Tier (`qwen38-flash-next-vision`)
+Downloaded `mmproj-F16.gguf` (863 MB) from `unsloth/Qwen3.8-Flash-Next-GGUF`. Tested with refreshed master binary:
+- **Multimodal works out of the box** (upstream fixed image position encoding; previous note resolved).
+- Geometry: `-ngl 99 -ncmoe 45` consumes **10,460 MiB VRAM**, leaving **1,822 MiB headroom** for high-resolution image embeddings and KV expansion.
+- Performance: Decodes at **18.18–18.58 t/s** (pp: 31.0 t/s). Successfully verified via router chat completion with image input.
+- Added `qwen38-flash-next-vision` to `llama-swap.yaml`.
+
+#### 3. Compact Shared MTP Head (`mtp-Qwen3.8-Flash-Next-shared-Q4_K_M.gguf`, 1.78 GB)
+The smaller 1.78 GB shared head saves **~870 MiB VRAM** compared to `shared-Q8_0` (2.60 GB), reclaiming enough headroom to fit an extra MoE layer (`-ncmoe 45`) on the RTX 4070 12 GB. Tested on the 6-prompt unique corpus:
+
+| Task | Master Plain (`ncmoe 46`) | Q8_0 `n_max=2` (`ncmoe 46`) | Q4_K_M `n_max=1` (`ncmoe 46`) | Q4_K_M `n_max=2` (`ncmoe 46`) | **Q4_K_M `n_max=2` (`ncmoe 45`)** |
+|---|---:|---:|---:|---:|---:|
+| `code-pathlib` | 19.64 | 19.80 | 20.76 | 20.21 | **20.83** |
+| `code-rust-lru` | 19.28 | 19.80 | 20.10 | 20.39 | **20.35** |
+| `code-sql-batch` | 19.45 | 20.61 | 21.05 | 22.42 | **21.88** |
+| `story-radio` | 19.09 | 18.65 | 19.90 | 19.41 | **20.00** |
+| `story-library` | 19.11 | 18.69 | 19.73 | 19.14 | **20.65** |
+| `story-orchard` | 19.56 | 20.51 | 20.23 | 19.74 | **20.28** |
+| **Aggregate t/s** | **19.35** | **19.65** | **20.28** | **20.16** | **20.65** |
+| **VRAM Used** | 8,458 MiB | 11,518 MiB | 10,536 MiB | 10,648 MiB | **11,786 MiB** |
+| **Acceptance** | — | 79.6–90.7% | 82.7–96.1% | 79.8–96.3% | **76.9–95.7%** |
+
+- **Key Takeaway:** `shared-Q4_K_M` paired with `-ncmoe 45` breaks the 20 t/s barrier on **every single task**, delivering **20.65 t/s aggregate** (+9.5% over original gold, +6.7% over master plain, +27.9% over `ik_llama` MTP-2).
+
+#### 4. Diagnosis: Low Initial Decode Speed in Quick Probes (Cold Page-In vs System State)
+
+During initial layer-fitting probes (`test-gold-layer-fitting.sh`), the first 32-token generation ("Count to 30") reported lower decode speeds (~10.3–15.3 t/s) across all arms, rising to ~14.3–18.8 t/s on the second probe ("Write a poem"), before reaching full steady-state throughput (~19.35–20.65 t/s) on the 1,152-token unique corpus benchmark.
+
+**Investigation into System State:**
+- **Host Memory & Swap:** Inspected `/proc/meminfo` and `free -h`. Total RAM is 61.6 GiB, with **54.5 GiB available**. Zram swap usage was **1.0 MiB** out of 61.6 GiB (effectively zero swap activity). Dirty memory was < 1 MiB.
+- **CPU Governance:** CPU scaling governor was confirmed `performance` across all 12 cores with energy-performance preference (`EPP`) at `performance`. Thermal headroom was optimal.
+- **GPU VRAM:** RTX 4070 VRAM usage was static and well within limits (8,458–11,786 MiB depending on layer offload).
+
+**Root Cause: The Mmap SSD Cold-Page Faulting Transient:**
+The AtomicChat AD-4.27bpw model retains ~45.5 GB of CPU-side MoE expert weights in memory-mapped (`mmap`) files on NVMe SSD.
+1. When `llama-server` starts fresh with `--no-warmup`, none of the CPU expert pages reside in physical DRAM page cache.
+2. During the very first token generations, the MoE routing gate dynamically selects different experts at each layer. Each un-cached expert access causes synchronous **major page faults** to the NVMe drive in the critical token decode loop.
+3. This synchronous I/O drops effective decode speed to ~10–14 t/s on the first 30–60 tokens.
+4. As documented in `AGENTS.md`, `/proc/<pid>/io read_bytes` initially records ~8.6 GB of page-in traffic on fresh loads. Over ~5–10 generations (~1,000 tokens), the working set of hot experts converges into the ~54 GB of available physical RAM, dropping disk traffic to the baseline design rate (~5 KB/token for PLE n-gram rows).
+5. Once page-in converges, decode speeds stabilize at their true hardware ceiling (19.35 t/s plain master, 20.65 t/s MTP). It is **not** a system state issue.
+
+### 9.9 Prompt Processing (PP) Optimization & Benchmark Matrix (2026-09-14)
+
+Evaluated prompt processing (prefill) throughput across Old Gold (`9d817213a`), Refreshed Master (`b78a39a2f`), layer offloads (`-ncmoe 46` vs `-ncmoe 45` vs `--fit on`), micro-batch sizes (`ub 1024` vs `ub 2048`), and batch thread scaling across varied prompt lengths (~512, ~1024, and ~2048 tokens). Tested with unique nonces per request to defeat KV prefix cache:
+
+| Configuration | ~512 tok (t/s) | ~1024 tok (t/s) | ~2048 tok (t/s) | Mean PP (t/s) | VRAM (MiB) |
+|---|---:|---:|---:|---:|---:|
+| 1. Gold (`9d817213a`) `-ncmoe 46`, ub 1024, tb 12 | 195.9 | 214.5 | 213.8 | **208.1** | 9,104 |
+| 2. Master (`b78a39a2f`) `-ncmoe 46`, ub 1024, tb 12 | 205.7 | 241.1 | 285.8 | **244.2** | 9,052 |
+| 3. Master `-ncmoe 45` (+1 MoE on GPU), ub 1024, tb 12 | 220.1 | 243.6 | 280.7 | **248.2** | 10,190 |
+| 4. Master `--fit on --fit-target 512`, ub 1024, tb 12 | 217.6 | 250.3 | 282.3 | **250.1** | 11,508 |
+| **5. Master `-ncmoe 45`, ub 2048, tb 12** | **201.4** | **303.1** | **356.8** | **287.1** | **10,798** |
+| 6. Master `-ncmoe 45`, ub 1024, tb 16 (all logical cores) | 220.6 | 240.3 | 272.0 | **244.3** | 10,190 |
+
+**Key Findings:**
+1. **Master outperforms Gold on prefill:** Master delivers **244.2 t/s mean PP** (+17.3% over gold's 208.1 t/s). At ~2048 tokens, the gap widens to **+33.7%** (285.8 vs 213.8 t/s) due to fused CUDA MoE reduction and faster Q4_K/Q5_K unpacking with L2 prefetch.
+2. **Micro-batch `ub 2048` breakthrough:** With CPU-side experts, weights are streamed once per ubatch. At `ub 1024`, a 2048-token prompt requires 2 complete passes over ~45 GB of host memory. At `ub 2048`, the full prompt is processed in a single pass, doubling arithmetic intensity and surging prefill to **303.1 t/s @ 1k tokens** and **356.8 t/s (up to 385.2 t/s peak) @ 2k tokens** (+38.0% over gold baseline). VRAM remains comfortably within limits (10,798 MiB, 1.48 GB headroom).
+3. **Layer offload benefit:** Moving from `-ncmoe 46` to `-ncmoe 45` speeds up shorter prompts (~512 tokens) from 205.7 to 220.1 t/s (+7.0%) by eliminating one MoE layer's DRAM traffic.
+4. **Batch thread scaling:** Allocating 16 threads (adding the 4 slow Gracemont E-cores) regresses throughput from 248.2 to 244.3 t/s due to synchronization jitter. `--threads-batch 12` (matching the 6 Golden Cove P-cores with hyperthreading) remains the optimal setting.
+
+### 9.10 Reboot checklist
 
 1. Capture `sudo dmidecode -t 17` baseline (see §9.3.1) — or skip if RAM
    settings change is deferred.
@@ -484,8 +789,8 @@ spec-warm 26.3 · MTP code 25.0 (32k cap). Gap analysis:
 - **QSA true sparsity**: upstream still computes full attention then masks.
   When real sparsity lands, prefill is the step-change (18 min/220k →
   potentially minutes). Watch the PR list.
-- **Multimodal**: broken upstream (positions not encoded). Keep qwen38
-  entries text-only until a fix PR appears.
+- **Multimodal**: resolved in master `b78a39a2f`. Verified working with
+  `mmproj-F16.gguf` under tier `qwen38-flash-next-vision`.
 - **Unsloth quant rework**: community expects unsloth to re-ladder this
   model; if a future quant solves the PLE residency better than AD, redo
   the §2 math.

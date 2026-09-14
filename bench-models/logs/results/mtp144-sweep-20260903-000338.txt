@@ -1,0 +1,4 @@
+== arm: 28243-fit512
+   LOAD FAILED
+== arm: base-fit512
+   LOAD FAILED

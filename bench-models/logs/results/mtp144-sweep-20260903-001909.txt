@@ -1,0 +1,5 @@
+== arm: 28243-fit3000
+counting: tg 17.17 n=64 | tg 21.33 n=64 | tg 22.88 n=64
+code: tg 15.70 n=320 | tg 19.39 n=320
+1.03.978.090 I slot print_timing: id  0 | task 128 | draft acceptance = 0.96532 (  167 accepted /   173 generated), mean len =  2.69
+1.20.865.957 I slot print_timing: id  0 | task 283 | draft acceptance = 0.97093 (  167 accepted /   172 generated), mean len =  2.69

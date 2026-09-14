@@ -1,0 +1,10 @@
+== arm: base-fit6000
+counting: tg 8.42 n=64 | tg 8.62 n=64 | tg 8.73 n=64
+code: tg 7.47 n=320 | tg 7.62 n=320
+1.39.217.991 I slot print_timing: id  0 | task 135 | draft acceptance = 0.93567 (  160 accepted /   171 generated), mean len =  2.70
+2.21.748.519 I slot print_timing: id  0 | task 297 | draft acceptance = 0.97561 (  160 accepted /   164 generated), mean len =  2.72
+== arm: 28243-fit6000
+counting: tg 11.41 n=64 | tg 12.47 n=64 | tg 12.36 n=64
+code: tg 10.07 n=320 | tg 11.10 n=320
+1.17.491.201 I slot print_timing: id  0 | task 135 | draft acceptance = 0.95783 (  159 accepted /   166 generated), mean len =  2.69
+1.46.798.226 I slot print_timing: id  0 | task 298 | draft acceptance = 0.96571 (  169 accepted /   175 generated), mean len =  2.72

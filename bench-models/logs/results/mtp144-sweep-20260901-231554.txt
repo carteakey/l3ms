@@ -1,0 +1,38 @@
+== arm: baseline
+counting: tg 16.11 n=64 | tg 38.64 n=64 | tg 45.45 n=64
+code: tg 17.21 n=320 | tg 30.56 n=320
+1.13.409.866 I slot print_timing: id  0 | task 89 | draft acceptance = 0.94545 (  156 accepted /   165 generated), mean len =  2.64
+1.24.279.397 I slot print_timing: id  0 | task 255 | draft acceptance = 0.80729 (  310 accepted /   384 generated), mean len = 45.29
+== arm: 144-combo
+counting: tg 20.91 n=64 | tg 14.37 n=64 | tg 17.65 n=64
+code: tg 19.58 n=320 | tg 22.00 n=320
+0.48.403.023 I slot print_timing: id  0 | task 115 | draft acceptance = 0.95322 (  163 accepted /   171 generated), mean len =  2.65
+1.03.348.340 I slot print_timing: id  0 | task 274 | draft acceptance = 0.82377 (  201 accepted /   244 generated), mean len =  4.09
+== arm: 144-plain
+counting: tg 20.30 n=64 | tg 22.21 n=64 | tg 22.42 n=64
+code: tg 19.93 n=320 | tg 19.51 n=320
+0.45.557.287 I slot print_timing: id  0 | task 131 | draft acceptance = 0.95652 (  176 accepted /   184 generated), mean len =  2.73
+1.02.362.462 I slot print_timing: id  0 | task 277 | draft acceptance = 0.95349 (  164 accepted /   172 generated), mean len =  2.66
+== arm: 144-p075
+counting: tg 20.89 n=64 | tg 21.67 n=64 | tg 20.80 n=64
+code: tg 20.36 n=320 | tg 19.78 n=320
+0.44.022.905 I slot print_timing: id  0 | task 135 | draft acceptance = 0.93642 (  162 accepted /   173 generated), mean len =  2.72
+1.00.645.355 I slot print_timing: id  0 | task 295 | draft acceptance = 0.96364 (  159 accepted /   165 generated), mean len =  2.71
+== arm: 144-p050
+counting: tg 22.66 n=64 | tg 23.86 n=64 | tg 23.79 n=64
+code: tg 20.53 n=320 | tg 19.16 n=320
+0.44.540.440 I slot print_timing: id  0 | task 125 | draft acceptance = 0.89500 (  179 accepted /   200 generated), mean len =  2.69
+1.01.659.310 I slot print_timing: id  0 | task 268 | draft acceptance = 0.89500 (  179 accepted /   200 generated), mean len =  2.69
+== arm: 144-nmax3
+counting: tg 21.02 n=64 | tg 23.08 n=64 | tg 23.73 n=64
+code: tg 19.16 n=320 | tg 16.92 n=320
+0.47.193.930 I slot print_timing: id  0 | task 104 | draft acceptance = 0.92308 (  180 accepted /   195 generated), mean len =  3.17
+1.06.514.590 I slot print_timing: id  0 | task 246 | draft acceptance = 0.95192 (  198 accepted /   208 generated), mean len =  3.33
+== arm: 144-psplit
+counting: tg 21.34 n=64 | tg 21.61 n=64 | tg 22.12 n=64
+code: tg 20.53 n=320 | tg 20.77 n=320
+0.45.507.722 I slot print_timing: id  0 | task 131 | draft acceptance = 0.95652 (  176 accepted /   184 generated), mean len =  2.73
+1.01.287.332 I slot print_timing: id  0 | task 277 | draft acceptance = 0.95349 (  164 accepted /   172 generated), mean len =  2.66
+== arm: 144-ncmoe46
+counting: tg PARSE-FAIL n=0 | tg PARSE-FAIL n=0 | tg PARSE-FAIL n=0
+code: tg PARSE-FAIL n=0 | tg PARSE-FAIL n=0

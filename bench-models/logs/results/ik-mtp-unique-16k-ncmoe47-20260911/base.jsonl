@@ -1,0 +1,7 @@
+{"row_type":"attempt","task":"code-pathlib","run":1,"ok":true,"stop":"limit","generated":192,"decode_s":18.441823,"decode_tps":10.411118250077555,"stages":[],"error":null}
+{"row_type":"attempt","task":"code-rust-lru","run":1,"ok":true,"stop":"limit","generated":192,"decode_s":17.288316,"decode_tps":11.105766461001755,"stages":[],"error":null}
+{"row_type":"attempt","task":"code-sql-batch","run":1,"ok":true,"stop":"limit","generated":192,"decode_s":16.323854,"decode_tps":11.761928279927032,"stages":[],"error":null}
+{"row_type":"attempt","task":"story-radio","run":1,"ok":true,"stop":"limit","generated":192,"decode_s":20.288772,"decode_tps":9.463362297136563,"stages":[],"error":null}
+{"row_type":"attempt","task":"story-library","run":1,"ok":true,"stop":"limit","generated":192,"decode_s":18.715134,"decode_tps":10.259076958786403,"stages":[],"error":null}
+{"row_type":"attempt","task":"story-orchard","run":1,"ok":true,"stop":"limit","generated":192,"decode_s":19.39753,"decode_tps":9.89816744709249,"stages":[],"error":null}
+{"row_type":"summary","attempts":6,"successes":6,"failures":0,"generated":1152,"decode_s":110.455429,"decode_tps":10.429546201844005,"speculative":{"num_drafts":0,"accepted_drafts":0,"draft_tokens":0,"accepted_tokens":0,"acceptance_rate":0.0,"acceptance_length":0.0,"draft_tokens_per_step":0.0,"t_begin_s":0.0,"t_draft_s":0.0,"t_accept_s":0.0,"stages":[]}}

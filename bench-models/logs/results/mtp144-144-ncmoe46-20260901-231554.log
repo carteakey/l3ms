@@ -1,0 +1,88 @@
+0.00.061.121 W DEPRECATED: argument '-ub' specified multiple times, use comma-separated values instead (only last value will be used)
+0.00.061.222 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.00.061.501 W srv  llama_server: -----------------
+0.00.061.502 W srv  llama_server: CORS is set to allow all origins ('*') and no API key is set
+0.00.061.502 W srv  llama_server: this can be a security risk (cross-origin attacks)
+0.00.061.502 W srv  llama_server: more info: https://github.com/ggml-org/llama.cpp/pull/25655
+0.00.061.503 W srv  llama_server: -----------------
+0.00.062.765 I srv    load_model: loading model '/home/kchauhan/models/qwen38-flash-next/AD-4.27bpw-Q4_K_M-M64/Qwen3.8-Flash-Next-AD-4.27bpw-Q4_K_M-M64-00001-of-00033.gguf'
+0.00.467.776 W llama_model_loader: tensor overrides to CPU are used with mmap enabled - consider using --load-mode none for better performance
+0.03.213.676 I cmn          init: llama threadpool init, n_threads = 10
+0.03.213.733 I common_speculative_init_result: loading draft model '/home/kchauhan/models/unsloth/Qwen3.8-Flash-Next-GGUF/MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf'
+0.04.580.323 I srv    load_model: initializing, n_slots = 1, n_ctx_slot = 32768, kv_unified = 'false'
+0.04.620.609 I srv          init: chat template supports preserving reasoning, consider enabling it via --reasoning-preserve
+0.04.620.637 I srv  llama_server: model loaded
+0.04.620.641 I srv  llama_server: listening on http://127.0.0.1:8023
+0.06.063.023 I slot get_availabl: id  0 | task -1 | selected slot by LRU, t_last = -1
+0.06.063.080 I slot launch_slot_: id  0 | task 0 | processing task, is_child = 0
+/home/kchauhan/repos/l3ms/vendor/llama.cpp-mtp144-wt/ggml/src/ggml-cuda/ggml-cuda.cu:107: CUDA error
+0.06.248.388 E CUDA error: out of memory
+0.06.248.391 E   current device: 0, in function cublas_handle at /home/kchauhan/repos/l3ms/vendor/llama.cpp-mtp144-wt/ggml/src/ggml-cuda/../ggml-cuda/common.cuh:1526
+0.06.248.391 E   cudaMalloc(&cublas_workspaces[device][curr_stream_no], cublas_workspace_sizes[device])
+[New LWP 710788]
+[New LWP 710787]
+[New LWP 710786]
+[New LWP 710785]
+[New LWP 710784]
+[New LWP 710783]
+[New LWP 710782]
+[New LWP 710781]
+[New LWP 710780]
+[New LWP 710779]
+[New LWP 710778]
+[New LWP 710777]
+[New LWP 710699]
+[New LWP 710698]
+[New LWP 710697]
+[New LWP 710696]
+[New LWP 710695]
+[New LWP 710694]
+[New LWP 710693]
+[New LWP 710692]
+[New LWP 710691]
+[New LWP 710690]
+[New LWP 710689]
+[New LWP 710688]
+[New LWP 710687]
+[New LWP 710686]
+[New LWP 710685]
+[New LWP 710684]
+[New LWP 710683]
+[New LWP 710682]
+[New LWP 710676]
+[New LWP 710675]
+[New LWP 710674]
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.cachyos.org>
+  <https://debuginfod.archlinux.org>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/usr/lib/libthread_db.so.1".
+0x00007ff28aab5b82 in ?? () from /usr/lib/libc.so.6
+#0  0x00007ff28aab5b82 in ?? () from /usr/lib/libc.so.6
+#1  0x00007ff28ab30868 in wait4 () from /usr/lib/libc.so.6
+#2  0x00007ff297d3c93b in ggml_print_backtrace () from /home/kchauhan/repos/l3ms/vendor/llama.cpp-mtp144-wt/build/bin/libggml-base.so.0
+#3  0x00007ff297d3cace in ggml_abort () from /home/kchauhan/repos/l3ms/vendor/llama.cpp-mtp144-wt/build/bin/libggml-base.so.0
+#4  0x00007ff2928a8251 in ggml_cuda_error(char const*, char const*, char const*, int, char const*) () from /home/kchauhan/repos/l3ms/vendor/llama.cpp-mtp144-wt/build/bin/libggml-cuda.so.0
+#5  0x00007ff2928b415e in void ggml_cuda_mul_mat_cublas_impl<(ggml_type)0>(ggml_backend_cuda_context&, ggml_tensor const*, ggml_tensor const*, ggml_tensor*) () from /home/kchauhan/repos/l3ms/vendor/llama.cpp-mtp144-wt/build/bin/libggml-cuda.so.0
+#6  0x00007ff2928bcb0b in ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context*, ggml_cgraph*, bool, bool, unsigned long) () from /home/kchauhan/repos/l3ms/vendor/llama.cpp-mtp144-wt/build/bin/libggml-cuda.so.0
+#7  0x00007ff2928bdc02 in ggml_backend_cuda_graph_compute(ggml_backend*, ggml_cgraph*) () from /home/kchauhan/repos/l3ms/vendor/llama.cpp-mtp144-wt/build/bin/libggml-cuda.so.0
+#8  0x00007ff297d5b747 in ggml_backend_sched_graph_compute_async () from /home/kchauhan/repos/l3ms/vendor/llama.cpp-mtp144-wt/build/bin/libggml-base.so.0
+#9  0x00007ff2972fab70 in llama_context::graph_compute(ggml_cgraph*, bool) () from /home/kchauhan/repos/l3ms/vendor/llama.cpp-mtp144-wt/build/bin/libllama.so.0
+#10 0x00007ff2972ff354 in llama_context::process_ubatch(llama_ubatch const&, llm_graph_type, llama_memory_context_i*, ggml_status&) () from /home/kchauhan/repos/l3ms/vendor/llama.cpp-mtp144-wt/build/bin/libllama.so.0
+#11 0x00007ff297303e4d in llama_context::decode(llama_batch const&) () from /home/kchauhan/repos/l3ms/vendor/llama.cpp-mtp144-wt/build/bin/libllama.so.0
+#12 0x00007ff29730596e in llama_decode () from /home/kchauhan/repos/l3ms/vendor/llama.cpp-mtp144-wt/build/bin/libllama.so.0
+#13 0x00007ff297f608f5 in std::_Function_handler<void (), server_context_impl::decode(int&, int, llama_batch&)::{lambda()#1}>::_M_invoke(std::_Any_data const&) () from /home/kchauhan/repos/l3ms/vendor/llama.cpp-mtp144-wt/build/bin/libllama-server-impl.so
+#14 0x00007ff297f18df5 in server_queue::yield_to_queue(std::function<void ()>&&) () from /home/kchauhan/repos/l3ms/vendor/llama.cpp-mtp144-wt/build/bin/libllama-server-impl.so
+#15 0x00007ff297f781ae in server_context_impl::decode(int&, int, llama_batch&) () from /home/kchauhan/repos/l3ms/vendor/llama.cpp-mtp144-wt/build/bin/libllama-server-impl.so
+#16 0x00007ff297f79ccd in server_context_impl::update_slots() () from /home/kchauhan/repos/l3ms/vendor/llama.cpp-mtp144-wt/build/bin/libllama-server-impl.so
+#17 0x00007ff297f19958 in server_queue::start_loop(long) () from /home/kchauhan/repos/l3ms/vendor/llama.cpp-mtp144-wt/build/bin/libllama-server-impl.so
+#18 0x00007ff297ed0484 in llama_server(common_params&, int, char**) () from /home/kchauhan/repos/l3ms/vendor/llama.cpp-mtp144-wt/build/bin/libllama-server-impl.so
+#19 0x00007ff297ed2222 in llama_server(int, char**) () from /home/kchauhan/repos/l3ms/vendor/llama.cpp-mtp144-wt/build/bin/libllama-server-impl.so
+#20 0x00007ff28aa27d0e in ?? () from /usr/lib/libc.so.6
+#21 0x00007ff28aa27e4b in __libc_start_main () from /usr/lib/libc.so.6
+#22 0x000055b8dc331075 in _start ()
+[Inferior 1 (process 710649) detached]

@@ -1,0 +1,7 @@
+{"row_type": "attempt", "task": "code-pathlib", "run": 1, "ok": true, "stop": "limit", "generated": 192, "decode_s": 9.216413, "decode_tps": 20.83, "prompt_n": 40, "prompt_tps": 30.9}
+{"row_type": "attempt", "task": "code-rust-lru", "run": 1, "ok": true, "stop": "limit", "generated": 192, "decode_s": 9.435098, "decode_tps": 20.35, "prompt_n": 38, "prompt_tps": 33.4}
+{"row_type": "attempt", "task": "code-sql-batch", "run": 1, "ok": true, "stop": "limit", "generated": 192, "decode_s": 8.775139, "decode_tps": 21.88, "prompt_n": 39, "prompt_tps": 35.6}
+{"row_type": "attempt", "task": "story-radio", "run": 1, "ok": true, "stop": "limit", "generated": 192, "decode_s": 9.600236, "decode_tps": 20.0, "prompt_n": 37, "prompt_tps": 33.9}
+{"row_type": "attempt", "task": "story-library", "run": 1, "ok": true, "stop": "limit", "generated": 192, "decode_s": 9.29989, "decode_tps": 20.65, "prompt_n": 38, "prompt_tps": 36.3}
+{"row_type": "attempt", "task": "story-orchard", "run": 1, "ok": true, "stop": "limit", "generated": 192, "decode_s": 9.465531, "decode_tps": 20.28, "prompt_n": 39, "prompt_tps": 37.0}
+{"row_type": "summary", "attempts": 6, "successes": 6, "failures": 0, "generated": 1152, "decode_s": 55.792307, "decode_tps": 20.65}

@@ -31,8 +31,9 @@ macros:
   "ik_server":     "${env.L3MS_ROOT}/vendor/ik_llama.cpp/build/bin/llama-server"
   "puzzle_server": "${env.L3MS_ROOT}/vendor/llama.cpp-pr-test-21032/build/bin/llama-server"
   "sarvam_server":  "${env.L3MS_ROOT}/vendor/llama.cpp-pr-test-20275/build/bin/llama-server"
-  # qwen3.8 flash-next tiers: master (gold) / exp (master + #28023 #28068 #27941) / exp+MTP
+  # qwen3.8 flash-next tiers: master (gold) / MTP (PR #28243 on master) / exp (#28068)
   "qwen38_master_server":  "${env.L3MS_ROOT}/vendor/llama.cpp-master/build/bin/llama-server"
+  "qwen38_mtp_server":     "${env.L3MS_ROOT}/vendor/llama.cpp-pr-test-28243/build/bin/llama-server"
   "qwen38_exp_server":     "${env.L3MS_ROOT}/vendor/llama.cpp-pr-test-28023-28068-27941/build/bin/llama-server-exp"
   "qwen38_exp_mtp_server": "${env.L3MS_ROOT}/vendor/llama.cpp-pr-test-28023-28068-27941/build/bin/llama-server"
 
@@ -229,8 +230,8 @@ models:
 # [retired 2026-08-31 — model files deleted from disk, see docs/bench-results.md archive]
 
   "qwen38-flash-next":
-    name: "Qwen3.8-Flash-Next (master e4b9af007, AtomicChat AD-4.27bpw, ngram-on-SSD)"
-    description: "Gold: plain upstream master, conservative. pp=198 tg=25 (steady) t/s @ 64k ctx, q8 KV, ngram-mod spec. Reasoning capped: effort=medium, budget=4000. See docs/qwen3-8-flash-next-local-post.md."
+    name: "Qwen3.8-Flash-Next (master b78a39a2f, AtomicChat AD-4.27bpw, ngram-on-SSD)"
+    description: "Gold: plain upstream master b78a39a2f, conservative. 19.35 t/s fresh decode (up to 19.6 t/s code), pp=300-385 t/s @ ub 2048, 64k ctx, q8 KV, ngram-mod spec. Reasoning capped: effort=medium, budget=4000. See docs/qwen38-flash-next-internal.md."
     env:
       - "GGML_CUDA_GRAPH_OPT=1"
     cmd: |
@@ -239,7 +240,7 @@ models:
       --alias Qwen3.8-Flash-Next
       --fit on --fit-target 512
       -c 65536 --parallel 1
-      -b 4096 -ub 1024
+      -b 4096 -ub 2048
       -fa on --jinja
       -ctk q8_0 -ctv q8_0
       -t 10 --threads-batch 12 --prio 2
@@ -275,29 +276,54 @@ models:
       --host 0.0.0.0 --port ${PORT}
 
   # ===========================================================================
-  # Qwen3.8-Flash-Next MTP (exp stack + #27836 draft head + detached-head patch)
+  # Qwen3.8-Flash-Next MTP (PR #28243 on master + shared-Q4_K_M draft head)
   # ===========================================================================
 
   "qwen38-flash-next-mtp":
-    name: "Qwen3.8-Flash-Next MTP (exp stack 0b7d6d57d + Q4_K_M MTP head)"
-    description: "Experimental + MTP: exp stack 0b7d6d57d (master + #28023 #28068 #27941 + #27836 draft head + detached-head patch, now committed). Code +26% tg, prose parity (p-min 0.7 gating). 32k ctx max — Q4_K_M head in VRAM leaves no room for 64k KV. Baseline numbers: docs/qwen3-8-flash-next-local-post.md."
+    name: "Qwen3.8-Flash-Next MTP (PR #28243 on master, shared-Q4_K_M, ncmoe 45)"
+    description: "Speculative tier: PR #28243 (Daniel Han upstream PR, commit d1a92352c on master b78a39a2f) with unsloth mtp-Qwen3.8-Flash-Next-shared-Q4_K_M.gguf (1.78 GB). Offloads 3 MoE layers to GPU (-ncmoe 45), 20.65 t/s aggregate across tasks (up to 21.9-22.4 t/s on SQL/code), 11.78 GB VRAM. See docs/qwen38-flash-next-internal.md."
     env:
       - "GGML_CUDA_GRAPH_OPT=1"
     cmd: |
-      taskset -c ${cpu_range} ${qwen38_exp_mtp_server}
+      taskset -c ${cpu_range} ${qwen38_mtp_server}
       -m /home/kchauhan/models/qwen38-flash-next/AD-4.27bpw-Q4_K_M-M64/Qwen3.8-Flash-Next-AD-4.27bpw-Q4_K_M-M64-00001-of-00033.gguf
-      --spec-draft-model /home/kchauhan/models/qwen38-flash-next/mtp-heads/agentionai-mtp-Q4_K_M.gguf
+      --spec-draft-model /home/kchauhan/models/unsloth/Qwen3.8-Flash-Next-GGUF/MTP/mtp-Qwen3.8-Flash-Next-shared-Q4_K_M.gguf
       --alias Qwen3.8-Flash-Next-MTP
-      -ngl 99 -ncmoe 46
-      -c 32768 --parallel 1
-      -b 4096 -ub 1024
-      -fa on --jinja -fit off -fit off
+      -ngl 99 -ncmoe 45
+      -c 16384 --parallel 1
+      -b 2048 -ub 512
+      -fa on --jinja
       -ctk q8_0 -ctv q8_0
       -t 10 --threads-batch 12 --prio 2
       --lazy-mode on
-      --spec-type draft-mtp,ngram-mod --spec-draft-n-max 2 --spec-draft-p-min 0.7
-      --spec-ngram-mod-n-match 60
+      --spec-type draft-mtp --spec-draft-n-max 2 --spec-draft-p-min 0.7
       --spec-draft-ngl 99
+      --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
+      --reasoning-effort medium --reasoning-budget 4000 --reasoning-preserve
+      --no-warmup
+      --host 0.0.0.0 --port ${PORT}
+
+  # ===========================================================================
+  # Qwen3.8 Flash Next Vision (AtomicChat AD-4.27bpw + mmproj-F16)
+  # ===========================================================================
+
+  "qwen38-flash-next-vision":
+    name: "Qwen3.8-Flash-Next Vision (master b78a39a2f, mmproj-F16, ncmoe 45)"
+    description: "Multimodal tier: master b78a39a2f with mmproj-F16 vision projector. Offloads 3 MoE layers to GPU (-ncmoe 45), 18.2-18.6 t/s @ 16k ctx, ub 1024, 10.6 GB VRAM (1.68 GB headroom for image activations/KV). See docs/qwen38-flash-next-internal.md."
+    env:
+      - "GGML_CUDA_GRAPH_OPT=1"
+    cmd: |
+      taskset -c ${cpu_range} ${qwen38_master_server}
+      -m /home/kchauhan/models/qwen38-flash-next/AD-4.27bpw-Q4_K_M-M64/Qwen3.8-Flash-Next-AD-4.27bpw-Q4_K_M-M64-00001-of-00033.gguf
+      --mmproj /home/kchauhan/models/unsloth/Qwen3.8-Flash-Next-GGUF/mmproj-F16.gguf
+      --alias Qwen3.8-Flash-Next-Vision
+      -ngl 99 -ncmoe 45
+      -c 16384 --parallel 1
+      -b 2048 -ub 1024
+      -fa on --jinja
+      -ctk q8_0 -ctv q8_0
+      -t 10 --threads-batch 12 --prio 2
+      --lazy-mode on
       --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
       --reasoning-effort medium --reasoning-budget 4000 --reasoning-preserve
       --no-warmup

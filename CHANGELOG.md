@@ -2,10 +2,105 @@
 
 ## [Unreleased]
 
+### Breaking changes
+- Extracted image/audio/video tooling into the standalone `l2m2` repository.
+  Removed `--media` and `--list media`; `--list all` no longer needs a media
+  manifest. Moved Qwen Image/Edit and LTX download entries and media docs.
+  Vision-capable LLMs and embeddings remain in L3MS.
+  Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
+
 ### Added
+- Standardized benchmark system environment capture and preflight verification
+  (`bench-models/bench-env.sh`). Automatically logs hardware state as YAML
+  frontmatter in log headers and embeds a structured `"sys"` object in
+  `bench-models/logs/results/<model>.jsonl`. Captures actual RAM speed & topology
+  (via `inxi -c 0 -m`), memory footprint (`MemAvailable`, `Active(anon)`), ZRAM
+  swap usage, CPU governor, EPP, PPD power profile, CPU/GPU temperatures,
+  baseline VRAM, and PCIe link generation. Integrated into `run-llama-bench.sh`,
+  `run-ik-llama-bench.sh`, `run-llama-fit-bench.sh`, and `log-result.sh`, with
+  preflight warnings for non-performance governors, active router instances,
+  elevated VRAM usage, or memory pressure.
+- Evaluated prompt processing (prefill / `pp`) benchmark matrix across Old Gold (`9d817213a`),
+  Refreshed Master (`b78a39a2f`), layer offloads, and micro-batch scaling. Refreshed master
+  improves prefill across all prompt lengths, achieving 244.2 t/s mean PP (+17.3% over Gold),
+  widening to +33.7% on 2k-token prompts (285.8 vs 213.8 t/s) via fused CUDA MoE reductions.
+  Micro-batch `-ub 2048` unlocks a massive prefill leap, delivering 303.1 t/s @ 1k tokens and
+  356.8 t/s (peak 385.2 t/s) @ 2k tokens (+38.0% over gold) in a single CPU expert pass under
+  10,798 MiB VRAM. Thread analysis confirms `--threads-batch 12` optimal on i5-12600K (16 threads
+  onto E-cores introduces core sync jitter and regresses throughput by ~2%).
+- Added `qwen38-flash-next-vision` multimodal serving tier in `llama-swap.yaml` using
+  `mmproj-F16.gguf` (863 MB) on refreshed master `b78a39a2f`. Configured at `-ncmoe 45`
+  (3 MoE layers on GPU), 16k context, 10,460 MiB VRAM (1.8 GB free headroom for image
+  embeddings and KV expansion), delivering 18.2–18.6 t/s decode with full image reasoning.
+- Analyzed Qwen3.8-Flash-Next GPU layer fitting: each MoE layer costs 1,138 MiB VRAM.
+  At 16k context, `-ncmoe 45` (3 MoE on GPU, 9,934 MiB) and `-ncmoe 44` (4 MoE on GPU,
+  11,072 MiB) fit cleanly. At 64k context, `--fit on --fit-target 512` packs 10,714 MiB
+  and beats static `-ncmoe 46` by +0.64 t/s.
+- Evaluated compact `mtp-Qwen3.8-Flash-Next-shared-Q4_K_M.gguf` (1.78 GB): saves ~870 MiB
+  VRAM vs Q8_0, allowing `-ncmoe 45` (+1 MoE layer on GPU) to fit within 11,786 MiB VRAM.
+  Achieved 20.65 t/s aggregate on the 6-prompt unique corpus (>20 t/s on every prompt,
+  up to 21.88–22.42 t/s on SQL/code), outperforming original gold by +9.5% and ik_llama
+  MTP-2 by +27.9%. Promoted to the active `qwen38-flash-next-mtp` tier in `llama-swap.yaml`
+  via PR #28243 (`qwen38_mtp_server`).
+- Upstream plain master refreshed to `b78a39a2f` (175 commits newer than September 1
+  gold `9d817213a`) and promoted to the new Gold serving baseline for Qwen3.8-Flash-Next.
+  Controlled 6-task unique-corpus benchmark confirms aggregate decode improved from
+  18.86 to 19.35 t/s (+2.6%), code decode improved by +10.9% on pathlib (19.64 vs 17.71),
+  and VRAM footprint decreased by 52 MiB (8458 vs 8510 MiB). Refreshed plain master
+  outperforms `ik_llama` base (18.00 t/s) by +7.5% and `ik_llama` MTP-2 (16.15 t/s) by
+  +19.8%, completely eliminating the performance case for ik_llama MTP on fresh traffic.
+- PR #28243 retest (`d1a92352c` merged onto master at `6d54aa023`) with shared-Q8_0 head:
+  at `n_max=1`, decode regressed to 17.88 t/s (-7.6% vs plain master); at `n_max=2`, it
+  achieved 19.65 t/s (+1.5% vs plain master) at the cost of 11518 MiB VRAM (+3060 MiB
+  over master), leaving only 764 MiB headroom on the RTX 4070 and precluding 32k/64k
+  context scaling. Plain master remains the production default.
+- Reproducible `ik_llama.cpp` Qwen3.8-Flash-Next MTP A/B harness
+  (`bench-models/bench-llama-qwen38-flash-next-ik-mtp.sh`). Current ik_llama
+  main `1a2a860` loads the existing AtomicChat AD-4.27bpw target and
+  agentionai Q4_K_M head successfully on the RTX 4070. At 16k / ncmoe 46,
+  warm code improved from 20.2-20.5 to 22.0-23.1 t/s (93.9% acceptance),
+  while warm story slipped from 20.2-20.4 to 19.3-19.6 (73.6% acceptance),
+  so the path remains opt-in. Full result and command rationale are recorded
+  in `docs/qwen38-flash-next-internal.md` §9.5.
+- Follow-up ik_llama campaign runner and six-task unique-prompt corpus. The
+  clean repeated-prompt result favored MTP-2 (22.06 vs 19.51 t/s) and
+  ngram+MTP (26.07), but neither generalized: on 1,152 fresh tokens, plain
+  decode won at 19.24 t/s versus MTP-1 16.51, MTP-2 15.96, ngram+MTP-1
+  12.05, and ngram+MTP-2 17.96. `-muge` is rejected because it disables mmap
+  and deferred PLE, producing an 83.3 GiB CPU allocation. Results and the
+  remaining placement/context checklist are in the internal doc §9.5.
+  Placement is now bracketed: ncmoe 45 leaves the MTP draft compute buffer
+  510 MiB short, ncmoe 46 is the minimum working placement, and ncmoe 47
+  works but incurs the known extra CPU expert-layer penalty.
+  Pinned-memory mode is rejected: without `GGML_CUDA_NO_PINNED=1`, ik_llama
+  tried to pin an 83.3 GiB CPU mapping and exhausted RAM plus zram. The fresh
+  harness now enforces no-pinned and explicitly prefetches expert pages.
+  The residency-controlled rerun confirms plain decode as the fresh-traffic
+  winner at 16k (18.26 t/s; speculative arms 14.67-16.35). MTP-2 approaches
+  parity at 32k (16.61 vs 17.26) but CUDA-OOMs at 64k with ncmoe 46; the
+  safe ik_llama MTP context cap remains 32k on the RTX 4070.
+- Flexible LLM Workbench & Live Hardware Performance Monitor:
+  - Six customizable Workbench layouts toggled sequentially via `v` (`WorkbenchCycleLayout`) or directly via number keys `1`–`6`:
+    - `1`: Dashboard (4-pane command center: Models Table + Live Hardware Monitor + Fast Actions & Profile + Quick Benchmarks & Ops)
+    - `2`: Split Vertical (2-column: Models Table + Hardware Monitor & Trend Charts)
+    - `3`: Classic (2-column: Models Table + Fast Actions & Profile)
+    - `4`: Focus Benchmarks (Full-width Bench scripts list and inline script editor)
+    - `5`: Focus Jobs (Full-width supervised process execution history and live output)
+    - `6`: Focus GPU Monitor (Full-screen hardware & host performance analyzer)
+  - Non-blocking background telemetry sampling in `src/telemetry.rs` querying GPU (`nvidia-smi`), system RAM and zram swap (`/proc/meminfo`), and llama-server cumulative read bytes + bandwidth rate (`/proc/<pid>/io`). Includes automatic detection of SSD NVMe thrashing / hot expert page faults for SSD-offloaded models (>1 MB/s warning vs <100 KB/s normal PLE traffic).
+  - Real-time Ratatui `Sparkline` rendering 60-second rolling trends for GPU Core Utilization (%) and VRAM allocation (MiB), accompanied by VRAM allocation `Gauge` and thermal/power readings.
+  - Direct benchmark launch with `b` shortcut directly from the workbench.
+- Param Builder tab (F3/Alt+3, new `src/param_registry.rs` + `src/param_builder.rs`): interactive, keyboard-first construction of a `llama-server` flag set with a live `cmd:` preview. Left pane lists a curated 48-flag registry grouped by category (Context & batching, GPU & offload, KV cache, CPU & threads, Load & memory, Sampling, Server) with per-flag control kinds — integer spinners (`-c`, `-ngl`, `-b` with `+`/`-` stepping and bounds clamping), toggles (`--jinja`, `--no-warmup`), on/off/auto tri-states (`--flash-attn`, `--fit`), option pickers (`--load-mode`, `--cache-type-k/v`, `--split-mode`), and free-text fields (`--override-tensor`, floats) — plus a free-form custom-flags section for build-specific flags the registry does not model (`--lazy-mode on`, `--spec-*`); the selected flag's description renders in a strip under the list. Right pane previews the exact generated cmd block (binary + `-m` + flags + `--port ${PORT}`). Four built-in presets (Alt+P): 12 GB full-VRAM house baseline, PLE-on-SSD unsloth offload, MoE n-cpu-moe hybrid, and a max-VRAM cold bench ladder. `Ctrl+I` imports an existing `llama-swap.yaml` entry's cmd block into the builder (quote-aware tokenizer keeps multi-word quoted values like `--alias "… QAT + MTP"` and `--chat-template-kwargs '{"preserve_thinking": true}'` intact; unknown flags land verbatim in custom lines so nothing is dropped); `Ctrl+S` writes the built flags back into a picked entry's `cmd:` block — text-level edit preserving name/description/env/ttl byte-for-byte, with the mandatory pre-write `llama-swap.yaml.bak-*` snapshot and router SIGHUP, while the entry's binary line and `-m` path stay the entry's identity. Tab toggles list/preview focus; all actions are palette-addressable (`param-builder.*` command ids). Round-trip property tested (`import → export → import` value-identical) against both synthetic fixtures and the live host yaml (ignored test, `cargo test import_real_yaml -- --ignored`).
+
+- llama.cpp PR #28243 test (danielhanchen shared-modules MTP on fresh master `67a17c17c`, via `maintenance/llama-test-pr.sh 28243` → `vendor/llama.cpp-pr-test-28243` @ `d6d782585`): the embed/lm_head borrow does not shrink the sidecar shared-Q8_0 head's footprint — ncmoe 46 OOMs at load by the exact 274.03 MiB the #144 build was short (and OOMs at decode with `-ub 512`); ncmoe 47 + plain p-min 0.7 ties the proven `0b7d6d57d` baseline within noise (code 21.4 vs 20.7, acceptance 0.94 vs 0.95, warm-pool protocol). Tier stays on `0b7d6d57d`; results table in `docs/qwen38-flash-next-internal.md` §9.1. `llama-test-pr.sh` fresh clones now need repo-local `user.name`/`user.email` (set `kchauhan`/`kchauhan@local` matching the other vendor clones) or the merge step fails. Fit-mode follow-up (2026-09-03): with `-ngl 99` set the fitter silently aborts and `--fit on` is a no-op; with `-ngl` omitted, fit-target 512 works on the base build (draft head loads around placement) but loses ~16% code to static `-fit off -ngl 99 -ncmoe 46` (17.4 vs 20.7, packs ~440 MiB less) and OOMs at load on the #28243 shared-head stack — `-fit off` stays in the yaml MTP entry; details in the internal doc §9.1.
+- GGUF inventory shard-set grouping (new `ShardSet`/`group_shard_sets` in `src/gguf.rs`): the browser collapses multi-part GGUFs (`-00001-of-000NN.gguf`, same directory + name prefix + declared total) into one row anchored at shard 1 — the path llama.cpp actually loads — with summed size, a `×N` shard-count marker, and params/arch/modified taken from shard 1 metadata. Filter matches any member path; details pane lists per-shard file names, sizes, and parse warnings, and incomplete sets (missing/duplicate shard indices vs the declared `-of-N`) render a warning-styled `incomplete` marker instead of silently collapsing. Scan status now reports files-per-entry counts.
+- Qwen3.8-Flash-Next MTP param sweep on the warm-pool protocol (new `bench-models/bench-llama-qwen38-flash-next-mtp144-sweep.sh`, `SWEEP_ARMS=1` + args to override the arm list): 8 arms comparing the proven `0b7d6d57d` build vs unsloth PR #144 (`586b15ef8`, preserved as `llama.cpp-pr-test-28023-28068-27941/build/bin/llama-server-mtp144`, worktree removed) across p-min 0.5/0.7/0.75, n-max 2/3, p-split 0.10, plain vs ngram-mod combo. Verdict: like-for-like plain draft-mtp is a dead tie (~20 t/s code / ~22-23 counting both builds — the old build's "25-45" numbers are the ngram-pool multiplier on identical/repeated prompts, mean draft len 45 vs 4 on the #144 base); p-min 0.7 stays the right gate (0.5 drops code acceptance to 0.67); n-max 3 and p-split 0.10 are neutral-to-negative; #144 + shared-Q8_0 at ncmoe 46 OOMs again (geometry closed). Full table in `docs/qwen38-flash-next-internal.md` §9.1. Also repaired the MTP tier binary: the exp clone's `build/bin/llama-server` had been left on the broken mtp-ondevice build; rebuilt at `0b7d6d57d` (copy kept as `llama-server-mtp0b7d`), tier smoke-tested through the router.
+- Models table ops expansion (new `src/swap_yaml.rs`): the workbench/ops model table gains Name, Size (GGUF bytes on disk, shard sets summed), and Updated (age of the `/v1/models` `created` stamp) columns, `c` cycles the sort key (id → name → state → size, indicator in the table title), and `d` disables/enables the selected model — llama-swap v247 has no runtime toggle API, so the action edits `disabled: true` in `llama-swap.yaml` with a pre-write snapshot (`llama-swap.yaml.bak-YYYYmmdd-HHMMSS`) and SIGHUPs the router for hot reload (no router running → reload skipped with a note; the reloader is injected in tests). Disabled models show a warning-styled `disabled` state cell; the Fast actions pane shows size and the new keymap. `/v1/models` parsing now also carries the `created` stamp.
+- Matrix-style boot animation (new `src/boot_anim.rs`): falling green glyph rain (halfwidth katakana + digits, bright-head/dim-trail gradient) for ~1.4 s, then a 5-row block-glyph `l3ms` logo centered and flashing (green-on-black ↔ black-on-green LED badge) before the workbench takes over. Any key press skips it; `L3MS_NO_BOOT_ANIM=1` disables it entirely; skips automatically on tiny terminals. Runs after terminal init in `run_tui`, drains queued input, and clears before the first App frame.
 - Winamp-classic skin for the Rust TUI (0.8.0): new `src/theme.rs` palette module — playlist green (#00FF00) body text on black, dim-green borders/titles, classic dark-blue (#0000C6) selection bars with white bold rows, amber accents/warnings, red errors, and an inverted LED badge style (black-on-green) for the header logo, footer status bar, and focused download fields. All inline `Color::Cyan`/`Yellow`/`DarkGray` styling in `src/app.rs` (34 sites, 27 blocks) rewired through the theme helpers; chat user lines render amber and assistant lines playlist green.
 
 ### Changed
+- Tab bar is now eight tabs: Params slots in at F3 (Chat moved to F4, Model Browser F5, Download F6, Jobs F7, Maintenance F8; Alt+1–8 updated to match).
 - Model inventory reconciliation (2026-08-31 storage cleanup follow-up), via `codex-skills/model-inventory-manager`: 11 serving entries referencing deleted files commented out of `llama-swap.yaml` (gpt-oss-120b ×3, qwen3-coder-next ×3, nomic-embed, qwen3-6-mtp + vision, gemma-4-26b-qat-mtp-vision, sarvam-30b; pre-edit snapshot `llama-swap.yaml.bak-20260831-<ts>`); 7 orphan files deleted (~24 GB — Ridge 3.7bpw 13 GB superseded by IQ3_XXS, 4 spare qwen38 MTP heads, unsloth Qwen3.8 MTP head dir, gemma QAT Q8_0 head). Audit script fixed: model store path fell back from the dead `/mnt/lab/models` mount to `/home/kchauhan/models`, sharded-GGUF false orphans (a served `-00001-of-N` shard now covers its set), `--spec-draft-model` path extraction, and media models (MiniMax/HeartMuLa/LTX) excluded per the skill's preservation rules. Router restarted clean with 7 active models (`/v1/models` verified).
 - Dashboard (l3ms.carteakey.dev) restored to regenerable state and history preserved: `docs/dashboard-meta.json` was stale (generator hard-failed — missing qwen3.8 family + qwen3-8-27b, still listing the retired gemma-4-12b trio). Active set now matches the 7 served entries exactly (added qwen38-flash-next gold/exp/MTP with the internal-doc measurement ledger as evidence fields, and qwen3-8-27b-iq3-xxs @ 262k); 11 retired profiles moved to the `archived` section **with their last measured tps preserved** (gemma-12b 120.8, QCN 39.6, gpt-oss-120b 28.5, Qwen3.6 Q4 60.3, Gemma vision 39.0, Sarvam 15.0); system block corrected to 64 GB DDR5 @ 5000 MT/s; `index.html` archive card now renders tps/quant/profiles with an explicit "archived numbers are not reproducible" caveat; generator + tests pass, `generated-models.js` regenerated.
 - Bench docs split (was a 1260-line `docs/bench-runbook.md`, now three docs with verified no-loss migration — all 939 non-blank source lines accounted for, 934 verbatim, 5 justified rewordings: two "section above" → explicit doc reference after the move, three headings re-leveled under the new structure; a stray unclosed ` ``` ` fence artifact at EOF was dropped):
@@ -16,6 +111,7 @@
 - Bench runbook: added a "CPU power layering" section (docs/bench-runbook.md) disentangling governor vs EPP vs HWP vs profile managers — on `intel_pstate` the governor name is mostly a label and EPP is the knob that matters (`powersave` + EPP=performance is a valid high-perf setup); Tuned is not a CachyOS default (PPD is; tuned-ppd is the shim bridging them) and its `throughput-performance` profile is functionally equivalent to the manual setup; I/O scheduler noted as an unrelated block layer. Recorded current box state (2026-08-31): PPD 0.30 active at `performance` profile, tuned/tuned-ppd not installed (tuned-ppd swap reverted), governor/EPP=performance verified live; added a status-update note to the historical root-cause section.
 
 ### Fixed
+- Atomic writes & snapshot portability (`src/swap_yaml.rs`): `swap_yaml::atomic_write` ensures atomic write + rename for `llama-swap.yaml` modifications; `swap_yaml::snapshot` replaces child-process `date` invocation with a zero-dependency pure-Rust UTC timestamp and unique collision handling; router reload verifies `pid > 1` before signaling. Fixed duplicate step 6 numbering in CLI quickstart (`src/cli.rs`).
 - llama-swap v247 API alignment (src/llama_swap.rs): model state now parses the nested `status.value` field from `/v1/models` (top-level `state`/`status` strings still honored for older routers) — states no longer show "unknown"; model load switched from the nonexistent `POST /models/load` to `GET /upstream/{model}/load` (verified live: triggers the on-demand startup path and holds until health-check); per-model unload moved to `POST /api/models/unload` with the existing `{"model": id}` body (verified live: `DELETE /upstream/{model}` does not evict a still-starting process, the API endpoint does).
 
 - Model Browser auto-scan: entering the Browser tab (F4, palette, or tab cycling) now scans the GGUF path automatically when it has never been scanned or changed since the last scan (mirrors the Chat tab auto-connect); manual `r` rescan unchanged. Previously the table sat empty until a manual scan.

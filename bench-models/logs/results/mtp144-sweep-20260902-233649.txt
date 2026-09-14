@@ -1,0 +1,3 @@
+== arm: 28243-plain-46-ub512
+counting: tg PARSE-FAIL n=0 | tg PARSE-FAIL n=0 | tg PARSE-FAIL n=0
+code: tg PARSE-FAIL n=0 | tg PARSE-FAIL n=0

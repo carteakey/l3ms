@@ -1,0 +1,10 @@
+== arm: baseline-plain
+counting: tg 16.89 n=64 | tg 22.81 n=64 | tg 22.73 n=64
+code: tg 16.79 n=320 | tg 19.79 n=320
+0.53.463.156 I slot print_timing: id  0 | task 131 | draft acceptance = 0.95679 (  155 accepted /   162 generated), mean len =  2.67
+1.10.008.376 I slot print_timing: id  0 | task 298 | draft acceptance = 0.95294 (  162 accepted /   170 generated), mean len =  2.72
+== arm: baseline-p050
+counting: tg 18.72 n=64 | tg 40.81 n=64 | tg 47.96 n=64
+code: tg 17.78 n=320 | tg 18.85 n=320
+0.47.124.659 I slot print_timing: id  0 | task 82 | draft acceptance = 0.89286 (  175 accepted /   196 generated), mean len =  2.64
+1.04.489.436 I slot print_timing: id  0 | task 230 | draft acceptance = 0.67197 (  211 accepted /   314 generated), mean len =  3.93

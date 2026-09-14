@@ -1,0 +1,993 @@
+diff --git a/src/app.rs b/src/app.rs
+index 96832f7..57b09de 100644
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -46,7 +46,7 @@ use crossterm::{
+ use ratatui::{
+     backend::CrosstermBackend,
+     layout::{Alignment, Constraint, Direction, Layout, Rect},
+-    style::{Color, Modifier, Style, Stylize},
++    style::{Color, Style, Stylize},
+     text::{Line, Span, Text},
+     widgets::{
+         Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState,
+@@ -75,6 +75,20 @@ const TELEMETRY_INTERVAL: Duration = Duration::from_secs(1);
+ const DOWNLOAD_ESTIMATE_TIMEOUT: Duration = Duration::from_secs(180);
+ const DOWNLOAD_DISK_TIMEOUT: Duration = Duration::from_secs(3);
+ 
++// A restrained hi-fi palette: dark graphite panels, muted chrome, warm meters,
++// and a single phosphor-green focus color. Keeping the theme here makes every
++// workflow feel like the same instrument without coupling UI state to styling.
++const UI_BG: Color = Color::Rgb(8, 11, 13);
++const UI_PANEL: Color = Color::Rgb(15, 20, 22);
++const UI_PANEL_ALT: Color = Color::Rgb(21, 27, 29);
++const UI_BORDER: Color = Color::Rgb(63, 76, 77);
++const UI_TEXT: Color = Color::Rgb(209, 217, 210);
++const UI_MUTED: Color = Color::Rgb(111, 124, 122);
++const UI_GREEN: Color = Color::Rgb(144, 211, 92);
++const UI_AMBER: Color = Color::Rgb(230, 177, 72);
++const UI_BLUE: Color = Color::Rgb(91, 181, 184);
++const UI_RED: Color = Color::Rgb(224, 104, 86);
++
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ enum Tab {
+     Workbench,
+@@ -512,10 +526,14 @@ impl App {
+                             }
+                             let visible_count = self.visible_model_count();
+                             clamp_table_selection(&mut self.model_state, visible_count);
+-                            self.status = format!("llama-swap: {} model(s)", self.models.len());
++                            if matches!(self.tab, Tab::Workbench | Tab::ModelOps) {
++                                self.status = format!("llama-swap: {} model(s)", self.models.len());
++                            }
+                         }
+                         Err(error) => {
+-                            self.status = "llama-swap unavailable".into();
++                            if matches!(self.tab, Tab::Workbench | Tab::ModelOps) {
++                                self.status = "llama-swap unavailable".into();
++                            }
+                             self.push_log(format!("Model refresh failed: {error}"));
+                         }
+                     }
+@@ -3191,6 +3209,10 @@ impl App {
+     }
+ 
+     fn draw(&mut self, frame: &mut Frame) {
++        frame.render_widget(
++            Block::default().style(Style::default().fg(UI_TEXT).bg(UI_BG)),
++            frame.area(),
++        );
+         let areas = Layout::default()
+             .direction(Direction::Vertical)
+             .constraints([
+@@ -3231,31 +3253,54 @@ impl App {
+     fn draw_header(&self, frame: &mut Frame, area: Rect) {
+         let endpoint =
+             env::var("LLAMA_SWAP_URL").unwrap_or_else(|_| "http://localhost:8080".into());
+-        let line = Line::from(vec![
+-            Span::styled(
+-                " L3MS ",
+-                Style::default().fg(Color::Black).bg(Color::Cyan).bold(),
+-            ),
+-            Span::raw(format!(" Rust v{}  ", env!("CARGO_PKG_VERSION"))),
+-            Span::styled(endpoint, Style::default().fg(Color::DarkGray)),
+-        ]);
+-        frame.render_widget(Paragraph::new(line), area);
++        let chunks = Layout::default()
++            .direction(Direction::Horizontal)
++            .constraints([
++                Constraint::Length(8),
++                Constraint::Length(22),
++                Constraint::Min(0),
++            ])
++            .split(area);
++        frame.render_widget(
++            Paragraph::new("  L3MS  ").style(Style::default().fg(UI_BG).bg(UI_GREEN).bold()),
++            chunks[0],
++        );
++        frame.render_widget(
++            Paragraph::new(format!(" RUST CONTROL · v{}", env!("CARGO_PKG_VERSION")))
++                .style(Style::default().fg(UI_TEXT).bg(UI_PANEL_ALT)),
++            chunks[1],
++        );
++        frame.render_widget(
++            Paragraph::new(Line::from(vec![
++                Span::styled("● ", Style::default().fg(UI_GREEN)),
++                Span::styled("SWAP  ", Style::default().fg(UI_MUTED).bold()),
++                Span::styled(endpoint, Style::default().fg(UI_TEXT)),
++                Span::raw(" "),
++            ]))
++            .style(Style::default().bg(UI_PANEL_ALT))
++            .alignment(Alignment::Right),
++            chunks[2],
++        );
+     }
+ 
+     fn draw_tabs(&self, frame: &mut Frame, area: Rect) {
+         let titles = TAB_NAMES
+             .iter()
+-            .map(|name| Line::from(*name))
++            .enumerate()
++            .map(|(index, name)| {
++                if area.width >= 112 {
++                    Line::from(format!(" F{} {name} ", index + 1))
++                } else {
++                    Line::from(format!(" {} {} ", index + 1, compact_tab_name(index)))
++                }
++            })
+             .collect::<Vec<_>>();
+         let tabs = Tabs::new(titles)
+-            .block(Block::default().borders(Borders::ALL))
++            .block(ui_panel().title(" NAV "))
+             .select(self.tab.index())
+-            .highlight_style(
+-                Style::default()
+-                    .fg(Color::Cyan)
+-                    .add_modifier(Modifier::BOLD),
+-            )
+-            .divider("│");
++            .style(Style::default().fg(UI_MUTED).bg(UI_PANEL))
++            .highlight_style(ui_selected_style())
++            .divider(" ");
+         frame.render_widget(tabs, area);
+     }
+ 
+@@ -3268,12 +3313,15 @@ impl App {
+         let model = self.selected_model();
+         let text = if let Some(model) = model {
+             Text::from(vec![
+-                Line::from(Span::styled(
+-                    model.id,
+-                    Style::default().fg(Color::Cyan).bold(),
+-                )),
+-                Line::from(format!("state: {}", model.state)),
+-                Line::from(format!("name: {}", value_or_dash(&model.name))),
++                Line::from(Span::styled(model.id, Style::default().fg(UI_GREEN).bold())),
++                Line::from(vec![
++                    Span::styled("STATE  ", ui_label_style()),
++                    Span::styled(model.state.clone(), model_state_style(&model.state)),
++                ]),
++                Line::from(vec![
++                    Span::styled("NAME   ", ui_label_style()),
++                    Span::raw(value_or_dash(&model.name).to_owned()),
++                ]),
+                 Line::from(""),
+                 Line::from(model.description),
+                 Line::from(""),
+@@ -3285,7 +3333,7 @@ impl App {
+         };
+         frame.render_widget(
+             Paragraph::new(text)
+-                .block(Block::default().title("Fast actions").borders(Borders::ALL))
++                .block(ui_panel().title(" QUICK CONTROL "))
+                 .wrap(Wrap { trim: false }),
+             chunks[1],
+         );
+@@ -3302,10 +3350,10 @@ impl App {
+             .split(area);
+         frame.render_widget(
+             Paragraph::new(format!(
+-                " {mode}   m toggle mode · r/Enter start · s stop\n {}",
++                "  {mode}   m toggle mode · r/Enter start · s stop\n  {}",
+                 self.telemetry
+             ))
+-            .style(Style::default().fg(Color::Yellow)),
++            .style(Style::default().fg(UI_AMBER).bg(UI_PANEL_ALT)),
+             chunks[0],
+         );
+         match self.ops_mode {
+@@ -3321,13 +3369,9 @@ impl App {
+                     .map(|path| ListItem::new(relative_display(&self.root, path)))
+                     .collect::<Vec<_>>();
+                 let list = List::new(items)
+-                    .block(
+-                        Block::default()
+-                            .title("Bench scripts · ↑/↓ select · Ctrl+U editor")
+-                            .borders(Borders::ALL),
+-                    )
+-                    .highlight_symbol("▶ ")
+-                    .highlight_style(Style::default().fg(Color::Cyan).bold());
++                    .block(ui_panel().title(" BENCH SCRIPTS · ↑/↓ select · Ctrl+U editor "))
++                    .highlight_symbol("▸ ")
++                    .highlight_style(ui_selected_style());
+                 frame.render_stateful_widget(list, panes[0], &mut self.bench_state);
+                 self.draw_script_editor(frame, panes[1], ScriptEditorTarget::Bench);
+             }
+@@ -3387,9 +3431,9 @@ impl App {
+             ""
+         };
+         let border = if focused {
+-            Style::default().fg(Color::Cyan)
++            ui_active_border_style()
+         } else {
+-            Style::default()
++            ui_border_style()
+         };
+         let scroll = if focused {
+             (
+@@ -3402,12 +3446,11 @@ impl App {
+         frame.render_widget(
+             Paragraph::new(content)
+                 .block(
+-                    Block::default()
++                    ui_panel()
+                         .title(format!(
+-                            "{} script · {path}{state} · {versions} snapshot(s)",
++                            " {} SCRIPT · {path}{state} · {versions} snapshot(s) ",
+                             target.label()
+                         ))
+-                        .borders(Borders::ALL)
+                         .border_style(border),
+                 )
+                 .scroll(scroll),
+@@ -3415,7 +3458,7 @@ impl App {
+         );
+         frame.render_widget(
+             Paragraph::new("Ctrl+U edit/Esc list · Alt+P save · Alt+O reload · Alt+V versions")
+-                .style(Style::default().fg(Color::DarkGray)),
++                .style(Style::default().fg(UI_MUTED).bg(UI_BG)),
+             chunks[1],
+         );
+ 
+@@ -3445,11 +3488,16 @@ impl App {
+         let rows = self
+             .visible_models()
+             .into_iter()
+-            .map(|model| {
++            .enumerate()
++            .map(|(index, model)| {
+                 Row::new(vec![
+                     Cell::from(model.id.clone()),
+-                    Cell::from(model.state.clone()),
++                    Cell::from(Span::styled(
++                        model.state.clone(),
++                        model_state_style(&model.state),
++                    )),
+                 ])
++                .style(ui_row_style(index))
+             })
+             .collect::<Vec<_>>();
+         let table = Table::new(
+@@ -3458,16 +3506,12 @@ impl App {
+         )
+         .header(
+             Row::new(["Model", "State"])
+-                .style(Style::default().fg(Color::Yellow).bold())
++                .style(ui_table_header_style())
+                 .bottom_margin(1),
+         )
+-        .block(
+-            Block::default()
+-                .title(format!("{title}{filter}"))
+-                .borders(Borders::ALL),
+-        )
+-        .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
+-        .highlight_symbol("▶ ");
++        .block(ui_panel().title(format!(" {title}{filter} ")))
++        .row_highlight_style(ui_selected_style())
++        .highlight_symbol("▸ ");
+         frame.render_stateful_widget(table, area, &mut self.model_state);
+     }
+ 
+@@ -3488,11 +3532,7 @@ impl App {
+                 self.chat_max_tokens,
+                 if self.chat_thinking { "on" } else { "off" }
+             ))
+-            .block(
+-                Block::default()
+-                    .title("Params · p system · [/] temp · -/+ max tokens · t thinking")
+-                    .borders(Borders::ALL),
+-            ),
++            .block(ui_panel().title(" PARAMS · p system · [/] temp · -/+ max · t thinking ")),
+             chunks[0],
+         );
+         if self.input_mode == InputMode::ChatSystemPrompt {
+@@ -3504,9 +3544,9 @@ impl App {
+         let mut lines = Vec::new();
+         for message in self.chat_history.records().iter().rev().take(14).rev() {
+             let color = if message.role == "user" {
+-                Color::Cyan
++                UI_BLUE
+             } else {
+-                Color::Green
++                UI_GREEN
+             };
+             lines.push(Line::from(Span::styled(
+                 format!("{}:", message.role),
+@@ -3518,7 +3558,7 @@ impl App {
+         if !self.chat_streaming.is_empty() {
+             lines.push(Line::from(Span::styled(
+                 "assistant (streaming):",
+-                Style::default().fg(Color::Green).bold(),
++                Style::default().fg(UI_GREEN).bold(),
+             )));
+             lines.push(Line::from(self.chat_streaming.as_str()));
+         }
+@@ -3528,20 +3568,20 @@ impl App {
+         }
+         frame.render_widget(
+             Paragraph::new(lines)
+-                .block(
+-                    Block::default()
+-                        .title("Conversation · Alt+S save · o sessions")
+-                        .borders(Borders::ALL),
+-                )
++                .block(ui_panel().title(" CONVERSATION · Alt+S save · o sessions "))
+                 .wrap(Wrap { trim: false }),
+             chunks[1],
+         );
+         let marker = if self.chat_pending { " waiting…" } else { "" };
+         frame.render_widget(
+             Paragraph::new(format!("> {}{marker}", self.chat_input)).block(
+-                Block::default()
+-                    .title("Message · Enter send · Esc cancel")
+-                    .borders(Borders::ALL),
++                ui_panel()
++                    .title(" MESSAGE · Enter send · Esc cancel ")
++                    .border_style(if self.input_mode == InputMode::ChatMessage {
++                        ui_active_border_style()
++                    } else {
++                        ui_border_style()
++                    }),
+             ),
+             chunks[2],
+         );
+@@ -3564,16 +3604,20 @@ impl App {
+             .split(area);
+         frame.render_widget(
+             Paragraph::new(self.browser_path.as_str()).block(
+-                Block::default()
++                ui_panel()
+                     .title(format!(
+-                        "GGUF path · g edit · r scan · t {}",
++                        " GGUF PATH · g edit · r scan · t {} ",
+                         if self.browser_recursive {
+                             "recursive"
+                         } else {
+                             "top-level"
+                         }
+                     ))
+-                    .borders(Borders::ALL),
++                    .border_style(if self.input_mode == InputMode::BrowserPath {
++                        ui_active_border_style()
++                    } else {
++                        ui_border_style()
++                    }),
+             ),
+             outer[0],
+         );
+@@ -3601,7 +3645,7 @@ impl App {
+                 format_bytes(shown_size),
+                 warning_count,
+             ))
+-            .style(Style::default().fg(Color::Yellow)),
++            .style(Style::default().fg(UI_AMBER).bg(UI_PANEL_ALT)),
+             outer[1],
+         );
+         if self.input_mode == InputMode::BrowserFilter {
+@@ -3632,6 +3676,7 @@ impl App {
+                 ),
+                 Cell::from(format_system_time(file.modified)),
+             ])
++            .style(ui_row_style(index))
+         });
+         let table = Table::new(
+             rows,
+@@ -3647,16 +3692,11 @@ impl App {
+         )
+         .header(
+             Row::new(["#", "GGUF", "Quant", "Size", "Params", "Arch", "Modified"])
+-                .yellow()
+-                .bold(),
++                .style(ui_table_header_style()),
+         )
+-        .block(
+-            Block::default()
+-                .title("Inventory · / filter · c cycle sort")
+-                .borders(Borders::ALL),
+-        )
+-        .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
+-        .highlight_symbol("▶ ");
++        .block(ui_panel().title(" INVENTORY · / filter · c cycle sort "))
++        .row_highlight_style(ui_selected_style())
++        .highlight_symbol("▸ ");
+         frame.render_stateful_widget(table, main[0], &mut self.browser_state);
+ 
+         let details = self.selected_browser_file().map_or_else(
+@@ -3665,11 +3705,7 @@ impl App {
+         );
+         frame.render_widget(
+             Paragraph::new(details)
+-                .block(
+-                    Block::default()
+-                        .title("Selected GGUF")
+-                        .borders(Borders::ALL),
+-                )
++                .block(ui_panel().title(" SELECTED GGUF "))
+                 .wrap(Wrap { trim: false }),
+             main[1],
+         );
+@@ -3792,9 +3828,13 @@ impl App {
+                 if compact {
+                     return Row::new(vec![
+                         Cell::from((index + 1).to_string()),
+-                        Cell::from(if model.enabled { "yes" } else { "no" }),
++                        Cell::from(Span::styled(
++                            if model.enabled { "yes" } else { "no" },
++                            boolean_state_style(model.enabled),
++                        )),
+                         Cell::from(model.repo_id.clone()),
+-                    ]);
++                    ])
++                    .style(ui_row_style(index));
+                 }
+                 let pattern = model
+                     .allow_patterns
+@@ -3803,11 +3843,15 @@ impl App {
+                     .unwrap_or_else(|| "*".into());
+                 Row::new(vec![
+                     Cell::from((index + 1).to_string()),
+-                    Cell::from(if model.enabled { "yes" } else { "no" }),
++                    Cell::from(Span::styled(
++                        if model.enabled { "yes" } else { "no" },
++                        boolean_state_style(model.enabled),
++                    )),
+                     Cell::from(model.repo_id.clone()),
+                     Cell::from(pattern),
+                     Cell::from(model.local_dir.clone()),
+                 ])
++                .style(ui_row_style(index))
+             })
+             .collect::<Vec<_>>();
+         let state = if self.download_load_error.is_some() {
+@@ -3818,9 +3862,9 @@ impl App {
+             ""
+         };
+         let table_border = if self.download.focus() == DownloadFocus::Table {
+-            Style::default().fg(Color::Cyan)
++            ui_active_border_style()
+         } else {
+-            Style::default()
++            ui_border_style()
+         };
+         let table_widths = if compact {
+             vec![
+@@ -3842,8 +3886,7 @@ impl App {
+         } else {
+             Row::new(["#", "Enabled", "Repository", "Pattern", "Local dir"])
+         }
+-        .yellow()
+-        .bold();
++        .style(ui_table_header_style());
+         let table_title = if compact {
+             format!("Models{state} · Space toggle · Alt+D/E download")
+         } else {
+@@ -3852,13 +3895,12 @@ impl App {
+         let table = Table::new(rows, table_widths)
+             .header(table_header)
+             .block(
+-                Block::default()
+-                    .title(table_title)
+-                    .borders(Borders::ALL)
++                ui_panel()
++                    .title(format!(" {table_title} "))
+                     .border_style(table_border),
+             )
+-            .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
+-            .highlight_symbol("▶ ");
++            .row_highlight_style(ui_selected_style())
++            .highlight_symbol("▸ ");
+         if let Some(table_area) = table_area {
+             frame.render_stateful_widget(table, table_area, &mut self.download_state);
+         }
+@@ -3880,31 +3922,36 @@ impl App {
+             .collect::<Vec<_>>();
+         frame.render_widget(
+             Paragraph::new(log_lines)
+-                .block(
+-                    Block::default()
+-                        .title(format!(
+-                            "Download activity · Alt+Y clear · {}",
+-                            self.download_disk_space
+-                        ))
+-                        .borders(Borders::ALL),
+-                )
++                .block(ui_panel().title(format!(
++                    " Download activity · Alt+Y clear · {} ",
++                    self.download_disk_space
++                )))
+                 .wrap(Wrap { trim: false }),
+             sections[2],
+         );
+     }
+ 
+     fn draw_jobs(&mut self, frame: &mut Frame, area: Rect) {
+-        let rows = self.job_history.records().iter().map(|job| {
+-            Row::new(vec![
+-                Cell::from(job.id.to_string()),
+-                Cell::from(job.kind.clone()),
+-                Cell::from(job.name.clone()),
+-                Cell::from(job.status.clone()),
+-                Cell::from(job.started_label.clone()),
+-                Cell::from(job.elapsed_label.clone()),
+-                Cell::from(job.exit_label.clone()),
+-            ])
+-        });
++        let rows = self
++            .job_history
++            .records()
++            .iter()
++            .enumerate()
++            .map(|(index, job)| {
++                Row::new(vec![
++                    Cell::from(job.id.to_string()),
++                    Cell::from(job.kind.clone()),
++                    Cell::from(job.name.clone()),
++                    Cell::from(Span::styled(
++                        job.status.clone(),
++                        job_state_style(&job.status),
++                    )),
++                    Cell::from(job.started_label.clone()),
++                    Cell::from(job.elapsed_label.clone()),
++                    Cell::from(job.exit_label.clone()),
++                ])
++                .style(ui_row_style(index))
++            });
+         let table = Table::new(
+             rows,
+             [
+@@ -3919,16 +3966,11 @@ impl App {
+         )
+         .header(
+             Row::new(["ID", "Kind", "Name", "Status", "Started", "Elapsed", "Exit"])
+-                .yellow()
+-                .bold(),
++                .style(ui_table_header_style()),
+         )
+-        .block(
+-            Block::default()
+-                .title("Jobs · s stop · r retry · c clear")
+-                .borders(Borders::ALL),
+-        )
+-        .row_highlight_style(Style::default().bg(Color::DarkGray))
+-        .highlight_symbol("▶ ");
++        .block(ui_panel().title(" JOBS · s stop · r retry · c clear "))
++        .row_highlight_style(ui_selected_style())
++        .highlight_symbol("▸ ");
+         frame.render_stateful_widget(table, area, &mut self.jobs_state);
+     }
+ 
+@@ -3943,13 +3985,9 @@ impl App {
+             .map(|path| ListItem::new(relative_display(&self.root, path)))
+             .collect::<Vec<_>>();
+         let list = List::new(items)
+-            .block(
+-                Block::default()
+-                    .title("Maintenance · r/Enter run · s stop · Ctrl+U editor")
+-                    .borders(Borders::ALL),
+-            )
+-            .highlight_symbol("▶ ")
+-            .highlight_style(Style::default().fg(Color::Cyan).bold());
++            .block(ui_panel().title(" MAINTENANCE · r/Enter run · s stop · Ctrl+U editor "))
++            .highlight_symbol("▸ ")
++            .highlight_style(ui_selected_style());
+         frame.render_stateful_widget(list, panes[0], &mut self.maintenance_state);
+         self.draw_script_editor(frame, panes[1], ScriptEditorTarget::Maintenance);
+     }
+@@ -3965,7 +4003,8 @@ impl App {
+             .collect::<Vec<_>>();
+         frame.render_widget(
+             Paragraph::new(lines)
+-                .block(Block::default().title("Activity").borders(Borders::ALL))
++                .style(Style::default().fg(UI_MUTED).bg(UI_PANEL))
++                .block(ui_panel().title(" ACTIVITY / OUTPUT "))
+                 .wrap(Wrap { trim: false }),
+             area,
+         );
+@@ -3989,18 +4028,36 @@ impl App {
+                 InputMode::ChatSystemPrompt => "  SYSTEM PROMPT INPUT",
+             }
+         };
++        let compact = area.width < 96;
+         let controls = if self.script_input_target.is_some() {
+-            "Esc list │ F1–F7 tabs │ Ctrl+P palette │ Ctrl+C quit"
++            if compact {
++                "Esc list │ Ctrl+P palette │ Ctrl+C quit"
++            } else {
++                "Esc list │ F1–F7 tabs │ Ctrl+P palette │ Ctrl+C quit"
++            }
+         } else if self.tab == Tab::Download && self.download.focus() != DownloadFocus::Table {
+-            "Tab/Shift+Tab fields │ Esc table │ Ctrl+P palette │ Ctrl+C quit"
++            if compact {
++                "Tab fields │ Esc table │ Ctrl+P palette"
++            } else {
++                "Tab/Shift+Tab fields │ Esc table │ Ctrl+P palette │ Ctrl+C quit"
++            }
++        } else if compact {
++            "F1–F7 tabs │ Ctrl+P palette │ ? help │ q quit"
+         } else {
+             "F1–F7 tabs │ Alt+←/→ cycle │ Ctrl+P palette │ ? help │ q quit"
+         };
+-        let footer = format!(" {}{}  │ {controls} ", self.status, input);
++        let status = format!(" ● {} ", self.status);
+         frame.render_widget(
+-            Paragraph::new(footer)
+-                .style(Style::default().fg(Color::Black).bg(Color::Cyan))
+-                .alignment(Alignment::Left),
++            Paragraph::new(Line::from(vec![
++                Span::styled(status, Style::default().fg(UI_BG).bg(UI_GREEN).bold()),
++                Span::styled(input, Style::default().fg(UI_BG).bg(UI_AMBER).bold()),
++                Span::styled(
++                    format!("  {controls} "),
++                    Style::default().fg(UI_TEXT).bg(UI_PANEL_ALT),
++                ),
++            ]))
++            .style(Style::default().fg(UI_TEXT).bg(UI_PANEL_ALT))
++            .alignment(Alignment::Left),
+             area,
+         );
+     }
+@@ -4012,7 +4069,7 @@ impl App {
+         let mut help = vec![
+             Line::from(Span::styled(
+                 "L3MS Rust key bindings",
+-                Style::default().fg(Color::Cyan).bold(),
++                Style::default().fg(UI_GREEN).bold(),
+             )),
+             Line::from(""),
+             Line::from("Global  F1–F7/Alt+1–7 tabs · Alt+←/→ cycle · Ctrl+P palette · q quit"),
+@@ -4020,7 +4077,7 @@ impl App {
+         ];
+         help.push(Line::from(Span::styled(
+             format!("{} commands", context),
+-            Style::default().fg(Color::Yellow).bold(),
++            Style::default().fg(UI_AMBER).bold(),
+         )));
+         for spec in visible_commands(context)
+             .into_iter()
+@@ -4029,7 +4086,7 @@ impl App {
+             help.push(Line::from(vec![
+                 Span::styled(
+                     format!("  {:<20}", spec.shortcut),
+-                    Style::default().fg(Color::Cyan),
++                    Style::default().fg(UI_BLUE),
+                 ),
+                 Span::raw(spec.label),
+             ]));
+@@ -4038,7 +4095,8 @@ impl App {
+         help.push(Line::from("Press any key to close."));
+         frame.render_widget(
+             Paragraph::new(help)
+-                .block(Block::default().title(" Help ").borders(Borders::ALL))
++                .style(Style::default().fg(UI_TEXT).bg(UI_PANEL))
++                .block(ui_popup().title(" HELP / KEY MAP "))
+                 .wrap(Wrap { trim: false }),
+             area,
+         );
+@@ -4052,11 +4110,8 @@ impl App {
+             .constraints([Constraint::Length(3), Constraint::Min(4)])
+             .split(area);
+         frame.render_widget(
+-            Paragraph::new(self.palette_query.as_str()).block(
+-                Block::default()
+-                    .title(" Command palette · type to search · Esc close ")
+-                    .borders(Borders::ALL),
+-            ),
++            Paragraph::new(self.palette_query.as_str())
++                .block(ui_popup().title(" COMMAND PALETTE · type to search · Esc close ")),
+             chunks[0],
+         );
+         let commands = self.palette_commands();
+@@ -4064,13 +4119,9 @@ impl App {
+             .iter()
+             .map(|spec| Row::new([Cell::from(spec.shortcut), Cell::from(spec.palette_label)]));
+         let table = Table::new(rows, [Constraint::Length(22), Constraint::Percentage(100)])
+-            .block(
+-                Block::default()
+-                    .title(format!(" {} command(s) · Enter run ", commands.len()))
+-                    .borders(Borders::ALL),
+-            )
+-            .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
+-            .highlight_symbol("▶ ");
++            .block(ui_popup().title(format!(" {} COMMAND(S) · Enter run ", commands.len())))
++            .row_highlight_style(ui_selected_style())
++            .highlight_symbol("▸ ");
+         frame.render_stateful_widget(table, chunks[1], &mut self.palette_state);
+         frame.set_cursor_position((
+             chunks[0].x + 1 + self.palette_query.chars().count() as u16,
+@@ -4101,10 +4152,10 @@ impl App {
+                 Constraint::Percentage(100),
+             ],
+         )
+-        .header(Row::new(["Saved", "Messages", "File"]).yellow().bold())
+-        .block(Block::default().title(title).borders(Borders::ALL))
+-        .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
+-        .highlight_symbol("▶ ");
++        .header(Row::new(["Saved", "Messages", "File"]).style(ui_table_header_style()))
++        .block(ui_popup().title(title))
++        .row_highlight_style(ui_selected_style())
++        .highlight_symbol("▸ ");
+         frame.render_stateful_widget(table, area, &mut self.chat_sessions_state);
+     }
+ 
+@@ -4122,16 +4173,12 @@ impl App {
+             .map(ListItem::new)
+             .collect::<Vec<_>>();
+         let list = List::new(items)
+-            .block(
+-                Block::default()
+-                    .title(format!(
+-                        " {} snapshots · Enter restore · Esc/Alt+V close ",
+-                        target.label()
+-                    ))
+-                    .borders(Borders::ALL),
+-            )
+-            .highlight_symbol("▶ ")
+-            .highlight_style(Style::default().fg(Color::Cyan).bold());
++            .block(ui_popup().title(format!(
++                " {} SNAPSHOTS · Enter restore · Esc/Alt+V close ",
++                target.label()
++            )))
++            .highlight_symbol("▸ ")
++            .highlight_style(ui_selected_style());
+         frame.render_stateful_widget(list, area, &mut self.script_version_state);
+     }
+ 
+@@ -4152,10 +4199,9 @@ impl App {
+                 "{dirty} edits are not saved.\n\nS  save snapshots, then quit\nD  discard edits and quit\nEsc  return to L3MS"
+             ))
+             .block(
+-                Block::default()
+-                    .title(" Unsaved changes ")
+-                    .borders(Borders::ALL)
+-                    .border_style(Style::default().fg(Color::Yellow)),
++                ui_popup()
++                    .title(" UNSAVED CHANGES ")
++                    .border_style(Style::default().fg(UI_AMBER)),
+             )
+             .wrap(Wrap { trim: false }),
+             area,
+@@ -4487,11 +4533,93 @@ fn visible_cursor_offset(cursor: usize, rendered_scroll: u16, visible_extent: u1
+     (offset < visible_extent as usize).then_some(offset as u16)
+ }
+ 
++fn compact_tab_name(index: usize) -> &'static str {
++    ["WORK", "OPS", "CHAT", "FILES", "GET", "JOBS", "TOOLS"]
++        .get(index)
++        .copied()
++        .unwrap_or("—")
++}
++
++fn ui_panel<'a>() -> Block<'a> {
++    Block::default()
++        .borders(Borders::ALL)
++        .style(Style::default().fg(UI_TEXT).bg(UI_PANEL))
++        .border_style(ui_border_style())
++        .title_style(Style::default().fg(UI_AMBER).bg(UI_PANEL).bold())
++}
++
++fn ui_popup<'a>() -> Block<'a> {
++    ui_panel()
++        .border_style(ui_active_border_style())
++        .title_style(Style::default().fg(UI_GREEN).bg(UI_PANEL).bold())
++}
++
++fn ui_border_style() -> Style {
++    Style::default().fg(UI_BORDER).bg(UI_PANEL)
++}
++
++fn ui_active_border_style() -> Style {
++    Style::default().fg(UI_GREEN).bg(UI_PANEL)
++}
++
++fn ui_label_style() -> Style {
++    Style::default().fg(UI_MUTED).bold()
++}
++
++fn ui_table_header_style() -> Style {
++    Style::default().fg(UI_AMBER).bg(UI_PANEL_ALT).bold()
++}
++
++fn ui_selected_style() -> Style {
++    Style::default().fg(UI_BG).bg(UI_GREEN).bold()
++}
++
++fn ui_row_style(index: usize) -> Style {
++    Style::default().fg(UI_TEXT).bg(if index.is_multiple_of(2) {
++        UI_PANEL
++    } else {
++        UI_PANEL_ALT
++    })
++}
++
++fn model_state_style(state: &str) -> Style {
++    let state = state.to_ascii_lowercase();
++    let color = if state.contains("load") || state.contains("ready") || state.contains("active") {
++        UI_GREEN
++    } else if state.contains("fail") || state.contains("error") || state.contains("unavailable") {
++        UI_RED
++    } else if state.contains("start") || state.contains("pending") {
++        UI_AMBER
++    } else {
++        UI_MUTED
++    };
++    Style::default().fg(color)
++}
++
++fn boolean_state_style(enabled: bool) -> Style {
++    Style::default().fg(if enabled { UI_GREEN } else { UI_MUTED })
++}
++
++fn job_state_style(state: &str) -> Style {
++    let state = state.to_ascii_lowercase();
++    let color = if state.contains("run") || state.contains("complete") || state.contains("success")
++    {
++        UI_GREEN
++    } else if state.contains("fail") || state.contains("error") {
++        UI_RED
++    } else if state.contains("stop") || state.contains("cancel") {
++        UI_AMBER
++    } else {
++        UI_MUTED
++    };
++    Style::default().fg(color)
++}
++
+ fn download_compact_focus_style(focused: bool) -> Style {
+     if focused {
+-        Style::default().fg(Color::Black).bg(Color::Cyan).bold()
++        ui_selected_style()
+     } else {
+-        Style::default()
++        Style::default().fg(UI_TEXT).bg(UI_PANEL)
+     }
+ }
+ 
+@@ -4575,13 +4703,12 @@ fn render_download_compact_settings(frame: &mut Frame, area: Rect, download: &Do
+             | DownloadFocus::GlobalWorkers
+             | DownloadFocus::SaveNote
+     );
+-    let block = Block::default()
+-        .title("Settings · Tab/Shift+Tab")
+-        .borders(Borders::ALL)
++    let block = ui_panel()
++        .title(" Settings · Tab/Shift+Tab ")
+         .border_style(if settings_focused {
+-            Style::default().fg(Color::Cyan)
++            ui_active_border_style()
+         } else {
+-            Style::default()
++            ui_border_style()
+         });
+     let inner = block.inner(area);
+     frame.render_widget(block, area);
+@@ -4726,16 +4853,15 @@ fn render_download_model_editor(frame: &mut Frame, area: Rect, download: &Downlo
+         })
+         .collect::<Vec<_>>();
+     let editor_border = if matches!(download.focus(), DownloadFocus::Model(_)) {
+-        Style::default().fg(Color::Cyan)
++        ui_active_border_style()
+     } else {
+-        Style::default()
++        ui_border_style()
+     };
+     frame.render_widget(
+         Paragraph::new(editor_lines)
+             .block(
+-                Block::default()
+-                    .title("Model editor · Alt+I focus · Tab/Shift+Tab fields")
+-                    .borders(Borders::ALL)
++                ui_panel()
++                    .title(" Model editor · Alt+I focus · Tab/Shift+Tab fields ")
+                     .border_style(editor_border),
+             )
+             .wrap(Wrap { trim: false }),
+@@ -4763,13 +4889,12 @@ fn render_download_model_editor(frame: &mut Frame, area: Rect, download: &Downlo
+ 
+ fn render_download_compact_model_editor(frame: &mut Frame, area: Rect, download: &DownloadUiState) {
+     let editor_focused = matches!(download.focus(), DownloadFocus::Model(_));
+-    let block = Block::default()
+-        .title("Model editor · Tab/Shift+Tab")
+-        .borders(Borders::ALL)
++    let block = ui_panel()
++        .title(" Model editor · Tab/Shift+Tab ")
+         .border_style(if editor_focused {
+-            Style::default().fg(Color::Cyan)
++            ui_active_border_style()
+         } else {
+-            Style::default()
++            ui_border_style()
+         });
+     let inner = block.inner(area);
+     frame.render_widget(block, area);
+@@ -4819,18 +4944,13 @@ fn render_download_value_field(
+     focused: bool,
+ ) {
+     let border = if focused {
+-        Style::default().fg(Color::Cyan)
++        ui_active_border_style()
+     } else {
+-        Style::default()
++        ui_border_style()
+     };
+     frame.render_widget(
+         Paragraph::new(value)
+-            .block(
+-                Block::default()
+-                    .title(title)
+-                    .borders(Borders::ALL)
+-                    .border_style(border),
+-            )
++            .block(ui_panel().title(format!(" {title} ")).border_style(border))
+             .wrap(Wrap { trim: false }),
+         area,
+     );
+@@ -4844,9 +4964,9 @@ fn render_download_text_field(
+     focused: bool,
+ ) {
+     let border = if focused {
+-        Style::default().fg(Color::Cyan)
++        ui_active_border_style()
+     } else {
+-        Style::default()
++        ui_border_style()
+     };
+     let inner_width = area.width.saturating_sub(2) as usize;
+     let cursor_column = text_buffer_cursor_display_width(buffer);
+@@ -4858,12 +4978,7 @@ fn render_download_text_field(
+     let rendered_scroll = logical_scroll.min(u16::MAX as usize) as u16;
+     frame.render_widget(
+         Paragraph::new(buffer.content())
+-            .block(
+-                Block::default()
+-                    .title(title)
+-                    .borders(Borders::ALL)
+-                    .border_style(border),
+-            )
++            .block(ui_panel().title(format!(" {title} ")).border_style(border))
+             .scroll((0, rendered_scroll)),
+         area,
+     );
+@@ -5044,7 +5159,7 @@ fn gguf_details(file: &GgufFile) -> Text<'static> {
+         lines.push(Line::from(""));
+         lines.push(Line::from(Span::styled(
+             format!("parse warning: {error}"),
+-            Style::default().fg(Color::Yellow),
++            Style::default().fg(UI_AMBER),
+         )));
+     }
+     Text::from(lines)
+@@ -5277,6 +5392,33 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn compact_control_deck_renders_theme_and_keyboard_navigation() {
++        let fixture = AppFixture::new();
++        let mut app = fixture.app();
++        let backend = TestBackend::new(80, 24);
++        let mut terminal = Terminal::new(backend).unwrap();
++        terminal.draw(|frame| app.draw(frame)).unwrap();
++
++        let rendered = terminal_text(&terminal);
++        for expected in [
++            "L3MS",
++            "RUST CONTROL",
++            "1 WORK",
++            "QUICK CONTROL",
++            "ACTIVITY / OUTPUT",
++        ] {
++            assert!(
++                rendered.contains(expected),
++                "missing control-deck text: {expected}"
++            );
++        }
++        let buffer = terminal.backend().buffer();
++        assert_eq!(buffer.cell((0, 0)).unwrap().bg, UI_GREEN);
++        assert!(buffer.content().iter().any(|cell| cell.bg == UI_PANEL));
++        assert!(buffer.content().iter().any(|cell| cell.bg == UI_PANEL_ALT));
++    }
++
+     #[test]
+     fn editor_cursor_width_uses_terminal_cells_not_utf8_bytes() {
+         let mut buffer = TextBuffer::from_content("a界🙂e\u{301}");

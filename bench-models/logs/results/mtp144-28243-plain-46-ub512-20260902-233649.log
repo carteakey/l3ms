@@ -1,0 +1,87 @@
+0.00.077.084 W DEPRECATED: argument '-ub' specified multiple times, use comma-separated values instead (only last value will be used)
+0.00.077.163 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.00.077.388 W srv  llama_server: -----------------
+0.00.077.389 W srv  llama_server: CORS is set to allow all origins ('*') and no API key is set
+0.00.077.389 W srv  llama_server: this can be a security risk (cross-origin attacks)
+0.00.077.389 W srv  llama_server: more info: https://github.com/ggml-org/llama.cpp/pull/25655
+0.00.077.389 W srv  llama_server: -----------------
+0.00.078.577 I srv    load_model: loading model '/home/kchauhan/models/qwen38-flash-next/AD-4.27bpw-Q4_K_M-M64/Qwen3.8-Flash-Next-AD-4.27bpw-Q4_K_M-M64-00001-of-00033.gguf'
+0.00.458.330 W llama_model_loader: tensor overrides to CPU are used with mmap enabled - consider using --load-mode none for better performance
+0.02.845.870 I cmn          init: llama threadpool init, n_threads = 10
+0.02.845.902 I common_speculative_init_result: loading draft model '/home/kchauhan/models/unsloth/Qwen3.8-Flash-Next-GGUF/MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf'
+0.05.615.321 I srv    load_model: initializing, n_slots = 1, n_ctx_slot = 32768, kv_unified = 'false'
+0.05.672.679 W srv          init: chat template supports preserving reasoning, it is enabled by default (may use more tokens, disable via --no-reasoning-preserve)
+0.05.672.687 I srv  llama_server: model loaded
+0.05.672.690 I srv  llama_server: listening on http://127.0.0.1:8023
+0.06.040.421 I slot get_availabl: id  0 | task -1 | selected slot by LRU, t_last = -1
+0.06.040.459 I slot launch_slot_: id  0 | task 0 | processing task, is_child = 0
+/home/kchauhan/repos/l3ms/vendor/llama.cpp-pr-test-28243/ggml/src/ggml-cuda/ggml-cuda.cu:108: CUDA error
+0.06.219.276 E CUDA error: out of memory
+0.06.219.278 E   current device: 0, in function cublas_handle at /home/kchauhan/repos/l3ms/vendor/llama.cpp-pr-test-28243/ggml/src/ggml-cuda/../ggml-cuda/common.cuh:1520
+0.06.219.279 E   cudaMalloc(&cublas_workspaces[device][curr_stream_no], cublas_workspace_sizes[device])
+[New LWP 1808206]
+[New LWP 1808205]
+[New LWP 1808204]
+[New LWP 1808203]
+[New LWP 1808202]
+[New LWP 1808201]
+[New LWP 1808200]
+[New LWP 1808199]
+[New LWP 1808198]
+[New LWP 1808197]
+[New LWP 1808196]
+[New LWP 1808195]
+[New LWP 1808099]
+[New LWP 1808098]
+[New LWP 1808097]
+[New LWP 1808096]
+[New LWP 1808095]
+[New LWP 1808094]
+[New LWP 1808093]
+[New LWP 1808092]
+[New LWP 1808091]
+[New LWP 1808090]
+[New LWP 1808089]
+[New LWP 1808088]
+[New LWP 1808087]
+[New LWP 1808086]
+[New LWP 1808085]
+[New LWP 1808084]
+[New LWP 1808083]
+[New LWP 1808082]
+[New LWP 1808078]
+[New LWP 1808077]
+[New LWP 1808076]
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.cachyos.org>
+  <https://debuginfod.archlinux.org>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/usr/lib/libthread_db.so.1".
+0x00007f03beeb5b82 in ?? () from /usr/lib/libc.so.6
+#0  0x00007f03beeb5b82 in ?? () from /usr/lib/libc.so.6
+#1  0x00007f03bef30868 in wait4 () from /usr/lib/libc.so.6
+#2  0x0000557bc542c51a in ggml_abort ()
+#3  0x0000557bc5be98d1 in ggml_cuda_error(char const*, char const*, char const*, int, char const*) ()
+#4  0x0000557bc5bf6f54 in void ggml_cuda_mul_mat_cublas_impl<(ggml_type)0>(ggml_backend_cuda_context&, ggml_tensor const*, ggml_tensor const*, ggml_tensor*) ()
+#5  0x0000557bc5bffd1c in ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context*, ggml_cgraph*, bool, bool, unsigned long) ()
+#6  0x0000557bc5c01122 in ggml_backend_cuda_graph_compute(ggml_backend*, ggml_cgraph*) ()
+#7  0x0000557bc5456fcc in ggml_backend_sched_compute_splits(ggml_backend_sched*) [clone .lto_priv.0] ()
+#8  0x0000557bc59ad5f0 in llama_context::graph_compute(ggml_cgraph*, bool) ()
+#9  0x0000557bc59b2b24 in llama_context::process_ubatch(llama_ubatch const&, llm_graph_type, llama_memory_context_i*, ggml_status&) ()
+#10 0x0000557bc59b6ebd in llama_context::decode(llama_batch const&) ()
+#11 0x0000557bc59b8aee in llama_decode ()
+#12 0x0000557bc556c9f5 in std::_Function_handler<void (), server_context_impl::decode(int&, int, llama_batch&)::{lambda()#1}>::_M_invoke(std::_Any_data const&) ()
+#13 0x0000557bc5524dd5 in server_queue::yield_to_queue(std::function<void ()>&&) ()
+#14 0x0000557bc5584477 in server_context_impl::decode(int&, int, llama_batch&) ()
+#15 0x0000557bc5585f86 in server_context_impl::update_slots() ()
+#16 0x0000557bc55242a6 in server_queue::start_loop(long) ()
+#17 0x0000557bc54dc004 in llama_server(common_params&, int, char**) ()
+#18 0x0000557bc54dddaa in llama_server(int, char**) ()
+#19 0x00007f03bee27d0e in ?? () from /usr/lib/libc.so.6
+#20 0x00007f03bee27e4b in __libc_start_main () from /usr/lib/libc.so.6
+#21 0x0000557bc5363325 in _start ()
+[Inferior 1 (process 1808069) detached]
