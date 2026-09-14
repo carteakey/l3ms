@@ -10,6 +10,7 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Added
+- Updated public dashboard (l3ms.carteakey.dev): updated Qwen3.8-Flash-Next tiers (Master baseline at 19.35 t/s steady state, MTP tier with compact shared-Q4_K_M head breaking 20 t/s across all tasks at 20.65 t/s, and multimodal Vision tier with mmproj-F16 at 18.4 t/s). Added task-level A/B benchmark comparison table to the dashboard.
 - Standardized benchmark system environment capture and preflight verification
   (`bench-models/bench-env.sh`). Automatically logs hardware state as YAML
   frontmatter in log headers and embeds a structured `"sys"` object in
