@@ -98,21 +98,28 @@ fi
 [ -n "${GROUPED_ROUTING:-}" ] && cmd+=(-ger   "${GROUPED_ROUTING}")
 [ -n "${ROPE_CACHE:-}"      ] && cmd+=(-rcache "${ROPE_CACHE}")
 
-# --- logging ---
+# --- logging & environment capture ---
+
+source "${SCRIPT_DIR}/bench-env.sh"
+bench_preflight_warn || true
 
 LOG_DIR="${SCRIPT_DIR}/logs"
 mkdir -p "${LOG_DIR}"
 _model_slug="$(basename "${MODEL}" .gguf)"
 LOG_FILE="${LOG_DIR}/$(date +%Y-%m-%d_%H-%M-%S)_${_model_slug}.log"
 
+# Emit system frontmatter to log file
+bench_emit_frontmatter > "${LOG_FILE}"
+
 # --- launch ---
 
 if command -v taskset >/dev/null 2>&1 && [ -n "${CPU_RANGE:-}" ]; then
-  taskset -c "${CPU_RANGE}" "${cmd[@]}" 2>&1 | tee "${LOG_FILE}"
+  taskset -c "${CPU_RANGE}" "${cmd[@]}" 2>&1 | tee -a "${LOG_FILE}"
 else
-  "${cmd[@]}" 2>&1 | tee "${LOG_FILE}"
+  "${cmd[@]}" 2>&1 | tee -a "${LOG_FILE}"
 fi
 
 # --- log structured result ---
 BACKEND="${BACKEND:-ik_llama.cpp}" LOG_FILE="${LOG_FILE}" \
   "${SCRIPT_DIR}/log-result.sh" || true
+

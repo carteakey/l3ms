@@ -43,3 +43,7 @@ vendor-forks
 
 # macOS
 .DS_Store
+
+# Local backup snapshots
+*.bak*
+scratch/

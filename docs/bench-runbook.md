@@ -102,24 +102,27 @@ vendor/llama.cpp/build/bin/llama-bench --version
 vendor/ik_llama.cpp/build/bin/llama-bench --version
 ```
 
-### System state check (run before every bench)
+### System state check & standardized frontmatter (automated via `bench-env.sh`)
 
-Bench tg is CPU-bound (expert compute). If the CPU is in a low-power state, tg
-will read 27–30 t/s instead of the expected ~39 t/s — a 30% drop with no other
-symptoms (pp is GPU-bound and unaffected, so it will look fine).
+Bench tg is CPU-bound (expert compute). If the CPU is in a low-power state or RAM clock
+is degraded, tg will drop significantly (e.g. 27–30 t/s instead of ~39 t/s). Likewise, low
+available memory or un-stopped background services cause expert refaulting or VMM pool OOMs.
+
+All runner scripts (`run-llama-bench.sh`, `run-ik-llama-bench.sh`, `run-llama-fit-bench.sh`)
+automatically execute preflight checks and emit standard YAML frontmatter to log files via
+`bench-models/bench-env.sh`.
+
+You can also run preflight checks and view frontmatter manually before any test session:
 
 ```sh
-# 1. Check governor — must be "performance" on all cores
-cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
-# expected: performance
+# 1. Run preflight warnings (governor, EPP, power-profile, VRAM, free RAM, router state, thermals):
+./bench-models/bench-env.sh --warn
 
-# 2. Check EPP — must be "performance" (intel_pstate active mode)
-cat /sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference
-# expected: performance
+# 2. Inspect full system frontmatter:
+./bench-models/bench-env.sh --frontmatter
 
-# 3. Check actual CPU frequency — P-cores should be near max boost
-grep "cpu MHz" /proc/cpuinfo | sort -rn | head -4
-# expected: 4500–4900 MHz on i5-12600K
+# 3. Export JSON format (for programmatic ingestion):
+./bench-models/bench-env.sh --json
 ```
 
 If governor or EPP is not `performance`, fix before running:

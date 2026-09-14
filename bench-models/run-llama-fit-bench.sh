@@ -49,6 +49,10 @@ LLAMA_BENCH="${LLAMA_BENCH:-${REPO_DIR}/vendor/llama.cpp/build/bin/llama-bench}"
 FIT_TARGET="${FIT_TARGET:-1024}"
 FIT_CTX="${FIT_CTX:-4096}"
 
+# --- environment capture & preflight warnings ---
+source "${SCRIPT_DIR}/bench-env.sh"
+bench_preflight_warn || true
+
 # --- logging (set up early so fit stage output is also captured) ---
 LOG_DIR="${SCRIPT_DIR}/logs"
 mkdir -p "${LOG_DIR}"
@@ -206,6 +210,7 @@ LOG_FILE="${LOG_DIR}/$(date +%Y-%m-%d_%H-%M-%S)_${_model_slug}_fit.log"
 
 # Replay the printed config into the log, then run bench with tee
 {
+  bench_emit_frontmatter
   echo "# model      : ${MODEL}"
   echo "# tasks      : ${TASKS:-${N_PROMPT:-512}pp + ${N_GEN:-128}tg}"
   echo "# batch      : ${BATCH_SIZE} / ubatch: ${UBATCH_SIZE}"

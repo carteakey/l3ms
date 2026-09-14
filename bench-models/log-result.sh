@@ -35,7 +35,7 @@ fi
 # Determine model key: explicit > MODEL env basename > log file basename
 _model_stem="$(basename "${LOG_FILE}" .log | sed 's/^[0-9_-]*_//')"
 MODEL_KEY="${MODEL_KEY:-${_model_stem}}"
-RESULTS_FILE="${RESULTS_DIR}/${MODEL_KEY}.jsonl"
+RESULTS_FILE="${RESULTS_FILE:-${RESULTS_DIR}/${MODEL_KEY}.jsonl}"
 
 # ---------------------------------------------------------------------------
 # Parse llama-bench markdown table output.
@@ -137,6 +137,28 @@ def maybe_int(value):
 
 parsed = json.loads(os.environ["PARSED_JSON"])
 
+sys_info = None
+log_file = os.environ.get("RESULT_LOG_FILE", "")
+if log_file and os.path.isfile(log_file):
+    try:
+        with open(log_file, "r") as f:
+            for _ in range(50):
+                line = f.readline()
+                if not line:
+                    break
+                if line.startswith("# bench_sys_json:"):
+                    raw = line.split(":", 1)[1].strip()
+                    sys_info = json.loads(raw)
+                    break
+    except Exception:
+        pass
+
+if not sys_info and os.environ.get("RESULT_SYS_JSON"):
+    try:
+        sys_info = json.loads(os.environ["RESULT_SYS_JSON"])
+    except Exception:
+        pass
+
 record = {
     "ts":            os.environ["RESULT_TS"],
     "model_key":     os.environ["RESULT_MODEL_KEY"],
@@ -163,6 +185,7 @@ record = {
     "llama_version": os.environ["RESULT_LLAMA_VERSION"],
     "log_file":      os.environ["RESULT_LOG_FILE"],
     "notes":         os.environ["RESULT_NOTES"],
+    "sys":           sys_info,
 }
 
 # Drop None values to keep records compact
@@ -178,4 +201,9 @@ if pp or tg:
     print(f"  pp={pp} ± {record.get('pp_std','?')} t/s   tg={tg} ± {record.get('tg_std','?')} t/s")
 else:
     print("  warning: no pp/tg values parsed from log — check log format")
+if sys_info:
+    gov = sys_info.get("cpu_governor", "?")
+    ram = sys_info.get("ram_speed_mts", "?")
+    print(f"  sys: governor={gov}, RAM={ram} MT/s")
 PYEOF
+
