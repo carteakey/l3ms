@@ -598,7 +598,7 @@ pub static REGISTRY: &[ParamDef] = &[
         aliases: &[],
         label: "reasoning-effort",
         category: ParamCategory::Server,
-        kind: ParamKind::Choice(&["minimal", "low", "medium", "high"]),
+        kind: ParamKind::Choice(&["minimal", "low", "medium", "high", "xhigh", "max"]),
         description: "Default reasoning effort",
     },
     ParamDef {

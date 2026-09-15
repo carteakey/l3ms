@@ -9,6 +9,9 @@
   Vision-capable LLMs and embeddings remain in L3MS.
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
+### Changed
+- Updated default reasoning effort from `medium` to `xhigh` across all Qwen3.8 Flash Next tiers (`qwen38-flash-next`, `qwen38-flash-next-exp`, `qwen38-flash-next-mtp`, `qwen38-flash-next-vision`) in `llama-swap.yaml` and `chat-template.jinja`. Extended `param_registry.rs` `--reasoning-effort` choice set to support `xhigh` and `max`.
+
 ### Added
 - Updated public dashboard (l3ms.carteakey.dev): updated Qwen3.8-Flash-Next tiers (Master baseline at 19.35 t/s steady state, MTP tier with compact shared-Q4_K_M head breaking 20 t/s across all tasks at 20.65 t/s, and multimodal Vision tier with mmproj-F16 at 18.4 t/s). Added task-level A/B benchmark comparison table to the dashboard.
 - Standardized benchmark system environment capture and preflight verification

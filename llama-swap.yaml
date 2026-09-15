@@ -231,7 +231,7 @@ models:
 
   "qwen38-flash-next":
     name: "Qwen3.8-Flash-Next (master b78a39a2f, AtomicChat AD-4.27bpw, ngram-on-SSD)"
-    description: "Gold: plain upstream master b78a39a2f, conservative. 19.35 t/s fresh decode (up to 19.6 t/s code), pp=300-385 t/s @ ub 2048, 64k ctx, q8 KV, ngram-mod spec. Reasoning capped: effort=medium, budget=4000. See docs/qwen38-flash-next-internal.md."
+    description: "Gold: plain upstream master b78a39a2f, conservative. 19.35 t/s fresh decode (up to 19.6 t/s code), pp=300-385 t/s @ ub 2048, 64k ctx, q8 KV, ngram-mod spec. Reasoning: effort=xhigh, budget=4000. See docs/qwen38-flash-next-internal.md."
     env:
       - "GGML_CUDA_GRAPH_OPT=1"
     cmd: |
@@ -248,7 +248,7 @@ models:
       --spec-type ngram-mod
       --spec-ngram-mod-n-match 60 --spec-ngram-mod-n-min 12 --spec-ngram-mod-n-max 24
       --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
-      --reasoning-effort medium --reasoning-budget 4000 --reasoning-preserve
+      --reasoning-effort xhigh --reasoning-budget 4000 --reasoning-preserve
       --no-warmup
       --host 0.0.0.0 --port ${PORT}
 
@@ -271,7 +271,7 @@ models:
       --spec-type ngram-mod
       --spec-ngram-mod-n-match 60 --spec-ngram-mod-n-min 12 --spec-ngram-mod-n-max 24
       --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
-      --reasoning-effort medium --reasoning-budget 4000 --reasoning-preserve
+      --reasoning-effort xhigh --reasoning-budget 4000 --reasoning-preserve
       --no-warmup
       --host 0.0.0.0 --port ${PORT}
 
@@ -299,7 +299,7 @@ models:
       --spec-type draft-mtp --spec-draft-n-max 2 --spec-draft-p-min 0.7
       --spec-draft-ngl 99
       --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
-      --reasoning-effort medium --reasoning-budget 4000 --reasoning-preserve
+      --reasoning-effort xhigh --reasoning-budget 4000 --reasoning-preserve
       --no-warmup
       --host 0.0.0.0 --port ${PORT}
 
@@ -325,7 +325,7 @@ models:
       -t 10 --threads-batch 12 --prio 2
       --lazy-mode on
       --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
-      --reasoning-effort medium --reasoning-budget 4000 --reasoning-preserve
+      --reasoning-effort xhigh --reasoning-budget 4000 --reasoning-preserve
       --no-warmup
       --host 0.0.0.0 --port ${PORT}
 
