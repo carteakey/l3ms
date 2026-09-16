@@ -10,9 +10,18 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Extracted shared filesystem utilities (`atomic_write`, `write_unique_snapshot`, `safe_stamp`, `format_utc_seconds`, `resolve_allow_missing`, `ensure_single_component`) into `src/fs_util.rs` to deduplicate ~300 lines of identical logic across `config_store` and `script_store`.
+- Added typed `ModelState` enum and `SwapModel::model_state()` to `llama_swap.rs` for compiler-checked model lifecycle states.
+- Marked compile-time `repository_root()` and `versions_root()` in `config_store` and `script_store` as deprecated with clear guidance to use runtime-resolved root paths via `_in()` functions.
 - Updated default reasoning effort from `medium` to `xhigh` across all Qwen3.8 Flash Next tiers (`qwen38-flash-next`, `qwen38-flash-next-exp`, `qwen38-flash-next-mtp`, `qwen38-flash-next-vision`) in `llama-swap.yaml` and `chat-template.jinja`. Extended `param_registry.rs` `--reasoning-effort` choice set to support `xhigh` and `max`.
 
+### Fixed
+- Capped filename collision retry loop in `swap_yaml::snapshot()` at 10,000 attempts to avoid unbounded busy-loops under filesystem anomalies.
+- Hardened `swap_yaml::atomic_write()` with temporary-file collision retries and monotonic nonce counters matching the storage modules.
+
 ### Added
+- Integrated community field telemetry and independent validations into `docs/qwen38-flash-next-internal.md` §11: physical tensor offset breakdowns across quants, symlinked PLE multi-drive storage topology, empirical DDR4 vs DDR5 bandwidth ceiling comparison matrix, high-core CPU thread scaling, and context-scaling decay curves.
+- Added `keywords` and `categories` metadata to `Cargo.toml`.
 - Updated public dashboard (l3ms.carteakey.dev): updated Qwen3.8-Flash-Next tiers (Master baseline at 19.35 t/s steady state, MTP tier with compact shared-Q4_K_M head breaking 20 t/s across all tasks at 20.65 t/s, and multimodal Vision tier with mmproj-F16 at 18.4 t/s). Added task-level A/B benchmark comparison table to the dashboard.
 - Standardized benchmark system environment capture and preflight verification
   (`bench-models/bench-env.sh`). Automatically logs hardware state as YAML
