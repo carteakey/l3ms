@@ -11,6 +11,7 @@ pub mod download_preflight;
 pub mod download_ui;
 pub mod downloader_command;
 pub mod gguf;
+pub(crate) mod fs_util;
 pub mod job_history;
 pub mod llama_swap;
 pub mod param_builder;

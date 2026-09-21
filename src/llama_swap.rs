@@ -14,6 +14,57 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use reqwest::Url;
 use serde::Serialize;
 use serde_json::Value;
+/// Lifecycle state of a model as reported by llama-swap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ModelState {
+    Loaded,
+    Loading,
+    Unloaded,
+    Unknown,
+}
+
+impl ModelState {
+    /// Parse from a normalized lowercase state string without failing.
+    pub fn parse_lossy(s: &str) -> Self {
+        match s {
+            "loaded" => Self::Loaded,
+            "loading" => Self::Loading,
+            "unloaded" => Self::Unloaded,
+            _ => Self::Unknown,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Loaded => "loaded",
+            Self::Loading => "loading",
+            Self::Unloaded => "unloaded",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn is_loaded(self) -> bool {
+        matches!(self, Self::Loaded)
+    }
+
+    pub fn is_loading(self) -> bool {
+        matches!(self, Self::Loading)
+    }
+}
+
+impl std::str::FromStr for ModelState {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(Self::parse_lossy(s))
+    }
+}
+
+impl std::fmt::Display for ModelState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
 
 pub const DEFAULT_BASE_URL: &str = "http://localhost:8080";
 
@@ -38,6 +89,13 @@ pub struct SwapModel {
     /// Size in bytes of the GGUF files backing the entry's `-m` path,
     /// resolved on disk by the app layer. `None` when unresolvable.
     pub size_bytes: Option<u64>,
+}
+
+impl SwapModel {
+    /// Parse `self.state` into a typed [`ModelState`].
+    pub fn model_state(&self) -> ModelState {
+        ModelState::parse_lossy(&self.state)
+    }
 }
 
 /// Blocking llama-swap API client.

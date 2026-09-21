@@ -10,8 +10,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{bail, Context, Result};
+
+static ATOMIC_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 use crate::llama_swap::SwapModel;
 
@@ -174,8 +177,14 @@ pub fn snapshot(path: impl AsRef<Path>) -> Result<PathBuf> {
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "llama-swap.yaml".into());
     let mut candidate = path.with_file_name(format!("{file_name}.bak-{stamp}"));
-    let mut suffix = 1;
+    let mut suffix = 1u32;
     while candidate.exists() {
+        if suffix > 10_000 {
+            anyhow::bail!(
+                "could not allocate a unique snapshot name for {}",
+                path.display()
+            );
+        }
         candidate = path.with_file_name(format!("{file_name}.bak-{stamp}-{suffix}"));
         suffix += 1;
     }
@@ -185,7 +194,7 @@ pub fn snapshot(path: impl AsRef<Path>) -> Result<PathBuf> {
 
 /// Atomically write `content` to `path` via a temporary file in the same directory.
 pub fn atomic_write(path: impl AsRef<Path>, content: &str) -> Result<()> {
-    use std::io::Write;
+    use std::io::{ErrorKind, Write};
     let path = path.as_ref();
     let parent = path
         .parent()
@@ -198,23 +207,39 @@ pub fn atomic_write(path: impl AsRef<Path>, content: &str) -> Result<()> {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let temp = parent.join(format!(".{file_name}.tmp-{}-{nonce}", std::process::id()));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp)
-        .with_context(|| format!("failed to create temporary file for {}", path.display()))?;
-    let write_result = (|| -> Result<()> {
-        file.write_all(content.as_bytes())?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temp, path).with_context(|| format!("failed to replace {}", path.display()))?;
-        Ok(())
-    })();
-    if write_result.is_err() {
-        let _ = fs::remove_file(&temp);
+
+    for attempt in 0_u32..100 {
+        let counter = ATOMIC_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let temp = parent.join(format!(
+            ".{file_name}.tmp-{}-{nonce}-{counter}-{attempt}",
+            std::process::id()
+        ));
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to create temporary file for {}", path.display()))
+            }
+        };
+        let write_result = (|| -> Result<()> {
+            file.write_all(content.as_bytes())?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&temp, path)
+                .with_context(|| format!("failed to replace {}", path.display()))?;
+            Ok(())
+        })();
+        if write_result.is_err() {
+            let _ = fs::remove_file(&temp);
+        }
+        return write_result;
     }
-    write_result
+    anyhow::bail!("could not allocate a temporary file for {}", path.display())
 }
 
 fn format_utc_timestamp(seconds: u64) -> String {
