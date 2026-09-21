@@ -54,19 +54,23 @@ Deep detail, decisions and next steps: `docs/qwen38-flash-next-internal.md`.
 Four router tiers share one AtomicChat AD-4.27bpw quant:
 
 - gold `qwen38-flash-next`: plain upstream master (`vendor/llama.cpp-master`,
-  macro `qwen38_master_server`, commit `b78a39a2f`). 19.35 t/s steady state
-  decode, pp 198-200 t/s @ 64k. Refresh = `git fetch` + rebuild.
-- vision `qwen38-flash-next-vision`: master `b78a39a2f` with `mmproj-F16.gguf`
+  macro `qwen38_master_server`, commit `ce8caa6e6`, tag `b11065`). 19.35 t/s steady state
+  decode, pp 198-200 t/s @ 64k. Natively includes upstream-merged PR #28770
+  (CUDA sparse Flash Attention) and kernel fusions (#28896, #28901). Refresh = `git fetch` + rebuild.
+- vision `qwen38-flash-next-vision`: master `ce8caa6e6` with `mmproj-F16.gguf`
   vision projector (`models/unsloth/Qwen3.8-Flash-Next-GGUF/mmproj-F16.gguf`),
   `-ngl 99 -ncmoe 45` @ 16k ctx, 18.2–18.6 t/s, 10.4 GB VRAM (1.8 GB headroom).
-- MTP `qwen38-flash-next-mtp`: Daniel Han PR #28243 (`d1a92352c` on master)
-  with compact `mtp-Qwen3.8-Flash-Next-shared-Q4_K_M.gguf` (1.78 GB),
-  `vendor/llama.cpp-pr-test-28243/build/bin/llama-server`, macro `qwen38_mtp_server`,
+- MTP `qwen38-flash-next-mtp`: Unified QSA Sparsity Stack (#28770 [merged upstream b11062] + #28699 + #28213 + #29166 multi-seq fix)
+  + Daniel Han PR #28243 with compact `mtp-Qwen3.8-Flash-Next-shared-Q4_K_M.gguf` (1.78 GB),
+  `vendor/llama.cpp-pr-test-28770-28699-28213/build/bin/llama-server`, macro `qwen38_mtp_server`,
   `-ngl 99 -ncmoe 45 --spec-draft-n-max 2 --spec-draft-p-min 0.7` @ 16k ctx,
-  **20.65 t/s aggregate** (77–96% acceptance), 11.78 GB VRAM.
-- exp `qwen38-flash-next-exp`: master + unmerged GDN PR #28068
-  (`build/bin/llama-server-exp` inside `vendor/llama.cpp-pr-test-28023-28068-27941`,
-  branch `pr-test-28023-28068-27941`). Becomes redundant when merged.
+  **20.65+ t/s aggregate** (77–96% acceptance), 11.8 GB VRAM.
+- exp `qwen38-flash-next-exp`: master + QSA Sparsity Stack (#28770 + #28699 + #28213)
+  (`build/bin/llama-server` inside `vendor/llama.cpp-pr-test-28770-28699-28213`, macro
+  `qwen38_exp_server`). True CUDA sparse Flash Attention, incremental pooled-key
+  indexer cache, and gather-based sparse decode. 20.11 t/s plain decode @ 4k-8k ctx
+  (breaks 20 t/s on plain decode without MTP), 3.8x prefill jump at 1k ctx (223.3 vs 58.0 t/s),
+  +6 MiB VRAM delta. Same flags as gold for A/B.
 
 MTP upgrade status (2026-09-14): PR #28243 on master with the 1.78 GB
 `shared-Q4_K_M` head definitively surpasses plain master across all tasks

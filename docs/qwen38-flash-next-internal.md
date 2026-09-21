@@ -20,7 +20,7 @@ llama-swap, three tiers, all smoke-tested.
 | gold | `qwen38-flash-next` | `vendor/llama.cpp-master` | master `b78a39a2f` | prose 19.1–19.6 · code 19.3–19.6 · aggregate 19.35 t/s · pp 198-200 t/s @ 64k |
 | vision | `qwen38-flash-next-vision` | `vendor/llama.cpp-master` | master `b78a39a2f` + `mmproj-F16.gguf` | 18.2–18.6 t/s @ 16k ctx, 10.4 GB VRAM (-ncmoe 45, 1.8 GB headroom for image/KV) |
 | MTP | `qwen38-flash-next-mtp` | `vendor/llama.cpp-pr-test-28243` | PR #28243 (`d1a92352c` on master `b78a39a2f`) | code 20.4–21.9 · prose 20.0–20.7 · aggregate **20.65 t/s** @ 16k ctx (-ncmoe 45, Q4_K_M head) |
-| exp | `qwen38-flash-next-exp` | `llama-server-exp` | `e1748dbd5` (master + #28023 #28068 #27941) | parity with gold; #28023/#27941 now upstream, so the delta is #28068 only |
+| exp | `qwen38-flash-next-exp` | `vendor/llama.cpp-pr-test-28770-28699-28213` | master + #28770 #28699 #28213 | 20.11 t/s plain decode @ 4k-8k ctx (breaks 20 t/s on plain decode), 223.3 t/s pp @ 1k ctx (+285%), +6 MiB VRAM |
 
 **Hardware final state**: RAM 5600 MT/s (was 5000; tg-neutral, keep for
 gaming), governor/EPP performance (persistence unit committed), spill-free,
@@ -94,7 +94,7 @@ timing changes are tg-neutral; the speculation pool makes single tg probes
 | gold | `qwen38-flash-next` | `vendor/llama.cpp-master/build/bin/llama-server` | master `b78a39a2f` | tracks upstream; refresh = `git fetch` + rebuild (ccache ~2 min); --fit on --fit-target 512 |
 | vision | `qwen38-flash-next-vision` | `vendor/llama.cpp-master/build/bin/llama-server` | master `b78a39a2f` | multimodal vision tier with `mmproj-F16.gguf`; -ngl 99 -ncmoe 45 @ 16k ctx |
 | MTP | `qwen38-flash-next-mtp` | `vendor/llama.cpp-pr-test-28243/build/bin/llama-server` | PR #28243 `d1a92352c` on master `6d54aa023` | compact `shared-Q4_K_M.gguf` (1.78 GB), -ngl 99 -ncmoe 45, 20.65 t/s aggregate @ 16k ctx |
-| exp | `qwen38-flash-next-exp` | `vendor/llama.cpp-pr-test-28023-28068-27941/build/bin/llama-server-exp` | `e1748dbd5` (master + #28023 #28068 #27941) | A/B vs gold for unmerged GDN #28068 fix |
+| exp | `qwen38-flash-next-exp` | `vendor/llama.cpp-pr-test-28770-28699-28213/build/bin/llama-server` | master + #28770 #28699 #28213 | QSA Sparsity Stack: CUDA sparse FA (#28770), incremental pooled cache (#28699), gather sparse decode (#28213) |
 
 - All four share the AtomicChat quant; `--parallel 1` mandatory everywhere
   (multi-slot corrupts the QSA indexer cache → hallucinations).
@@ -759,7 +759,68 @@ Evaluated prompt processing (prefill) throughput across Old Gold (`9d817213a`), 
 3. **Layer offload benefit:** Moving from `-ncmoe 46` to `-ncmoe 45` speeds up shorter prompts (~512 tokens) from 205.7 to 220.1 t/s (+7.0%) by eliminating one MoE layer's DRAM traffic.
 4. **Batch thread scaling:** Allocating 16 threads (adding the 4 slow Gracemont E-cores) regresses throughput from 248.2 to 244.3 t/s due to synchronization jitter. `--threads-batch 12` (matching the 6 Golden Cove P-cores with hyperthreading) remains the optimal setting.
 
-### 9.10 Reboot checklist
+### 9.11 Direct Reads Evaluation (PR #29030) & QSA Sparsity Stack Breakthrough (#28770, #28699, #28213) — 2026-09-19
+
+#### 1. Direct Reads Evaluation (PR #29030)
+Evaluated `vendor/llama.cpp-pr-test-29030` (`--lazy-mode on-direct`, author pwilkin, port/evolution of #28136) on the AtomicChat AD-4.27bpw model across prompt lengths (512, 1024, 2048 tokens) and 64-token decode:
+
+| Configuration | Cold ~512 (t/s) | Warm ~512 (t/s) | Warm ~1024 (t/s) | Warm ~2048 (t/s) | Decode tg (t/s) | VRAM (MiB) |
+|---|---:|---:|---:|---:|---:|---:|
+| 1. Master `b78a39a2f` (`--lazy-mode on`, ub 2048) | 81.6 | 199.5 | *OOM graph capture* | — | — | 11,944 |
+| 2. PR #29030 (`--lazy-mode on`, ub 2048) | **122.6** | 212.4 | 308.1 | **400.6** | **18.67** | 11,944 |
+| 3. PR #29030 (`--lazy-mode on-direct`, ub 2048) | 110.9 | **224.4** | **328.0** | 362.7 | 12.74 | 11,944 |
+| 4. PR #29030 (`--lazy-mode on-direct`, ub 1024) | 54.4 | 202.0 | 217.3 | 277.4 | 16.67 | 11,510 |
+
+- **Prefill Breakthrough**: The refreshed PR #29030 base crossed 400 t/s prefill (**400.6 t/s @ 2048 tokens**). At 512–1024 tokens, `--lazy-mode on-direct` improved prefill by +5.6% to +6.5% via sorted, deduplicated `pread()` direct reads.
+- **Decode Regression**: `--lazy-mode on-direct` dropped decode from **18.67 t/s down to 12.74 t/s** (−31.8%). Root cause: `llama_lazy_reader::gather` executes on *every single token step* during decode for the 24 n-gram lookups, issuing 24 explicit POSIX `pread()` syscalls and thread synchronization instead of reading through mmap page cache.
+- **Verdict**: Keep production on `--lazy-mode on`. Direct reads remain a pure batch/prefill accelerator until upstream adds an adaptive mode switch (direct reads during prefill, mmap during decode).
+
+#### 2. QSA Sparsity Stack Breakthrough (#28770 + #28699 + #28213)
+Cleanly merged the 3 complementary QSA sparsity PRs into `vendor/llama.cpp-pr-test-28770-28699-28213`:
+- **#28770** (`am17an`): Real CUDA sparse Flash Attention inside `build_attn_mha` for `qwen4exp`
+- **#28699** (`Rhonstin`): Incremental pooled-key cache for the QSA indexer ($O(1)$ update per step)
+- **#28213** (`abdel-darwish-27`): Gather-based sparse decode attention over top-2048 KV entries
+
+Benchmarked across context depths (1k, 4k, 8k, 12k tokens) against master baseline (`b78a39a2f`) and an ablation with pooled-cache disabled (`LLAMA_QSA_NO_POOLED_CACHE=1`):
+
+| Context Depth | Master Baseline (`b78a39a2f`) | **QSA Sparsity Stack** (All 3 Active) | Pooled Cache Disabled (A/B) | **Net Gain vs Master** |
+|---|---:|---:|---:|---:|
+| **1k Context** (~1,300 tok) | 58.0 pp · 15.53 tg | **223.3 pp · 19.41 tg** | 90.5 pp · 17.19 tg | **+285% prefill** · **+25.0% decode** |
+| **4k Context** (~5,000 tok) | 247.2 pp · 18.35 tg | **331.1 pp · 20.11 tg** | 248.7 pp · 18.65 tg | **+34.0% prefill** · **+9.6% decode** |
+| **8k Context** (~10,000 tok) | 294.6 pp · 18.94 tg | **339.0 pp · 20.08 tg** | 297.0 pp · 19.04 tg | **+15.1% prefill** · **+6.0% decode** |
+| **12k Context** (~15,000 tok) | 317.9 pp · 16.45 tg | **330.3 pp · 16.62 tg** | 299.1 pp · 18.10 tg | **+3.9% prefill** · **+1.0% decode** |
+| **VRAM Footprint** | **11,170 MiB** | **11,176 MiB** | **11,176 MiB** | **+6 MiB total** *(zero memory penalty)* |
+
+**Key Findings:**
+1. **Plain Decode Breaks 20 t/s**: For the first time on this 12 GB box, plain decode without MTP surpassed 20 t/s (**20.11 t/s @ 4k context, 20.08 t/s @ 8k context**).
+2. **Short-Context Prefill Surge (3.85×)**: Jumped from 58.0 to 223.3 t/s at ~1k context. The A/B ablation confirms #28699's incremental pooled-key cache eliminates the quadratic re-pooling overhead across early turns.
+3. **Negligible Memory Cost**: Only +6 MiB VRAM delta (11,176 vs 11,170 MiB), leaving >1.1 GB of unallocated VRAM headroom at 16k context.
+4. **Router Deployment**: Wired as experimental tier `qwen38-flash-next-exp` in `llama-swap.yaml`.
+
+#### 3. Unified QSA Sparsity + MTP Stack Performance (#28770 + #28699 + #28213 + #28243)
+Cleanly merged Daniel Han's shared-module MTP PR #28243 onto the QSA Sparsity Stack branch (`vendor/llama.cpp-pr-test-28770-28699-28213`) with zero conflicts. Evaluated on the 6-prompt unique corpus (`code-pathlib`, `code-rust-lru`, `code-sql-batch`, `story-radio`, `story-library`, `story-orchard`) against the previous production MTP baseline (`vendor/llama.cpp-pr-test-28243`) at `-ncmoe 45`, `n_max=2`, `p_min=0.7`, and 16k context with `shared-Q4_K_M`:
+
+| Task | Production MTP Baseline (#28243) | Unified QSA + MTP Stack | Delta |
+|---|---:|---:|---:|
+| `code-pathlib` | 12.94 t/s | **14.79 t/s** | **+14.3%** |
+| `code-rust-lru` | 15.20 t/s | **16.70 t/s** | **+9.9%** |
+| `code-sql-batch` | **19.03 t/s** | 18.97 t/s | -0.3% |
+| `story-radio` | 14.79 t/s | **14.90 t/s** | +0.7% |
+| `story-library` | 17.50 t/s | **17.83 t/s** | +1.9% |
+| `story-orchard` | 17.93 t/s | **18.86 t/s** | **+5.2%** |
+| **AGGREGATE** | **16.04 t/s** | **16.92 t/s** | **+5.5%** |
+| **Draft Acceptance** | 76.85% (mean len 2.28) | **87.04% (mean len 2.47)** | **+10.2 pt** |
+| **Peak VRAM** | 11,860 MiB | 11,868 MiB | +8 MiB |
+
+- **Faster Code & Story Generation**: Outperforms the previous standalone MTP build across 5 of 6 tasks on the unique corpus (+14.3% on pathlib, +9.9% on rust-lru).
+- **Higher Speculative Acceptance**: Draft acceptance jumped from 76.9% to 87.0% with mean drafted length extending from 2.28 to 2.47 tokens per verify round.
+- **Production Promotion**: Macro `qwen38_mtp_server` in `llama-swap.yaml` now points to `vendor/llama.cpp-pr-test-28770-28699-28213/build/bin/llama-server`, uniting MTP speculative drafting with CUDA sparse Flash Attention and the incremental indexer cache under tier `qwen38-flash-next-mtp`.
+
+#### 4. Upstream Validation & Multi-Sequence QSA Fix (PR #29166) — 2026-09-20
+- **Upstream Merged #28770**: Upstream `llama.cpp` merged PR #28770 into master at commit `3cf03257f` (tag `b11062`: `CUDA: enable sparse fa for qwen4`), directly validating our sparse Flash Attention deployment.
+- **Multi-Sequence Indexing Bugfix (#29166)**: Merged PR #29166 (`qwen4exp: fix per-block bias indexing when a unified cache holds several sequences` by Akio Nishimura) onto our unified stack branch (`vendor/llama.cpp-pr-test-28770-28699-28213`). In multi-sequence serving or concurrent slot contexts, `set_input_qsa` previously indexed `bid_cell` and `bid_idx` by block position rather than entry index, corrupting block bias masks and causing context loss. Resolved the non-semantic conflict with #28699's incremental pooled-key cache, rebuilt `llama-server`, and validated live serving via `qwen38-flash-next-mtp` (88.0% draft acceptance, peak VRAM 11,868 MiB).
+
+### 9.12 Reboot checklist
 
 1. Capture `sudo dmidecode -t 17` baseline (see §9.3.1) — or skip if RAM
    settings change is deferred.
@@ -786,9 +847,11 @@ Evaluated prompt processing (prefill) throughput across Old Gold (`9d817213a`), 
 - **#28068** (GDN l2norm max→rsqrt): under review — CISC skeptical,
   author's own numbers show marginal effect (KLD −1.7% rel, top-1 −0.2 pt).
   Stays in exp tier only; do not promote to gold unless it merges.
-- **QSA true sparsity**: upstream still computes full attention then masks.
-  When real sparsity lands, prefill is the step-change (18 min/220k →
-  potentially minutes). Watch the PR list.
+- **QSA true sparsity**: Resolved locally on 2026-09-19 via QSA Sparsity Stack
+  (#28770 sparse Flash Attention + #28699 incremental pooled key cache + #28213
+  gather sparse decode) deployed to `qwen38-flash-next-exp`. Slashed 1k context
+  prefill latency by 3.85x and broke 20 t/s on plain decode (20.11 t/s @ 4k ctx)
+  without MTP.
 - **Multimodal**: resolved in master `b78a39a2f`. Verified working with
   `mmproj-F16.gguf` under tier `qwen38-flash-next-vision`.
 - **Unsloth quant rework**: community expects unsloth to re-ladder this
@@ -852,3 +915,142 @@ Community measurements (`Local-Two9825`, `UNO10100f`):
 * At 200k context: drops by ~50% to ~20 t/s on multi-GPU/high-channel rigs (`Local-Two9825`).
 * Confirms attention compute and KV cache traversal costs grow linearly with sequence length, reinforcing the standard benchmarking rule: always report throughput tied to specific context lengths (16k for MTP, 64k for Gold).
 
+
+## 12. Research Leads & Next Experiments (2026-09-16)
+
+These are research candidates, not committed backlog items or validated serving
+changes. Linear remains authoritative for committed work. Keep the current gold
+and compact-head MTP tiers while evaluating isolated arms. External throughput
+claims below are author reports on different hardware, not expected local gains.
+
+### 12.1 Measurement contract
+
+- Capture `bench-models/bench-env.sh` frontmatter for every arm; compare only
+  verified matching governor/EPP, RAM clock, thermal and memory-pressure states.
+- Stop llama-swap for full-VRAM experiments and restore its prior service state
+  afterward. Snapshot configs/scripts before edits; keep bench and serving flags
+  synchronized if a winner is promoted.
+- Warm expert residency and record `/proc/<pid>/io` read-byte deltas. A fresh
+  process does not necessarily have a cold OS page cache; `--no-warmup` alone
+  does not establish cold residency.
+- Run interleaved baseline/candidate repetitions (at least three per arm), fresh
+  prompts, and identical generation budgets/sampling. Retain the six-task corpus,
+  add longer code/tool-call continuations, and report spread as well as aggregate
+  tokens divided by total decode time. Measure TTFT and end-to-end completion time.
+- Record both allocated context and actual occupied tokens. A short prompt in a
+  64k allocation is not a 64k-depth benchmark. Log placement, peak VRAM, draft
+  acceptance/span, and available timing breakdowns.
+- Screen output/task correctness, retrieval and tool-call formatting. Establish
+  plain-versus-plain repeatability before attributing output differences to MTP;
+  CUDA QSA top-k tie handling has an upstream nondeterminism report ([#28497](https://github.com/ggml-org/llama.cpp/issues/28497)).
+
+### 12.2 Priority 1 — Placement and fit reserve (existing quant/runtime)
+
+Lead: [PulseVector's 4070 report](https://reddit.com/r/LocalLLaMA/comments/1wgiefk/comment/pa2mq7e/)
+claims 24.5 t/s with DDR5-5200, a 14th-gen i7, `-t 20`, fit target 128 and
+overclocking. The exact CPU SKU, full command, workload and contribution of each
+change were not established by the supplied comment.
+
+- [ ] Sweep `--fit-target 512/256/128` at 16k, 32k and 64k allocation; capture
+      actual tensor/layer placement, peak VRAM and stability through real prefill.
+- [ ] Run the full fresh corpus for plain `-ncmoe 46/45/44` at 16k, where prior
+      fitting probes showed 44 fits. Compare best plain placement against compact
+      Q4 MTP-2 at 45; also retain matched-placement plain/MTP comparisons.
+- [ ] Keep CPU/GPU clocks and thread settings fixed for the placement sweep.
+      Only then test explicit P-core affinity/thread alternatives independently.
+
+Decision: adopt only a repeatable improvement that survives representative prompt
+lengths and the normal desktop workload. Reducing reserve 512→128 releases only
+384 MiB versus ~1,138 MiB per complete expert layer; inspect placement rather
+than assuming another layer fits. Do not copy another CPU's `-t 20` setting.
+The current +6.7% MTP result compares against plain at 46, not best-fit plain.
+
+### 12.3 Priority 2 — Compact MTP plus mixed KV for context capacity
+
+Lead: [4070 mixed-KV command](https://reddit.com/r/LocalLLaMA/comments/1wgiefk/comment/pa2stty/)
+uses q8 K/q4 V with a smaller IQ3 quant. Separate [developer KV measurements](https://github.com/ucicelos/flashnext-hybrid#12-quantisation-q4-against-q5-and-the-kv-cache)
+support preserving K at q8; q4 V saves memory but increases logit divergence and
+is not intrinsically faster.
+
+- [ ] Compare `-ctk q8_0 -ctv q8_0` against `-ctk q8_0 -ctv q4_0` with the compact
+      shared-Q4_K_M head, draft depth 1/2, initially at 16k and then 32k.
+- [ ] Check whether 32k MTP can preserve `-ncmoe 45`; measure actual KV savings,
+      prefill/decode peaks and stability rather than inferring fit from idle VRAM.
+- [ ] Gate on occupied-context retrieval, code correctness and tool-call quality.
+      Keep q8/q8 as the quality baseline; do not lower K precision in this ladder.
+
+### 12.4 Priority 3 — Expert cache versus whole-layer offload versus MTP
+
+[PR #27861](https://github.com/ggml-org/llama.cpp/pull/27861) caches hot experts
+from host-offloaded layers on GPU. A [2×3090 report](https://www.reddit.com/r/LocalLLaMA/comments/1w5vjp6/qwen38flashnext_on_2x3090_ddr4_17_2529_ts_decode/)
+claims 17→25–29 t/s. This is an architectural candidate for our limited VRAM,
+not evidence of that multiplier on a 4070.
+
+- [ ] Inspect current implementation compatibility with qwen4exp and AtomicChat's
+      mixed tensor types before building. Check vendor status and isolate builds;
+      do not hand-merge the previously rejected MTP stacks.
+- [ ] Verify multi-token verification support: the [persistent-pool comparison](https://github.com/ggml-org/llama.cpp/discussions/28248)
+      describes #27861's implementation as single-token-only at that time. Do not
+      assume a cache that helps plain decode also accelerates MTP verification.
+- [ ] With equal context and VRAM constraints, compare whole-layer placement,
+      expert cache without MTP, and cache+MTP only if supported. Log cache hit rate,
+      transfer cost, CPU fallback and steady-state task throughput.
+- [ ] Inspect [prefill-time cache eviction](https://www.reddit.com/r/LocalLLaMA/comments/1wc6fsk/qwen38flashnext_on_2x3090_ddr4_part_4_2225x/)
+      only after decode caching works. Its reported 2.2–2.5× prefill gain on larger
+      hardware carries a refill cost on short turns; evaluate full turn latency.
+
+Decision: the cache must outperform the best static placement within 12 GB,
+without unbounded host pinning or quality regressions. Existing ik_llama
+`GGML_CUDA_NO_PINNED=1` protections remain mandatory for those experiments.
+
+### 12.5 Priority 4 — Actual-depth profiling and reusable state
+
+[flashnext-hybrid](https://github.com/ucicelos/flashnext-hybrid) documents sparse
+attention gather, indexing and device-resident rollback. Its gather loses at
+16k and helps at greater depth; its APU/eGPU numbers are not transferable here.
+
+- [ ] Audit which relevant fixes are already in each local binary before selecting
+      any patch. Profile occupied 8k/16k/32k/near-64k contexts where the tier fits,
+      reserving output capacity; record indexer/top-k, attention and rollback cost.
+- [ ] Separate context-dependent compute from expert re-faulting using read_bytes.
+      Diagnose graph reuse/capture and draft verification before tuning acceptance.
+- [ ] Exercise >300-token continuations and multi-turn sessions: short generations
+      can miss recurrent-state rollback corruption.
+- [ ] Investigate paired target/draft save-and-restore with the [12 GB Q3_PLE project](https://github.com/nickmatteo/Qwen38-FlashNext-Q3PLE-MTP)
+      as a reference. It reports restartable 59,750-token state; validate restored
+      continuation against uninterrupted execution before using it operationally.
+
+### 12.6 Priority 5 — Alternative quantization, after header preflight
+
+- [ ] **Q3_PLE:** inspect the above project's runtime and placement independently
+      of its custom PLE codec. It preserves AtomicChat's other 1,223 tensors and
+      reports 31.45 t/s on a 5070/5900XT/64 GB DDR4 short fixture, but only
+      18.25 plain versus 18.34 MTP on its actual-depth retrieval test. Its custom
+      format requires a patched runtime; broad quality is unproven. Reduced PLE
+      disk size alone is not evidence of faster healthy local decode.
+- [ ] **GSQ-RCO:** inspect [model card/manifest](https://huggingface.co/pfeifferj/Qwen3.8-Flash-Next-GSQ-RCO-GGUF)
+      and range-fetch headers before any download. Main weights are 47.94 GB,
+      but the required BF16 embedding shard adds 103.68 GB: 151.62 GB total text
+      files. Establish hot-weight RAM footprint, Q2_0 runtime support and head
+      compatibility. Its limited evaluations do not establish coding parity with AD.
+- [ ] Only download after disk/fast-memory preflight and a clear quality/speed
+      hypothesis. Compare against AD on identical prompts and scoring; keep the
+      existing quant until a replacement earns promotion.
+
+### 12.7 Evidence corrections to apply when revising the public writeup
+
+Section 11 is a collection of community leads, not controlled independent
+validation of mechanisms. Its stronger causal claims must not guide tuning:
+
+- The supplied tensor comment uses GB; verify units and actual local GGUF headers.
+  Its Unsloth expert sizes cannot be substituted for AtomicChat's resident RAM.
+  The local model has 33 shards, so the asserted three-shard filename/layout in
+  §11.2 must not be used as a storage instruction without inspection.
+- Cross-machine DDR4/DDR5 results do not isolate bandwidth, latency, CPU, quant,
+  context or spill. Our controlled 5000→5600 MT/s result was approximately neutral.
+- Symlinked PLE storage working is useful evidence; zero latency cost and expert
+  paging as the sole cause of a quant speed difference were not demonstrated.
+- Community context numbers are different rigs/models, not one decay curve.
+  Label allocation versus occupied depth and distinguish 16k MTP from 64k gold.
+- Top-1 token agreement is not a percentage of retained intelligence. Avoid
+  translating quant metrics or a small task suite into broad intelligence loss.

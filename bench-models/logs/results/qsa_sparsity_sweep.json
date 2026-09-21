@@ -1,0 +1,89 @@
+{
+  "1. Master b78a39a2f (Dense attention baseline)": {
+    "depths": {
+      "1k-depth": {
+        "prompt_tokens": 1301,
+        "pp_pps": 58.04101103782993,
+        "gen_tokens": 64,
+        "tg_pps": 15.531717245827146
+      },
+      "4k-depth": {
+        "prompt_tokens": 5045,
+        "pp_pps": 247.23287847384245,
+        "gen_tokens": 64,
+        "tg_pps": 18.351178640859278
+      },
+      "8k-depth": {
+        "prompt_tokens": 10037,
+        "pp_pps": 294.5542590250932,
+        "gen_tokens": 64,
+        "tg_pps": 18.93946226357238
+      },
+      "12k-depth": {
+        "prompt_tokens": 15029,
+        "pp_pps": 317.8807890990303,
+        "gen_tokens": 64,
+        "tg_pps": 16.45162478074293
+      }
+    },
+    "vram_mib": 11170
+  },
+  "2. QSA Sparsity Stack (#28770 + #28699 + #28213)": {
+    "depths": {
+      "1k-depth": {
+        "prompt_tokens": 1301,
+        "pp_pps": 223.347946228939,
+        "gen_tokens": 64,
+        "tg_pps": 19.414112889060362
+      },
+      "4k-depth": {
+        "prompt_tokens": 5045,
+        "pp_pps": 331.06083638238505,
+        "gen_tokens": 64,
+        "tg_pps": 20.112829782567538
+      },
+      "8k-depth": {
+        "prompt_tokens": 10037,
+        "pp_pps": 339.00825106970666,
+        "gen_tokens": 64,
+        "tg_pps": 20.075036023536864
+      },
+      "12k-depth": {
+        "prompt_tokens": 15029,
+        "pp_pps": 330.3367546819558,
+        "gen_tokens": 64,
+        "tg_pps": 16.622682521011864
+      }
+    },
+    "vram_mib": 11176
+  },
+  "3. QSA Sparsity Stack (Pooled-Cache disabled A/B)": {
+    "depths": {
+      "1k-depth": {
+        "prompt_tokens": 1301,
+        "pp_pps": 90.50811926006516,
+        "gen_tokens": 64,
+        "tg_pps": 17.185270858963484
+      },
+      "4k-depth": {
+        "prompt_tokens": 5045,
+        "pp_pps": 248.73254866308102,
+        "gen_tokens": 64,
+        "tg_pps": 18.65343516332415
+      },
+      "8k-depth": {
+        "prompt_tokens": 10037,
+        "pp_pps": 297.0152907685594,
+        "gen_tokens": 64,
+        "tg_pps": 19.04216115834373
+      },
+      "12k-depth": {
+        "prompt_tokens": 15029,
+        "pp_pps": 299.06097361549536,
+        "gen_tokens": 64,
+        "tg_pps": 18.100805974300307
+      }
+    },
+    "vram_mib": 11176
+  }
+}

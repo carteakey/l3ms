@@ -1,0 +1,104 @@
+{
+  "1. Production MTP Baseline (PR #28243)": {
+    "tasks": {
+      "code-pathlib": {
+        "prompt_tokens": 40,
+        "pp_tps": 12.982865214489916,
+        "gen_tokens": 192,
+        "dec_tps": 12.943032900918574,
+        "dec_ms": 14756.974
+      },
+      "code-rust-lru": {
+        "prompt_tokens": 38,
+        "pp_tps": 15.546678493052271,
+        "gen_tokens": 192,
+        "dec_tps": 15.196718336304649,
+        "dec_ms": 12568.503
+      },
+      "code-sql-batch": {
+        "prompt_tokens": 39,
+        "pp_tps": 14.708710951201024,
+        "gen_tokens": 192,
+        "dec_tps": 19.026385013743326,
+        "dec_ms": 10038.691
+      },
+      "story-radio": {
+        "prompt_tokens": 37,
+        "pp_tps": 9.271772439631365,
+        "gen_tokens": 192,
+        "dec_tps": 14.791066505591177,
+        "dec_ms": 12913.2
+      },
+      "story-library": {
+        "prompt_tokens": 38,
+        "pp_tps": 27.405618295990774,
+        "gen_tokens": 192,
+        "dec_tps": 17.50098248316584,
+        "dec_ms": 10913.673
+      },
+      "story-orchard": {
+        "prompt_tokens": 39,
+        "pp_tps": 26.742661539389882,
+        "gen_tokens": 192,
+        "dec_tps": 17.931356140015538,
+        "dec_ms": 10651.732
+      }
+    },
+    "aggregate_tps": 16.0350157976224,
+    "total_tokens": 1152,
+    "total_ms": 71842.773,
+    "peak_vram": 11860,
+    "last_acceptance": "1.54.972.611 I slot print_timing: id  0 | task 608 | draft acceptance = 0.76852 (   83 accepted /   108 generated), mean len =  2.28"
+  },
+  "2. Unified QSA Sparsity + MTP Stack": {
+    "tasks": {
+      "code-pathlib": {
+        "prompt_tokens": 40,
+        "pp_tps": 11.3611478849377,
+        "gen_tokens": 192,
+        "dec_tps": 14.793440201351887,
+        "dec_ms": 12911.128
+      },
+      "code-rust-lru": {
+        "prompt_tokens": 38,
+        "pp_tps": 19.501250389383518,
+        "gen_tokens": 192,
+        "dec_tps": 16.70378960011565,
+        "dec_ms": 11434.531
+      },
+      "code-sql-batch": {
+        "prompt_tokens": 39,
+        "pp_tps": 18.472013951580585,
+        "gen_tokens": 192,
+        "dec_tps": 18.965411954067957,
+        "dec_ms": 10070.965
+      },
+      "story-radio": {
+        "prompt_tokens": 37,
+        "pp_tps": 11.808553350086585,
+        "gen_tokens": 192,
+        "dec_tps": 14.900082465325518,
+        "dec_ms": 12818.721
+      },
+      "story-library": {
+        "prompt_tokens": 38,
+        "pp_tps": 26.40289709262414,
+        "gen_tokens": 192,
+        "dec_tps": 17.83431140369757,
+        "dec_ms": 10709.693
+      },
+      "story-orchard": {
+        "prompt_tokens": 39,
+        "pp_tps": 26.60129568772534,
+        "gen_tokens": 192,
+        "dec_tps": 18.859663760830237,
+        "dec_ms": 10127.434
+      }
+    },
+    "aggregate_tps": 16.92314038485337,
+    "total_tokens": 1152,
+    "total_ms": 68072.472,
+    "peak_vram": 11868,
+    "last_acceptance": "1.45.070.713 I slot print_timing: id  0 | task 598 | draft acceptance = 0.87037 (   94 accepted /   108 generated), mean len =  2.47"
+  }
+}

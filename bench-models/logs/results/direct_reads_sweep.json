@@ -1,0 +1,92 @@
+{
+  "2. PR #29030 (--lazy-mode on, ub 2048)": {
+    "cold_512_pps": 122.60437812272953,
+    "cold_512_io_mb": 174.1640625,
+    "prompts": {
+      "pp-512": {
+        "tok_count": 728,
+        "t1_pps": 195.60942815948187,
+        "t2_pps": 229.2726357125513,
+        "avg_pps": 212.4410319360166,
+        "read_mb": 47.71484375
+      },
+      "pp-1024": {
+        "tok_count": 1421,
+        "t1_pps": 313.5728727026539,
+        "t2_pps": 302.53610846164327,
+        "avg_pps": 308.05449058214856,
+        "read_mb": 580.53125
+      },
+      "pp-2048": {
+        "tok_count": 2807,
+        "t1_pps": 392.5314699905007,
+        "t2_pps": 408.61530506691713,
+        "avg_pps": 400.5733875287089,
+        "read_mb": 294.4453125
+      }
+    },
+    "decode_tg": 18.672248977546175,
+    "output_sample": "We need answer user: \"Write a fast Python function to compute Fibonacci numbers.\" Need provide final",
+    "vram_mib": 11944
+  },
+  "3. PR #29030 (--lazy-mode on-direct, ub 2048)": {
+    "cold_512_pps": 110.85982883242428,
+    "cold_512_io_mb": 1441.734375,
+    "prompts": {
+      "pp-512": {
+        "tok_count": 728,
+        "t1_pps": 214.0568926760493,
+        "t2_pps": 234.6511401531292,
+        "avg_pps": 224.35401641458924,
+        "read_mb": 58.453125
+      },
+      "pp-1024": {
+        "tok_count": 1421,
+        "t1_pps": 342.5548322771025,
+        "t2_pps": 313.4413856888531,
+        "avg_pps": 327.9981089829778,
+        "read_mb": 234.39453125
+      },
+      "pp-2048": {
+        "tok_count": 2807,
+        "t1_pps": 350.6463785611781,
+        "t2_pps": 374.79717958112445,
+        "avg_pps": 362.7217790711513,
+        "read_mb": 1524.05859375
+      }
+    },
+    "decode_tg": 12.742491638498343,
+    "output_sample": "We need answer user: \"Write a fast Python function to compute Fibonacci numbers.\" Need provide final",
+    "vram_mib": 11944
+  },
+  "4. PR #29030 (--lazy-mode on-direct, ub 1024)": {
+    "cold_512_pps": 54.42982041622979,
+    "cold_512_io_mb": 2786.83984375,
+    "prompts": {
+      "pp-512": {
+        "tok_count": 728,
+        "t1_pps": 193.50488108088425,
+        "t2_pps": 210.52826399781608,
+        "avg_pps": 202.01657253935016,
+        "read_mb": 190.09375
+      },
+      "pp-1024": {
+        "tok_count": 1421,
+        "t1_pps": 200.54809894233108,
+        "t2_pps": 234.05502220146127,
+        "avg_pps": 217.30156057189618,
+        "read_mb": 1452.3359375
+      },
+      "pp-2048": {
+        "tok_count": 2807,
+        "t1_pps": 237.91708381970582,
+        "t2_pps": 316.89552122878246,
+        "avg_pps": 277.40630252424415,
+        "read_mb": 2008.671875
+      }
+    },
+    "decode_tg": 16.666803352090984,
+    "output_sample": "We need answer user: \"Write a fast Python function to compute Fibonacci numbers.\" Need provide code.",
+    "vram_mib": 11510
+  }
+}
