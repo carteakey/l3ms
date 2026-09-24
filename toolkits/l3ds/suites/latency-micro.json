@@ -1,0 +1,34 @@
+{
+  "name": "latency-micro",
+  "description": "Micro-benchmark for forward pass speed and option-order flip invariance",
+  "cases": [
+    {
+      "id": "micro-01",
+      "state": {"sentiment": "The API response was instantaneous and perfectly formatted."},
+      "questions": {
+        "polarity": {
+          "type": "choice",
+          "instructions": "Determine the sentiment polarity.",
+          "criteria": {
+            "positive": "Satisfied, working well, compliments",
+            "negative": "Angry, broken, errors, complaints"
+          }
+        }
+      }
+    },
+    {
+      "id": "micro-02",
+      "state": {"sentiment": "Latency spiked over 2 seconds and broke our downstream SLA."},
+      "questions": {
+        "polarity": {
+          "type": "choice",
+          "instructions": "Determine the sentiment polarity.",
+          "criteria": {
+            "positive": "Satisfied, working well, compliments",
+            "negative": "Angry, broken, errors, complaints"
+          }
+        }
+      }
+    }
+  ]
+}

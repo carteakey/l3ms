@@ -1,0 +1,80 @@
+{
+  "$schema": "./docs/decision-runtimes.schema.json",
+  "version": "1.0",
+  "profiles": [
+    {
+      "id": "nagi-smol",
+      "name": "Nagi-Smol v0 (480M)",
+      "engine": "nagi",
+      "tier": "smol",
+      "type": "local",
+      "model": "nagisanzeninz/nagi-smol-v0",
+      "backbone": "ModernBERT-large / M2'",
+      "device": "cuda",
+      "fallback_device": "cpu",
+      "vram_gb": 1.2,
+      "expected_latency_ms": 17,
+      "description": "Ultra-fast CPU/GPU local decision model with calibrated confidence",
+      "entrypoint": "decision-models/runner.py"
+    },
+    {
+      "id": "nagi-big",
+      "name": "Nagi-Big v3 (4B)",
+      "engine": "nagi",
+      "tier": "big",
+      "type": "local",
+      "model": "nagisanzeninz/nagi-big-v3",
+      "backbone": "Qwen3.5-4B + Adapter",
+      "device": "cuda",
+      "fallback_device": "cuda",
+      "vram_gb": 8.5,
+      "expected_latency_ms": 70,
+      "description": "Balanced high-accuracy decision model capable of real-time game coordination",
+      "entrypoint": "decision-models/runner.py"
+    },
+    {
+      "id": "laya-en",
+      "name": "Laya (ModernBERT)",
+      "engine": "laya",
+      "tier": "smol",
+      "type": "local",
+      "model": "convaiinnovations/laya",
+      "backbone": "ModernBERT-large",
+      "device": "cuda",
+      "fallback_device": "cpu",
+      "vram_gb": 1.1,
+      "expected_latency_ms": 13,
+      "description": "Single forward pass encoder decision model for ultra-low latency routing",
+      "entrypoint": "decision-models/runner.py"
+    },
+    {
+      "id": "semif-openjev",
+      "name": "SemIf / OpenJev (3B)",
+      "engine": "semif",
+      "tier": "mid",
+      "type": "local",
+      "model": "TheoLeeCJ/SemIf-OpenJev",
+      "backbone": "Qwen-based logit extraction",
+      "device": "cuda",
+      "fallback_device": "cuda",
+      "vram_gb": 7.0,
+      "expected_latency_ms": 51,
+      "description": "Open semantic if decision model with direct logit readout",
+      "entrypoint": "decision-models/runner.py"
+    },
+    {
+      "id": "jev-api",
+      "name": "Jev 1.13 (TypeSafe API)",
+      "engine": "jev",
+      "tier": "hosted",
+      "type": "api",
+      "model": "typesafe/jev-latest",
+      "backbone": "Proprietary Hosted",
+      "device": "remote",
+      "vram_gb": 0.0,
+      "expected_latency_ms": 350,
+      "description": "Commercial reference decision model hosted by TypeSafe AI / OpenRouter",
+      "entrypoint": "decision-models/runner.py"
+    }
+  ]
+}

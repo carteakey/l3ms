@@ -1,0 +1,78 @@
+{
+  "name": "routing-gate",
+  "description": "Agentic routing and intent classification benchmark",
+  "cases": [
+    {
+      "id": "case-01-billing",
+      "state": {
+        "user_query": "My credit card was charged twice for the monthly team plan.",
+        "account_status": "active"
+      },
+      "questions": {
+        "squad": {
+          "type": "choice",
+          "instructions": "Which squad must resolve this incident?",
+          "criteria": {
+            "billing": "Invoicing, payment processing, credit card charges",
+            "security": "Auth, SSO, token validation, account takeovers",
+            "support": "General questions, tutorials, feature suggestions"
+          }
+        }
+      }
+    },
+    {
+      "id": "case-02-security",
+      "state": {
+        "user_query": "Someone from an unrecognized IP logged into our API key dashboard.",
+        "account_status": "flagged"
+      },
+      "questions": {
+        "squad": {
+          "type": "choice",
+          "instructions": "Which squad must resolve this incident?",
+          "criteria": {
+            "billing": "Invoicing, payment processing, credit card charges",
+            "security": "Auth, SSO, token validation, account takeovers",
+            "infrastructure": "Cluster nodes, GPUs, memory limits"
+          }
+        }
+      }
+    },
+    {
+      "id": "case-03-infra",
+      "state": {
+        "user_query": "Kubernetes pod is throwing OOMKilled on node gpu-04.",
+        "cluster": "prod-us-east"
+      },
+      "questions": {
+        "squad": {
+          "type": "choice",
+          "instructions": "Which squad must resolve this incident?",
+          "criteria": {
+            "infrastructure": "Cluster nodes, GPUs, memory limits, hardware",
+            "billing": "Invoicing and payment processing",
+            "support": "General customer support"
+          }
+        }
+      }
+    },
+    {
+      "id": "case-04-database",
+      "state": {
+        "user_query": "PostgreSQL connection pool exhausted, active connections > 1000.",
+        "db": "master-replica-2"
+      },
+      "questions": {
+        "squad": {
+          "type": "choice",
+          "instructions": "Which squad must resolve this incident?",
+          "criteria": {
+            "infrastructure": "Database, connection pools, cluster nodes",
+            "billing": "Payment processing and invoices",
+            "growth": "Marketing campaigns and user referrals"
+          }
+        }
+      }
+    }
+  ]
+}
