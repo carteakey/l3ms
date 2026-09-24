@@ -68,7 +68,14 @@ class NagiEngine(BaseDecisionEngine):
         try:
             if "smol" in model_name.lower():
                 from nagi import load_smol
-                self.model = load_smol(device=device)
+                try:
+                    self.model = load_smol(device=device)
+                except Exception as cuda_err:
+                    if device != "cpu":
+                        print(f"[{model_name}] Device {device} error ({cuda_err}), falling back to CPU...", file=sys.stderr)
+                        self.model = load_smol(device="cpu")
+                    else:
+                        raise
             elif "huge" in model_name.lower():
                 from nagi import load_huge
                 self.model = load_huge(device=device)
