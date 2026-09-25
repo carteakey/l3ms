@@ -55,6 +55,14 @@ struct Cli {
     #[arg(long, default_value_t = 100)]
     tick_ms: u64,
 
+    /// API key for hosted System One / TypeSafe / OpenRouter API.
+    #[arg(long, env = "TYPESAFE_API_KEY")]
+    api_key: Option<String>,
+
+    /// Base URL override for System One compatible API endpoint.
+    #[arg(long, env = "TYPESAFE_BASE_URL")]
+    base_url: Option<String>,
+
     /// Root directory containing decision-runtimes.json.
     #[arg(long, default_value = env!("CARGO_MANIFEST_DIR"))]
     root: PathBuf,
@@ -118,6 +126,12 @@ fn run(cli: Cli) -> Result<u8> {
         }
         if let Some(ref q) = cli.question {
             cmd.arg("--question").arg(q);
+        }
+        if let Some(ref key) = cli.api_key {
+            cmd.arg("--api-key").arg(key);
+        }
+        if let Some(ref base) = cli.base_url {
+            cmd.arg("--base-url").arg(base);
         }
 
         let status = cmd.status()?;

@@ -22,46 +22,48 @@ class BaseDecisionEngine:
 
 
 class MockOrApiJevEngine(BaseDecisionEngine):
-    def __init__(self, model: str = "typesafe/jev-latest"):
+    def __init__(self, model: str = "typesafe/jev-latest", api_key: str = None, base_url: str = None):
         self.model = model
-        self.api_key = os.environ.get("TYPESAFE_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
+        self.api_key = api_key or os.environ.get("TYPESAFE_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
+        self.base_url = base_url or os.environ.get("TYPESAFE_BASE_URL")
         self.client = None
         if self.api_key:
             try:
                 from typesafe_sdk import TypeSafeClient
-                base_url = os.environ.get("TYPESAFE_BASE_URL")
-                self.client = TypeSafeClient(api_key=self.api_key, base_url=base_url)
+                self.client = TypeSafeClient(api_key=self.api_key, base_url=self.base_url)
             except Exception as e:
-                print(f"[jev-api] Initialization notice: {e}", file=sys.stderr)
+                print(f"[systemone-api] Initialization notice: {e}", file=sys.stderr)
 
     def decide(self, state: Dict[str, Any], questions: Dict[str, Any]) -> Dict[str, Any]:
         if self.client:
             t0 = time.perf_counter()
-            resp = self.client.system_one(state=state, questions=questions, model=self.model)
-            elapsed_ms = (time.perf_counter() - t0) * 1000
-            
-            # Normalize response from SystemOneResponse
-            dump = resp.model_dump() if hasattr(resp, "model_dump") else {}
-            answers = {}
-            if "choices" in dump and dump["choices"]:
-                for q_id, q_val in dump["choices"].items():
-                    answers[q_id] = {
-                        "choice": q_val.get("choice"),
-                        "confidence": q_val.get("confidence", 0.0),
-                        "probabilities": q_val.get("probabilities", {})
-                    }
-            if "nouls" in dump and dump["nouls"]:
-                for q_id, q_val in dump["nouls"].items():
-                    answers[q_id] = {
-                        "choice": q_val.get("choice"),
-                        "confidence": q_val.get("confidence", 0.0),
-                        "probabilities": {"true": q_val.get("probability", 0.0), "false": 1.0 - q_val.get("probability", 0.0)}
-                    }
-            return {
-                "answers": answers,
-                "latency_ms": elapsed_ms,
-                "engine": "jev-live-api"
-            }
+            try:
+                resp = self.client.system_one(state=state, questions=questions, model=self.model)
+                elapsed_ms = (time.perf_counter() - t0) * 1000
+                dump = resp.model_dump() if hasattr(resp, "model_dump") else {}
+                answers = dump.get("answers", {})
+                if not answers:
+                    answers = {}
+                    if "choices" in dump and dump["choices"]:
+                        answers.update(dump["choices"])
+                    if "scores" in dump and dump["scores"]:
+                        answers.update(dump["scores"])
+                    if "nouls" in dump and dump["nouls"]:
+                        answers.update(dump["nouls"])
+                return {
+                    "model": dump.get("model", self.model),
+                    "usage": dump.get("usage", {}),
+                    "answers": answers,
+                    "latency_ms": elapsed_ms,
+                    "engine": "systemone-official-api"
+                }
+            except Exception as api_err:
+                print(f"[systemone-api] Live request failed ({api_err})", file=sys.stderr)
+                return {
+                    "error": str(api_err),
+                    "latency_ms": (time.perf_counter() - t0) * 1000,
+                    "engine": "systemone-official-api (failed)"
+                }
         else:
             # Emulate WAN network latency of hosted Jev API (P50 ~250ms, jitter up to 500ms)
             state_str = json.dumps(state) if isinstance(state, dict) else str(state)
@@ -239,7 +241,7 @@ class SemIfEngine(BaseDecisionEngine):
         }
 
 
-def get_engine(engine_name: str, model: str, device: str) -> BaseDecisionEngine:
+def get_engine(engine_name: str, model: str, device: str, api_key: str = None, base_url: str = None) -> BaseDecisionEngine:
     if engine_name == "nagi":
         return NagiEngine(model, device)
     elif engine_name == "laya":
@@ -247,7 +249,7 @@ def get_engine(engine_name: str, model: str, device: str) -> BaseDecisionEngine:
     elif engine_name == "semif":
         return SemIfEngine(model, device)
     elif engine_name == "jev":
-        return MockOrApiJevEngine(model)
+        return MockOrApiJevEngine(model, api_key=api_key, base_url=base_url)
     else:
         raise ValueError(f"Unknown engine: {engine_name}")
 
@@ -319,11 +321,13 @@ def main():
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--state", type=str, default=None)
     parser.add_argument("--question", type=str, default=None)
+    parser.add_argument("--api-key", type=str, default=None)
+    parser.add_argument("--base-url", type=str, default=None)
     parser.add_argument("--bench-suite", type=str, default=None)
     parser.add_argument("--iterations", type=int, default=10)
 
     args = parser.parse_args()
-    engine = get_engine(args.engine, args.model, args.device)
+    engine = get_engine(args.engine, args.model, args.device, api_key=args.api_key, base_url=args.base_url)
 
     if args.bench_suite:
         run_benchmark(engine, args.bench_suite, args.iterations)
