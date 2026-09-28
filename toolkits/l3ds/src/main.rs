@@ -152,3 +152,48 @@ fn main() -> ExitCode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::Parser;
+    use std::path::PathBuf;
+
+    #[test]
+    fn default_root_loads_child_manifest_and_assets() {
+        let cli = Cli::try_parse_from(["l3ds"]).expect("default CLI arguments should parse");
+        let expected_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+        assert_eq!(cli.root, expected_root);
+        let manifest = crate::manifest::load_manifest(&cli.root)
+            .expect("default root should contain decision-runtimes.json");
+        assert!(!manifest.profiles.is_empty());
+        assert!(cli.root.join("suites/routing-gate.json").is_file());
+        assert!(cli.root.join("decision-models/arena_sim.py").is_file());
+        for profile in manifest.profiles {
+            assert!(
+                cli.root.join(profile.entrypoint).is_file(),
+                "profile entrypoint should resolve under the default root"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_root_loads_its_manifest() {
+        let root = tempfile::tempdir().expect("temporary root should be created");
+        std::fs::write(
+            root.path().join("decision-runtimes.json"),
+            r#"{"version":"test","profiles":[]}"#,
+        )
+        .expect("test manifest should be written");
+        let root_arg = root.path().to_str().expect("temp path should be UTF-8");
+        let cli = Cli::try_parse_from(["l3ds", "--root", root_arg])
+            .expect("explicit root argument should parse");
+
+        assert_eq!(cli.root, root.path());
+        let manifest = crate::manifest::load_manifest(&cli.root)
+            .expect("explicit root should select its manifest");
+        assert_eq!(manifest.version, "test");
+        assert!(manifest.profiles.is_empty());
+    }
+}

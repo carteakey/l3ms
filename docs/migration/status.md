@@ -16,8 +16,8 @@ CAR-220 Phase 9, and CAR-221 Phase 10.
 | Phase | State | Evidence / remaining gate |
 | --- | --- | --- |
 | 0. Baseline and protection | In progress | Original L3MS `68fd7bc48f803aecb5ae5d25a3f30967b46da3eb`; L2M2 `39e4d40a4e5ed993e99aa4ed70c9d183873a90ba`; L3DS `4716ddf3508d224645416f3ba70d5e34c138cedd`. Source inventories and backups in progress. |
-| 1. Folder/history import | Pending | Import selected source histories and WIP under `toolkits/`; preserve originals; add README wordmark and navigation. |
-| 2. Independent operation | Pending | Per-toolkit checks, path fixes, and CI. |
+| 1. Folder/history import | In progress | L3DS five-commit history imported under `toolkits/l3ds`; L2M2 audit/import pending. README wordmark and navigation committed. |
+| 2. Independent operation | In progress | Imported L3DS build, test, profile list, and explicit old-root list pass; L2M2 and CI pending. |
 | 3. Runtime cutover | Pending | Live L3MS, L2M2, L3DS checks on the deployment host, with rollback. |
 | 4. Shared contracts | Pending | Catalog, configuration, and job contracts. |
 | 5. Runtime adapters | Pending | Manual, verified service transitions. |
@@ -49,6 +49,12 @@ CAR-220 Phase 9, and CAR-221 Phase 10.
 | 2026-09-28 | Read-only live host baseline | `l2m2-comfyui.service` active from the original L2M2 checkout in GPU mode; `http://127.0.0.1:8188/system_stats` responds. `llama-swap.service` inactive; ports 8080/8001 do not respond. RTX 4070 reports 12,282 MiB total and 362 MiB used. No service was switched. |
 | 2026-09-28 | L3MS recovery snapshot | Verified Git history bundle, tracked WIP patch, and archive of 12 untracked files under `/home/kchauhan/repos/l3ms-migration-backup.Z0zIPT/`. Ignored runtimes and weights remain in the original checkout. |
 | 2026-09-28 | Dashboard data baseline | Three generator unit tests pass. Regeneration differs from the checked-in `docs/generated-models.js` in four command examples' reasoning-effort settings; this is pre-existing source/payload drift, not caused by the monorepo import. The generated file was returned to its checked-in state on this branch pending the site phase. |
+| 2026-09-28 | L3DS import | Audited disposable five-commit history merged as `ee27a64`; 15 tracked paths and blob IDs match source under `toolkits/l3ds/`. Full-history high-signal pattern and size audit found no hits; dedicated secret scanner remains a pre-push safeguard. |
+| 2026-09-28 | L3DS recovery bundle | Original complete history bundled and verified at `/home/kchauhan/repos/l3ms-migration-backup.Z0zIPT/l3ds-history.bundle`; source checkout remains clean. |
+| 2026-09-28 | L3DS child operation | `cargo build --locked`, `cargo test --locked` (0 tests), `l3ds --list` (6 profiles), and `l3ds --root /home/kchauhan/repos/l3ds --list` passed from the imported child; child target output is ignored. No decision inference was claimed. |
+| 2026-09-28 | Root regression after first child import | `cargo test --all-targets --locked` passed: 258 passed, 1 ignored. |
+| 2026-09-28 | Root lint after first child import | `cargo clippy --all-targets --locked -- -D warnings` passed. |
+| 2026-09-28 | L3DS child path follow-through | Documented child-directory commands and compile-time default root; added two offline tests for the default root and `--root` override. Child fmt, offline test (2 passed), Clippy, build, and `--list` pass. |
 
 ## Open decisions
 

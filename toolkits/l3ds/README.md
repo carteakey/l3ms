@@ -21,6 +21,23 @@ Unlike autoregressive LLMs (System 2) that generate token-by-token JSON, decisio
 
 ## Quickstart
 
+From the L3MS monorepo root, enter the L3DS child before running these
+commands:
+
+```bash
+cd toolkits/l3ds
+```
+
+Cargo sets the CLI's default `--root` to this package directory
+(`toolkits/l3ds`) through `CARGO_MANIFEST_DIR`. The manifest, Python runner,
+benchmark suites, and `.venv` are resolved beneath that directory even when the
+binary is launched from another working directory. To select another
+compatible checkout, run:
+
+```bash
+./target/release/l3ds --root /path/to/l3ds --list
+```
+
 ### Build the CLI
 ```bash
 cargo build --release

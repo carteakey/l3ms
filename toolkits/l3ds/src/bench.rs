@@ -71,7 +71,9 @@ pub fn run_benchmark(
                 if out.status.success() {
                     let stdout_str = String::from_utf8_lossy(&out.stdout);
                     // Parse JSON output line from runner
-                    if let Some(json_line) = stdout_str.lines().find(|l| l.starts_with("BENCH_RESULT:")) {
+                    if let Some(json_line) =
+                        stdout_str.lines().find(|l| l.starts_with("BENCH_RESULT:"))
+                    {
                         let json_data = &json_line["BENCH_RESULT:".len()..];
                         if let Ok(res) = serde_json::from_str::<serde_json::Value>(json_data) {
                             let p50 = res["p50_ms"].as_f64().unwrap_or(0.0);
@@ -79,7 +81,11 @@ pub fn run_benchmark(
                             let flips = res["flip_rate"].as_f64().unwrap_or(0.0);
                             println!(
                                 "  {:<16} {:<10.2} {:<10.2} {:<10.2}% {:<12}",
-                                profile.id, p50, p95, flips * 100.0, "PASSED"
+                                profile.id,
+                                p50,
+                                p95,
+                                flips * 100.0,
+                                "PASSED"
                             );
                             continue;
                         }
