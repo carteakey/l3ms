@@ -48,6 +48,7 @@ CAR-220 Phase 9, and CAR-221 Phase 10.
 | 2026-09-28 | Branch formatting recovery | Formatted five L3MS source files (18 insertions, 17 deletions); root `cargo fmt --all -- --check` now passes on the branch. Original checkout remains unchanged. |
 | 2026-09-28 | Read-only live host baseline | `l2m2-comfyui.service` active from the original L2M2 checkout in GPU mode; `http://127.0.0.1:8188/system_stats` responds. `llama-swap.service` inactive; ports 8080/8001 do not respond. RTX 4070 reports 12,282 MiB total and 362 MiB used. No service was switched. |
 | 2026-09-28 | L3MS recovery snapshot | Verified Git history bundle, tracked WIP patch, and archive of 12 untracked files under `/home/kchauhan/repos/l3ms-migration-backup.Z0zIPT/`. Ignored runtimes and weights remain in the original checkout. |
+| 2026-09-28 | Dashboard data baseline | Three generator unit tests pass. Regeneration differs from the checked-in `docs/generated-models.js` in four command examples' reasoning-effort settings; this is pre-existing source/payload drift, not caused by the monorepo import. The generated file was returned to its checked-in state on this branch pending the site phase. |
 
 ## Open decisions
 
