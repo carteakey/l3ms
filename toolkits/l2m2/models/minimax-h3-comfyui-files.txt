@@ -1,0 +1,7 @@
+# Official Comfy-Org/MiniMax-H3 reference-quality baseline.
+# Total upstream size on 2026-09-11: 42,470,637,623 bytes (~39.6 GiB).
+diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors
+text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors
+vae/minimax_h3_video_vae_fp16.safetensors
+vae/minimax_h3_audio_vae_fp32.safetensors
+

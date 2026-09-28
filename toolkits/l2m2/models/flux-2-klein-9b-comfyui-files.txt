@@ -1,0 +1,6 @@
+# Pinned official FLUX.2-klein-9b-fp8 and Comfy-Org weights (verified bit-for-bit SHA-256)
+# repo revision repo_file relative_path bytes sha256
+titomatus0203/flux-2-klein-9b-fp8 6bc983e15e4c905dabe2985902ba26edfdbf277e flux-2-klein-9b-fp8.safetensors diffusion_models/flux-2-klein-9b-fp8.safetensors 9433061528 865ba09f5b4c3cbd3468a4bd3acb9fcb2f8740c54317482f0bcd4ed1d3655cee
+wissxi/FLUX.2-klein-base-9b-fp8 4f274be83da93f436ad65b00b3756f20386944da flux-2-klein-base-9b-fp8.safetensors diffusion_models/flux-2-klein-base-9b-fp8.safetensors 9567278472 a9f5028c24a7a96f4f45beb883aad287d9bccc246227a6803edc898ddda42cf4
+Comfy-Org/vae-text-encorder-for-flux-klein-9b 3f62d9d8ae1fec33c6e91453d5c712855b096b55 split_files/text_encoders/qwen_3_8b_fp8mixed.safetensors text_encoders/qwen_3_8b_fp8mixed.safetensors 8664848742 abad16806e0cbabc54e0325d6565847443fe396d5f0be38bb3cd3fe75a1201d6
+Comfy-Org/vae-text-encorder-for-flux-klein-9b 3f62d9d8ae1fec33c6e91453d5c712855b096b55 split_files/vae/flux2-vae.safetensors vae/flux2-vae.safetensors 336211292 868fe7b343cc8f3a19dbcfcafbc3d5f888802be3f89bd81b65b3621a066ce8f3

@@ -1,0 +1,157 @@
+{
+  "schema_version": 1,
+  "profiles": [
+    {
+      "id": "minimax-h3",
+      "name": "MiniMax H3 audio + video",
+      "runtime": "audio.cpp",
+      "variant": "Q4_K GGUF, CUDA, staged/layerwise",
+      "tasks": ["music", "video", "tts"],
+      "inputs": ["text"],
+      "status": "experimental-local",
+      "script": "media-models/generate-minimax-h3.sh",
+      "description": "Offline MiniMax-H3 generation through audio.cpp release-0.6. The Yeti profile is tuned for a 12 GB RTX 4070: Q4_K, memory saver, layerwise weights, short 480p video, and audio-first defaults.",
+      "requirements": [
+        "audio.cpp release-0.6 audiocpp_cli built with CUDA",
+        "MiniMax-H3-Q4-GGUF package in L3MS_MEDIA_ROOT",
+        "NVIDIA driver/toolkit compatible with the audio.cpp CUDA build"
+      ],
+      "notes": [
+        "The normal Q4_K DiT is the default; the optional INT8 ConvRot package is not selected because audio.cpp reports a higher peak-memory path.",
+        "Video defaults to 480p and 121 frames (about five seconds at 24 fps). Use --video to request synchronized video output.",
+        "When ffmpeg, jq, and xxd are available, --video also muxes the RGB24 payload with the generated WAV into a playable MP4; the raw JSON artifact is retained.",
+        "H3 is experimental and can be slow on 12 GB. Keep other GPU-heavy models unloaded while generating."
+      ]
+    },
+    {
+      "id": "ltx-2.5",
+      "name": "LTX-2.5 synchronized video",
+      "runtime": "LTX-2 Python",
+      "variant": "22B distilled, FP8-cast at load, CPU offload",
+      "tasks": ["video", "music"],
+      "inputs": ["text", "image"],
+      "status": "gated-local",
+      "script": "media-models/generate-ltx-2.5.sh",
+      "description": "Text-to-video/audio generation through the official LTX-2.5 DistilledPipeline. The official BF16 transformer is quantized to FP8 while loading and offloaded to CPU; an explicit transformer-path override is available for future compatible pre-quantized releases.",
+      "requirements": [
+        "Lightricks/LTX-2 checkout with uv sync --extra natten",
+        "Hugging Face access to the gated LTX-2.5 files",
+        "about 66 GiB of model storage plus CPU RAM and swap"
+      ],
+      "notes": [
+        "The official LTX-2.5 repository currently publishes BF16 split components; no official pre-quantized Ada transformer is listed. The selected fp8-cast policy still stores the eligible transformer linears in FP8 during inference.",
+        "The newly reported 2.5 NVFP4 transformer is a Blackwell-oriented path and is about 18.7 GB before runtime overhead, so it is not selected for this 12 GB Ada host.",
+        "The convolutional video VAE is selected to avoid requiring the diffusion VAE attention extra during decode.",
+        "Use --transformer PATH with the matching --quantization policy only after a pre-quantized artifact has been verified against the official ltx-pipelines loader.",
+        "The distilled pipeline accepts still-image conditioning through --image PATH FRAME STRENGTH. Use a dedicated LTX pipeline for audio-to-video or video-to-video inputs."
+      ]
+    },
+    {
+      "id": "heartmula-music",
+      "name": "HeartMuLa local music generation",
+      "runtime": "audio.cpp",
+      "variant": "HeartMuLa-oss-3B Q8_0 GGUF, CUDA",
+      "tasks": ["music"],
+      "inputs": ["text", "lyrics"],
+      "status": "local",
+      "script": "media-models/generate-heartmula-music.sh",
+      "description": "Offline prompt-, tag-, and lyrics-conditioned song generation through audio.cpp using its published HeartMuLa Q8_0 GGUF package.",
+      "requirements": [
+        "audio.cpp release-0.6 audiocpp_cli built with HeartMuLa and CUDA",
+        "HeartMuLa Q8_0 GGUF package in L3MS_MEDIA_ROOT",
+        "NVIDIA driver/toolkit compatible with the audio.cpp CUDA build"
+      ],
+      "notes": [
+        "The Q8_0 package is audio.cpp's recommended HeartMuLa download and contains the MuLa generator and HeartCodec assets in one GGUF.",
+        "Use --instrumental for a no-vocals tag preset or --lyrics/--lyrics-file for a supplied lyric sheet.",
+        "Memory saver is enabled for the 12 GB Yeti profile; keep llama-swap GPU models unloaded during generation."
+      ]
+    },
+    {
+      "id": "breeze-tts-2",
+      "name": "Breeze-TTS-2 speech generation & voice cloning",
+      "runtime": "audio.cpp",
+      "variant": "Breeze-TTS-2 Q8_0 GGUF, CUDA, T5Gemma conditioning + Mimi codec",
+      "tasks": ["tts", "clon", "design"],
+      "inputs": ["text", "audio"],
+      "status": "local",
+      "script": "media-models/generate-breeze-tts-2.sh",
+      "description": "Offline instruction-conditioned text-to-speech and reference-audio voice cloning through audio.cpp using the Breeze-TTS-2 Q8_0 GGUF package.",
+      "requirements": [
+        "audio.cpp audiocpp_cli built with breeze_tts and CUDA",
+        "Breeze-TTS-2 Q8_0 GGUF package in L3MS_MEDIA_ROOT",
+        "NVIDIA driver/toolkit compatible with the audio.cpp CUDA build"
+      ],
+      "notes": [
+        "Default Q8_0 package contains T5Gemma text conditioning, Qwen-style acoustic code generation, depth codebook decoding, and Mimi waveform decoding.",
+        "Supports standard TTS, prompt-audio voice cloning via --voice-ref and --reference-text, and voice design via --instruction.",
+        "Supports offline and streaming modes (--mode streaming --stream-frames 16).",
+        "CUDA backend uses bf16 activation rounding by default for reference parity with official Breeze-TTS 2."
+      ]
+    },
+    {
+      "id": "blender-3d",
+      "name": "Blender 3D scene & mesh generation",
+      "runtime": "Blender 5.2 / blender-mcp",
+      "variant": "Blender 5.2.1 LTS, local socket MCP bridge (port 9876)",
+      "tasks": ["3d", "render", "image"],
+      "inputs": ["text", "python"],
+      "status": "local",
+      "script": "media-models/generate-blender-3d.sh",
+      "description": "Interactive and headless 3D modeling, asset creation, material styling, and rendering in Blender 5.2.1 LTS via Model Context Protocol (blender-mcp) or direct Python execution.",
+      "requirements": [
+        "Blender 5.2.1 LTS at ~/.local/bin/blender",
+        "blender_mcp addon installed and enabled in Blender user preferences",
+        "blender-mcp CLI server runner via uv tool / uvx",
+        "MCP client configured at ~/.gemini/config/mcp_config.json"
+      ],
+      "notes": [
+        "Interactive: in Blender 3D Viewport, press N -> MCP for Blender -> Start MCP Server (port 9876).",
+        "MCP integration supports live scene inspection, object creation/manipulation, shader nodes, and viewport capture.",
+        "Headless: script also supports direct background Python execution and image rendering without GUI."
+      ]
+    },
+    {
+      "id": "qwen-image-2.1",
+      "name": "Qwen Image 2.1 image generation",
+      "runtime": "ComfyUI",
+      "variant": "INT8 ConvRot diffusion model and Qwen3-VL encoder, BF16 VAE",
+      "tasks": ["image"],
+      "inputs": ["text"],
+      "status": "local",
+      "script": "media-models/generate-qwen-image-2.1.sh",
+      "description": "Text-to-image generation through the local ComfyUI API with the official quantized Qwen Image 2.1 weights. Bundled ComfyUI workflows also support image editing and transparent PNG output.",
+      "requirements": [
+        "ComfyUI at the pinned Qwen Image 2.1-compatible revision",
+        "Official Qwen Image 2.1 ComfyUI files installed by maintenance/setup-qwen-image-2.1-comfyui.sh",
+        "Exclusive GPU time; stop llama-swap before starting ComfyUI in GPU mode"
+      ],
+      "notes": [
+        "The Yeti setup uses the official INT8 ConvRot model and text encoder with the BF16 VAE; the three files total about 16.1 GiB on disk.",
+        "The CLI default is 1024x1024, 25 steps, CFG 1, Euler/simple. Keep dimensions divisible by 32 and start at 1024 on the 12 GB RTX 4070.",
+        "Import workflows/qwen-image-2.1/image_qwen_image_2_1_t2i.json or image_qwen_image_2_1_image_edit.json for the full native ComfyUI workflow."
+      ]
+    },
+    {
+      "id": "krea-2",
+      "name": "Krea 2 raw int8 image generation",
+      "runtime": "ComfyUI",
+      "variant": "INT8 ConvRot raw model with r128 Turbo distill LoRA (0.60 strength), Qwen3-VL 4B encoder, VAE",
+      "tasks": ["image"],
+      "inputs": ["text"],
+      "status": "local",
+      "script": "media-models/generate-krea-2.sh",
+      "description": "Text-to-image generation through the local ComfyUI API using Krea 2 raw int8 with the distilled Turbo LoRA (r128). Tuned for 12 GB GPUs at resolutions up to 1024x1536, 12 steps, and CFG 1.5.",
+      "requirements": [
+        "ComfyUI at the pinned Krea 2-compatible revision",
+        "Official Krea 2 ComfyUI and Turbo LoRA files installed by maintenance/setup-krea-2-comfyui.sh",
+        "Exclusive GPU time; stop llama-swap before starting ComfyUI in GPU mode"
+      ],
+      "notes": [
+        "Uses the official INT8 ConvRot raw DiT model and Qwen3-VL 4B FP8 text encoder with the r128 distilled Turbo LoRA (strength 0.60, 12 steps, CFG 1.5).",
+        "The CLI default is 1024x1024 (or up to 1024x1536), 12 Euler/simple steps, and CFG 1.5. Keep dimensions divisible by 32 and resolutions <= 1024x1536 on 12 GiB GPUs.",
+        "Import workflows/krea-2/image_krea2_turbo_t2i_int8.json for native ComfyUI workflow usage."
+      ]
+    }
+  ]
+}
