@@ -111,17 +111,15 @@ pub(crate) fn write_unique_snapshot(
                 if let Err(error) = write_and_sync(&mut file, content) {
                     drop(file);
                     let _ = fs::remove_file(&path);
-                    return Err(anyhow::Error::new(error)).with_context(|| {
-                        format!("failed to write snapshot {}", path.display())
-                    });
+                    return Err(anyhow::Error::new(error))
+                        .with_context(|| format!("failed to write snapshot {}", path.display()));
                 }
                 return Ok(path);
             }
             Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
             Err(error) => {
-                return Err(error).with_context(|| {
-                    format!("failed to create snapshot {}", path.display())
-                })
+                return Err(error)
+                    .with_context(|| format!("failed to create snapshot {}", path.display()))
             }
         }
     }
@@ -247,8 +245,10 @@ mod tests {
     #[test]
     fn write_unique_snapshot_creates_distinct_files() {
         let temp = TempDir::new().unwrap();
-        let p1 = write_unique_snapshot(temp.path(), "20260101T120000Z", "note", ".json", b"a").unwrap();
-        let p2 = write_unique_snapshot(temp.path(), "20260101T120000Z", "note", ".json", b"b").unwrap();
+        let p1 =
+            write_unique_snapshot(temp.path(), "20260101T120000Z", "note", ".json", b"a").unwrap();
+        let p2 =
+            write_unique_snapshot(temp.path(), "20260101T120000Z", "note", ".json", b"b").unwrap();
         assert_ne!(p1, p2);
         assert_eq!(fs::read(p1).unwrap(), b"a");
         assert_eq!(fs::read(p2).unwrap(), b"b");

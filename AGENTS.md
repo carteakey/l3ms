@@ -4,11 +4,22 @@ Agent and contributor guide for `L3MS`.
 
 ## Purpose
 
-Build a keyboard-first, script-first homelab LLM toolkit with strong operational ergonomics.
+Build a keyboard-first, script-first homelab model stack with strong operational
+ergonomics.
 
-Scope: local LLM operations, including vision-capable LLMs and embeddings.
-Image generation/editing, audio/music, speech, and video belong in sibling
-`l2m2` (Local Latent Media Machine). Do not reintroduce media runtime dependencies.
+Scope: this repository contains three independently operated inference lanes:
+
+- Language: the existing root L3MS Rust package, llama-swap service, vision-capable
+  LLMs, and embeddings.
+- Media: `toolkits/l2m2` (Local Latent Media Machine), including image, audio,
+  speech, music, and video workflows.
+- Decisions: `toolkits/l3ds` (Local Low-latency Decision System), including its local
+  and hosted decision runners.
+
+The first import preserves the existing L3MS package and runtime behavior. The
+root guide governs repository-level work; keep each toolkit's setup, runtime,
+and task-specific instructions in its local `AGENTS.md`. Do not add media or
+decision runtime dependencies to the root L3MS package as part of source import.
 
 ## Engineering Rules
 

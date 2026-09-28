@@ -7,8 +7,9 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::fs_util::{atomic_write, ensure_single_component, resolve_allow_missing, safe_stamp,
-    write_unique_snapshot};
+use crate::fs_util::{
+    atomic_write, ensure_single_component, resolve_allow_missing, safe_stamp, write_unique_snapshot,
+};
 
 const DEFAULT_CONFIG_RELATIVE_PATH: &str = "model_downloader/models_config.json";
 const VERSIONS_RELATIVE_PATH: &str = ".toolkit/download_config_versions";
@@ -1188,5 +1189,4 @@ mod tests {
     fn csv_parser_trims_and_discards_empty_fields() {
         assert_eq!(csv_to_list(" one, ,two ,, three "), ["one", "two", "three"]);
     }
-
 }

@@ -222,8 +222,9 @@ pub fn atomic_write(path: impl AsRef<Path>, content: &str) -> Result<()> {
             Ok(file) => file,
             Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
             Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("failed to create temporary file for {}", path.display()))
+                return Err(error).with_context(|| {
+                    format!("failed to create temporary file for {}", path.display())
+                })
             }
         };
         let write_result = (|| -> Result<()> {

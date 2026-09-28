@@ -6,8 +6,9 @@ use std::str::FromStr;
 
 use anyhow::{anyhow, Context, Result};
 
-use crate::fs_util::{atomic_write, ensure_single_component, resolve_allow_missing, safe_stamp,
-    write_unique_snapshot};
+use crate::fs_util::{
+    atomic_write, ensure_single_component, resolve_allow_missing, safe_stamp, write_unique_snapshot,
+};
 
 const VERSIONS_RELATIVE_PATH: &str = ".toolkit/script_versions";
 const RUN_DIRECTORY: &str = "run-models";
@@ -638,5 +639,4 @@ mod tests {
                 .contains("version not found")
         );
     }
-
 }

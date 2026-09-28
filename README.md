@@ -1,10 +1,26 @@
 # L3MS
 
-`L3MS` (Local Large Language Model System) is a keyboard-first terminal toolkit for homelab LLM workflows.
+`L3MS` (Local 3-Mode Model Stack) is a keyboard-first homelab toolkit for
+language, media, and decision-model workflows.
 
-Image generation/editing, audio/music, speech, and video tooling now live in the
-sibling `l2m2` (Local Latent Media Machine) repository. Vision-capable LLMs,
-including Gemma vision, and embeddings remain in L3MS.
+```text
+    _       _____    __  __    _____
+   / /     |__  /   |  \/  |  / ___/
+  / /        / /    | \  / |  \__ \
+ / /___     / /__   | |\/| | ___/ /
+/_____/    /____/   |_|  |_|/____/
+```
+
+`L` = Local · `3` = three inference lanes · `M` = Models · `S` = Stack
+
+Language (root L3MS) · Media (L2M2) · Decisions (L3DS)
+
+The root L3MS app continues to run its existing language-model workflows. The
+media and decision toolkits keep their native runtimes and configuration;
+shared routing across lanes is planned work.
+
+Vision-capable LLMs, including Gemma vision, and embeddings remain in the
+language lane.
 
 ## App Description
 
@@ -65,6 +81,18 @@ llama-swap service configuration:
 The script derives the service port, API key, Rust toolchain environment, and
 downloader Python interpreter. Arguments are passed through to the Rust binary,
 for example `./maintenance/run-l3ms-kpc.sh --list run`.
+
+## Toolkit Sources
+
+The toolkits retain their own setup, runtime manifests, and task-specific
+behavior:
+
+- [L2M2 — media models](toolkits/l2m2/README.md)
+- [L3DS — decision models](toolkits/l3ds/README.md)
+
+Their source import and standalone checks are tracked separately from L3MS's
+existing runtime. The links identify their planned locations; they do not imply
+that L3MS already routes inference across all three lanes.
 
 Show quick-start instructions without opening TUI:
 
