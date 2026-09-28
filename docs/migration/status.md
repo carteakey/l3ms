@@ -18,7 +18,7 @@ CAR-220 Phase 9, and CAR-221 Phase 10.
 | 0. Baseline and protection | In progress | Original L3MS `68fd7bc48f803aecb5ae5d25a3f30967b46da3eb`; L2M2 `39e4d40a4e5ed993e99aa4ed70c9d183873a90ba`; L3DS `4716ddf3508d224645416f3ba70d5e34c138cedd`. Source inventories and backups in progress. |
 | 1. Folder/history import | In progress | L3DS five-commit and L2M2 three-commit histories imported under `toolkits/`; source/WIP audit, private recovery, and README wordmark done. Final tree/secret/public-path review pending. |
 | 2. Independent operation | In progress | Imported child builds, tests, profile lists, and explicit old-root lists pass; CI added locally, pre-push validation pending. |
-| 3. Runtime cutover | Pending | Live L3MS, L2M2, L3DS checks on the deployment host, with rollback. |
+| 3. Runtime cutover | In progress | Bounded L2M2 GPU-mode pilot from the branch passed and original service was restored. Representative model generation, L3MS router, and real L3DS inference still pending. |
 | 4. Shared contracts | Pending | Catalog, configuration, and job contracts. |
 | 5. Runtime adapters | Pending | Manual, verified service transitions. |
 | 6. Local coordinator | Pending | Cross-client queueing and request-driven switching. |
@@ -36,6 +36,15 @@ CAR-220 Phase 9, and CAR-221 Phase 10.
   state are being classified before history import.
 - The source tree and plan are being reviewed for paths, secrets, and large
   generated files before the first push.
+
+## Mutable runtime state (not Git migration inputs)
+
+| State | Current location / writer | Pilot strategy and rollback |
+| --- | --- | --- |
+| L3MS vendor, weights, `.toolkit`, user state | Original `~/repos/l3ms` and external model roots; no active llama-swap service at baseline | Keep root deployment paths unchanged; reconcile dirty config before any deployment. Restore the saved config/service revision if the pilot fails. |
+| ComfyUI vendor, user data, outputs, and model symlinks | Original `~/repos/l2m2/vendor/ComfyUI` and `.toolkit`; the active `l2m2-comfyui.service` is the writer | Snapshot mutable user/workflow state, verify symlink targets, and reconnect the imported child only in an exclusive pilot window. Stop old writer before starting new; preserve pilot writes and return the unit to the original checkout on rollback. |
+| L2M2 Python environments | Original `.venv-comfy/` (6.5 GiB) and `.venv-comfy-mcp/` (228 MiB); no Git owner | Rebuild or reconnect by a verified path at the new child; do not copy venvs blindly because interpreter paths are absolute. Keep originals until acceptance. |
+| L3DS Python environment and model cache | Original `.venv/` (5.1 GiB) and shared host Hugging Face cache (36 MiB, no snapshots) | Rebuild only after resolving dependency conflicts; leave the original venv/cache intact. No local model inference acceptance until a real model is available. |
 
 ## Evidence log
 
@@ -58,6 +67,7 @@ CAR-220 Phase 9, and CAR-221 Phase 10.
 | 2026-09-28 | L2M2 import | Audited public-safe three-commit history merged as `4deece4`; 87 source/evidence files under `toolkits/l2m2/`. A third-party transcript and a host-specific Funnel note were excluded from every imported commit and retained in the verified private WIP backup at `/home/kchauhan/repos/l2m2-migration-backup-20260928/l2m2-selected-private.bundle`. No weights/bulk binaries in imported history. |
 | 2026-09-28 | L2M2 child operation | `cargo fmt --check`, Clippy, Rust tests (4 passed), release build, 7-profile list, Python syntax, 14 downloader tests, 9 media-model tests, shell syntax, and explicit old-root list passed. No inference or runtime switch was attempted. |
 | 2026-09-28 | Model ignore safeguard | Imported child `.gitignore` now ignores GGUF/safetensors and other `models/` contents while allowing only direct `*-files.txt` inventory files; verified with `git check-ignore --no-index`. |
+| 2026-09-28 | L2M2 live pilot and rollback | After user approval, confirmed ComfyUI queue empty and llama-swap inactive; stopped original transient unit, archived 81 `.toolkit` entries to a verified mode-600 backup at `/home/kchauhan/repos/l2m2-migration-backup-20260928/l2m2-toolkits-prepilot.tar.gz`, and started a separate `l2m2-comfyui-monorepo-pilot` unit from the branch with ignored symlinks to original vendor, venv, and `.toolkit`. ComfyUI 0.36.0 served `127.0.0.1:8188` in GPU mode, exposed 11 saved workflows, and completed a 64×64 `EmptyImage` → `SaveImage` job (`65b9ccfe-6ce0-4ac5-acdb-6f8f497eeaaa`), producing `l3ms-monorepo-pilot_00001_.png` in the normal media output directory. This verifies service-path wiring, not a heavyweight model workflow. Pilot queue was empty before stop. Original `l2m2-comfyui.service` was restarted and is active/healthy with its original user-directory path; pilot unit is inactive. |
 
 ## Open decisions
 

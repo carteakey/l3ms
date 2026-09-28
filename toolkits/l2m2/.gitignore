@@ -1,11 +1,11 @@
 /target/
-/.venv/
-/.toolkit/
+/.venv
+/.toolkit
 /models/
 !/models/
 /models/**
 !/models/*-files.txt
-/vendor/
+/vendor
 .env
 __pycache__/
 *.pyc
@@ -13,5 +13,5 @@ __pycache__/
 .DS_Store
 
 # Isolated ComfyUI and MCP Python runtimes
-/.venv-comfy/
-/.venv-comfy-mcp/
+/.venv-comfy
+/.venv-comfy-mcp

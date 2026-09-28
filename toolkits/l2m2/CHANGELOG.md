@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Document monorepo-root build/run instructions and the compiled default-root
+  and `--root` override behavior.
+
 - Add audio.cpp runtime management and BreezeTTS 2 profile:
   - Add `vendor/audio.cpp` and `vendor/audio.cpp-master` vendor tree layout mirroring L3MS llama.cpp tiers.
   - Add `maintenance/refresh-audio-cpp.sh` to audit upstream PRs, fetch, fast-forward, compile CUDA binaries (`audiocpp_cli` & `audiocpp_server`), and run smoke tests.

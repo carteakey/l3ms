@@ -50,6 +50,38 @@ was 135 MB before these checks and is rebuildable.
   place; it is not part of the Git import. No symlinked model or output data was
   found in the L3DS checkout.
 
+## Phase 0/3 environment capture (read-only)
+
+Captured from the original `.venv` with `uv pip freeze` and Python distribution
+metadata; no packages were installed and no model code was run. This is an
+observed environment snapshot, not proof that native inference succeeds.
+
+| Input | Observed value |
+| --- | --- |
+| Python | 3.12.13, uv-managed interpreter |
+| Torch | `2.6.0+cu124`; `torch.version.cuda` is `12.4`; Torch build git version `2236df1770800ffea5697b11b0bb0d910b2e59e1` |
+| CUDA wheel runtime | `nvidia-cuda-runtime-cu12==12.4.127`; `nvidia-cudnn-cu12==9.1.0.70` |
+| Nagi | `nagi-decisions==0.4.1`, Git commit `80f8c5e71832e227c8bf14cc52bbb448d3771c7a` |
+| Hugging Face stack | `transformers==5.17.0`, `peft==0.21.0`, `huggingface-hub==1.33.0`, `accelerate==1.15.0`, `numpy==2.5.3`, `pyyaml==6.0.3` |
+| Other present bridges | `laya==0.3.20`; `semif-phase1==0.1.0`, Git commit `23cf1f39fc9534fe81437200959b6dfc7106e45a`; `typesafe-sdk==0.7.1` |
+
+The setup script still installs unpinned packages. It does not explicitly
+install Laya, SemIf, or `typesafe-sdk`, despite those packages being present in
+the original venv. An offline, read-only `uv pip check --python .venv` found six
+conflicts declared by the installed `semif-phase1` metadata: it requires
+`torch==2.10.0`, `accelerate==1.12.0`, `huggingface-hub==1.31.0`,
+`numpy==2.2.6`, `sentencepiece==0.2.1`, and `protobuf==7.36.1`, while the venv
+has respectively `2.6.0+cu124`, `1.15.0`, `1.33.0`, `2.5.3`, `0.2.2`, and
+`7.36.2`.
+
+No constraints or lock file was added: freezing this venv would encode a
+dependency set that fails its package metadata check, while resolving SemIf's
+declared exact requirements would change the installed Torch/CUDA stack. The
+intended SemIf/Torch combination needs a deliberate choice and runtime
+validation before setup is pinned. The observed Hugging Face cache contains no
+model weights, so a fresh environment would still require a separately planned
+model acquisition step.
+
 ## Filtered history snapshot
 
 `git-filter-repo` was unavailable. A disposable clone at

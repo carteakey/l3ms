@@ -6,7 +6,10 @@ No TUI or background service: one CLI, an editable manifest, and shell scripts.
 
 ## Start
 
+From the monorepo root, enter the L2M2 child before building or running it:
+
 ```sh
+cd toolkits/l2m2
 cargo build --release --locked
 ./target/release/l2m2 --list
 ./target/release/l2m2 --media heartmula-music --extra '--prompt "a sleepy robot waltz" --instrumental'
@@ -14,8 +17,21 @@ cargo build --release --locked
 ./target/release/l2m2 --media
 ```
 
-`--root PATH` selects another checkout's manifest/scripts. Prompts and paths
-are passed as argv values; shell substitutions in prompt text are not executed.
+The compiled binary defaults to this child directory through Cargo's
+`CARGO_MANIFEST_DIR`. From the monorepo root, it also works as:
+
+```sh
+./toolkits/l2m2/target/release/l2m2 --list
+```
+
+Use `--root PATH` to select another L2M2 checkout's manifest and scripts:
+
+```sh
+./target/release/l2m2 --root /path/to/another/l2m2 --list
+```
+
+Prompts and paths are passed as argv values; shell substitutions in prompt
+text are not executed.
 
 ## What is here
 
@@ -80,4 +96,3 @@ Krea 2 raw INT8 ComfyUI setup with Turbo distill LoRA and the L2M2 CLI profile
 are documented in [the Krea 2 guide](docs/krea-2-setup.md).
 
 audio.cpp multi-tier runtimes, compilation flags, and Breeze-TTS-2 speech generation/voice cloning are documented in [the audio.cpp runtimes guide](docs/audio-cpp-runtimes.md). Measured baseline runs are recorded in [the Breeze-TTS-2 experiment log](docs/experiments/breeze-tts-2-baseline.md).
-
