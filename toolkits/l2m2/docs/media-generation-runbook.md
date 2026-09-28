@@ -10,21 +10,14 @@ runtime's flags and credentials separate from the Rust launcher.
 Yeti has an RTX 4070 with 12 GiB of VRAM, 64 GiB of RAM, and CUDA. The selected
 profiles therefore use the smallest practical local variants:
 
-- **MiniMax-H3:** audio.cpp `release-0.6`, the normal `minimax_h3_q4_k` GGUF
-  package, staged/layerwise weights, memory saver, and a 32×32 audio-first
-  default. `--video` switches to 832×480 and 121 frames (about five seconds at
-  24 fps). The optional INT8 ConvRot DiT is not the default because the
-  audio.cpp performance report measured a higher peak-memory path for it.
-- **LTX-2.5:** the official 22B distilled BF16 transformer, quantized to FP8
-  while loading with `fp8-cast`, plus CPU offload. The convolutional video VAE
-  avoids requiring the diffusion-VAE attention extra.
-- **HeartMuLa:** audio.cpp `release-0.6` with the published Q8_0 GGUF package,
-  CUDA, and memory saver. This replaces the hosted MiniMax Music API profile
-  with an offline lyrics/tags-to-song path.
+- **MiniMax-H3:** audio.cpp, the normal `minimax_h3_q4_k` GGUF package, staged/layerwise weights, memory saver, and a 32×32 audio-first default. `--video` switches to 832×480 and 121 frames (about five seconds at 24 fps).
+- **LTX-2.5:** the official 22B distilled BF16 transformer, quantized to FP8 while loading with `fp8-cast`, plus CPU offload. The convolutional video VAE avoids requiring the diffusion-VAE attention extra.
+- **HeartMuLa:** audio.cpp with the published Q8_0 GGUF package, CUDA, and memory saver. This provides an offline lyrics/tags-to-song path.
+- **Breeze-TTS-2:** audio.cpp native GGUF package (`breeze_tts_2_q8_0`), CUDA, T5Gemma conditioning, and Mimi waveform decoding. Supports standard TTS, instruction-conditioned voice design, reference-audio voice cloning, and low-latency streaming (~0.37 RTF on RTX 4070).
 
 These are conservative starting points, not a claim that every route will fit
 or be fast on a 12 GiB card. Keep llama-swap's GPU model unloaded while running
-H3, HeartMuLa, or LTX and start with five-second clips.
+H3, HeartMuLa, Breeze-TTS-2, or LTX.
 
 ## Install and inspect
 
@@ -32,18 +25,23 @@ On Yeti, from the L2M2 checkout:
 
 ```bash
 ./maintenance/setup-media-runtimes.sh install-audio-cpp
+./maintenance/setup-media-runtimes.sh install-breeze
 ./maintenance/setup-media-runtimes.sh install-ltx
 ./maintenance/setup-media-runtimes.sh install-music
 ./maintenance/setup-media-runtimes.sh check
 ```
 
-`install-audio-cpp` clones the pinned `release-0.6` branch, builds the CUDA
-CLI/server for `minimax_h3` and `heartmula`, and installs the public H3 Q4_K
-and HeartMuLa Q8_0 packages under
-`${L3MS_MEDIA_ROOT:-$HOME/models/media}`. `install-music` is an idempotent alias
-for this shared build/install path. It does not touch llama-swap or port 8080.
-On CachyOS it discovers `/opt/cuda` even from a non-interactive SSH shell and
-pins the compatible CCCL 3.2 fetch needed by audio.cpp release-0.6.
+To refresh upstream `audio.cpp` code, audit active PRs, and rebuild binaries:
+
+```bash
+./maintenance/refresh-audio-cpp.sh --update --build --smoke
+```
+
+`install-audio-cpp` updates/clones `audio.cpp`, builds the CUDA CLI/server for
+`minimax_h3`, `heartmula`, and `breeze_tts`, and installs the model packages under
+`${L3MS_MEDIA_ROOT:-$HOME/models/media}`. `install-breeze` installs the Q8_0
+package and verifies loader readiness. It does not touch llama-swap or port 8080.
+On CachyOS it discovers `/opt/cuda` even from a non-interactive SSH shell.
 
 LTX-2.5 is a gated Hugging Face model. Accept the model terms and log in with a
 Read-scoped token, then opt into the roughly 66 GiB download:
@@ -134,6 +132,22 @@ cargo run --locked -- --media heartmula-music --extra \
   '--prompt "dreamy ambient electronica with a gentle pulse" --instrumental'
 cargo run --locked -- --media heartmula-music --extra \
   '--prompt "upbeat indie pop" --tags "pop,bright,drums,vocal" --lyrics-file ./lyrics.txt'
+```
+
+Local Q8_0 Breeze-TTS-2 speech generation, voice design, and voice cloning:
+
+```bash
+# Standard TTS / voice design:
+cargo run --locked -- --media breeze-tts-2 --extra \
+  '--text "Welcome to local text-to-speech with Breeze-TTS-2." --instruction "A warm female narrator with calm pacing."'
+
+# Prompt-audio voice cloning:
+cargo run --locked -- --media breeze-tts-2 --extra \
+  '--task clon --text "Read this with the reference speaker tone." --voice-ref ./sample.wav --reference-text "Transcript of sample."'
+
+# Low-latency streaming mode:
+cargo run --locked -- --media breeze-tts-2 --extra \
+  '--text "Streaming speech generation test." --mode streaming --stream-frames 16'
 ```
 
 The default output directory is `$HOME/media-output`; set

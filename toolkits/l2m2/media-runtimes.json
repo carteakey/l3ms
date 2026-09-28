@@ -68,6 +68,28 @@
       ]
     },
     {
+      "id": "breeze-tts-2",
+      "name": "Breeze-TTS-2 speech generation & voice cloning",
+      "runtime": "audio.cpp",
+      "variant": "Breeze-TTS-2 Q8_0 GGUF, CUDA, T5Gemma conditioning + Mimi codec",
+      "tasks": ["tts", "clon", "design"],
+      "inputs": ["text", "audio"],
+      "status": "local",
+      "script": "media-models/generate-breeze-tts-2.sh",
+      "description": "Offline instruction-conditioned text-to-speech and reference-audio voice cloning through audio.cpp using the Breeze-TTS-2 Q8_0 GGUF package.",
+      "requirements": [
+        "audio.cpp audiocpp_cli built with breeze_tts and CUDA",
+        "Breeze-TTS-2 Q8_0 GGUF package in L3MS_MEDIA_ROOT",
+        "NVIDIA driver/toolkit compatible with the audio.cpp CUDA build"
+      ],
+      "notes": [
+        "Default Q8_0 package contains T5Gemma text conditioning, Qwen-style acoustic code generation, depth codebook decoding, and Mimi waveform decoding.",
+        "Supports standard TTS, prompt-audio voice cloning via --voice-ref and --reference-text, and voice design via --instruction.",
+        "Supports offline and streaming modes (--mode streaming --stream-frames 16).",
+        "CUDA backend uses bf16 activation rounding by default for reference parity with official Breeze-TTS 2."
+      ]
+    },
+    {
       "id": "blender-3d",
       "name": "Blender 3D scene & mesh generation",
       "runtime": "Blender 5.2 / blender-mcp",
@@ -87,6 +109,48 @@
         "Interactive: in Blender 3D Viewport, press N -> MCP for Blender -> Start MCP Server (port 9876).",
         "MCP integration supports live scene inspection, object creation/manipulation, shader nodes, and viewport capture.",
         "Headless: script also supports direct background Python execution and image rendering without GUI."
+      ]
+    },
+    {
+      "id": "qwen-image-2.1",
+      "name": "Qwen Image 2.1 image generation",
+      "runtime": "ComfyUI",
+      "variant": "INT8 ConvRot diffusion model and Qwen3-VL encoder, BF16 VAE",
+      "tasks": ["image"],
+      "inputs": ["text"],
+      "status": "local",
+      "script": "media-models/generate-qwen-image-2.1.sh",
+      "description": "Text-to-image generation through the local ComfyUI API with the official quantized Qwen Image 2.1 weights. Bundled ComfyUI workflows also support image editing and transparent PNG output.",
+      "requirements": [
+        "ComfyUI at the pinned Qwen Image 2.1-compatible revision",
+        "Official Qwen Image 2.1 ComfyUI files installed by maintenance/setup-qwen-image-2.1-comfyui.sh",
+        "Exclusive GPU time; stop llama-swap before starting ComfyUI in GPU mode"
+      ],
+      "notes": [
+        "The Yeti setup uses the official INT8 ConvRot model and text encoder with the BF16 VAE; the three files total about 16.1 GiB on disk.",
+        "The CLI default is 1024x1024, 25 steps, CFG 1, Euler/simple. Keep dimensions divisible by 32 and start at 1024 on the 12 GB RTX 4070.",
+        "Import workflows/qwen-image-2.1/image_qwen_image_2_1_t2i.json or image_qwen_image_2_1_image_edit.json for the full native ComfyUI workflow."
+      ]
+    },
+    {
+      "id": "krea-2",
+      "name": "Krea 2 raw int8 image generation",
+      "runtime": "ComfyUI",
+      "variant": "INT8 ConvRot raw model with r128 Turbo distill LoRA (0.60 strength), Qwen3-VL 4B encoder, VAE",
+      "tasks": ["image"],
+      "inputs": ["text"],
+      "status": "local",
+      "script": "media-models/generate-krea-2.sh",
+      "description": "Text-to-image generation through the local ComfyUI API using Krea 2 raw int8 with the distilled Turbo LoRA (r128). Tuned for 12 GB GPUs at resolutions up to 1024x1536, 12 steps, and CFG 1.5.",
+      "requirements": [
+        "ComfyUI at the pinned Krea 2-compatible revision",
+        "Official Krea 2 ComfyUI and Turbo LoRA files installed by maintenance/setup-krea-2-comfyui.sh",
+        "Exclusive GPU time; stop llama-swap before starting ComfyUI in GPU mode"
+      ],
+      "notes": [
+        "Uses the official INT8 ConvRot raw DiT model and Qwen3-VL 4B FP8 text encoder with the r128 distilled Turbo LoRA (strength 0.60, 12 steps, CFG 1.5).",
+        "The CLI default is 1024x1024 (or up to 1024x1536), 12 Euler/simple steps, and CFG 1.5. Keep dimensions divisible by 32 and resolutions <= 1024x1536 on 12 GiB GPUs.",
+        "Import workflows/krea-2/image_krea2_turbo_t2i_int8.json for native ComfyUI workflow usage."
       ]
     }
   ]

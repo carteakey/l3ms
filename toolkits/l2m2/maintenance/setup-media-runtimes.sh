@@ -13,10 +13,11 @@ REPO_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 MEDIA_ROOT="${L3MS_MEDIA_ROOT:-${HOME}/models/media}"
 AUDIO_CPP_ROOT="${L3MS_AUDIO_CPP_ROOT:-${HOME}/repos/audio.cpp}"
 LTX_ROOT="${L3MS_LTX_ROOT:-${HOME}/repos/LTX-2}"
-AUDIO_CPP_REF="${L3MS_AUDIO_CPP_REF:-release-0.6}"
+AUDIO_CPP_REF="${L3MS_AUDIO_CPP_REF:-main}"
 LTX_REF="${L3MS_LTX_REF:-main}"
 H3_PACKAGE_ID="${L3MS_H3_PACKAGE_ID:-minimax_h3_q4_k}"
 MUSIC_PACKAGE_ID="${L3MS_MUSIC_PACKAGE_ID:-heartmula_q8_0}"
+BREEZE_PACKAGE_ID="${L3MS_BREEZE_PACKAGE_ID:-breeze_tts_2_q8_0}"
 
 log() { printf '%s\n' "-> $*"; }
 ok() { printf '%s\n' "[OK] $*"; }
@@ -39,10 +40,12 @@ Usage: maintenance/setup-media-runtimes.sh <command>
 Commands:
   check              Report runtime, model, and authentication readiness
   install-audio-cpp Clone/build audio.cpp and install H3 Q4_K + HeartMuLa Q8_0
+  install-breeze     Build audio.cpp and install BreezeTTS 2 Q8_0 GGUF
+  install-tts        Compatibility alias for install-breeze
   install-ltx        Clone LTX-2 and create its uv environment
   install-music      Build audio.cpp and install HeartMuLa Q8_0 GGUF
   install-music-cli  Compatibility alias for install-music
-  install            Install both audio.cpp models and LTX (weights remain gated)
+  install            Install audio.cpp models (H3, HeartMuLa, BreezeTTS) and LTX (weights remain gated)
 
 Environment:
   L3MS_MEDIA_ROOT       Shared media models/output root (default: ~/models/media)
@@ -87,15 +90,24 @@ ensure_checkout() {
 
 audio_cli_path() {
     local candidate
-    for candidate in \
-        "$AUDIO_CPP_ROOT/build/linux-cuda-release/bin/audiocpp_cli" \
-        "$AUDIO_CPP_ROOT/build/bin/audiocpp_cli" \
-        "$AUDIO_CPP_ROOT/build/debug/bin/audiocpp_cli" \
-        "$AUDIO_CPP_ROOT/build/release/bin/audiocpp_cli"; do
-        if [[ -x "$candidate" ]]; then
-            printf '%s\n' "$candidate"
-            return 0
-        fi
+    local roots=(
+        "${AUDIO_CPP_ROOT:-}"
+        "${REPO_DIR}/vendor/audio.cpp"
+        "${REPO_DIR}/vendor/audio.cpp-master"
+        "${HOME}/repos/audio.cpp"
+    )
+    for root in "${roots[@]}"; do
+        [[ -n "$root" ]] || continue
+        for candidate in \
+            "$root/build/linux-cuda-release/bin/audiocpp_cli" \
+            "$root/build/bin/audiocpp_cli" \
+            "$root/build/debug/bin/audiocpp_cli" \
+            "$root/build/release/bin/audiocpp_cli"; do
+            if [[ -x "$candidate" ]]; then
+                printf '%s\n' "$candidate"
+                return 0
+            fi
+        done
     done
     return 1
 }
@@ -117,14 +129,12 @@ install_audio_cpp() {
     existing_cli="$(audio_cli_path || true)"
     if [[ -z "$existing_cli" ]] \
         || ! audio_loader_available "$existing_cli" minimax_h3 \
-        || ! audio_loader_available "$existing_cli" heartmula; then
-        log "Building audio.cpp CUDA CLI/server for minimax_h3 and heartmula"
+        || ! audio_loader_available "$existing_cli" heartmula \
+        || ! audio_loader_available "$existing_cli" breeze_tts; then
+        log "Building audio.cpp CUDA CLI/server for minimax_h3, heartmula, and breeze_tts"
         (
             cd "$AUDIO_CPP_ROOT"
             build_dir="${AUDIO_CPP_BUILD_DIR:-$AUDIO_CPP_ROOT/build/linux-cuda-release}"
-            # audio.cpp release-0.6 needs CCCL 3.2 for its CUB top-k path.
-            # CUDA 13.3 ships a newer system CCCL, so explicitly fetch the
-            # compatible version instead of relying on the system headers.
             cmake -S . -B "$build_dir" \
                 -DCMAKE_BUILD_TYPE=RelWithDebInfo \
                 -DENGINE_ENABLE_CUDA=ON \
@@ -137,7 +147,7 @@ install_audio_cpp() {
                 -DENGINE_BUILD_WARMBENCH=OFF \
                 -DAUDIOCPP_DEPLOYMENT_BUILD=ON \
                 -DAUDIOCPP_MODEL_SET=custom \
-                -DAUDIOCPP_MODELS=minimax_h3,heartmula \
+                -DAUDIOCPP_MODELS=minimax_h3,heartmula,breeze_tts \
                 -DGGML_CUDA_CUB_3DOT2=ON \
                 -DCMAKE_CUDA_ARCHITECTURES="${L3MS_CUDA_ARCHITECTURES:-89-real}"
             cmake --build "$build_dir" --parallel "$(nproc 2>/dev/null || echo 8)" \
@@ -181,6 +191,21 @@ install_audio_cpp() {
     fi
     [[ -f "$music_dir/heartmula-q8_0.gguf" ]] || die "HeartMuLa Q8_0 package is incomplete"
     ok "HeartMuLa Q8_0 package: $music_dir"
+}
+
+install_breeze_tts() {
+    install_audio_cpp
+    local model_python="$AUDIO_CPP_ROOT/.venv/bin/python"
+    local breeze_dir="$MEDIA_ROOT/Breeze-TTS-2-GGUF"
+    if [[ ! -f "$breeze_dir/breeze-tts-2-q8_0.gguf" ]]; then
+        log "Installing audio.cpp package $BREEZE_PACKAGE_ID into $MEDIA_ROOT"
+        (
+            cd "$AUDIO_CPP_ROOT"
+            "$model_python" tools/model_manager_v2.py install "$BREEZE_PACKAGE_ID" --models-root "$MEDIA_ROOT"
+        )
+    fi
+    [[ -f "$breeze_dir/breeze-tts-2-q8_0.gguf" ]] || die "Breeze-TTS-2 Q8_0 package is incomplete"
+    ok "Breeze-TTS-2 Q8_0 package: $breeze_dir"
 }
 
 download_ltx_models() {
@@ -256,6 +281,12 @@ check_runtime() {
             warn "audio.cpp HeartMuLa loader is not compiled into $cli"
             missing=1
         fi
+        if audio_loader_available "$cli" breeze_tts; then
+            ok "audio.cpp Breeze-TTS loader compiled"
+        else
+            warn "audio.cpp Breeze-TTS loader is not compiled into $cli"
+            missing=1
+        fi
     else
         warn "audio.cpp CLI missing under $AUDIO_CPP_ROOT"
         missing=1
@@ -272,6 +303,8 @@ check_runtime() {
     fi
     local music_dir="$MEDIA_ROOT/HeartMuLa-GGUF"
     check_file "HeartMuLa Q8_0 GGUF" "$music_dir/heartmula-q8_0.gguf" || missing=1
+    local breeze_dir="$MEDIA_ROOT/Breeze-TTS-2-GGUF"
+    check_file "Breeze-TTS-2 Q8_0 GGUF" "$breeze_dir/breeze-tts-2-q8_0.gguf" || missing=1
 
     if [[ -d "$LTX_ROOT" ]]; then
         ok "LTX-2 checkout: $LTX_ROOT"
@@ -321,6 +354,9 @@ case "$command" in
     install-audio-cpp)
         install_audio_cpp
         ;;
+    install-breeze|install-tts)
+        install_breeze_tts
+        ;;
     install-ltx)
         install_ltx
         ;;
@@ -332,6 +368,7 @@ case "$command" in
         ;;
     install)
         install_audio_cpp
+        install_breeze_tts
         install_ltx
         ;;
     -h|--help|"")

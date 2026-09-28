@@ -2,9 +2,15 @@
 /.venv/
 /.toolkit/
 /models/
+!/models/
+!/models/minimax-h3-comfyui-files.txt
 /vendor/
 .env
 __pycache__/
 *.pyc
 *.log
 .DS_Store
+
+# Isolated ComfyUI and MCP Python runtimes
+/.venv-comfy/
+/.venv-comfy-mcp/

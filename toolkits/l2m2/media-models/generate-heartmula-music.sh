@@ -34,21 +34,32 @@ EOF
 }
 
 find_cli() {
-    if [[ -n "${L3MS_AUDIO_CPP_CLI:-}" ]]; then
+    if [[ -n "${L3MS_AUDIO_CPP_CLI:-}" && -x "${L3MS_AUDIO_CPP_CLI}" ]]; then
         printf '%s\n' "$L3MS_AUDIO_CPP_CLI"
-        return
+        return 0
     fi
-    local root="${L3MS_AUDIO_CPP_ROOT:-${HOME}/repos/audio.cpp}"
+    local root="${L3MS_AUDIO_CPP_ROOT:-}"
     local candidate
-    for candidate in \
-        "$root/build/linux-cuda-release/bin/audiocpp_cli" \
-        "$root/build/bin/audiocpp_cli" \
-        "$root/build/debug/bin/audiocpp_cli" \
-        "$root/build/release/bin/audiocpp_cli"; do
-        if [[ -x "$candidate" ]]; then
-            printf '%s\n' "$candidate"
-            return
-        fi
+    local search_roots=()
+    if [[ -n "$root" ]]; then
+        search_roots+=("$root")
+    fi
+    search_roots+=(
+        "${REPO_DIR:-$(dirname "$SCRIPT_DIR")}/vendor/audio.cpp"
+        "${REPO_DIR:-$(dirname "$SCRIPT_DIR")}/vendor/audio.cpp-master"
+        "${HOME}/repos/audio.cpp"
+    )
+    for r in "${search_roots[@]}"; do
+        for candidate in \
+            "$r/build/linux-cuda-release/bin/audiocpp_cli" \
+            "$r/build/bin/audiocpp_cli" \
+            "$r/build/debug/bin/audiocpp_cli" \
+            "$r/build/release/bin/audiocpp_cli"; do
+            if [[ -x "$candidate" ]]; then
+                printf '%s\n' "$candidate"
+                return 0
+            fi
+        done
     done
     return 1
 }

@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased
+
+- Add audio.cpp runtime management and BreezeTTS 2 profile:
+  - Add `vendor/audio.cpp` and `vendor/audio.cpp-master` vendor tree layout mirroring L3MS llama.cpp tiers.
+  - Add `maintenance/refresh-audio-cpp.sh` to audit upstream PRs, fetch, fast-forward, compile CUDA binaries (`audiocpp_cli` & `audiocpp_server`), and run smoke tests.
+  - Add `breeze-tts-2` profile to `media-runtimes.json` for instruction-conditioned speech and voice cloning.
+  - Add `media-models/generate-breeze-tts-2.sh` script-first CLI runner supporting offline/streaming modes, voice design (`--instruction`), and voice cloning (`--voice-ref`).
+  - Update `maintenance/setup-media-runtimes.sh` with `install-breeze` and readiness checks.
+
+- Add pinned official Z-Image-Turbo ComfyUI setup with BF16 and INT8 weights,
+  Qwen 3 4B text encoders, VAE, and verified SHA-256 manifests.
+
+- Add pinned official FLUX.2 Klein 9B ComfyUI setup with distilled 4-step turbo
+  and base models, Qwen 3 8B text encoder, VAE, and verified SHA-256 manifests.
+
+- Expose ComfyUI and local Comfy MCP server via Tailscale Funnel on port 443
+  and configure workflow discovery under `.toolkit/comfyui/user/default/workflows`.
+
+- Add a pinned Krea 2 ComfyUI setup with official raw INT8 weights,
+  Qwen3-VL 4B encoder, VAE, r128 Turbo distill LoRA (0.60 strength, 12 steps,
+  CFG 1.5), workflows, checksums, and an L2M2 text-to-image profile.
+
+- Add a pinned Qwen Image 2.1 ComfyUI setup with official quantized weights,
+  workflows, checksums, and an L2M2 text-to-image profile.
+
+- Add a pinned, resumable MiniMax-H3 ComfyUI Ref2VA baseline installer using
+  the official INT8 ConvRot model, NVFP4 text encoder, and video/audio VAEs.
+
+- Add a pinned official ComfyUI/local MCP setup and CPU/GPU launch scripts;
+  default CPU setup does not interfere with LLM benchmarks.
+
+- Capture sourced H3 reference-workflow notes and add a bounded Batman scene test.
+- Fix explicit H3 video dimensions/frame counts being overwritten by defaults.
+- Expand L2M2 as Local Large Media Models.
+
 ## 0.2.0 — 2026-09-08
 
 - Added `blender-3d` profile for Blender 5.2.1 LTS with Model Context Protocol (`blender-mcp`) support.

@@ -2,7 +2,7 @@
 name = "l2m2"
 version = "0.1.0"
 edition = "2021"
-description = "Local Latent Media Machine: script-first image, audio and video tooling"
+description = "Local Large Media Models: script-first image, audio and video tooling"
 license = "MIT"
 
 [dependencies]

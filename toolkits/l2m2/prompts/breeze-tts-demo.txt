@@ -1,0 +1,1 @@
+Welcome to local speech synthesis with Breeze-TTS-2 and audio.cpp. Running fully offline with CUDA acceleration, high fidelity acoustic modeling, and low-latency streaming.

@@ -1,4 +1,4 @@
-# L2M2 — Local Latent Media Machine
+# L2M2 — Local Large Media Models
 
 A tiny, script-first home for local image, audio/music, speech, and video
 experiments. Extracted from L3MS; vision-capable LLMs remain in L3MS.
@@ -19,8 +19,9 @@ are passed as argv values; shell substitutions in prompt text are not executed.
 
 ## What is here
 
-- `media-runtimes.json`: MiniMax-H3, HeartMuLa, and LTX-2.5 profiles.
-- `media-models/`: editable generation wrappers.
+- `media-runtimes.json`: MiniMax-H3, HeartMuLa, Breeze-TTS-2, and LTX-2.5 profiles.
+- `media-models/`: editable generation wrappers including `generate-breeze-tts-2.sh`.
+- `maintenance/refresh-audio-cpp.sh`: operational script to audit, build with CUDA, and smoke-test audio.cpp.
 - `maintenance/setup-media-runtimes.sh`: runtime install/readiness commands.
 - `model_downloader/models_config.json`: extracted Qwen Image, Qwen Image Edit,
   and LTX-2.3 downloads. These are download entries, not new generation wrappers.
@@ -55,5 +56,28 @@ cargo fmt --all -- --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --all-targets --locked
 python3 -m unittest discover -s model_downloader -p 'test_*.py'
+python3 -m unittest discover -s media-models -p 'test_*.py'
 for script in media-models/*.sh maintenance/*.sh; do bash -n "$script"; done
 ```
+
+MiniMax-H3 quality capture and the small video experiment: [notes](docs/minimax-h3-quality-notes.md).
+
+ComfyUI and its local MCP connection: [setup and controls](docs/comfyui-setup.md).
+
+Install the official MiniMax-H3 reference-quality model stack:
+
+```sh
+./maintenance/setup-minimax-h3-comfyui.sh
+```
+
+The selected baseline and first-run settings are documented in
+[the H3 reference experiment](docs/experiments/h3-reference-baseline.md).
+
+Qwen Image 2.1 ComfyUI setup, workflows, and the L2M2 CLI profile are documented
+in [the Qwen Image 2.1 guide](docs/qwen-image-2.1-setup.md).
+
+Krea 2 raw INT8 ComfyUI setup with Turbo distill LoRA and the L2M2 CLI profile
+are documented in [the Krea 2 guide](docs/krea-2-setup.md).
+
+audio.cpp multi-tier runtimes, compilation flags, and Breeze-TTS-2 speech generation/voice cloning are documented in [the audio.cpp runtimes guide](docs/audio-cpp-runtimes.md). Measured baseline runs are recorded in [the Breeze-TTS-2 experiment log](docs/experiments/breeze-tts-2-baseline.md).
+

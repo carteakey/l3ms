@@ -37,21 +37,32 @@ EOF
 }
 
 find_cli() {
-    if [[ -n "${L3MS_AUDIO_CPP_CLI:-}" ]]; then
+    if [[ -n "${L3MS_AUDIO_CPP_CLI:-}" && -x "${L3MS_AUDIO_CPP_CLI}" ]]; then
         printf '%s\n' "$L3MS_AUDIO_CPP_CLI"
-        return
+        return 0
     fi
-    local root="${L3MS_AUDIO_CPP_ROOT:-${HOME}/repos/audio.cpp}"
+    local root="${L3MS_AUDIO_CPP_ROOT:-}"
     local candidate
-    for candidate in \
-        "$root/build/linux-cuda-release/bin/audiocpp_cli" \
-        "$root/build/bin/audiocpp_cli" \
-        "$root/build/debug/bin/audiocpp_cli" \
-        "$root/build/release/bin/audiocpp_cli"; do
-        if [[ -x "$candidate" ]]; then
-            printf '%s\n' "$candidate"
-            return
-        fi
+    local search_roots=()
+    if [[ -n "$root" ]]; then
+        search_roots+=("$root")
+    fi
+    search_roots+=(
+        "${REPO_DIR:-$(dirname "$SCRIPT_DIR")}/vendor/audio.cpp"
+        "${REPO_DIR:-$(dirname "$SCRIPT_DIR")}/vendor/audio.cpp-master"
+        "${HOME}/repos/audio.cpp"
+    )
+    for r in "${search_roots[@]}"; do
+        for candidate in \
+            "$r/build/linux-cuda-release/bin/audiocpp_cli" \
+            "$r/build/bin/audiocpp_cli" \
+            "$r/build/debug/bin/audiocpp_cli" \
+            "$r/build/release/bin/audiocpp_cli"; do
+            if [[ -x "$candidate" ]]; then
+                printf '%s\n' "$candidate"
+                return 0
+            fi
+        done
     done
     return 1
 }
@@ -69,9 +80,9 @@ video_output=""
 video=false
 steps=20
 seed=42
-width=32
-height=32
-frames=241
+width=""
+height=""
+frames=""
 request_options=()
 
 while (($#)); do
@@ -155,13 +166,13 @@ if [[ -z "$prompt" ]]; then
 fi
 
 if [[ "$video" == true ]]; then
-    width="${L3MS_H3_VIDEO_WIDTH:-832}"
-    height="${L3MS_H3_VIDEO_HEIGHT:-480}"
-    frames="${L3MS_H3_VIDEO_FRAMES:-121}"
+    width="${width:-${L3MS_H3_VIDEO_WIDTH:-832}}"
+    height="${height:-${L3MS_H3_VIDEO_HEIGHT:-480}}"
+    frames="${frames:-${L3MS_H3_VIDEO_FRAMES:-121}}"
 else
-    width="${L3MS_H3_AUDIO_WIDTH:-$width}"
-    height="${L3MS_H3_AUDIO_HEIGHT:-$height}"
-    frames="${L3MS_H3_AUDIO_FRAMES:-$frames}"
+    width="${width:-${L3MS_H3_AUDIO_WIDTH:-32}}"
+    height="${height:-${L3MS_H3_AUDIO_HEIGHT:-32}}"
+    frames="${frames:-${L3MS_H3_AUDIO_FRAMES:-241}}"
 fi
 
 cli_path="$(find_cli || true)"
@@ -223,7 +234,7 @@ done
 
 echo "MiniMax-H3: $(basename "$model_path") -> $output"
 if [[ "$video" == true ]]; then
-    echo "Profile: Yeti 12 GB / 480p / ${frames} frames / layerwise Q4_K"
+    echo "Profile: Yeti 12 GB / ${width}x${height} / ${frames} frames / layerwise Q4_K"
 else
     echo "Profile: Yeti 12 GB / audio-first / ${frames} frames / layerwise Q4_K"
 fi

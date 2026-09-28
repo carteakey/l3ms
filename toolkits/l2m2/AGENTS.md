@@ -1,6 +1,6 @@
 # L2M2
 
-Local Latent Media Machine: a barebones local media toolkit.
+Local Large Media Models: a barebones local media toolkit.
 
 - Keep orchestration explicit, script-first, and keyboard-friendly.
 - Declare generation profiles in media-runtimes.json and commands in media-models/.
@@ -11,3 +11,7 @@ Local Latent Media Machine: a barebones local media toolkit.
 - Keep existing L3MS_* script environment variables compatible.
 - Do not add a TUI, daemon, or shared framework without a concrete need.
 - Update CHANGELOG.md for user-visible changes and run the README checks.
+
+- Save reusable experiment runners under maintenance/, prompts under prompts/,
+  and measured run summaries under docs/experiments/. Each run must retain its
+  exact command, script copies, seed/settings, log, duration and artifact paths.
