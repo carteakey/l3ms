@@ -3,7 +3,8 @@
 /.toolkit/
 /models/
 !/models/
-!/models/minimax-h3-comfyui-files.txt
+/models/**
+!/models/*-files.txt
 /vendor/
 .env
 __pycache__/

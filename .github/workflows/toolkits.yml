@@ -1,0 +1,82 @@
+name: Toolkit checks
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/toolkits.yml"
+      - "toolkits/l2m2/**"
+      - "toolkits/l3ds/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/toolkits.yml"
+      - "toolkits/l2m2/**"
+      - "toolkits/l3ds/**"
+
+permissions:
+  contents: read
+
+jobs:
+  l2m2:
+    name: L2M2 offline checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: toolkits/l2m2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Select the toolkit Rust toolchain
+        run: rustup show
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Lint
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Test Rust targets
+        run: cargo test --all-targets --locked
+      - name: Build CLI
+        run: cargo build --release --locked
+      - name: List media profiles without starting a runtime
+        run: ./target/release/l2m2 --list
+      - name: Check Python syntax
+        run: python3 -m compileall -q model_downloader media-models
+      - name: Run README Python checks
+        run: |
+          # unittest discovery imports test_resume.py but does not execute its download helpers.
+          python3 -m unittest discover -s model_downloader -p 'test_*.py'
+          python3 -m unittest discover -s media-models -p 'test_*.py'
+      - name: Check shell syntax
+        run: |
+          for script in media-models/*.sh maintenance/*.sh; do
+            bash -n "$script"
+          done
+
+  l3ds:
+    name: L3DS offline checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: toolkits/l3ds
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Select the repository Rust toolchain
+        run: rustup show
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Lint
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Test Rust targets
+        run: cargo test --all-targets --locked
+      - name: Build CLI
+        run: cargo build --release --locked
+      - name: List decision profiles without running an engine
+        run: ./target/release/l3ds --list
+      - name: Check Python syntax
+        run: python3 -m compileall -q decision-models
+      - name: Check setup shell syntax
+        run: bash -n maintenance/setup-env.sh

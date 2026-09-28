@@ -16,8 +16,8 @@ CAR-220 Phase 9, and CAR-221 Phase 10.
 | Phase | State | Evidence / remaining gate |
 | --- | --- | --- |
 | 0. Baseline and protection | In progress | Original L3MS `68fd7bc48f803aecb5ae5d25a3f30967b46da3eb`; L2M2 `39e4d40a4e5ed993e99aa4ed70c9d183873a90ba`; L3DS `4716ddf3508d224645416f3ba70d5e34c138cedd`. Source inventories and backups in progress. |
-| 1. Folder/history import | In progress | L3DS five-commit history imported under `toolkits/l3ds`; L2M2 audit/import pending. README wordmark and navigation committed. |
-| 2. Independent operation | In progress | Imported L3DS build, test, profile list, and explicit old-root list pass; L2M2 and CI pending. |
+| 1. Folder/history import | In progress | L3DS five-commit and L2M2 three-commit histories imported under `toolkits/`; source/WIP audit, private recovery, and README wordmark done. Final tree/secret/public-path review pending. |
+| 2. Independent operation | In progress | Imported child builds, tests, profile lists, and explicit old-root lists pass; CI added locally, pre-push validation pending. |
 | 3. Runtime cutover | Pending | Live L3MS, L2M2, L3DS checks on the deployment host, with rollback. |
 | 4. Shared contracts | Pending | Catalog, configuration, and job contracts. |
 | 5. Runtime adapters | Pending | Manual, verified service transitions. |
@@ -55,6 +55,9 @@ CAR-220 Phase 9, and CAR-221 Phase 10.
 | 2026-09-28 | Root regression after first child import | `cargo test --all-targets --locked` passed: 258 passed, 1 ignored. |
 | 2026-09-28 | Root lint after first child import | `cargo clippy --all-targets --locked -- -D warnings` passed. |
 | 2026-09-28 | L3DS child path follow-through | Documented child-directory commands and compile-time default root; added two offline tests for the default root and `--root` override. Child fmt, offline test (2 passed), Clippy, build, and `--list` pass. |
+| 2026-09-28 | L2M2 import | Audited public-safe three-commit history merged as `4deece4`; 87 source/evidence files under `toolkits/l2m2/`. A third-party transcript and a host-specific Funnel note were excluded from every imported commit and retained in the verified private WIP backup at `/home/kchauhan/repos/l2m2-migration-backup-20260928/l2m2-selected-private.bundle`. No weights/bulk binaries in imported history. |
+| 2026-09-28 | L2M2 child operation | `cargo fmt --check`, Clippy, Rust tests (4 passed), release build, 7-profile list, Python syntax, 14 downloader tests, 9 media-model tests, shell syntax, and explicit old-root list passed. No inference or runtime switch was attempted. |
+| 2026-09-28 | Model ignore safeguard | Imported child `.gitignore` now ignores GGUF/safetensors and other `models/` contents while allowing only direct `*-files.txt` inventory files; verified with `git check-ignore --no-index`. |
 
 ## Open decisions
 

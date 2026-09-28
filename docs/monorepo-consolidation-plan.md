@@ -274,7 +274,7 @@ Read-only catalog, status, and route discovery never cause an engine swap.
 | 1 | Source histories imported into isolated folders | 0 |
 | 2 | Independent builds, path compatibility, CI | 1 |
 | 3 | Verified runtime cutover with working rollback | 2 |
-| 4 | Shared catalog, config resolution, job contracts | 3 |
+| 4 | Shared catalog, config resolution, job contracts | 2 to develop; 3 to release |
 | 5 | Runtime adapters and safe manual engine transitions | 4 |
 | 6 | One coordinator and request-driven swapping for local clients | 5 |
 | 7 | HTTP ingress to the same scheduler | 6 |
@@ -282,7 +282,10 @@ Read-only catalog, status, and route discovery never cause an engine swap.
 | 9 | Public site with separate evidence for each lane | 4 to develop; 8 to release |
 | 10 | Acceptance record and retirement of old launch paths | 7, 8, 9 |
 
-Phases are delivery gates, not single commits. Use small reviewable changes within
+Phases are delivery gates, not single commits. Phase 4's read-only/contracts
+implementation may proceed on the integration branch after Phase 2 while the
+live Phase 3 pilot is pending; do not release shared runtime actions or claim
+the Phase 4 gate until Phase 3 has passed. Use small reviewable changes within
 each phase and record the exact revision, verification commands/results, runtime
 host, and rollback point before advancing. Mark unavailable live checks pending;
 do not count mocks or skipped checks as live acceptance. Keep sanitized evidence
@@ -447,7 +450,8 @@ no model weights or user state need to be restored from Git.
 
 ## Phase 4 — Shared catalog, configuration, and job contracts
 
-**Depends on:** Phase 3. No automatic runtime switching in this phase.
+**Depends on:** Phase 2 to develop; Phase 3 to release. No automatic runtime
+switching in this phase.
 
 1. Read the three native manifests through separate adapters. Identify profiles
    by `(toolkit, profile_id)`; expose task, readiness, device, source, and runtime
