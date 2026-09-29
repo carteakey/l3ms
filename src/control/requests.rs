@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 
 use anyhow::{bail, ensure, Result};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use super::catalog::{Catalog, CatalogProfile, Lane, ProfileKey, Task};
 
@@ -112,7 +112,8 @@ pub enum InferenceRequest {
     Decision {
         profile: ProfileKey,
         state: Value,
-        questions: Vec<String>,
+        /// Native `system_one` question definitions keyed by question ID.
+        questions: Map<String, Value>,
     },
 }
 
@@ -235,13 +236,48 @@ impl InferenceRequest {
                 state, questions, ..
             } => {
                 ensure!(state.is_object(), "decision state must be an object");
-                ensure_json_budget(state)?;
                 ensure!(
                     (1..=MAX_QUESTIONS).contains(&questions.len())
-                        && questions.iter().all(|question| !question.trim().is_empty()),
-                    "decision questions must be non-empty and bounded"
+                        && questions
+                            .iter()
+                            .all(|(id, definition)| !id.trim().is_empty()
+                                && id.len() <= 128
+                                && definition
+                                    .as_object()
+                                    .is_some_and(|fields| !fields.is_empty())),
+                    "decision questions must be named, non-empty objects and bounded"
                 );
-                ensure_text_budget(questions.iter().map(String::as_str))?;
+                for (id, question) in questions {
+                    if question.get("type").and_then(Value::as_str) == Some("choice") {
+                        let valid_criteria = question
+                            .get("criteria")
+                            .and_then(Value::as_object)
+                            .is_some_and(|criteria| {
+                                !criteria.is_empty()
+                                    && criteria.keys().all(|key| !key.trim().is_empty())
+                            });
+                        let valid_options = question
+                            .get("options")
+                            .and_then(Value::as_array)
+                            .is_some_and(|options| {
+                                !options.is_empty()
+                                    && options.iter().all(|option| {
+                                        option.as_str().is_some_and(|text| !text.trim().is_empty())
+                                    })
+                            });
+                        ensure!(
+                            valid_criteria || valid_options,
+                            "choice question {id} requires declared options"
+                        );
+                    }
+                }
+                ensure!(
+                    serde_json::to_vec(state)?
+                        .len()
+                        .saturating_add(serde_json::to_vec(questions)?.len())
+                        <= MAX_REQUEST_BYTES,
+                    "decision request JSON exceeds 1 MiB"
+                );
             }
         }
         Ok(profile)
@@ -263,15 +299,9 @@ pub enum InferenceResult {
         artifacts: Vec<PathBuf>,
     },
     Decision {
-        answers: Vec<DecisionAnswer>,
+        /// Native choice/score/probability objects keyed by question ID.
+        answers: Map<String, Value>,
     },
-}
-
-#[derive(Clone)]
-pub struct DecisionAnswer {
-    pub question: String,
-    pub answer: String,
-    pub confidence: Option<f64>,
 }
 
 impl InferenceResult {
@@ -296,17 +326,45 @@ impl InferenceResult {
                     answers.len() == questions.len(),
                     "decision answer count mismatch"
                 );
-                for (answer, question) in answers.iter().zip(questions) {
-                    ensure!(
-                        answer.question == *question,
-                        "decision question order mismatch"
-                    );
-                    ensure!(
-                        answer
-                            .confidence
-                            .is_none_or(|value| value.is_finite() && (0.0..=1.0).contains(&value)),
-                        "decision confidence must be in [0, 1]"
-                    );
+                ensure!(
+                    serde_json::to_vec(answers)?.len() <= MAX_REQUEST_BYTES,
+                    "decision result JSON exceeds 1 MiB"
+                );
+                for (id, question) in questions {
+                    let answer = answers
+                        .get(id)
+                        .ok_or_else(|| anyhow::anyhow!("missing decision answer for {id}"))?;
+                    if let Some(confidence) = answer.get("confidence") {
+                        ensure!(
+                            confidence.as_f64().is_some_and(
+                                |value| value.is_finite() && (0.0..=1.0).contains(&value)
+                            ),
+                            "decision confidence must be in [0, 1]"
+                        );
+                    }
+                    if question.get("type").and_then(Value::as_str) == Some("choice") {
+                        let choice = answer
+                            .get("choice")
+                            .and_then(Value::as_str)
+                            .or_else(|| answer.as_str())
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("decision answer for {id} has no choice")
+                            })?;
+                        let declared = question
+                            .get("criteria")
+                            .and_then(Value::as_object)
+                            .is_some_and(|criteria| criteria.contains_key(choice))
+                            || question
+                                .get("options")
+                                .and_then(Value::as_array)
+                                .is_some_and(|options| {
+                                    options.iter().any(|option| option.as_str() == Some(choice))
+                                });
+                        ensure!(
+                            declared,
+                            "decision choice for {id} is not a declared option"
+                        );
+                    }
                 }
             }
             Self::Chat { .. } | Self::MediaComplete { .. } => {}
@@ -351,7 +409,7 @@ mod tests {
         let decision = InferenceRequest::Decision {
             profile: key(Lane::Decisions, "nagi-smol"),
             state: serde_json::json!({"position": 1}),
-            questions: vec!["move?".into()],
+            questions: serde_json::json!({"move": {"type":"choice", "criteria":{"yes":"Move", "no":"Stay"}}}).as_object().unwrap().clone(),
         };
         assert_eq!(chat.validate(&catalog).unwrap().key, *chat.profile());
         assert_eq!(speech.task(), "tts");
@@ -424,14 +482,10 @@ mod tests {
         let request = InferenceRequest::Decision {
             profile: key(Lane::Decisions, "nagi-smol"),
             state: serde_json::json!({}),
-            questions: vec!["move?".into()],
+            questions: serde_json::json!({"move": {"type":"choice", "criteria":{"yes":"Move", "no":"Stay"}}}).as_object().unwrap().clone(),
         };
         let valid = InferenceResult::Decision {
-            answers: vec![DecisionAnswer {
-                question: "move?".into(),
-                answer: "yes".into(),
-                confidence: Some(0.8),
-            }],
+            answers: serde_json::json!({"move":{"choice":"yes","confidence":0.8,"probabilities":{"yes":0.8,"no":0.2}}}).as_object().unwrap().clone(),
         };
         assert!(valid.validate_for(&request).is_ok());
         let wrong_lane = InferenceResult::Chat {
@@ -440,13 +494,52 @@ mod tests {
         };
         assert!(wrong_lane.validate_for(&request).is_err());
         let invalid = InferenceResult::Decision {
-            answers: vec![DecisionAnswer {
-                question: "move?".into(),
-                answer: "yes".into(),
-                confidence: Some(1.1),
-            }],
+            answers: serde_json::json!({"move":{"choice":"yes","confidence":1.1}})
+                .as_object()
+                .unwrap()
+                .clone(),
         };
         assert!(invalid.validate_for(&request).is_err());
+        for answers in [
+            serde_json::json!({"other":{"choice":"yes"}}),
+            serde_json::json!({"move":{"choice":"undeclared"}}),
+        ] {
+            assert!(InferenceResult::Decision {
+                answers: answers.as_object().unwrap().clone()
+            }
+            .validate_for(&request)
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn decision_contract_preserves_native_definitions_and_score_results() {
+        let catalog = catalog();
+        let questions = serde_json::json!({"urgency":{"type":"score","instructions":"Assess urgency","range":[0,100]}});
+        let request = InferenceRequest::Decision {
+            profile: key(Lane::Decisions, "nagi-smol"),
+            state: serde_json::json!({"alert":"test"}),
+            questions: questions.as_object().unwrap().clone(),
+        };
+        assert!(request.validate(&catalog).is_ok());
+        let result = InferenceResult::Decision {
+            answers: serde_json::json!({"urgency":{"score":75,"confidence":0.9}})
+                .as_object()
+                .unwrap()
+                .clone(),
+        };
+        assert!(result.validate_for(&request).is_ok());
+        for question in [
+            serde_json::json!("flattened prompt"),
+            serde_json::json!({"type":"choice"}),
+        ] {
+            let invalid = InferenceRequest::Decision {
+                profile: key(Lane::Decisions, "nagi-smol"),
+                state: serde_json::json!({}),
+                questions: Map::from_iter([("question".into(), question)]),
+            };
+            assert!(invalid.validate(&catalog).is_err());
+        }
     }
 
     #[test]
