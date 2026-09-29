@@ -242,6 +242,29 @@ pub struct CatalogProfile {
     pub readiness: Readiness,
     /// The language manifest's config-level disabled flag, when present.
     pub disabled: bool,
+    /// Manifest-native route fields preserved for the route resolver. This is
+    /// crate-visible so consumers use the validated route interface instead
+    /// of parsing manifest details a second time.
+    pub(crate) native_source: NativeProfileSource,
+}
+
+/// Native manifest fields needed to construct a lane-specific dispatch route.
+/// Paths remain raw until the route resolver applies bounded relative-path
+/// validation and anchors them to the already-canonical manifest directory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum NativeProfileSource {
+    Language {
+        model_id: ProfileId,
+    },
+    Media {
+        script: String,
+    },
+    Decisions {
+        entrypoint: String,
+        model: String,
+        profile_type: String,
+        tier: Option<String>,
+    },
 }
 
 /// A deterministic catalog built from the three native L3MS manifests.
@@ -323,6 +346,7 @@ struct MediaProfile {
     name: String,
     runtime: String,
     tasks: Vec<String>,
+    script: String,
     #[serde(default)]
     device: Option<String>,
 }
@@ -338,6 +362,11 @@ struct DecisionProfile {
     id: String,
     name: String,
     engine: String,
+    tier: Option<String>,
+    #[serde(rename = "type")]
+    profile_type: String,
+    model: String,
+    entrypoint: String,
     device: Option<String>,
 }
 
@@ -362,6 +391,9 @@ fn load_language(
     for entry in entries {
         let key = ProfileKey::new(Lane::Language, entry.id)
             .with_context(|| format!("invalid profile ID in {}", source_path.display()))?;
+        let native_source = NativeProfileSource::Language {
+            model_id: key.profile_id.clone(),
+        };
         let profile = CatalogProfile {
             name: key.profile_id.to_string(),
             key,
@@ -371,6 +403,7 @@ fn load_language(
             device: None,
             readiness: Readiness::ManifestPresent,
             disabled: entry.disabled,
+            native_source,
         };
         insert_profile(profiles, keys, profile)?;
     }
@@ -404,8 +437,17 @@ fn load_media(
             native.id,
             source_path.display()
         );
+        ensure!(
+            !native.script.trim().is_empty(),
+            "profile {:?} has no script path in {}",
+            native.id,
+            source_path.display()
+        );
         let key = ProfileKey::new(Lane::Media, native.id)
             .with_context(|| format!("invalid profile ID in {}", source_path.display()))?;
+        let native_source = NativeProfileSource::Media {
+            script: native.script,
+        };
         let profile = CatalogProfile {
             key,
             name: native.name,
@@ -420,6 +462,7 @@ fn load_media(
             device: native.device.as_deref().map(Device::from_native),
             readiness: Readiness::ManifestPresent,
             disabled: false,
+            native_source,
         };
         insert_profile(profiles, keys, profile)?;
     }
@@ -446,8 +489,32 @@ fn load_decisions(
             "empty profile name in {}",
             source_path.display()
         );
+        ensure!(
+            !native.model.trim().is_empty(),
+            "profile {:?} has no model identifier in {}",
+            native.id,
+            source_path.display()
+        );
+        ensure!(
+            !native.profile_type.trim().is_empty(),
+            "profile {:?} has no type in {}",
+            native.id,
+            source_path.display()
+        );
+        ensure!(
+            !native.entrypoint.trim().is_empty(),
+            "profile {:?} has no entrypoint in {}",
+            native.id,
+            source_path.display()
+        );
         let key = ProfileKey::new(Lane::Decisions, native.id)
             .with_context(|| format!("invalid profile ID in {}", source_path.display()))?;
+        let native_source = NativeProfileSource::Decisions {
+            entrypoint: native.entrypoint,
+            model: native.model,
+            profile_type: native.profile_type,
+            tier: native.tier,
+        };
         let profile = CatalogProfile {
             key,
             name: native.name,
@@ -458,6 +525,7 @@ fn load_decisions(
             device: native.device.as_deref().map(Device::from_native),
             readiness: Readiness::ManifestPresent,
             disabled: false,
+            native_source,
         };
         insert_profile(profiles, keys, profile)?;
     }

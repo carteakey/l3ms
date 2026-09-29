@@ -2,4 +2,5 @@
 
 pub mod catalog;
 pub mod requests;
+pub mod routes;
 pub mod runtime;
