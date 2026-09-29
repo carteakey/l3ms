@@ -16,6 +16,23 @@ use super::catalog::{Catalog, CatalogProfile, Lane, ProfileKey, Task};
 const MAX_TURNS: usize = 128;
 const MAX_QUESTIONS: usize = 128;
 const MAX_SCRIPT_ARGS: usize = 128;
+const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+
+fn ensure_text_budget<'a>(values: impl IntoIterator<Item = &'a str>) -> Result<()> {
+    let total = values
+        .into_iter()
+        .fold(0usize, |bytes, value| bytes.saturating_add(value.len()));
+    ensure!(total <= MAX_REQUEST_BYTES, "request text exceeds 1 MiB");
+    Ok(())
+}
+
+fn ensure_json_budget(value: &Value) -> Result<()> {
+    ensure!(
+        serde_json::to_vec(value)?.len() <= MAX_REQUEST_BYTES,
+        "request JSON exceeds 1 MiB"
+    );
+    Ok(())
+}
 
 /// A language turn. A chat adapter translates this to its native wire shape.
 #[derive(Clone)]
@@ -159,10 +176,12 @@ impl InferenceRequest {
                     turns.iter().all(|turn| !turn.content.trim().is_empty()),
                     "chat turns must not be empty"
                 );
+                ensure_text_budget(turns.iter().map(|turn| turn.content.as_str()))?;
             }
             Self::Media { input, .. } => match input {
                 MediaInput::Workflow { graph, .. } => {
                     ensure!(graph.is_object(), "media workflow must be an object");
+                    ensure_json_budget(graph)?;
                 }
                 MediaInput::Script { args, .. } => {
                     ensure!(
@@ -173,12 +192,22 @@ impl InferenceRequest {
                         args.iter().all(|arg| !arg.contains('\0')),
                         "native script argument contains NUL"
                     );
+                    ensure_text_budget(args.iter().map(String::as_str))?;
                 }
                 MediaInput::Speech(input) => {
                     ensure!(
                         !input.text.trim().is_empty(),
                         "speech text must not be empty"
                     );
+                    ensure_text_budget(
+                        [
+                            Some(input.text.as_str()),
+                            input.instruction.as_deref(),
+                            input.reference_text.as_deref(),
+                        ]
+                        .into_iter()
+                        .flatten(),
+                    )?;
                     match input.mode {
                         SpeechMode::VoiceClone => {
                             ensure!(
@@ -207,11 +236,13 @@ impl InferenceRequest {
                 state, questions, ..
             } => {
                 ensure!(state.is_object(), "decision state must be an object");
+                ensure_json_budget(state)?;
                 ensure!(
                     (1..=MAX_QUESTIONS).contains(&questions.len())
                         && questions.iter().all(|question| !question.trim().is_empty()),
                     "decision questions must be non-empty and bounded"
                 );
+                ensure_text_budget(questions.iter().map(String::as_str))?;
             }
         }
         Ok(profile)
@@ -410,5 +441,28 @@ mod tests {
             }],
         };
         assert!(invalid.validate_for(&request).is_err());
+    }
+
+    #[test]
+    fn request_payloads_have_a_bounded_memory_contract() {
+        let catalog = catalog();
+        let oversized = InferenceRequest::Chat {
+            profile: key(Lane::Language, "gemma-4-26b-qat-mtp"),
+            turns: vec![ChatTurn {
+                role: ChatRole::User,
+                content: "x".repeat(MAX_REQUEST_BYTES + 1),
+            }],
+            max_tokens: 8,
+        };
+        assert!(oversized.validate(&catalog).is_err());
+
+        let oversized = InferenceRequest::Media {
+            profile: key(Lane::Media, "qwen-image-2.1"),
+            input: MediaInput::Workflow {
+                task: Task::new("image").unwrap(),
+                graph: serde_json::json!({"prompt": "x".repeat(MAX_REQUEST_BYTES)}),
+            },
+        };
+        assert!(oversized.validate(&catalog).is_err());
     }
 }
