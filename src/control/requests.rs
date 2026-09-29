@@ -211,7 +211,10 @@ impl InferenceRequest {
                     match input.mode {
                         SpeechMode::VoiceClone => {
                             ensure!(
-                                input.voice_reference.is_some()
+                                input
+                                    .voice_reference
+                                    .as_ref()
+                                    .is_some_and(|path| !path.as_os_str().is_empty())
                                     && input
                                         .reference_text
                                         .as_deref()
@@ -407,8 +410,16 @@ mod tests {
             ..
         } = &mut speech
         {
-            input.voice_reference = Some(PathBuf::from("reference.wav"));
+            input.voice_reference = Some(PathBuf::new());
             input.reference_text = Some("reference words".into());
+        }
+        assert!(speech.validate(&catalog).is_err());
+        if let InferenceRequest::Media {
+            input: MediaInput::Speech(input),
+            ..
+        } = &mut speech
+        {
+            input.voice_reference = Some(PathBuf::from("reference.wav"));
         }
         assert!(speech.validate(&catalog).is_ok());
     }
