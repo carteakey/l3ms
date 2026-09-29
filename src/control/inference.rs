@@ -166,6 +166,35 @@ impl CoordinatorCore {
         &self.history
     }
 
+    /// Reconnect lookup uses the caller's retained request ID, never a numeric
+    /// history ID (which can be rehydrated differently after restart).
+    pub fn request_state(&self, request_id: &str) -> Option<&str> {
+        self.history
+            .records()
+            .iter()
+            .find(|job| job.metadata.request_id.as_deref() == Some(request_id))
+            .and_then(|job| job.metadata.result_state.as_deref())
+    }
+
+    /// Cancels only retained, nonterminal work. A terminal row is not rewritten
+    /// as cancelled, and an unknown request cannot target another numeric job.
+    pub fn cancel_request(&mut self, request_id: &str) -> Result<()> {
+        let job = self
+            .history
+            .records()
+            .iter()
+            .find(|job| job.metadata.request_id.as_deref() == Some(request_id))
+            .context("unknown retained request")?;
+        ensure!(
+            matches!(
+                job.metadata.result_state.as_deref(),
+                Some("queued" | "running")
+            ),
+            "request is already terminal"
+        );
+        self.cancel(job.id)
+    }
+
     /// Called only after the host executor has reconciled actual backend jobs,
     /// admission and resource ownership. This does not perform those probes.
     pub fn confirm_reconciled(&mut self) -> Result<()> {
@@ -507,10 +536,36 @@ mod tests {
             .is_err());
         coordinator.cancel(id).unwrap();
         assert_eq!(coordinator.queued_count(), 0);
+        assert_eq!(coordinator.request_state("first"), Some("cancelled"));
+        assert!(coordinator.cancel_request("first").is_err());
+        assert!(coordinator.cancel_request("unknown").is_err());
         assert!(coordinator
             .submit("first".into(), chat(), Duration::from_secs(10), now)
             .is_err());
         assert!(coordinator.reserve_next(now).unwrap().is_none());
+    }
+
+    #[test]
+    fn request_id_lookup_and_cancel_survive_restart_without_replay() {
+        let temp = TempDir::new().unwrap();
+        let now = Instant::now();
+        let mut coordinator = core(temp.path(), 2);
+        coordinator.confirm_reconciled().unwrap();
+        coordinator
+            .submit("stable-id".into(), chat(), Duration::from_secs(10), now)
+            .unwrap();
+        assert_eq!(coordinator.request_state("stable-id"), Some("queued"));
+        drop(coordinator);
+        let mut restarted = core(temp.path(), 2);
+        assert_eq!(restarted.request_state("stable-id"), Some("interrupted"));
+        assert!(restarted.cancel_request("stable-id").is_err());
+        restarted.confirm_reconciled().unwrap();
+        restarted
+            .submit("new-id".into(), chat(), Duration::from_secs(10), now)
+            .unwrap();
+        restarted.cancel_request("new-id").unwrap();
+        assert_eq!(restarted.request_state("new-id"), Some("cancelled"));
+        assert_eq!(restarted.queued_count(), 0);
     }
 
     #[test]
