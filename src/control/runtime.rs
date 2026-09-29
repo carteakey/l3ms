@@ -8,8 +8,9 @@
 //! gates before this can back a user-facing switch command.
 
 use std::time::Instant;
+use std::{error::Error, fmt};
 
-use anyhow::{anyhow, bail, ensure, Context, Result};
+use anyhow::{anyhow, ensure, Context, Result};
 
 use super::catalog::RuntimeIdentity;
 
@@ -69,6 +70,47 @@ impl Cancellation for NeverCancel {
     }
 }
 
+/// What a coordinator may infer after a failed transition. None of these
+/// states licenses replaying an inference request with an uncertain result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FailureDisposition {
+    /// No runtime stop/start was attempted; existing ownership was not changed.
+    NoTransition,
+    /// The previous runtime is healthy with admission reopened.
+    PreviousRestored,
+    /// Runtime or GPU ownership cannot be verified; quarantine conflicting work.
+    OwnershipUncertain,
+}
+
+#[derive(Debug)]
+pub struct SwitchFailure {
+    pub disposition: FailureDisposition,
+    source: anyhow::Error,
+}
+
+impl SwitchFailure {
+    fn new(disposition: FailureDisposition, source: anyhow::Error) -> Self {
+        Self {
+            disposition,
+            source,
+        }
+    }
+}
+
+impl fmt::Display for SwitchFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{:#}", self.source)
+    }
+}
+
+impl Error for SwitchFailure {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+pub type SwitchResult<T> = std::result::Result<T, SwitchFailure>;
+
 fn restore(previous: &mut dyn RuntimeAdapter) -> Result<()> {
     previous.activate().context("reactivate previous runtime")?;
     previous
@@ -79,19 +121,23 @@ fn restore(previous: &mut dyn RuntimeAdapter) -> Result<()> {
         .context("reopen previous runtime admission")
 }
 
-fn failed_with_restore(previous: &mut dyn RuntimeAdapter, primary: anyhow::Error) -> anyhow::Error {
+fn failed_with_restore(previous: &mut dyn RuntimeAdapter, primary: anyhow::Error) -> SwitchFailure {
     match restore(previous) {
-        Ok(()) => primary.context("previous runtime restored"),
-        Err(recovery) => {
-            anyhow!("transition failed: {primary:#}; restoration also failed: {recovery:#}")
-        }
+        Ok(()) => SwitchFailure::new(
+            FailureDisposition::PreviousRestored,
+            primary.context("previous runtime restored"),
+        ),
+        Err(recovery) => SwitchFailure::new(
+            FailureDisposition::OwnershipUncertain,
+            anyhow!("transition failed: {primary:#}; restoration also failed: {recovery:#}"),
+        ),
     }
 }
 
 fn failed_during_deactivation(
     previous: &mut dyn RuntimeAdapter,
     primary: anyhow::Error,
-) -> anyhow::Error {
+) -> SwitchFailure {
     let observed = previous.state();
     match observed {
         Ok(RuntimeState::Running) => {
@@ -100,33 +146,37 @@ fn failed_during_deactivation(
                 .context("verify previous runtime after failed stop")
                 .and_then(|()| previous.open_admission().context("reopen previous admission"));
             match recovery {
-                Ok(()) => primary.context("previous runtime remained healthy and admission reopened"),
-                Err(error) => anyhow!("transition failed: {primary:#}; recovery also failed: {error:#}"),
+                Ok(()) => SwitchFailure::new(
+                    FailureDisposition::PreviousRestored,
+                    primary.context("previous runtime remained healthy and admission reopened"),
+                ),
+                Err(error) => SwitchFailure::new(
+                    FailureDisposition::OwnershipUncertain,
+                    anyhow!("transition failed: {primary:#}; recovery also failed: {error:#}"),
+                ),
             }
         }
         Ok(RuntimeState::Stopped) => match previous.verify_released() {
             Ok(()) => failed_with_restore(previous, primary),
-            Err(error) => anyhow!(
-                "transition failed: {primary:#}; GPU release is uncertain: {error:#}; refusing restart"
+            Err(error) => SwitchFailure::new(
+                FailureDisposition::OwnershipUncertain,
+                anyhow!("transition failed: {primary:#}; GPU release is uncertain: {error:#}; refusing restart"),
             ),
         },
-        Ok(RuntimeState::Unknown) => anyhow!(
-            "transition failed: {primary:#}; previous runtime state is unknown; refusing restart"
+        Ok(RuntimeState::Unknown) => SwitchFailure::new(
+            FailureDisposition::OwnershipUncertain,
+            anyhow!("transition failed: {primary:#}; previous runtime state is unknown; refusing restart"),
         ),
-        Err(error) => anyhow!(
-            "transition failed: {primary:#}; previous runtime inspection failed: {error:#}; refusing restart"
+        Err(error) => SwitchFailure::new(
+            FailureDisposition::OwnershipUncertain,
+            anyhow!("transition failed: {primary:#}; previous runtime inspection failed: {error:#}; refusing restart"),
         ),
     }
 }
 
-/// Switch one exclusively owned GPU resource between two managed runtimes.
-/// This is an in-process primitive, not an installed host coordinator.
-/// Returns only after target health and admission are verified. On a failed
-/// activation it attempts to stop the target and restore the previous runtime.
-/// Both primary and recovery failures are surfaced together.
-pub fn switch_exclusive(
-    previous: &mut dyn RuntimeAdapter,
-    target: &mut dyn RuntimeAdapter,
+fn preflight(
+    previous: &dyn RuntimeAdapter,
+    target: &dyn RuntimeAdapter,
     deadline: Instant,
     cancellation: &dyn Cancellation,
 ) -> Result<()> {
@@ -157,23 +207,41 @@ pub fn switch_exclusive(
         target.state()? == RuntimeState::Stopped,
         "target runtime is not known stopped"
     );
+    Ok(())
+}
+
+/// Switch one exclusively owned GPU resource between two managed runtimes.
+/// This is an in-process primitive, not an installed host coordinator.
+/// Returns only after target health and admission are verified. On a failed
+/// activation it attempts to stop the target and restore the previous runtime.
+/// Both primary and recovery failures are surfaced together.
+pub fn switch_exclusive(
+    previous: &mut dyn RuntimeAdapter,
+    target: &mut dyn RuntimeAdapter,
+    deadline: Instant,
+    cancellation: &dyn Cancellation,
+) -> SwitchResult<()> {
+    preflight(previous, target, deadline, cancellation)
+        .map_err(|error| SwitchFailure::new(FailureDisposition::NoTransition, error))?;
 
     if let Err(error) = previous
         .close_admission()
         .context("close previous runtime admission")
     {
         return match previous.open_admission() {
-            Ok(()) => Err(error),
-            Err(recovery) => Err(anyhow!(
-                "admission close failed: {error:#}; reopening admission also failed: {recovery:#}"
+            Ok(()) => Err(SwitchFailure::new(FailureDisposition::NoTransition, error)),
+            Err(recovery) => Err(SwitchFailure::new(
+                FailureDisposition::OwnershipUncertain,
+                anyhow!("admission close failed: {error:#}; reopening admission also failed: {recovery:#}"),
             )),
         };
     }
     if let Err(error) = previous.drain(deadline).context("drain previous runtime") {
         return match previous.open_admission() {
-            Ok(()) => Err(error),
-            Err(recovery) => Err(anyhow!(
-                "drain failed: {error:#}; reopening admission also failed: {recovery:#}"
+            Ok(()) => Err(SwitchFailure::new(FailureDisposition::NoTransition, error)),
+            Err(recovery) => Err(SwitchFailure::new(
+                FailureDisposition::OwnershipUncertain,
+                anyhow!("drain failed: {error:#}; reopening admission also failed: {recovery:#}"),
             )),
         };
     }
@@ -184,9 +252,13 @@ pub fn switch_exclusive(
             "transition deadline expired after drain"
         };
         return match previous.open_admission() {
-            Ok(()) => Err(anyhow!(reason)),
-            Err(recovery) => Err(anyhow!(
-                "{reason}; reopening admission also failed: {recovery:#}"
+            Ok(()) => Err(SwitchFailure::new(
+                FailureDisposition::NoTransition,
+                anyhow!(reason),
+            )),
+            Err(recovery) => Err(SwitchFailure::new(
+                FailureDisposition::OwnershipUncertain,
+                anyhow!("{reason}; reopening admission also failed: {recovery:#}"),
             )),
         };
     }
@@ -198,7 +270,10 @@ pub fn switch_exclusive(
         .verify_released()
         .context("verify exclusive GPU release")
     {
-        bail!("{error:#}; GPU ownership is uncertain, so neither runtime was activated");
+        return Err(SwitchFailure::new(
+            FailureDisposition::OwnershipUncertain,
+            anyhow!("{error:#}; GPU ownership is uncertain, so neither runtime was activated"),
+        ));
     }
     if cancellation.is_cancelled() || Instant::now() >= deadline {
         let reason = if cancellation.is_cancelled() {
@@ -239,9 +314,10 @@ pub fn switch_exclusive(
                     .context("verify target GPU release")
             });
         if let Err(cleanup_error) = cleanup {
-            bail!(
-                "transition failed: {primary:#}; target cleanup failed: {cleanup_error:#}; previous runtime was not restarted because GPU ownership is uncertain"
-            );
+            return Err(SwitchFailure::new(
+                FailureDisposition::OwnershipUncertain,
+                anyhow!("transition failed: {primary:#}; target cleanup failed: {cleanup_error:#}; previous runtime was not restarted because GPU ownership is uncertain"),
+            ));
         }
         return Err(failed_with_restore(previous, primary));
     }
@@ -290,7 +366,7 @@ mod tests {
                 .borrow_mut()
                 .push(format!("{}:{step}", self.id.as_str()));
             if self.fail == Some(step) {
-                bail!("injected {step} failure")
+                anyhow::bail!("injected {step} failure")
             }
             Ok(())
         }
@@ -399,7 +475,9 @@ mod tests {
     fn failed_drain_reopens_admission_without_stopping_previous() {
         let (mut previous, mut target, events) = pair();
         previous.fail = Some("drain");
-        assert!(switch_exclusive(&mut previous, &mut target, deadline(), &NeverCancel).is_err());
+        let error =
+            switch_exclusive(&mut previous, &mut target, deadline(), &NeverCancel).unwrap_err();
+        assert_eq!(error.disposition, FailureDisposition::NoTransition);
         assert_eq!(previous.state, RuntimeState::Running);
         assert!(previous.admission_open);
         assert_eq!(target.state, RuntimeState::Stopped);
@@ -410,7 +488,9 @@ mod tests {
     fn failed_admission_close_attempts_to_reopen_without_stopping() {
         let (mut previous, mut target, events) = pair();
         previous.fail = Some("close");
-        assert!(switch_exclusive(&mut previous, &mut target, deadline(), &NeverCancel).is_err());
+        let error =
+            switch_exclusive(&mut previous, &mut target, deadline(), &NeverCancel).unwrap_err();
+        assert_eq!(error.disposition, FailureDisposition::NoTransition);
         assert_eq!(previous.state, RuntimeState::Running);
         assert!(previous.admission_open);
         assert!(events.borrow().iter().any(|event| event == "language:open"));
@@ -423,6 +503,7 @@ mod tests {
         target.fail = Some("healthy");
         let error =
             switch_exclusive(&mut previous, &mut target, deadline(), &NeverCancel).unwrap_err();
+        assert_eq!(error.disposition, FailureDisposition::PreviousRestored);
         assert!(format!("{error:#}").contains("previous runtime restored"));
         assert_eq!(previous.state, RuntimeState::Running);
         assert!(previous.admission_open);
@@ -445,6 +526,7 @@ mod tests {
         previous.fail = Some("released");
         let error =
             switch_exclusive(&mut previous, &mut target, deadline(), &NeverCancel).unwrap_err();
+        assert_eq!(error.disposition, FailureDisposition::OwnershipUncertain);
         assert!(format!("{error:#}").contains("ownership is uncertain"));
         assert!(!events.borrow().iter().any(|event| event == "media:start"));
         assert!(!events
@@ -454,7 +536,9 @@ mod tests {
 
         let (mut previous, mut target, events) = pair();
         previous.owner = LifecycleOwner::External;
-        assert!(switch_exclusive(&mut previous, &mut target, deadline(), &NeverCancel).is_err());
+        let error =
+            switch_exclusive(&mut previous, &mut target, deadline(), &NeverCancel).unwrap_err();
+        assert_eq!(error.disposition, FailureDisposition::NoTransition);
         assert!(events.borrow().is_empty());
     }
 
