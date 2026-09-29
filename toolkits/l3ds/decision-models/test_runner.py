@@ -1,4 +1,5 @@
 import contextlib
+import builtins
 import importlib.util
 import io
 import unittest
@@ -43,6 +44,22 @@ class RunnerSafetyTest(unittest.TestCase):
             engine = runner.MockOrApiJevEngine(allow_simulation=False)
         with self.assertRaises(runner.InferenceUnavailable):
             engine.decide(STATE, QUESTIONS)
+
+    def test_explicit_simulation_does_not_load_models_or_call_hosted_api(self):
+        original_import = builtins.__import__
+
+        def guard_import(name, *args, **kwargs):
+            if name in {"nagi", "laya", "typesafe_sdk"}:
+                raise AssertionError(f"simulation attempted to import {name}")
+            return original_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=guard_import):
+            nagi = runner.NagiEngine("nagi-smol", allow_simulation=True)
+            laya = runner.LayaEngine("laya-en", allow_simulation=True)
+            hosted = runner.MockOrApiJevEngine(api_key="unused", allow_simulation=True)
+        self.assertIn("simulated", nagi.decide(STATE, QUESTIONS)["engine"])
+        self.assertIn("simulated", laya.decide(STATE, QUESTIONS)["engine"])
+        self.assertIsNone(hosted.client)
 
     def test_failed_benchmark_cannot_emit_result_marker(self):
         engine = object.__new__(runner.SemIfEngine)

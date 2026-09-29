@@ -32,7 +32,7 @@ class MockOrApiJevEngine(BaseDecisionEngine):
         self.api_key = api_key or os.environ.get("TYPESAFE_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
         self.base_url = base_url or os.environ.get("TYPESAFE_BASE_URL")
         self.client = None
-        if self.api_key:
+        if self.api_key and not self.allow_simulation:
             try:
                 from typesafe_sdk import TypeSafeClient
                 self.client = TypeSafeClient(api_key=self.api_key, base_url=self.base_url)
@@ -94,6 +94,8 @@ class NagiEngine(BaseDecisionEngine):
         self.allow_simulation = allow_simulation
         self.model = None
         self.load_err = "model did not load"
+        if self.allow_simulation:
+            return
         try:
             import nagi
             if "smol" in model_name.lower():
@@ -158,6 +160,8 @@ class LayaEngine(BaseDecisionEngine):
         self.allow_simulation = allow_simulation
         self.agent = None
         self.load_err = "model did not load"
+        if self.allow_simulation:
+            return
         try:
             import laya
             try:
@@ -226,6 +230,8 @@ class SemIfEngine(BaseDecisionEngine):
         self.device = device
         self.allow_simulation = allow_simulation
         self.scorer = None
+        if self.allow_simulation:
+            return
         try:
             import semif_phase1
             self.scorer = True
