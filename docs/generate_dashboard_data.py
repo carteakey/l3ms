@@ -12,7 +12,11 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "llama-swap.yaml"
 META = ROOT / "docs" / "dashboard-meta.json"
 COMMUNITY_RUNS = ROOT / "docs" / "community-runs.json"
+MEDIA_MANIFEST = ROOT / "toolkits" / "l2m2" / "media-runtimes.json"
+DECISION_MANIFEST = ROOT / "toolkits" / "l3ds" / "decision-runtimes.json"
+STACK_META = ROOT / "docs" / "stack-meta.json"
 OUTPUT = ROOT / "docs" / "generated-models.js"
+SOURCE_BASE = "https://github.com/carteakey/l3ms/blob/main/"
 
 EVIDENCE_FIELDS = (
     "pp",
@@ -209,10 +213,122 @@ def portable_command(model: dict) -> str:
     return "\n".join(preamble) + "\n\n" + shell_command
 
 
+def public_doc_url(relative: str) -> str:
+    if not isinstance(relative, str) or not relative:
+        raise SystemExit("Stack guide/evidence path must be a non-empty string")
+    path = Path(relative)
+    if path.is_absolute() or ".." in path.parts or path.suffix != ".md":
+        raise SystemExit(f"Unsafe stack guide/evidence path: {relative}")
+    if not (ROOT / path).is_file():
+        raise SystemExit(f"Stack guide/evidence does not exist: {relative}")
+    return SOURCE_BASE + path.as_posix()
+
+
+def profile_source_url(manifest: Path, profile_id: str) -> str:
+    marker = f'"id": {json.dumps(profile_id)}'
+    lines = manifest.read_text().splitlines()
+    matches = [number for number, line in enumerate(lines, 1) if marker in line]
+    if len(matches) != 1:
+        raise SystemExit(f"Expected one {profile_id} source line in {manifest}")
+    return SOURCE_BASE + manifest.relative_to(ROOT).as_posix() + f"#L{matches[0]}"
+
+
+def checked_stack_metadata(profiles: list[dict], metadata: dict, lane: str) -> None:
+    ids = [profile.get("id") for profile in profiles]
+    if any(not isinstance(profile_id, str) or not profile_id for profile_id in ids):
+        raise SystemExit(f"{lane} manifest has an empty/invalid profile ID")
+    if len(ids) != len(set(ids)):
+        raise SystemExit(f"{lane} manifest has duplicate profile IDs")
+    if set(ids) != set(metadata):
+        missing = sorted(set(ids) - set(metadata))
+        stale = sorted(set(metadata) - set(ids))
+        raise SystemExit(
+            f"{lane} display metadata mismatch; missing={missing or 'none'}, "
+            f"stale={stale or 'none'}"
+        )
+    for profile_id, display in metadata.items():
+        if not isinstance(display, dict) or set(display) - {"guide", "experiment", "modes"}:
+            raise SystemExit(f"Invalid {lane} display metadata for {profile_id}")
+        public_doc_url(display.get("guide"))
+        if display.get("experiment") is not None:
+            public_doc_url(display["experiment"])
+        if "modes" in display and (
+            lane != "media"
+            or not isinstance(display["modes"], list)
+            or not all(isinstance(mode, str) and mode for mode in display["modes"])
+        ):
+            raise SystemExit(f"Invalid {lane} modes for {profile_id}")
+
+
+def media_public_profiles(manifest: dict, metadata: dict) -> list[dict]:
+    if manifest.get("schema_version") != 1 or not isinstance(manifest.get("profiles"), list):
+        raise SystemExit("Unsupported media manifest schema")
+    profiles = manifest["profiles"]
+    checked_stack_metadata(profiles, metadata, "media")
+    public = []
+    for profile in profiles:
+        profile_id = profile["id"]
+        if not all(isinstance(profile.get(key), str) and profile[key] for key in ("name", "runtime", "status", "script")):
+            raise SystemExit(f"Incomplete media profile {profile_id}")
+        if not isinstance(profile.get("tasks"), list) or not all(isinstance(task, str) and task for task in profile["tasks"]):
+            raise SystemExit(f"Incomplete media tasks for {profile_id}")
+        script = Path(profile["script"])
+        if script.is_absolute() or ".." in script.parts or not (MEDIA_MANIFEST.parent / script).is_file():
+            raise SystemExit(f"Invalid media script for {profile_id}")
+        display = metadata[profile_id]
+        public.append({
+            "id": profile_id,
+            "name": profile["name"],
+            "runtime": profile["runtime"],
+            "status": profile["status"],
+            "tasks": profile["tasks"],
+            "modes": display.get("modes", []),
+            "sourceUrl": profile_source_url(MEDIA_MANIFEST, profile_id),
+            "guideUrl": public_doc_url(display["guide"]),
+            "experimentUrl": public_doc_url(display["experiment"]) if display.get("experiment") else None,
+        })
+    return public
+
+
+def decision_public_profiles(manifest: dict, metadata: dict) -> list[dict]:
+    if not manifest.get("version") or not isinstance(manifest.get("profiles"), list):
+        raise SystemExit("Unsupported decision manifest schema")
+    profiles = manifest["profiles"]
+    checked_stack_metadata(profiles, metadata, "decisions")
+    public = []
+    for profile in profiles:
+        profile_id = profile["id"]
+        if not all(isinstance(profile.get(key), str) and profile[key] for key in ("name", "engine", "type", "entrypoint")):
+            raise SystemExit(f"Incomplete decision profile {profile_id}")
+        if profile["type"] not in {"local", "api"}:
+            raise SystemExit(f"Unknown decision type for {profile_id}")
+        entrypoint = Path(profile["entrypoint"])
+        if entrypoint.is_absolute() or ".." in entrypoint.parts or not (DECISION_MANIFEST.parent / entrypoint).is_file():
+            raise SystemExit(f"Invalid decision entrypoint for {profile_id}")
+        display = metadata[profile_id]
+        public.append({
+            "id": profile_id,
+            "name": profile["name"],
+            "engine": profile["engine"],
+            "kind": "hosted" if profile["type"] == "api" else "local",
+            "device": profile.get("device", "unspecified"),
+            "declaredLatencyMs": profile.get("expected_latency_ms"),
+            "sourceUrl": profile_source_url(DECISION_MANIFEST, profile_id),
+            "guideUrl": public_doc_url(display["guide"]),
+            "experimentUrl": public_doc_url(display["experiment"]) if display.get("experiment") else None,
+        })
+    return public
+
+
 def main() -> None:
     parsed = parse_models(CONFIG.read_text())
     meta = json.loads(META.read_text())
     community_runs = validate_community_runs(json.loads(COMMUNITY_RUNS.read_text()))
+    stack_meta = json.loads(STACK_META.read_text())
+    media = media_public_profiles(json.loads(MEDIA_MANIFEST.read_text()), stack_meta["media"])
+    decisions = decision_public_profiles(
+        json.loads(DECISION_MANIFEST.read_text()), stack_meta["decisions"]
+    )
     public_models = []
     active_ids = {
         model_id
@@ -257,6 +373,8 @@ def main() -> None:
         "system": meta["system"],
         "methodology": meta["methodology"],
         "models": public_models,
+        "media": media,
+        "decisions": decisions,
         "benchmarks": meta["benchmarks"],
         # Deliberately separate from models: community hardware must never
         # enter the local RTX 4070 ranking or its sort order.

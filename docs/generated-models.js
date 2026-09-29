@@ -266,6 +266,179 @@ window.L3MS_DASHBOARD = {
       "benchmarkUrl": "https://github.com/carteakey/l3ms/blob/main/bench-models/bench-llama-qwen38-flash-next-build-ab.sh"
     }
   ],
+  "media": [
+    {
+      "id": "minimax-h3",
+      "name": "MiniMax H3 audio + video",
+      "runtime": "audio.cpp",
+      "status": "experimental-local",
+      "tasks": [
+        "music",
+        "video",
+        "tts"
+      ],
+      "modes": [],
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L5",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/media-generation-runbook.md",
+      "experimentUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/experiments/h3-reference-baseline.md"
+    },
+    {
+      "id": "ltx-2.5",
+      "name": "LTX-2.5 synchronized video",
+      "runtime": "LTX-2 Python",
+      "status": "gated-local",
+      "tasks": [
+        "video",
+        "music"
+      ],
+      "modes": [],
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L27",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/media-generation-runbook.md",
+      "experimentUrl": null
+    },
+    {
+      "id": "heartmula-music",
+      "name": "HeartMuLa local music generation",
+      "runtime": "audio.cpp",
+      "status": "local",
+      "tasks": [
+        "music"
+      ],
+      "modes": [],
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L50",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/audio-cpp-runtimes.md",
+      "experimentUrl": null
+    },
+    {
+      "id": "breeze-tts-2",
+      "name": "Breeze-TTS-2 speech generation & voice cloning",
+      "runtime": "audio.cpp",
+      "status": "local",
+      "tasks": [
+        "tts",
+        "clon",
+        "design"
+      ],
+      "modes": [
+        "Standard TTS",
+        "Voice design",
+        "Voice cloning",
+        "Streaming"
+      ],
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L71",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/audio-cpp-runtimes.md",
+      "experimentUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/experiments/breeze-tts-2-baseline.md"
+    },
+    {
+      "id": "blender-3d",
+      "name": "Blender 3D scene & mesh generation",
+      "runtime": "Blender 5.2 / blender-mcp",
+      "status": "local",
+      "tasks": [
+        "3d",
+        "render",
+        "image"
+      ],
+      "modes": [],
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L93",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/blender-mcp-setup.md",
+      "experimentUrl": null
+    },
+    {
+      "id": "qwen-image-2.1",
+      "name": "Qwen Image 2.1 image generation",
+      "runtime": "ComfyUI",
+      "status": "local",
+      "tasks": [
+        "image"
+      ],
+      "modes": [],
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L115",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/qwen-image-2.1-setup.md",
+      "experimentUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/experiments/qwen-vs-krea2-comparison.md"
+    },
+    {
+      "id": "krea-2",
+      "name": "Krea 2 raw int8 image generation",
+      "runtime": "ComfyUI",
+      "status": "local",
+      "tasks": [
+        "image"
+      ],
+      "modes": [],
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L136",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/krea-2-setup.md",
+      "experimentUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/experiments/qwen-vs-krea2-comparison.md"
+    }
+  ],
+  "decisions": [
+    {
+      "id": "nagi-smol",
+      "name": "Nagi-Smol v0 (480M)",
+      "engine": "nagi",
+      "kind": "local",
+      "device": "cuda",
+      "declaredLatencyMs": 17,
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l3ds/decision-runtimes.json#L6",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l3ds/README.md",
+      "experimentUrl": null
+    },
+    {
+      "id": "nagi-big",
+      "name": "Nagi-Big v3 (4B)",
+      "engine": "nagi",
+      "kind": "local",
+      "device": "cuda",
+      "declaredLatencyMs": 70,
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l3ds/decision-runtimes.json#L21",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l3ds/README.md",
+      "experimentUrl": null
+    },
+    {
+      "id": "laya-en",
+      "name": "Laya (ModernBERT)",
+      "engine": "laya",
+      "kind": "local",
+      "device": "cuda",
+      "declaredLatencyMs": 13,
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l3ds/decision-runtimes.json#L36",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l3ds/README.md",
+      "experimentUrl": null
+    },
+    {
+      "id": "semif-openjev",
+      "name": "SemIf / OpenJev (3B)",
+      "engine": "semif",
+      "kind": "local",
+      "device": "cuda",
+      "declaredLatencyMs": 51,
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l3ds/decision-runtimes.json#L51",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l3ds/README.md",
+      "experimentUrl": null
+    },
+    {
+      "id": "jev-api",
+      "name": "Jev 1.13 (TypeSafe API)",
+      "engine": "jev",
+      "kind": "hosted",
+      "device": "remote",
+      "declaredLatencyMs": 350,
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l3ds/decision-runtimes.json#L66",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l3ds/README.md",
+      "experimentUrl": null
+    },
+    {
+      "id": "systemone",
+      "name": "System One (Official TypeSafe API)",
+      "engine": "jev",
+      "kind": "hosted",
+      "device": "remote",
+      "declaredLatencyMs": 300,
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l3ds/decision-runtimes.json#L80",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l3ds/README.md",
+      "experimentUrl": null
+    }
+  ],
   "benchmarks": {
     "qwen38-flash-next": {
       "title": "Qwen3.8-Flash-Next: Master vs Compact MTP (PR #28243)",

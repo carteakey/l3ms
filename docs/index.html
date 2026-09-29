@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="Reproducible llama.cpp configurations and benchmarks from a 12GB VRAM homelab.">
+  <meta name="description" content="L3MS: local language, media, and decision model profiles, with separately labeled benchmark evidence.">
   <meta name="theme-color" content="#080808">
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
-  <title>L3MS // Homelab LLM Profiles</title>
+  <title>L3MS // Local 3-Mode Model Stack</title>
   <style>
     :root {
       color-scheme: dark;
@@ -211,6 +211,19 @@
     .community-card h3 { margin: 0; color: #fff; font-size: .85rem; }
     .community-card p { color: var(--muted); }
 
+    .lane-intro { padding: .9rem; margin-bottom: .8rem; border-left: 4px solid var(--blue); }
+    .lane-intro p { margin: .25rem 0 0; color: var(--muted); }
+    .lane-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; }
+    .lane-card { min-width: 0; padding: .9rem; }
+    .lane-card h3 { margin: .28rem 0 .65rem; color: #fff; font-size: .86rem; }
+    .lane-card .badge-row { margin: .35rem 0 .7rem; }
+    .lane-card .badge { overflow-wrap: anywhere; }
+    .lane-card .detail-value { overflow-wrap: anywhere; }
+    .lane-links { display: flex; gap: .8rem; flex-wrap: wrap; margin-top: .8rem; padding-top: .6rem; border-top: 1px dashed var(--border); font-size: .68rem; }
+    .lane-note { margin: .7rem 0 0; color: var(--yellow); font-size: .66rem; }
+    .lane-meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; }
+    .lane-meta > div { min-width: 0; }
+
     .empty { padding: 2rem; color: var(--muted); text-align: center; }
     footer { margin-top: 2rem; padding: 1rem 0; border-top: 2px solid var(--border); color: var(--muted); font-size: .66rem; text-align: center; }
 
@@ -238,6 +251,7 @@
       .chart-row { grid-template-columns: 95px minmax(0, 1fr); }
       .metrics { grid-template-columns: repeat(2, 1fr); }
       .archive-list { grid-template-columns: 1fr; }
+      .lane-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -245,15 +259,15 @@
   <main class="container">
     <header class="surface">
       <div>
-        <h1 class="brand-title">L3MS <span class="accent">//</span> PROFILES</h1>
-        <span class="eyebrow">Reproducible homelab LLM inference</span>
+        <h1 class="brand-title">L3MS <span class="accent">//</span> THE STACK</h1>
+        <span class="eyebrow">Local 3-Mode Model Stack · Language / Media / Decisions</span>
         <nav class="header-links" aria-label="Related resources">
           <a href="https://github.com/carteakey/l3ms">Source</a>
           <a href="https://carteakey.dev/blog/local-inference/local-llm-optimization/">Optimization guide</a>
         </nav>
       </div>
       <div class="system-grid" aria-label="Test system">
-        <div><span class="label">Snapshot</span><span class="system-value"><span class="status-dot"></span><span id="profile-count">--</span> profiles</span></div>
+        <div><span class="label">Language snapshot</span><span class="system-value"><span class="status-dot"></span><span id="profile-count">--</span> served profiles</span></div>
         <div><span class="label">GPU</span><span class="system-value" id="system-gpu">--</span></div>
         <div><span class="label">CPU</span><span class="system-value" id="system-cpu">--</span></div>
         <div><span class="label">RAM</span><span class="system-value" id="system-ram">--</span></div>
@@ -262,8 +276,8 @@
 
     <section class="intro surface">
       <div>
-        <h2>Commands and measured performance from one 12GB node.</h2>
-        <p>These are the configurations I actually serve through llama-swap. Open a profile to see its normalized llama.cpp command, benchmark source, and the trade-offs used to make it fit.</p>
+        <h2>Three model lanes, with evidence kept in its lane.</h2>
+        <p>Language profiles show measured llama.cpp performance from one 12GB node. Media and decision cards describe native toolkit manifests and link to their guides; a listed profile is not a claim that its model is installed, running, or benchmarked.</p>
       </div>
       <div class="methodology">
         <span class="label">How to read the numbers</span>
@@ -272,10 +286,12 @@
     </section>
 
     <nav class="tabs" aria-label="Dashboard views">
-      <button class="tab active" data-tab="models">[1] Served profiles</button>
-      <button class="tab" data-tab="benchmarks">[2] Benchmark runs</button>
-      <button class="tab" data-tab="community">[3] Community runs</button>
-      <button class="tab" data-tab="archive">[4] Retired profiles</button>
+      <button class="tab active" data-tab="models">[1] Language</button>
+      <button class="tab" data-tab="media">[2] Media / TTS</button>
+      <button class="tab" data-tab="decisions">[3] Decisions</button>
+      <button class="tab" data-tab="benchmarks">[4] Benchmark runs</button>
+      <button class="tab" data-tab="community">[5] Community runs</button>
+      <button class="tab" data-tab="archive">[6] Retired profiles</button>
     </nav>
 
     <section class="tab-panel active" id="models-panel">
@@ -298,6 +314,22 @@
         </table>
       </div>
       <div class="mobile-models" id="mobile-models"></div>
+    </section>
+
+    <section class="tab-panel" id="media-panel">
+      <div class="lane-intro surface">
+        <span class="label">Media generation / native L2M2 profiles</span>
+        <p>Image, video, audio, 3D, and speech workflows. Status comes from the toolkit manifest; experiment links are provided only where a documented run exists. Breeze TTS 2 includes standard synthesis, voice design, voice cloning, and streaming paths.</p>
+      </div>
+      <div class="lane-grid" id="media-list"></div>
+    </section>
+
+    <section class="tab-panel" id="decisions-panel">
+      <div class="lane-intro surface">
+        <span class="label">Decision models / native L3DS profiles</span>
+        <p>Local and hosted decision backends are shown separately. Manifest latency values are targets, not measured results; no decision benchmark is implied by this catalog.</p>
+      </div>
+      <div class="lane-grid" id="decision-list"></div>
     </section>
 
     <section class="tab-panel" id="benchmarks-panel">
@@ -329,7 +361,7 @@
     </section>
 
     <footer>
-      <span id="generated-date"></span> · Commands generated from <a href="https://github.com/carteakey/l3ms/blob/main/llama-swap.yaml">llama-swap.yaml</a> · <span id="system-os"></span>
+      <span id="generated-date"></span> · Language commands from <a href="https://github.com/carteakey/l3ms/blob/main/llama-swap.yaml">llama-swap.yaml</a> · Media and decisions from native manifests · <span id="system-os"></span>
     </footer>
   </main>
 
@@ -337,6 +369,8 @@
   <script>
     const dashboard = window.L3MS_DASHBOARD;
     const models = dashboard.models;
+    const mediaProfiles = dashboard.media;
+    const decisionProfiles = dashboard.decisions;
     const communityRuns = dashboard.communityRuns;
     let activeFilter = "All";
     let searchTerm = "";
@@ -501,6 +535,44 @@
       `).join("");
     }
 
+    const laneLinks = profile => `
+      <div class="lane-links">
+        <a href="${escapeHtml(profile.sourceUrl)}">Native profile</a>
+        <a href="${escapeHtml(profile.guideUrl)}">Setup guide</a>
+        ${profile.experimentUrl ? `<a href="${escapeHtml(profile.experimentUrl)}">Documented experiment</a>` : ""}
+      </div>`;
+
+    function renderMedia() {
+      document.getElementById("media-list").innerHTML = mediaProfiles.map(profile => `
+        <article class="lane-card surface">
+          <span class="label">Media // ${escapeHtml(profile.id)}</span>
+          <h3>${escapeHtml(profile.name)}</h3>
+          <div class="lane-meta">
+            <div><span class="label">Runtime</span><span class="detail-value">${escapeHtml(profile.runtime)}</span></div>
+            <div><span class="label">Manifest status</span><span class="detail-value">${escapeHtml(profile.status)}</span></div>
+          </div>
+          <div class="badge-row">${profile.tasks.map(task => `<span class="badge">${escapeHtml(task)}</span>`).join("")}${profile.modes.map(mode => `<span class="badge badge-vision">${escapeHtml(mode)}</span>`).join("")}</div>
+          ${profile.experimentUrl ? "" : '<p class="lane-note">No measured experiment linked for this profile.</p>'}
+          ${laneLinks(profile)}
+        </article>`).join("");
+    }
+
+    function renderDecisions() {
+      document.getElementById("decision-list").innerHTML = decisionProfiles.map(profile => `
+        <article class="lane-card surface">
+          <span class="label">Decisions // ${escapeHtml(profile.id)}</span>
+          <h3>${escapeHtml(profile.name)}</h3>
+          <div class="lane-meta">
+            <div><span class="label">Backend</span><span class="detail-value">${escapeHtml(profile.engine)}</span></div>
+            <div><span class="label">Route</span><span class="detail-value">${escapeHtml(profile.kind)} · ${escapeHtml(profile.device)}</span></div>
+          </div>
+          <div class="badge-row"><span class="badge ${profile.kind === "hosted" ? "badge-preload" : "badge-mtp"}">${escapeHtml(profile.kind)}</span></div>
+          ${profile.declaredLatencyMs == null ? "" : `<p class="lane-note">Manifest latency target: ${escapeHtml(profile.declaredLatencyMs)} ms (not measured here).</p>`}
+          <p class="lane-note">No measured decision benchmark published.</p>
+          ${laneLinks(profile)}
+        </article>`).join("");
+    }
+
     document.addEventListener("click", event => {
       const tab = event.target.closest("[data-tab]");
       if (tab) {
@@ -530,6 +602,8 @@
     document.getElementById("methodology-copy").textContent = dashboard.methodology;
     document.getElementById("generated-date").textContent = `Snapshot generated ${dashboard.generatedAt}`;
     renderModels();
+    renderMedia();
+    renderDecisions();
     renderBenchmarks();
     renderCommunity();
     renderArchive();

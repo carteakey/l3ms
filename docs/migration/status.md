@@ -24,7 +24,7 @@ CAR-220 Phase 9, and CAR-221 Phase 10.
 | 6. Local coordinator | Pending | Cross-client queueing and request-driven switching. |
 | 7. HTTP ingress | Pending | Gateway to the same coordinator. |
 | 8. Unified workbench | Pending | Language, media/TTS, and decision UI/CLI flows. |
-| 9. Public site | Pending | Separate evidence for all three lanes. |
+| 9. Public site | In development | Local static site now has separate language, media/TTS, and decision views generated from native manifests; six generator/site checks pass. Visual/browser review and all publication gates remain pending. |
 | 10. Final acceptance | Pending | Live gates and old-path retirement review. |
 
 ## Current safeguards
@@ -76,6 +76,7 @@ CAR-220 Phase 9, and CAR-221 Phase 10.
 | 2026-09-28 | Phase 4 offline development | Read-only three-lane manifest catalog, layered stack settings in the existing settings store, and cross-toolkit metadata in the existing job-history store are being implemented/tested. No new inference or service action is exposed by these contracts. |
 | 2026-09-29 | Phase 4 offline catalog and CLI | `l3ms --list stack` lists 21 lane-qualified profiles from the three native manifests without contacting llama-swap; each is explicitly `manifest-only`, not installed/healthy. It works from another working directory with `L3MS_ROOT` set. Root `cargo test --all-targets --locked` passed 284 tests (1 ignored); root fmt, Clippy, and dashboard generator checks passed. |
 | 2026-09-29 | Phase 4 settings and jobs | Existing settings store now has versioned optional stack preferences, declared path anchoring, built-in → host → user → environment → CLI precedence, snapshots on writes, and portable profile exports that omit machine roots/policy. Existing job history now supports queued cross-toolkit metadata, explicit pre-dispatch persistence, transitions/timestamps/artifacts, and no-replay interruption on restart while preserving legacy row shape. Targeted tests pass; final full-suite check pending after integration. |
+| 2026-09-29 | Phase 9 site development | Added native-manifest-derived media/TTS and decision catalog payloads, separate site tabs, Breeze's four TTS modes, hosted/local decision labels, and explicit absence of measured results. Existing language ranking remains separate. Six Python tests, JavaScript syntax, and whitespace checks pass. No browser surface was available for visual review; no site was published. |
 
 ## Open decisions
 

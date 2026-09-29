@@ -1,0 +1,41 @@
+{
+  "media": {
+    "minimax-h3": {
+      "guide": "toolkits/l2m2/docs/media-generation-runbook.md",
+      "experiment": "toolkits/l2m2/docs/experiments/h3-reference-baseline.md"
+    },
+    "ltx-2.5": {
+      "guide": "toolkits/l2m2/docs/media-generation-runbook.md",
+      "experiment": null
+    },
+    "heartmula-music": {
+      "guide": "toolkits/l2m2/docs/audio-cpp-runtimes.md",
+      "experiment": null
+    },
+    "breeze-tts-2": {
+      "guide": "toolkits/l2m2/docs/audio-cpp-runtimes.md",
+      "experiment": "toolkits/l2m2/docs/experiments/breeze-tts-2-baseline.md",
+      "modes": ["Standard TTS", "Voice design", "Voice cloning", "Streaming"]
+    },
+    "blender-3d": {
+      "guide": "toolkits/l2m2/docs/blender-mcp-setup.md",
+      "experiment": null
+    },
+    "qwen-image-2.1": {
+      "guide": "toolkits/l2m2/docs/qwen-image-2.1-setup.md",
+      "experiment": "toolkits/l2m2/docs/experiments/qwen-vs-krea2-comparison.md"
+    },
+    "krea-2": {
+      "guide": "toolkits/l2m2/docs/krea-2-setup.md",
+      "experiment": "toolkits/l2m2/docs/experiments/qwen-vs-krea2-comparison.md"
+    }
+  },
+  "decisions": {
+    "nagi-smol": {"guide": "toolkits/l3ds/README.md", "experiment": null},
+    "nagi-big": {"guide": "toolkits/l3ds/README.md", "experiment": null},
+    "laya-en": {"guide": "toolkits/l3ds/README.md", "experiment": null},
+    "semif-openjev": {"guide": "toolkits/l3ds/README.md", "experiment": null},
+    "jev-api": {"guide": "toolkits/l3ds/README.md", "experiment": null},
+    "systemone": {"guide": "toolkits/l3ds/README.md", "experiment": null}
+  }
+}

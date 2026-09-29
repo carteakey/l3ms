@@ -57,6 +57,58 @@ class DashboardDataTest(unittest.TestCase):
         community = valid_community_run()
         self.assertNotIn(community["id"], parsed)
 
+    def test_media_and_decision_views_keep_separate_evidence(self):
+        metadata = json.loads((ROOT / "docs" / "stack-meta.json").read_text())
+        media = dashboard.media_public_profiles(
+            json.loads((ROOT / "toolkits" / "l2m2" / "media-runtimes.json").read_text()),
+            metadata["media"],
+        )
+        decisions = dashboard.decision_public_profiles(
+            json.loads((ROOT / "toolkits" / "l3ds" / "decision-runtimes.json").read_text()),
+            metadata["decisions"],
+        )
+        self.assertEqual(len(media), 7)
+        self.assertEqual(len(decisions), 6)
+        breeze = next(profile for profile in media if profile["id"] == "breeze-tts-2")
+        self.assertEqual(
+            breeze["modes"],
+            ["Standard TTS", "Voice design", "Voice cloning", "Streaming"],
+        )
+        h3 = next(profile for profile in media if profile["id"] == "minimax-h3")
+        self.assertEqual(h3["status"], "experimental-local")
+        hosted = next(profile for profile in decisions if profile["id"] == "systemone")
+        self.assertEqual(hosted["kind"], "hosted")
+        self.assertIsNone(hosted["experimentUrl"])
+        for profile in media + decisions:
+            self.assertIn("#L", profile["sourceUrl"])
+            self.assertNotIn("tps", profile)
+
+    def test_stack_metadata_must_match_native_manifests_and_safe_paths(self):
+        manifest = json.loads(
+            (ROOT / "toolkits" / "l2m2" / "media-runtimes.json").read_text()
+        )
+        metadata = json.loads((ROOT / "docs" / "stack-meta.json").read_text())["media"]
+        missing = dict(metadata)
+        missing.pop("breeze-tts-2")
+        with self.assertRaises(SystemExit):
+            dashboard.media_public_profiles(manifest, missing)
+        unsafe = {key: dict(value) for key, value in metadata.items()}
+        unsafe["breeze-tts-2"]["guide"] = "../private-note.md"
+        with self.assertRaises(SystemExit):
+            dashboard.media_public_profiles(manifest, unsafe)
+
+    def test_site_has_separate_lane_panels_and_explicit_evidence_labels(self):
+        html = (ROOT / "docs" / "index.html").read_text()
+        for lane in ("models", "media", "decisions"):
+            with self.subTest(lane=lane):
+                self.assertIn(f'data-tab="{lane}"', html)
+                self.assertIn(f'id="{lane}-panel"', html)
+        self.assertIn('id="media-list"', html)
+        self.assertIn('id="decision-list"', html)
+        self.assertIn("not a claim that its model is installed", html)
+        self.assertIn("No measured decision benchmark published.", html)
+        self.assertIn("not measured here", html)
+
 
 if __name__ == "__main__":
     unittest.main()
