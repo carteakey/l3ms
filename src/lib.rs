@@ -6,6 +6,7 @@ pub mod chat_history;
 pub mod cli;
 pub mod commands;
 pub mod config_store;
+pub mod control;
 pub mod download_editor;
 pub mod download_preflight;
 pub mod download_ui;

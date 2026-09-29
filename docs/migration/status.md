@@ -19,7 +19,7 @@ CAR-220 Phase 9, and CAR-221 Phase 10.
 | 1. Folder/history import | In progress | L3DS five-commit and L2M2 three-commit histories imported under `toolkits/`; source/WIP audit, private recovery, and README wordmark done. Final tree/secret/public-path review pending. |
 | 2. Independent operation | In progress | Imported child builds, tests, profile lists, and explicit old-root lists pass; CI added locally, pre-push validation pending. |
 | 3. Runtime cutover | In progress | Bounded L2M2 GPU-mode pilot from the branch passed and original service was restored. Representative model generation, L3MS router, and real L3DS inference still pending. |
-| 4. Shared contracts | Pending | Catalog, configuration, and job contracts. |
+| 4. Shared contracts | In development | Read-only catalog and offline `l3ms --list stack`, layered settings, and existing-store job metadata are on the branch. Full compatibility/live release gates remain; release stays gated by Phase 3. |
 | 5. Runtime adapters | Pending | Manual, verified service transitions. |
 | 6. Local coordinator | Pending | Cross-client queueing and request-driven switching. |
 | 7. HTTP ingress | Pending | Gateway to the same coordinator. |
@@ -35,7 +35,11 @@ CAR-220 Phase 9, and CAR-221 Phase 10.
 - L2M2 and L3DS originals remain in place. Their source and ignored runtime
   state are being classified before history import.
 - The source tree and plan are being reviewed for paths, secrets, and large
-  generated files before the first push.
+  generated files before the first push. The current
+  [publication audit](publication-audit.md) is **NO-GO** for a public push:
+  retained imported history still exposes a Funnel endpoint and host-specific
+  paths. Keep this branch local until the exact outgoing history is sanitized
+  and re-audited.
 
 ## Mutable runtime state (not Git migration inputs)
 
@@ -68,6 +72,10 @@ CAR-220 Phase 9, and CAR-221 Phase 10.
 | 2026-09-28 | L2M2 child operation | `cargo fmt --check`, Clippy, Rust tests (4 passed), release build, 7-profile list, Python syntax, 14 downloader tests, 9 media-model tests, shell syntax, and explicit old-root list passed. No inference or runtime switch was attempted. |
 | 2026-09-28 | Model ignore safeguard | Imported child `.gitignore` now ignores GGUF/safetensors and other `models/` contents while allowing only direct `*-files.txt` inventory files; verified with `git check-ignore --no-index`. |
 | 2026-09-28 | L2M2 live pilot and rollback | After user approval, confirmed ComfyUI queue empty and llama-swap inactive; stopped original transient unit, archived 81 `.toolkit` entries to a verified mode-600 backup at `/home/kchauhan/repos/l2m2-migration-backup-20260928/l2m2-toolkits-prepilot.tar.gz`, and started a separate `l2m2-comfyui-monorepo-pilot` unit from the branch with ignored symlinks to original vendor, venv, and `.toolkit`. ComfyUI 0.36.0 served `127.0.0.1:8188` in GPU mode, exposed 11 saved workflows, and completed a 64×64 `EmptyImage` → `SaveImage` job (`65b9ccfe-6ce0-4ac5-acdb-6f8f497eeaaa`), producing `l3ms-monorepo-pilot_00001_.png` in the normal media output directory. This verifies service-path wiring, not a heavyweight model workflow. Pilot queue was empty before stop. Original `l2m2-comfyui.service` was restarted and is active/healthy with its original user-directory path; pilot unit is inactive. |
+| 2026-09-28 | Isolated llama-swap probe | A loopback-only router with the branch config parsed and listened on port 18080, but its declared preload failed because the branch worktree has no `vendor/llama.cpp` (the deployed root still owns ignored vendor state). The probe was shut down; ComfyUI remained active. Branch L3MS `--quickstart` and `--list bench` passed; `--list run` still requires a live router. No language inference is claimed. |
+| 2026-09-28 | Phase 4 offline development | Read-only three-lane manifest catalog, layered stack settings in the existing settings store, and cross-toolkit metadata in the existing job-history store are being implemented/tested. No new inference or service action is exposed by these contracts. |
+| 2026-09-29 | Phase 4 offline catalog and CLI | `l3ms --list stack` lists 21 lane-qualified profiles from the three native manifests without contacting llama-swap; each is explicitly `manifest-only`, not installed/healthy. It works from another working directory with `L3MS_ROOT` set. Root `cargo test --all-targets --locked` passed 284 tests (1 ignored); root fmt, Clippy, and dashboard generator checks passed. |
+| 2026-09-29 | Phase 4 settings and jobs | Existing settings store now has versioned optional stack preferences, declared path anchoring, built-in → host → user → environment → CLI precedence, snapshots on writes, and portable profile exports that omit machine roots/policy. Existing job history now supports queued cross-toolkit metadata, explicit pre-dispatch persistence, transitions/timestamps/artifacts, and no-replay interruption on restart while preserving legacy row shape. Targeted tests pass; final full-suite check pending after integration. |
 
 ## Open decisions
 

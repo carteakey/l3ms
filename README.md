@@ -90,9 +90,24 @@ behavior:
 - [L2M2 — media models](toolkits/l2m2/README.md)
 - [L3DS — decision models](toolkits/l3ds/README.md)
 
-Their source import and standalone checks are tracked separately from L3MS's
-existing runtime. The links identify their planned locations; they do not imply
+Their source imports and standalone checks are tracked separately from L3MS's
+existing runtime. These links point to the imported sources; they do not imply
 that L3MS already routes inference across all three lanes.
+
+List the three native manifest catalogs without starting a model or contacting
+llama-swap:
+
+```bash
+l3ms --list stack
+```
+
+This reports `language:`, `media:`, and `decisions:` profile IDs. Its
+`manifest-only` label means a profile is declared, not that its weights,
+dependencies, or service are ready. Toolkit roots default to `toolkits/l2m2`
+and `toolkits/l3ds`; layered settings can override them with
+`L3MS_MEDIA_TOOLKIT_ROOT` and `L3MS_DECISIONS_TOOLKIT_ROOT`. An optional
+`L3MS_HOST_SETTINGS_DIR` selects a host settings directory before user
+settings are applied.
 
 Show quick-start instructions without opening TUI:
 

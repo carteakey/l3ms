@@ -12,10 +12,30 @@ use anyhow::{Context, Result};
 use crate::{
     script_store::{command_for_script, resolve_script_in},
     state_store::{
-        self, JobHistoryLoad as PersistedLoad, JobRecord as PersistedJob, JOBS_MAX,
+        self, JobHistoryLoad as PersistedLoad, JobMetadata, JobRecord as PersistedJob, JOBS_MAX,
         JOB_INTERRUPTED_EXIT, JOB_RUNNING_EXIT,
     },
 };
+
+/// Safe identifiers for a cross-toolkit job. This API deliberately has no
+/// argv, command, or environment fields; those remain transient supervisor
+/// inputs and are never copied into the persistent job contract.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CrossToolkitJobStart {
+    pub toolkit: String,
+    pub profile: Option<String>,
+    pub task: Option<String>,
+    pub request_id: Option<String>,
+}
+
+/// Bounded, typed updates supplied as a dispatched job progresses.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CrossToolkitJobUpdate {
+    pub backend_id: Option<String>,
+    pub result_state: Option<String>,
+    /// When provided, replaces the complete artifact-reference list.
+    pub artifact_refs: Option<Vec<String>>,
+}
 
 #[derive(Debug, Clone)]
 pub struct JobRecord {
@@ -30,6 +50,7 @@ pub struct JobRecord {
     pub mode: String,
     pub script_path: String,
     pub exit_code: Option<i32>,
+    pub metadata: JobMetadata,
     started_at: Option<Instant>,
 }
 
@@ -50,6 +71,7 @@ impl JobRecord {
             exit: self.exit_label.clone(),
             mode: self.mode.clone(),
             script_path: self.script_path.clone(),
+            metadata: self.metadata.clone(),
         }
     }
 }
@@ -183,6 +205,7 @@ impl JobHistory {
                 mode,
                 script_path,
                 exit_code: None,
+                metadata: JobMetadata::default(),
                 started_at: Some(Instant::now()),
             },
         );
@@ -204,8 +227,135 @@ impl JobHistory {
         } else {
             "failed".into()
         };
+        if job.metadata.toolkit.is_some() {
+            job.metadata.result_state = Some(if exit_code == 0 {
+                "succeeded".into()
+            } else {
+                "failed".into()
+            });
+            job.metadata.finished_at = Some(state_store::utc_timestamp_now());
+        }
         job.started_at = None;
         Some(job)
+    }
+
+    /// Record accepted cross-toolkit work as queued. Callers must persist this
+    /// history before dispatching; update the entry to `running` when execution
+    /// actually starts. The row uses the same bounded history/store as all jobs.
+    pub fn begin_cross_toolkit(&mut self, request: CrossToolkitJobStart) -> Result<u64> {
+        let timestamp = state_store::utc_timestamp_now();
+        let metadata = JobMetadata {
+            toolkit: Some(request.toolkit),
+            profile: request.profile,
+            task: request.task,
+            request_id: request.request_id,
+            submitted_at: Some(timestamp),
+            result_state: Some("queued".into()),
+            ..JobMetadata::default()
+        };
+        let errors = state_store::validate_job_metadata(&metadata);
+        anyhow::ensure!(
+            errors.is_empty(),
+            "invalid cross-toolkit job metadata: {}",
+            errors.join("; ")
+        );
+
+        let toolkit = metadata.toolkit.as_deref().unwrap_or("toolkit");
+        let name = match metadata.task.as_deref() {
+            Some(task) => format!("{toolkit}:{task}"),
+            None => format!("{toolkit}:job"),
+        };
+        let id = self.begin(
+            name,
+            "cross-toolkit".into(),
+            Vec::new(),
+            "cross-toolkit".into(),
+            String::new(),
+        );
+        if let Some(job) = self.jobs.iter_mut().find(|job| job.id == id) {
+            job.metadata = metadata;
+            job.status = "queued".into();
+            job.started_at = None;
+        }
+        Ok(id)
+    }
+
+    /// Update backend/result/artifact fields on an existing cross-toolkit
+    /// entry. Metadata is validated before mutating the live history.
+    pub fn update_cross_toolkit(
+        &mut self,
+        id: u64,
+        update: CrossToolkitJobUpdate,
+    ) -> Result<&JobRecord> {
+        let job_index = self
+            .jobs
+            .iter()
+            .position(|job| job.id == id)
+            .ok_or_else(|| anyhow::anyhow!("unknown job id {id}"))?;
+        let mut metadata = self.jobs[job_index].metadata.clone();
+        let previous_state = metadata.result_state.clone();
+        anyhow::ensure!(
+            metadata.toolkit.is_some(),
+            "job {id} is not a cross-toolkit job"
+        );
+        if let Some(backend_id) = update.backend_id {
+            metadata.backend_id = Some(backend_id);
+        }
+        if let Some(result_state) = update.result_state {
+            let previous = metadata.result_state.as_deref().unwrap_or("running");
+            anyhow::ensure!(
+                valid_state_transition(previous, &result_state),
+                "invalid job result transition from {previous} to {result_state}"
+            );
+            metadata.result_state = Some(result_state);
+        }
+        if let Some(artifact_refs) = update.artifact_refs {
+            metadata.artifact_refs = artifact_refs;
+        }
+        let entering_running = previous_state.as_deref() == Some("queued")
+            && metadata.result_state.as_deref() == Some("running");
+        if entering_running {
+            metadata.started_at = Some(state_store::utc_timestamp_now());
+        }
+        let errors = state_store::validate_job_metadata(&metadata);
+        anyhow::ensure!(
+            errors.is_empty(),
+            "invalid cross-toolkit job metadata: {}",
+            errors.join("; ")
+        );
+
+        let terminal_transition = metadata
+            .result_state
+            .as_deref()
+            .is_some_and(is_terminal_state)
+            && !self.jobs[job_index]
+                .metadata
+                .result_state
+                .as_deref()
+                .is_some_and(is_terminal_state);
+        if terminal_transition {
+            metadata.finished_at = Some(state_store::utc_timestamp_now());
+        }
+        let job = &mut self.jobs[job_index];
+        if terminal_transition
+            && !job
+                .metadata
+                .result_state
+                .as_deref()
+                .is_some_and(is_terminal_state)
+        {
+            finish_with_result_state(job, metadata.result_state.as_deref().unwrap());
+        } else if metadata.result_state.as_deref() == Some("queued") {
+            job.status = "queued".into();
+        } else if metadata.result_state.as_deref() == Some("running") {
+            job.status = "running".into();
+            if entering_running {
+                job.started_label = current_clock_label();
+                job.started_at = Some(Instant::now());
+            }
+        }
+        job.metadata = metadata;
+        Ok(job)
     }
 
     pub fn clear_for_recovery(&mut self) {
@@ -245,11 +395,19 @@ fn notice_for(loaded: &PersistedLoad) -> LoadNotice {
 fn hydrate_job(id: u64, persisted: PersistedJob, repository_root: &Path) -> JobRecord {
     let (kind, command) = retry_command(&persisted, repository_root);
     let exit_code = persisted.exit.parse::<i32>().ok();
-    let status = match persisted.exit.as_str() {
-        JOB_INTERRUPTED_EXIT => "interrupted",
-        "0" => "done",
-        _ if exit_code.is_some() => "failed",
-        _ => "finished",
+    let status = match persisted.metadata.result_state.as_deref() {
+        Some("queued") => "queued",
+        Some("running") => "running",
+        Some("succeeded") => "done",
+        Some("failed") => "failed",
+        Some("cancelled") => "cancelled",
+        Some("interrupted") => "interrupted",
+        _ => match persisted.exit.as_str() {
+            JOB_INTERRUPTED_EXIT => "interrupted",
+            "0" => "done",
+            _ if exit_code.is_some() => "failed",
+            _ => "finished",
+        },
     }
     .to_owned();
     JobRecord {
@@ -264,8 +422,56 @@ fn hydrate_job(id: u64, persisted: PersistedJob, repository_root: &Path) -> JobR
         mode: persisted.mode,
         script_path: persisted.script_path,
         exit_code,
+        metadata: persisted.metadata,
         started_at: None,
     }
+}
+
+fn is_terminal_state(state: &str) -> bool {
+    matches!(state, "succeeded" | "failed" | "cancelled" | "interrupted")
+}
+
+fn valid_state_transition(previous: &str, next: &str) -> bool {
+    if previous == next {
+        return true;
+    }
+    match previous {
+        "queued" => next == "running" || is_terminal_state(next),
+        "running" => is_terminal_state(next),
+        _ => false,
+    }
+}
+
+fn finish_with_result_state(job: &mut JobRecord, result_state: &str) {
+    let elapsed = job
+        .started_at
+        .map(|started| started.elapsed().as_secs())
+        .unwrap_or_default();
+    job.elapsed_label = format_elapsed(elapsed);
+    match result_state {
+        "succeeded" => {
+            job.exit_label = "0".into();
+            job.exit_code = Some(0);
+            job.status = "done".into();
+        }
+        "failed" => {
+            job.exit_label = "1".into();
+            job.exit_code = Some(1);
+            job.status = "failed".into();
+        }
+        "cancelled" => {
+            job.exit_label = "cancelled".into();
+            job.exit_code = None;
+            job.status = "cancelled".into();
+        }
+        "interrupted" => {
+            job.exit_label = JOB_INTERRUPTED_EXIT.into();
+            job.exit_code = None;
+            job.status = "interrupted".into();
+        }
+        _ => return,
+    }
+    job.started_at = None;
 }
 
 fn retry_command(persisted: &PersistedJob, repository_root: &Path) -> (String, Vec<String>) {
@@ -375,6 +581,29 @@ mod tests {
     }
 
     #[test]
+    fn startup_does_not_replay_a_persisted_queued_cross_toolkit_job() {
+        let data = TempDir::new().unwrap();
+        let mut queued = persisted("queued", JOB_RUNNING_EXIT, "cross-toolkit", "");
+        queued.metadata = JobMetadata {
+            toolkit: Some("l2m2".into()),
+            submitted_at: Some("2026-09-28T15:04:05Z".into()),
+            result_state: Some("queued".into()),
+            ..JobMetadata::default()
+        };
+        state_store::save_jobs_in(data.path(), &[queued]).unwrap();
+
+        let (history, notice) =
+            JobHistory::load_in(data.path(), repository_fixture().path()).unwrap();
+        assert_eq!(notice.reconciled_running, 1);
+        assert_eq!(history.records()[0].status, "interrupted");
+        assert_eq!(
+            history.records()[0].metadata.result_state.as_deref(),
+            Some("interrupted")
+        );
+        assert!(history.records()[0].metadata.finished_at.is_some());
+    }
+
+    #[test]
     fn begin_finish_and_persist_keep_legacy_order_and_shape() {
         let data = TempDir::new().unwrap();
         let mut history = JobHistory::default();
@@ -400,6 +629,165 @@ mod tests {
         assert_eq!(persisted.jobs[0].exit, "0");
         assert_eq!(persisted.jobs[1].name, "second");
         assert_eq!(persisted.jobs[1].exit, JOB_INTERRUPTED_EXIT);
+    }
+
+    #[test]
+    fn cross_toolkit_jobs_use_existing_history_and_persist_only_contract_metadata() {
+        let data = TempDir::new().unwrap();
+        let mut history = JobHistory::default();
+        let id = history
+            .begin_cross_toolkit(CrossToolkitJobStart {
+                toolkit: "l2m2".into(),
+                profile: Some("whisper-large".into()),
+                task: Some("transcribe-42".into()),
+                request_id: Some("req-123".into()),
+            })
+            .unwrap();
+        let record = history.records().iter().find(|job| job.id == id).unwrap();
+        assert!(record.command.is_empty());
+        assert!(record.script_path.is_empty());
+        assert_eq!(record.status, "queued");
+        assert_eq!(record.metadata.result_state.as_deref(), Some("queued"));
+        assert!(record
+            .metadata
+            .submitted_at
+            .as_deref()
+            .is_some_and(state_store::is_utc_timestamp));
+        assert!(record.metadata.started_at.is_none());
+        assert!(record.started_at.is_none());
+        history.persist_in(data.path()).unwrap();
+        let queued_on_disk: Vec<PersistedJob> =
+            serde_json::from_slice(&fs::read(state_store::jobs_path_in(data.path())).unwrap())
+                .unwrap();
+        assert_eq!(
+            queued_on_disk[0].metadata.result_state.as_deref(),
+            Some("queued")
+        );
+        assert!(queued_on_disk[0].metadata.started_at.is_none());
+
+        history
+            .update_cross_toolkit(
+                id,
+                CrossToolkitJobUpdate {
+                    backend_id: Some("llama.cpp:gpu0".into()),
+                    artifact_refs: Some(vec!["artifacts/transcript.json".into()]),
+                    ..CrossToolkitJobUpdate::default()
+                },
+            )
+            .unwrap();
+        history
+            .update_cross_toolkit(
+                id,
+                CrossToolkitJobUpdate {
+                    result_state: Some("running".into()),
+                    ..CrossToolkitJobUpdate::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(history.records()[0].status, "running");
+        assert!(history.records()[0].started_at.is_some());
+        assert!(history.records()[0]
+            .metadata
+            .started_at
+            .as_deref()
+            .is_some_and(state_store::is_utc_timestamp));
+
+        history
+            .update_cross_toolkit(
+                id,
+                CrossToolkitJobUpdate {
+                    result_state: Some("succeeded".into()),
+                    ..CrossToolkitJobUpdate::default()
+                },
+            )
+            .unwrap();
+        history.persist_in(data.path()).unwrap();
+
+        let bytes = fs::read(state_store::jobs_path_in(data.path())).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(!text.contains("argv"));
+        assert!(!text.contains("environment"));
+        assert!(!text.contains("--api-key"));
+        let persisted = state_store::load_jobs_in(data.path()).unwrap();
+        let job = &persisted.jobs[0];
+        assert_eq!(job.metadata.toolkit.as_deref(), Some("l2m2"));
+        assert_eq!(job.metadata.backend_id.as_deref(), Some("llama.cpp:gpu0"));
+        assert_eq!(job.metadata.result_state.as_deref(), Some("succeeded"));
+        assert!(job
+            .metadata
+            .finished_at
+            .as_deref()
+            .is_some_and(state_store::is_utc_timestamp));
+        assert!(job.script_path.is_empty());
+    }
+
+    #[test]
+    fn cross_toolkit_updates_validate_before_mutation_and_keep_terminal_state() {
+        let mut history = JobHistory::default();
+        let id = history
+            .begin_cross_toolkit(CrossToolkitJobStart {
+                toolkit: "l2m2".into(),
+                ..CrossToolkitJobStart::default()
+            })
+            .unwrap();
+        let before = history.records()[0].metadata.clone();
+        let invalid = history.update_cross_toolkit(
+            id,
+            CrossToolkitJobUpdate {
+                backend_id: Some("Bearer top-secret".into()),
+                ..CrossToolkitJobUpdate::default()
+            },
+        );
+        assert!(invalid.is_err());
+        assert_eq!(history.records()[0].metadata, before);
+
+        history
+            .update_cross_toolkit(
+                id,
+                CrossToolkitJobUpdate {
+                    result_state: Some("cancelled".into()),
+                    ..CrossToolkitJobUpdate::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(history.records()[0].status, "cancelled");
+        assert!(history
+            .update_cross_toolkit(
+                id,
+                CrossToolkitJobUpdate {
+                    result_state: Some("running".into()),
+                    ..CrossToolkitJobUpdate::default()
+                }
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn existing_finish_api_completes_cross_toolkit_metadata() {
+        let mut history = JobHistory::default();
+        let id = history
+            .begin_cross_toolkit(CrossToolkitJobStart {
+                toolkit: "l2m2".into(),
+                ..CrossToolkitJobStart::default()
+            })
+            .unwrap();
+
+        history
+            .update_cross_toolkit(
+                id,
+                CrossToolkitJobUpdate {
+                    result_state: Some("running".into()),
+                    ..CrossToolkitJobUpdate::default()
+                },
+            )
+            .unwrap();
+        let finished = history.finish(id, 0).unwrap();
+        assert_eq!(finished.metadata.result_state.as_deref(), Some("succeeded"));
+        assert!(finished
+            .metadata
+            .finished_at
+            .as_deref()
+            .is_some_and(state_store::is_utc_timestamp));
     }
 
     #[test]
@@ -461,6 +849,7 @@ mod tests {
             exit: exit.into(),
             mode: mode.into(),
             script_path: script_path.into(),
+            metadata: JobMetadata::default(),
         }
     }
 

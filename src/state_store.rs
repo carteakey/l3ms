@@ -24,6 +24,10 @@ pub const CHAT_LIST_MAX: usize = 1_000;
 const JOBS_FILE_NAME: &str = "jobs.json";
 const CHATS_DIRECTORY_NAME: &str = "chats";
 const JOB_MAX_FIELD_BYTES: usize = 64 * 1_024;
+const JOB_METADATA_ID_MAX_BYTES: usize = 128;
+const JOB_METADATA_ARTIFACT_MAX_BYTES: usize = 2 * 1_024;
+const JOB_METADATA_ARTIFACTS_MAX: usize = 64;
+const JOB_METADATA_TOTAL_MAX_BYTES: usize = 16 * 1_024;
 const JOBS_MAX_FILE_BYTES: usize = 16 * 1_024 * 1_024;
 const CHAT_MAX_SAVED_BYTES: usize = 256;
 const CHAT_MAX_ROLE_BYTES: usize = 64;
@@ -32,6 +36,36 @@ const UNIQUE_NAME_ATTEMPTS: u32 = 10_000;
 const ATOMIC_WRITE_ATTEMPTS: u32 = 100;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Metadata shared by jobs dispatched to another toolkit or backend.
+///
+/// The fields are flattened into the existing jobs.json row and omitted when
+/// empty, so legacy rows retain their original JSON shape. Only identifiers,
+/// lifecycle state, timestamps, and bounded artifact references belong here;
+/// command arguments and environment values must never be stored in metadata.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toolkit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submitted_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_refs: Vec<String>,
+}
 
 /// A persisted job row in the same field order and string representation as
 /// the legacy Python `jobs.json` file.
@@ -48,6 +82,8 @@ pub struct JobRecord {
     pub mode: String,
     #[serde(default)]
     pub script_path: String,
+    #[serde(flatten)]
+    pub metadata: JobMetadata,
 }
 
 /// A malformed recent row omitted while loading a job history.
@@ -153,9 +189,10 @@ pub fn load_jobs() -> Result<JobHistoryLoad> {
 
 /// Load and normalize the most recent 200 persisted job rows.
 ///
-/// Malformed rows are skipped and reported in `issues`. A stale legacy
-/// running marker is returned as `exit == "interrupted"`; callers can persist
-/// that reconciliation with `save_jobs` after incorporating the loaded rows.
+/// Malformed rows are skipped and reported in `issues`. A stale running
+/// marker is returned as `exit == "interrupted"`; cross-toolkit queued and
+/// running states are also marked interrupted to prevent implicit replay.
+/// Callers can persist this reconciliation with `save_jobs` after loading.
 pub fn load_jobs_in(data_root: impl AsRef<Path>) -> Result<JobHistoryLoad> {
     let path = jobs_path_in(data_root);
     let Some(bytes) = read_bounded_optional(&path, JOBS_MAX_FILE_BYTES)? else {
@@ -205,6 +242,12 @@ pub fn load_jobs_in(data_root: impl AsRef<Path>) -> Result<JobHistoryLoad> {
 
         if job.exit == JOB_RUNNING_EXIT {
             job.exit = JOB_INTERRUPTED_EXIT.to_owned();
+            if job.metadata.toolkit.is_some() {
+                job.metadata.result_state = Some("interrupted".to_owned());
+                if job.metadata.finished_at.is_none() {
+                    job.metadata.finished_at = Some(utc_timestamp_now());
+                }
+            }
             result.reconciled_running += 1;
         }
         result.jobs.push(job);
@@ -259,7 +302,207 @@ pub fn validate_job_record(job: &JobRecord) -> Vec<String> {
         JOB_MAX_FIELD_BYTES,
         &mut errors,
     );
+    errors.extend(validate_job_metadata(&job.metadata));
     errors
+}
+
+/// Validate cross-toolkit metadata. This intentionally accepts only
+/// non-secret identifiers, known lifecycle values, strict UTC timestamps,
+/// and local paths or credential-free HTTPS artifact URLs.
+pub fn validate_job_metadata(metadata: &JobMetadata) -> Vec<String> {
+    let mut errors = Vec::new();
+    let mut total_bytes = 0_usize;
+    for (field, value) in [
+        ("toolkit", metadata.toolkit.as_deref()),
+        ("profile", metadata.profile.as_deref()),
+        ("task", metadata.task.as_deref()),
+        ("request_id", metadata.request_id.as_deref()),
+        ("backend_id", metadata.backend_id.as_deref()),
+    ] {
+        if let Some(value) = value {
+            total_bytes = total_bytes.saturating_add(value.len());
+            validate_metadata_identifier(field, value, &mut errors);
+        }
+    }
+
+    for (field, value) in [
+        ("submitted_at", metadata.submitted_at.as_deref()),
+        ("started_at", metadata.started_at.as_deref()),
+        ("finished_at", metadata.finished_at.as_deref()),
+    ] {
+        if let Some(value) = value {
+            total_bytes = total_bytes.saturating_add(value.len());
+            if !is_utc_timestamp(value) {
+                errors.push(format!(
+                    "{field} must be a UTC timestamp in YYYY-MM-DDTHH:MM:SSZ form"
+                ));
+            }
+        }
+    }
+
+    if let Some(state) = metadata.result_state.as_deref() {
+        total_bytes = total_bytes.saturating_add(state.len());
+        if !matches!(
+            state,
+            "queued" | "running" | "succeeded" | "failed" | "cancelled" | "interrupted"
+        ) {
+            errors.push("result_state is not a supported job state".to_owned());
+        }
+    }
+
+    if metadata.artifact_refs.len() > JOB_METADATA_ARTIFACTS_MAX {
+        errors.push(format!(
+            "artifact_refs contains {}; maximum is {}",
+            metadata.artifact_refs.len(),
+            JOB_METADATA_ARTIFACTS_MAX
+        ));
+    }
+    for (index, artifact) in metadata.artifact_refs.iter().enumerate() {
+        total_bytes = total_bytes.saturating_add(artifact.len());
+        if artifact.len() > JOB_METADATA_ARTIFACT_MAX_BYTES {
+            errors.push(format!(
+                "artifact_refs[{index}] exceeds {JOB_METADATA_ARTIFACT_MAX_BYTES} bytes"
+            ));
+        }
+        if artifact.is_empty() || artifact.chars().any(char::is_control) {
+            errors.push(format!(
+                "artifact_refs[{index}] must be non-empty and contain no control characters"
+            ));
+        }
+        if contains_obvious_secret(artifact) {
+            errors.push(format!(
+                "artifact_refs[{index}] appears to contain credential material"
+            ));
+        }
+        if !is_safe_artifact_reference(artifact) {
+            errors.push(format!(
+                "artifact_refs[{index}] must be a local path or credential-free HTTPS URL without query or fragment"
+            ));
+        }
+    }
+    if total_bytes > JOB_METADATA_TOTAL_MAX_BYTES {
+        errors.push(format!(
+            "job metadata exceeds {JOB_METADATA_TOTAL_MAX_BYTES} total bytes"
+        ));
+    }
+    errors
+}
+
+fn validate_metadata_identifier(field: &str, value: &str, errors: &mut Vec<String>) {
+    if value.is_empty() || value.len() > JOB_METADATA_ID_MAX_BYTES {
+        errors.push(format!(
+            "{field} must contain 1 to {JOB_METADATA_ID_MAX_BYTES} bytes"
+        ));
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || b"._:/-".contains(&byte))
+    {
+        errors.push(format!("{field} must use only safe identifier characters"));
+    }
+    if contains_obvious_secret(value) {
+        errors.push(format!("{field} appears to contain credential material"));
+    }
+}
+
+fn contains_obvious_secret(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    [
+        "bearer ",
+        "api_key=",
+        "apikey=",
+        "access_token=",
+        "refresh_token=",
+        "password=",
+        "secret=",
+        "token=",
+        "sk-",
+        "hf_",
+        "ghp_",
+        "github_pat_",
+        "xoxb-",
+        "xoxp-",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+        || lower.starts_with("akia")
+}
+
+fn is_safe_artifact_reference(value: &str) -> bool {
+    if value.contains('?') || value.contains('#') || value.contains('\\') {
+        return false;
+    }
+    if let Some(url) = value.strip_prefix("https://") {
+        let Some((authority, path)) = url.split_once('/') else {
+            return !url.is_empty() && !url.contains('@') && !url.chars().any(char::is_whitespace);
+        };
+        !authority.is_empty()
+            && !authority.contains('@')
+            && !authority.chars().any(char::is_whitespace)
+            && !path.is_empty()
+            && !path.chars().any(char::is_whitespace)
+    } else {
+        !value.contains("://")
+            && !value.chars().any(char::is_whitespace)
+            && !value.starts_with("//")
+    }
+}
+
+pub(crate) fn is_utc_timestamp(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 20
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+        || bytes[19] != b'Z'
+        || !bytes.iter().enumerate().all(|(index, byte)| {
+            matches!(index, 4 | 7 | 10 | 13 | 16 | 19) || byte.is_ascii_digit()
+        })
+    {
+        return false;
+    }
+    let number =
+        |range: std::ops::Range<usize>| value.get(range).and_then(|part| part.parse::<u32>().ok());
+    let Some(year) = number(0..4) else {
+        return false;
+    };
+    let Some(month) = number(5..7) else {
+        return false;
+    };
+    let Some(day) = number(8..10) else {
+        return false;
+    };
+    let Some(hour) = number(11..13) else {
+        return false;
+    };
+    let Some(minute) = number(14..16) else {
+        return false;
+    };
+    let Some(second) = number(17..19) else {
+        return false;
+    };
+    if !(1..=12).contains(&month) || !(0..=23).contains(&hour) || minute > 59 || second > 59 {
+        return false;
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days_in_month = match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    (1..=days_in_month).contains(&day)
+}
+
+pub(crate) fn utc_timestamp_now() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let (year, month, day, hour, minute, second) = utc_parts(seconds);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
 /// Save a non-empty chat history as a unique JSON/Markdown pair.
@@ -865,6 +1108,7 @@ mod tests {
             exit: exit.into(),
             mode: "bench".to_owned(),
             script_path: "bench-models/bench-example.sh".to_owned(),
+            metadata: JobMetadata::default(),
         }
     }
 
@@ -908,6 +1152,64 @@ mod tests {
         assert_eq!(loaded.jobs[0].script_path, "bench.sh");
         assert_eq!(loaded.jobs[1].mode, "");
         assert_eq!(loaded.jobs[1].script_path, "");
+        assert_eq!(loaded.jobs[1].metadata, JobMetadata::default());
+    }
+
+    #[test]
+    fn legacy_job_rows_round_trip_without_changing_their_json_shape() {
+        let legacy = r#"{"name":"old","started":"then","elapsed":"3s","exit":"0","mode":"","script_path":""}"#;
+        let job: JobRecord = serde_json::from_str(legacy).unwrap();
+        assert_eq!(serde_json::to_string(&job).unwrap(), legacy);
+    }
+
+    #[test]
+    fn validates_cross_toolkit_metadata_and_rejects_credentials_or_oversize() {
+        let valid = JobMetadata {
+            toolkit: Some("l2m2".into()),
+            profile: Some("qwen3-8b".into()),
+            task: Some("transcribe-42".into()),
+            request_id: Some("req:123".into()),
+            backend_id: Some("llama.cpp:worker-1".into()),
+            submitted_at: Some("2026-09-28T15:04:05Z".into()),
+            started_at: Some("2026-09-28T15:04:05Z".into()),
+            finished_at: None,
+            result_state: Some("running".into()),
+            artifact_refs: vec![
+                "artifacts/transcript.json".into(),
+                "https://store.example/a.wav".into(),
+            ],
+        };
+        assert!(validate_job_metadata(&valid).is_empty());
+
+        let mut invalid = valid.clone();
+        invalid.request_id = Some("Bearer abc123".into());
+        invalid.submitted_at = Some("2026-02-30T15:04:05Z".into());
+        invalid.result_state = Some("running shell with args".into());
+        invalid.artifact_refs = vec!["https://user:password@store.example/a.wav".into()];
+        assert!(!validate_job_metadata(&invalid).is_empty());
+
+        invalid.artifact_refs = vec!["https://store.example/a.wav?token=abc".into()];
+        assert!(!validate_job_metadata(&invalid).is_empty());
+
+        let mut oversized = valid;
+        oversized.artifact_refs = vec!["a".repeat(JOB_METADATA_ARTIFACT_MAX_BYTES + 1)];
+        assert!(validate_job_metadata(&oversized)
+            .iter()
+            .any(|error| error.contains("exceeds")));
+    }
+
+    #[test]
+    fn malformed_persisted_metadata_is_reported_and_omitted() {
+        let temp = TempDir::new().unwrap();
+        fs::write(
+            jobs_path_in(temp.path()),
+            r#"[{"name":"bad","started":"now","elapsed":"1s","exit":"0","result_state":"mystery"},{"name":"good","started":"now","elapsed":"1s","exit":"0","toolkit":"l2m2","result_state":"succeeded","finished_at":"2026-09-28T15:04:05Z"}]"#,
+        )
+        .unwrap();
+        let loaded = load_jobs_in(temp.path()).unwrap();
+        assert_eq!(loaded.jobs.len(), 1);
+        assert_eq!(loaded.jobs[0].metadata.toolkit.as_deref(), Some("l2m2"));
+        assert_eq!(loaded.issues.len(), 1);
     }
 
     #[test]
@@ -966,6 +1268,57 @@ mod tests {
         let disk: Vec<JobRecord> =
             serde_json::from_slice(&fs::read(jobs_path_in(temp.path())).unwrap()).unwrap();
         assert_eq!(disk[0].exit, JOB_INTERRUPTED_EXIT);
+    }
+
+    #[test]
+    fn stale_cross_toolkit_jobs_reconcile_result_state_and_timestamp() {
+        let temp = TempDir::new().unwrap();
+        let mut stale = job("stale", JOB_RUNNING_EXIT);
+        stale.metadata = JobMetadata {
+            toolkit: Some("l2m2".into()),
+            result_state: Some("running".into()),
+            ..JobMetadata::default()
+        };
+        save_jobs_in(temp.path(), &[stale]).unwrap();
+
+        let loaded = load_jobs_in(temp.path()).unwrap();
+        assert_eq!(loaded.jobs[0].exit, JOB_INTERRUPTED_EXIT);
+        assert_eq!(
+            loaded.jobs[0].metadata.result_state.as_deref(),
+            Some("interrupted")
+        );
+        assert!(loaded.jobs[0]
+            .metadata
+            .finished_at
+            .as_deref()
+            .is_some_and(is_utc_timestamp));
+    }
+
+    #[test]
+    fn stale_queued_cross_toolkit_jobs_reconcile_as_interrupted() {
+        let temp = TempDir::new().unwrap();
+        let mut queued = job("queued", JOB_RUNNING_EXIT);
+        queued.metadata = JobMetadata {
+            toolkit: Some("l2m2".into()),
+            submitted_at: Some("2026-09-28T15:04:05Z".into()),
+            result_state: Some("queued".into()),
+            ..JobMetadata::default()
+        };
+        save_jobs_in(temp.path(), &[queued]).unwrap();
+
+        let loaded = load_jobs_in(temp.path()).unwrap();
+        assert_eq!(loaded.reconciled_running, 1);
+        assert_eq!(loaded.jobs[0].exit, JOB_INTERRUPTED_EXIT);
+        assert_eq!(
+            loaded.jobs[0].metadata.result_state.as_deref(),
+            Some("interrupted")
+        );
+        assert!(loaded.jobs[0].metadata.started_at.is_none());
+        assert!(loaded.jobs[0]
+            .metadata
+            .finished_at
+            .as_deref()
+            .is_some_and(is_utc_timestamp));
     }
 
     #[test]

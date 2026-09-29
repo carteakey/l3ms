@@ -1,5 +1,6 @@
 //! Command-line launcher for the Rust L3MS application.
 
+use std::collections::BTreeMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
@@ -11,10 +12,14 @@ use clap::{ArgGroup, Parser, ValueEnum};
 
 use crate::{
     bench_results::{load_results_in, sort_results, ResultSort},
+    control::catalog::{Catalog, CatalogProfile, Device, Readiness},
     llama_swap::{SwapClient, SwapModel},
     prompt_store::list_prompts,
     script_store::{collect_scripts_in, ScriptMode},
-    settings::{export_profile_in, import_profile_in, load_settings_in},
+    settings::{
+        export_profile_in, import_profile_in, load_resolved_stack_settings_in, load_settings_in,
+        StackOverrides,
+    },
 };
 
 #[derive(Debug, Parser)]
@@ -47,7 +52,7 @@ struct Cli {
     )]
     bench: Option<String>,
 
-    /// List llama-swap models, benchmark scripts, results, prompts, or everything.
+    /// List live models, offline stack profiles, scripts, results, prompts, or everything.
     #[arg(long, value_name = "MODE")]
     list: Option<ListMode>,
 
@@ -87,6 +92,7 @@ enum ListMode {
     Bench,
     Results,
     Prompts,
+    Stack,
     All,
 }
 
@@ -188,6 +194,7 @@ fn print_quickstart() {
     println!();
     println!("  4) Discover available models and scripts");
     println!("     l3ms --list all");
+    println!("     l3ms --list stack  # offline three-lane manifest catalog");
     println!();
     println!("  5) Pass extra arguments to a selected benchmark");
     println!(r#"     l3ms --bench qwen --extra "--ctx-size 32768""#);
@@ -202,6 +209,7 @@ fn print_quickstart() {
 
 fn list(mode: ListMode) -> Result<u8> {
     match mode {
+        ListMode::Stack => print_stack_list()?,
         ListMode::Run => {
             let client = SwapClient::from_env()?;
             print_model_list(&client.list_models()?);
@@ -240,6 +248,92 @@ fn list(mode: ListMode) -> Result<u8> {
         }
     }
     Ok(0)
+}
+
+fn print_stack_list() -> Result<()> {
+    let root = repository_root()?;
+    let user_data_root = crate::state_store::data_root()?;
+    let host_data_root = env::var_os("L3MS_HOST_SETTINGS_DIR")
+        .map(|value| {
+            anyhow::ensure!(
+                !value.is_empty(),
+                "L3MS_HOST_SETTINGS_DIR must not be empty"
+            );
+            Ok(PathBuf::from(value))
+        })
+        .transpose()?;
+    let invocation_dir = env::current_dir().context("resolve current directory")?;
+    let environment = stack_environment()?;
+    let resolved = load_resolved_stack_settings_in(
+        &root,
+        host_data_root.as_deref(),
+        &user_data_root,
+        &environment,
+        &StackOverrides::default(),
+        &invocation_dir,
+    )?;
+    let catalog = Catalog::load_from_roots(
+        &root,
+        &resolved.media_toolkit_root,
+        &resolved.decisions_toolkit_root,
+    )?;
+    println!("L3MS stack profiles ({}):", catalog.list().len());
+    for profile in catalog.list() {
+        println!("{}", format_stack_profile(profile));
+    }
+    Ok(())
+}
+
+fn stack_environment() -> Result<BTreeMap<String, String>> {
+    let mut values = BTreeMap::new();
+    for (key, value) in env::vars_os() {
+        let Some(key) = key.to_str() else {
+            continue;
+        };
+        if !matches!(
+            key,
+            "L3MS_MEDIA_TOOLKIT_ROOT" | "L3MS_DECISIONS_TOOLKIT_ROOT" | "L3MS_GPU_POLICY"
+        ) && !key.starts_with("L3MS_TASK_DEFAULT_")
+        {
+            continue;
+        }
+        let value = value
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("{key} must be UTF-8 for stack settings resolution"))?;
+        values.insert(key.to_owned(), value);
+    }
+    Ok(values)
+}
+
+fn format_stack_profile(profile: &CatalogProfile) -> String {
+    let tasks = profile
+        .tasks
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let device = match profile.device.as_ref() {
+        Some(Device::Cpu) => "cpu".to_owned(),
+        Some(Device::Cuda) => "cuda".to_owned(),
+        Some(Device::Remote) => "remote".to_owned(),
+        Some(Device::Other(value)) => value.clone(),
+        None => "unspecified".to_owned(),
+    };
+    let readiness = match profile.readiness {
+        Readiness::ManifestPresent => "manifest-only",
+        Readiness::Installed => "installed",
+        Readiness::Healthy => "healthy",
+    };
+    format!(
+        "  {:<36} tasks={:<20} runtime={:<24} device={:<11} readiness={}{}\n    source={}",
+        profile.key,
+        tasks,
+        profile.runtime,
+        device,
+        readiness,
+        if profile.disabled { " disabled" } else { "" },
+        profile.source_path.display()
+    )
 }
 
 fn interactive_run(filter: &str) -> Result<u8> {
@@ -602,6 +696,8 @@ mod tests {
         assert_eq!(cli.list, Some(ListMode::Results));
         let cli = Cli::try_parse_from(["l3ms", "--list", "prompts"]).unwrap();
         assert_eq!(cli.list, Some(ListMode::Prompts));
+        let cli = Cli::try_parse_from(["l3ms", "--list", "stack"]).unwrap();
+        assert_eq!(cli.list, Some(ListMode::Stack));
         assert!(
             Cli::try_parse_from(["l3ms", "--settings"])
                 .unwrap()
@@ -624,6 +720,19 @@ mod tests {
 
         assert!(Cli::try_parse_from(["l3ms", "--run", "--bench"]).is_err());
         assert!(Cli::try_parse_from(["l3ms", "--list", "invalid"]).is_err());
+    }
+
+    #[test]
+    fn offline_stack_list_formats_manifest_only_profiles() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let catalog = Catalog::load(&root).unwrap();
+        let key = "media:breeze-tts-2".parse().unwrap();
+        let profile = catalog.inspect(&key).unwrap();
+        let formatted = format_stack_profile(profile);
+        assert!(formatted.contains("media:breeze-tts-2"));
+        assert!(formatted.contains("tts"));
+        assert!(formatted.contains("manifest-only"));
+        assert!(formatted.contains("media-runtimes.json"));
     }
 
     #[test]

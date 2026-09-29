@@ -10,6 +10,10 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Imported L2M2 and L3DS source histories under `toolkits/` while keeping
+  their manifests, lockfiles, standalone commands, and runtime state separate.
+  Added an offline `l3ms --list stack` catalog and the first shared settings/job
+  contracts; model execution still uses the native runtimes.
 - Extracted shared filesystem utilities (`atomic_write`, `write_unique_snapshot`, `safe_stamp`, `format_utc_seconds`, `resolve_allow_missing`, `ensure_single_component`) into `src/fs_util.rs` to deduplicate ~300 lines of identical logic across `config_store` and `script_store`.
 - Added typed `ModelState` enum and `SwapModel::model_state()` to `llama_swap.rs` for compiler-checked model lifecycle states.
 - Marked compile-time `repository_root()` and `versions_root()` in `config_store` and `script_store` as deprecated with clear guidance to use runtime-resolved root paths via `_in()` functions.
