@@ -103,8 +103,12 @@ class DashboardDataTest(unittest.TestCase):
             with self.subTest(lane=lane):
                 self.assertIn(f'data-tab="{lane}"', html)
                 self.assertIn(f'id="{lane}-panel"', html)
+                self.assertIn(f'id="{lane}-tab" role="tab" aria-controls="{lane}-panel"', html)
+                self.assertIn(f'id="{lane}-panel" role="tabpanel" aria-labelledby="{lane}-tab"', html)
         self.assertIn('id="media-list"', html)
         self.assertIn('id="decision-list"', html)
+        self.assertIn('role="tablist"', html)
+        self.assertIn('event.key === "ArrowRight"', html)
         self.assertIn("not a claim that its model is installed", html)
         self.assertIn("No measured decision benchmark published.", html)
         self.assertIn("not measured here", html)
