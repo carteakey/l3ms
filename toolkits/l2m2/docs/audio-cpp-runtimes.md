@@ -65,23 +65,64 @@ Registered in `media-runtimes.json`:
 
 ### Generation CLI (`media-models/generate-breeze-tts-2.sh`)
 
-#### 1. Voice Design / Standard TTS
-Synthesize speech with descriptive style prompts:
+Run from the L2M2 checkout root. The wrapper works in a standalone L2M2
+checkout: it resolves `audio.cpp` from `vendor/audio.cpp`,
+`L3MS_AUDIO_CPP_ROOT`, or the legacy `$HOME/repos/audio.cpp` location, and the
+model from `L3MS_MEDIA_ROOT` (or an explicit model-path override).
+
+#### Read-only readiness check
+
+Check the selected CLI, compiled `breeze_tts` loader, Q8_0 model, and model
+spec without requiring text or starting inference:
+
+```bash
+./media-models/generate-breeze-tts-2.sh --check
+# The same wrapper through L2M2's profile runner:
+./target/release/l2m2 --media breeze-tts-2 --extra '--check'
+```
+
+For a cloning-specific check, provide `--task clon --voice-ref PATH`. The check
+only runs the CLI's loader-list command and reads local file metadata. It does
+not download weights, create output directories, load Breeze-TTS, initialize a
+GPU, or prove available VRAM/driver compatibility; use a later exclusive GPU
+window for an actual inference smoke test.
+
+#### 1. Standard TTS
+
+Standard speech uses audio.cpp's native `tts` task and the default clear-speech
+instruction:
+
 ```bash
 ./media-models/generate-breeze-tts-2.sh \
+  --task tts \
   --text "Welcome to local voice synthesis with BreezeTTS 2 and audio.cpp." \
-  --instruction "A warm female narrator with calm pacing and studio clarity." \
   --output "$HOME/media-output/welcome.wav"
 ```
 
 Via `l2m2` unified runner:
 ```bash
 ./target/release/l2m2 --media breeze-tts-2 \
-  --extra '--text "Welcome to local TTS." --instruction "A confident product demo narrator."'
+  --extra '--text "Welcome to local TTS."'
 ```
 
-#### 2. Prompt-Audio Voice Cloning
-Clone any speaker from reference audio:
+#### 2. Voice design
+
+The wrapper's `--task design` is a friendly alias for native `tts`; the
+voice/style direction is carried by the `instruction` request option:
+
+```bash
+./media-models/generate-breeze-tts-2.sh \
+  --task design \
+  --text "Welcome to local voice synthesis with BreezeTTS 2 and audio.cpp." \
+  --instruction "A warm female narrator with calm pacing and studio clarity." \
+  --output "$HOME/media-output/welcome-designed.wav"
+```
+
+#### 3. Prompt-audio voice cloning
+
+Cloning uses the native `clon` task. The reference transcript is optional, but
+include it when available to describe the reference speech accurately:
+
 ```bash
 ./media-models/generate-breeze-tts-2.sh \
   --task clon \
@@ -91,27 +132,35 @@ Clone any speaker from reference audio:
   --instruction "Speak clearly and naturally."
 ```
 
-#### 3. Real-time Streaming
-Generate incremental audio frames with low time-to-first-token:
+#### 4. Streaming
+
+Streaming emits incremental audio events. The wrapper keeps the merged WAV at
+`--output` and directs chunk WAVs to a sibling `<output>.chunks/` directory.
+Smaller frame counts can reduce time-to-first-audio at the cost of more chunk
+overhead; defaults are 16 frames and a 12-frame lookahead:
+
 ```bash
 ./media-models/generate-breeze-tts-2.sh \
   --mode streaming \
   --stream-frames 16 \
   --stream-lookahead 12 \
-  --text "Streaming voice test with low latency."
+  --text "Streaming voice test with low latency." \
+  --output "$HOME/media-output/stream.wav"
 ```
 
 ---
 
 ## 4. Verification & Diagnostics
 
-1. Check loader availability in the compiled CLI:
+1. `--check` performs the non-generating, model-specific file/loader preflight.
+2. Check native task/mode availability in the compiled CLI:
    ```bash
-   ./vendor/audio.cpp/build/linux-cuda-release/bin/audiocpp_cli --list-loaders
+   ./vendor/audio.cpp/build/linux-cuda-release/bin/audiocpp_cli --list-loaders --json
    ```
-   Must display `breeze_tts: tts (offline|streaming), clon (offline|streaming), vdes (offline|streaming)`.
+   Confirm `breeze_tts` is listed. The profile exposes standard `tts` and `clon`;
+   `design` is the wrapper's instruction-conditioned TTS alias.
 
-2. Inspect overall runtime and model readiness:
+3. Inspect overall runtime and model readiness across installed profiles:
    ```bash
    ./maintenance/setup-media-runtimes.sh check
    ```

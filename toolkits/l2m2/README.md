@@ -65,6 +65,12 @@ compatibility boundary, so L2M2 does not require an L3MS checkout.
 Before generation on a shared GPU, unload competing models as described in the
 runbook. Runtime readiness and hardware requirements still apply.
 
+For a focused Breeze-TTS preflight that does not load the model or request GPU
+work, run `./media-models/generate-breeze-tts-2.sh --check` from this child
+directory. It verifies the compiled audio.cpp loader and local model/spec files;
+the first actual TTS/design/clone/streaming run still needs an exclusive GPU
+window.
+
 ## Checks
 
 ```sh

@@ -36,9 +36,14 @@ Options:
   --weight-type TYPE        Matmul weight storage type: native, q8_0, q4_k, etc. (default: native)
   --attention MODE          Attention kernel: auto (default), flash, or eager
   --bf16-activations MODE   Activation rounding: auto (default), on, or off
+  --check                   Read-only check of CLI loader, model/spec, and requested clone input
   --output PATH             Output WAV path (default: $L3MS_MEDIA_OUTPUT_DIR/breeze-tts-*.wav)
   --out-dir PATH            Output directory override
   --help, -h                Show this help
+
+--check does not require synthesis text, create output paths, allocate a GPU,
+or run TTS. It checks the local executable, compiled Breeze loader, model, and
+model spec; it does not validate GPU memory or driver/runtime compatibility.
 
 Environment:
   L3MS_AUDIO_CPP_CLI        audiocpp_cli path override
@@ -123,6 +128,7 @@ weight_type="native"
 attention="auto"
 bf16_activations="auto"
 output=""
+check_only=0
 
 while (($#)); do
     case "$1" in
@@ -226,6 +232,10 @@ while (($#)); do
             bf16_activations="$2"
             shift 2
             ;;
+        --check)
+            check_only=1
+            shift
+            ;;
         --output|--out)
             (($# >= 2)) || { echo "Missing value for $1" >&2; exit 2; }
             output="$2"
@@ -263,7 +273,9 @@ if [[ -n "$reference_text_file" ]]; then
     reference_text="$(<"$reference_text_file")"
 fi
 
-[[ -n "$text" ]] || { echo "Breeze-TTS requires --text TEXT or --text-file PATH" >&2; exit 2; }
+if [[ "$check_only" != "1" ]]; then
+    [[ -n "$text" ]] || { echo "Breeze-TTS requires --text TEXT or --text-file PATH" >&2; exit 2; }
+fi
 
 # Normalize task
 case "$task" in
@@ -273,13 +285,70 @@ case "$task" in
     clon|clone)
         cli_task="clon"
         [[ -n "$voice_ref" ]] || { echo "Voice cloning requires --voice-ref PATH" >&2; exit 2; }
-        [[ -f "$voice_ref" ]] || { echo "Reference audio file not found: $voice_ref" >&2; exit 1; }
+        [[ -s "$voice_ref" ]] || { echo "Reference audio file missing or empty: $voice_ref" >&2; exit 1; }
         ;;
     *)
         echo "Unsupported task: $task (expected tts, design, or clon)" >&2
         exit 2
         ;;
 esac
+
+case "$mode" in
+    offline|streaming) ;;
+    *) echo "Unsupported mode: $mode (expected offline or streaming)" >&2; exit 2 ;;
+esac
+
+check_readiness() {
+    local failed=0
+    local loader_output=""
+    local cli_path=""
+
+    if cli_path="$(find_cli)"; then
+        printf 'OK: audio.cpp CLI: %s\n' "$cli_path"
+        if loader_output="$("$cli_path" --list-loaders --json 2>&1)"; then
+            if printf '%s' "$loader_output" | python3 -c 'import json, sys; sys.exit(0 if "breeze_tts" in json.load(sys.stdin).get("loaders", {}) else 1)' 2>/dev/null; then
+                printf 'OK: Breeze-TTS loader is compiled into the CLI\n'
+            else
+                printf 'MISSING: Breeze-TTS loader is not listed by %s\n' "$cli_path" >&2
+                failed=1
+            fi
+        else
+            printf 'MISSING: could not inspect loaders with %s --list-loaders --json\n' "$cli_path" >&2
+            failed=1
+        fi
+    else
+        printf 'MISSING: audiocpp_cli; build audio.cpp or set L3MS_AUDIO_CPP_CLI\n' >&2
+        failed=1
+    fi
+
+    if [[ -s "$model_path" ]]; then
+        printf 'OK: Breeze-TTS model: %s\n' "$model_path"
+    else
+        printf 'MISSING: Breeze-TTS model file: %s\n' "$model_path" >&2
+        failed=1
+    fi
+    if [[ -s "$spec_path" ]]; then
+        printf 'OK: Breeze-TTS model spec: %s\n' "$spec_path"
+    else
+        printf 'MISSING: Breeze-TTS model spec: %s\n' "$spec_path" >&2
+        failed=1
+    fi
+    if [[ "$cli_task" == "clon" ]]; then
+        if [[ -s "$voice_ref" ]]; then
+            printf 'OK: cloning reference audio: %s\n' "$voice_ref"
+        else
+            printf 'MISSING: cloning reference WAV: %s\n' "$voice_ref" >&2
+            failed=1
+        fi
+    fi
+    printf 'Read-only preflight: no synthesis was run and no output directory was created.\n'
+    return "$failed"
+}
+
+if [[ "$check_only" == "1" ]]; then
+    check_readiness
+    exit $?
+fi
 
 cli_path="$(find_cli || true)"
 [[ -n "$cli_path" && -x "$cli_path" ]] || {
@@ -338,7 +407,10 @@ if [[ "$cli_task" == "clon" ]]; then
 fi
 
 if [[ "$mode" == "streaming" ]]; then
+    stream_output_dir="${output}.chunks"
+    mkdir -p "$stream_output_dir"
     args+=(
+        --out-dir "$stream_output_dir"
         --request-option "stream_frames_per_event=$stream_frames"
         --request-option "stream_lookahead_margin=$stream_lookahead"
     )

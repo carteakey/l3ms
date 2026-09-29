@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add a read-only Breeze-TTS-2 readiness check and offline contract tests for
+  standard TTS, instruction-led design, cloning, and streaming output routing.
+
 - Document monorepo-root build/run instructions and the compiled default-root
   and `--root` override behavior.
 

@@ -137,18 +137,34 @@ cargo run --locked -- --media heartmula-music --extra \
 Local Q8_0 Breeze-TTS-2 speech generation, voice design, and voice cloning:
 
 ```bash
-# Standard TTS / voice design:
+# Safe, read-only preflight from the L2M2 checkout root; no text is required.
+./media-models/generate-breeze-tts-2.sh --check
+# Clone-specific readiness also checks the reference WAV:
+./media-models/generate-breeze-tts-2.sh --check --task clon --voice-ref ./sample.wav
+
+# Standard TTS (native audio.cpp task: tts):
 cargo run --locked -- --media breeze-tts-2 --extra \
-  '--text "Welcome to local text-to-speech with Breeze-TTS-2." --instruction "A warm female narrator with calm pacing."'
+  '--task tts --text "Welcome to local text-to-speech with Breeze-TTS-2."'
+
+# Voice design is instruction-conditioned native TTS (wrapper alias: design):
+cargo run --locked -- --media breeze-tts-2 --extra \
+  '--task design --text "A warm narrator is ready." --instruction "Warm female narrator, calm pacing."'
 
 # Prompt-audio voice cloning:
 cargo run --locked -- --media breeze-tts-2 --extra \
   '--task clon --text "Read this with the reference speaker tone." --voice-ref ./sample.wav --reference-text "Transcript of sample."'
 
-# Low-latency streaming mode:
+# Incremental streaming; the merged WAV is written to stream.wav and emitted
+# chunk WAVs to stream.wav.chunks/:
 cargo run --locked -- --media breeze-tts-2 --extra \
-  '--text "Streaming speech generation test." --mode streaming --stream-frames 16'
+  '--text "Streaming speech generation test." --mode streaming --stream-frames 16 --stream-lookahead 12 --output ./stream.wav'
 ```
+
+The Breeze-specific `--check` probes only the local CLI loader list and required
+files; it does not run inference, initialize a GPU, download model weights, or
+prove VRAM/driver readiness. Schedule the first standard/design/clone/streaming
+inference smoke test for an exclusive GPU window after unloading other GPU
+workloads.
 
 The default output directory is `$HOME/media-output`; set
 `L3MS_MEDIA_OUTPUT_DIR` or pass `--output` to choose another destination.

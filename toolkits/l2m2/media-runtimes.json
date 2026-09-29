@@ -76,16 +76,18 @@
       "inputs": ["text", "audio"],
       "status": "local",
       "script": "media-models/generate-breeze-tts-2.sh",
-      "description": "Offline instruction-conditioned text-to-speech and reference-audio voice cloning through audio.cpp using the Breeze-TTS-2 Q8_0 GGUF package.",
+      "description": "Native audio.cpp Breeze-TTS-2 Q8_0 speech generation with standard TTS, instruction-led voice design, reference-audio cloning, offline output, and incremental streaming.",
       "requirements": [
         "audio.cpp audiocpp_cli built with breeze_tts and CUDA",
-        "Breeze-TTS-2 Q8_0 GGUF package in L3MS_MEDIA_ROOT",
+        "Breeze-TTS-2 Q8_0 GGUF package and breeze_tts model spec available locally",
         "NVIDIA driver/toolkit compatible with the audio.cpp CUDA build"
       ],
       "notes": [
         "Default Q8_0 package contains T5Gemma text conditioning, Qwen-style acoustic code generation, depth codebook decoding, and Mimi waveform decoding.",
-        "Supports standard TTS, prompt-audio voice cloning via --voice-ref and --reference-text, and voice design via --instruction.",
-        "Supports offline and streaming modes (--mode streaming --stream-frames 16).",
+        "Standard speech uses native --task tts; the wrapper's --task design alias also uses tts with an instruction prompt.",
+        "Voice cloning uses native --task clon and a reference WAV via --voice-ref; --reference-text is optional.",
+        "Offline mode writes one WAV; streaming mode emits audio chunks under <output>.chunks and retains the final WAV at --output.",
+        "Run media-models/generate-breeze-tts-2.sh --check for a read-only CLI/loader/model/spec preflight; it does not load the model or verify GPU capacity.",
         "CUDA backend uses bf16 activation rounding by default for reference parity with official Breeze-TTS 2."
       ]
     },
