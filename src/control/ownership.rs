@@ -32,14 +32,14 @@ impl CoordinatorLock {
             metadata.permissions().mode() & 0o077 == 0,
             "host lock directory must not be accessible to group or other users"
         );
-        let gpus: BTreeSet<_> = gpus.into_iter().collect();
-        ensure!(gpus.len() <= 16, "too many GPU locks requested");
-        ensure!(
-            gpus.iter().all(|gpu| *gpu <= 1023),
-            "GPU lock index exceeds 1023"
-        );
+        let mut unique_gpus = BTreeSet::new();
+        for (index, gpu) in gpus.into_iter().enumerate() {
+            ensure!(index < 16, "too many GPU locks requested");
+            ensure!(gpu <= 1023, "GPU lock index exceeds 1023");
+            unique_gpus.insert(gpu);
+        }
         let names = std::iter::once("coordinator.lock".to_owned())
-            .chain(gpus.into_iter().map(|gpu| format!("gpu-{gpu}.lock")));
+            .chain(unique_gpus.into_iter().map(|gpu| format!("gpu-{gpu}.lock")));
         let mut files = Vec::new();
         for name in names {
             let path = directory.join(name);
@@ -119,6 +119,7 @@ mod tests {
     fn invalid_or_shared_paths_fail_closed() {
         let directory = private_directory();
         assert!(CoordinatorLock::acquire(directory.path(), [1024]).is_err());
+        assert!(CoordinatorLock::acquire(directory.path(), std::iter::repeat(0)).is_err());
         assert!(!directory.path().join("coordinator.lock").exists());
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(CoordinatorLock::acquire(directory.path(), []).is_err());
