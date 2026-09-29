@@ -3,6 +3,7 @@
 
 # Ignore cloned and built vendor dependencies
 /vendor/
+/vendor
 
 # Rust build output
 /target/

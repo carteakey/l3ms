@@ -18,7 +18,7 @@ CAR-220 Phase 9, and CAR-221 Phase 10.
 | 0. Baseline and protection | In progress | Original L3MS `68fd7bc48f803aecb5ae5d25a3f30967b46da3eb`; L2M2 `39e4d40a4e5ed993e99aa4ed70c9d183873a90ba`; L3DS `4716ddf3508d224645416f3ba70d5e34c138cedd`. Source inventories and backups in progress. |
 | 1. Folder/history import | In progress | L3DS five-commit and L2M2 three-commit histories imported under `toolkits/`; source/WIP audit, private recovery, and README wordmark done. Final tree/secret/public-path review pending. |
 | 2. Independent operation | In progress | Imported child builds, tests, profile lists, and explicit old-root lists pass; CI added locally, pre-push validation pending. |
-| 3. Runtime cutover | In progress | Bounded L2M2 GPU-mode pilot from the branch passed and original service was restored. Representative model generation, L3MS router, and real L3DS inference still pending. |
+| 3. Runtime cutover | In progress | Bounded L2M2 GPU-mode pilot and a real branch L3MS language request passed; original ComfyUI service was restored after each. Representative media-model generation, real L3DS inference, and full deployed-path reconciliation still pending. |
 | 4. Shared contracts | In development | Read-only catalog and offline `l3ms --list stack`, layered settings, and existing-store job metadata are on the branch. Full compatibility/live release gates remain; release stays gated by Phase 3. |
 | 5. Runtime adapters | Pending | Manual, verified service transitions. |
 | 6. Local coordinator | Pending | Cross-client queueing and request-driven switching. |
@@ -31,7 +31,8 @@ CAR-220 Phase 9, and CAR-221 Phase 10.
 
 - The original `~/repos/l3ms` checkout remains on `main` with its pre-existing
   tracked and untracked changes. The migration branch lives in a separate Git
-  worktree; no runtime path or service has been switched.
+  worktree; bounded pilots have been restored, and no deployed runtime path or
+  permanent service has been switched.
 - L2M2 and L3DS originals remain in place. Their source and ignored runtime
   state are being classified before history import.
 - The source tree and plan are being reviewed for paths, secrets, and large
@@ -77,6 +78,7 @@ CAR-220 Phase 9, and CAR-221 Phase 10.
 | 2026-09-29 | Phase 4 offline catalog and CLI | `l3ms --list stack` lists 21 lane-qualified profiles from the three native manifests without contacting llama-swap; each is explicitly `manifest-only`, not installed/healthy. It works from another working directory with `L3MS_ROOT` set. Root `cargo test --all-targets --locked` passed 284 tests (1 ignored); root fmt, Clippy, and dashboard generator checks passed. |
 | 2026-09-29 | Phase 4 settings and jobs | Existing settings store now has versioned optional stack preferences, declared path anchoring, built-in → host → user → environment → CLI precedence, snapshots on writes, and portable profile exports that omit machine roots/policy. Existing job history now supports queued cross-toolkit metadata, explicit pre-dispatch persistence, transitions/timestamps/artifacts, and no-replay interruption on restart while preserving legacy row shape. Targeted tests pass; final full-suite check pending after integration. |
 | 2026-09-29 | Phase 9 site development | Added native-manifest-derived media/TTS and decision catalog payloads, separate site tabs, Breeze's four TTS modes, hosted/local decision labels, and explicit absence of measured results. Existing language ranking remains separate. Six Python tests, JavaScript syntax, and whitespace checks pass. No browser surface was available for visual review; no site was published. |
+| 2026-09-29 | Branch language runtime pilot and restoration | With the approved maintenance window and an empty ComfyUI queue, stopped the original transient ComfyUI unit; linked the branch's ignored `vendor` path to the original verified builds; started branch-configured llama-swap on loopback `127.0.0.1:18080`. The preloaded Gemma 4 QAT+MTP model passed health, authenticated `/v1/models` listed eight profiles, and a bounded `/v1/chat/completions` request returned `READY` (89 total tokens). Stopped the temporary router and restarted the original ComfyUI transient unit via its original `maintenance/comfyui-service.sh start-gpu` launcher. Verified active original `ExecStart`, ComfyUI 0.36.0 GPU health, empty queue, and closed pilot port. No permanent service path changed. |
 
 ## Open decisions
 
