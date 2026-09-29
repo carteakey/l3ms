@@ -176,7 +176,7 @@ pub struct RuntimeIdentity {
 }
 
 impl RuntimeIdentity {
-    fn new(lane: Lane, id: impl Into<String>) -> Result<Self> {
+    pub fn new(lane: Lane, id: impl Into<String>) -> Result<Self> {
         let id = id.into();
         ensure!(!id.trim().is_empty(), "runtime identity must not be empty");
         Ok(Self { lane, id })
