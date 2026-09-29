@@ -43,6 +43,10 @@ struct Cli {
     #[arg(long, default_value_t = 10)]
     iterations: usize,
 
+    /// Explicit synthetic demo mode; never use its output as inference or benchmark evidence.
+    #[arg(long)]
+    simulate: bool,
+
     /// Run real-time tick-based arena simulation.
     #[arg(long)]
     arena: bool,
@@ -78,6 +82,7 @@ fn run(cli: Cli) -> Result<u8> {
             cli.profile.as_deref(),
             &cli.suite,
             cli.iterations,
+            cli.simulate,
         )?;
         return Ok(0);
     }
@@ -132,6 +137,9 @@ fn run(cli: Cli) -> Result<u8> {
         }
         if let Some(ref base) = cli.base_url {
             cmd.arg("--base-url").arg(base);
+        }
+        if cli.simulate {
+            cmd.arg("--simulate");
         }
 
         let status = cmd.status()?;

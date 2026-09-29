@@ -78,5 +78,7 @@ jobs:
         run: ./target/release/l3ds --list
       - name: Check Python syntax
         run: python3 -m compileall -q decision-models
+      - name: Check decision runner fail-closed behavior
+        run: python3 -m unittest discover -s decision-models -p 'test_*.py'
       - name: Check setup shell syntax
         run: bash -n maintenance/setup-env.sh

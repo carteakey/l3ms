@@ -10,6 +10,7 @@ pub fn run_benchmark(
     profile_filter: Option<&str>,
     suite_name: &str,
     iterations: usize,
+    simulate: bool,
 ) -> Result<()> {
     let suite_path = root.join("suites").join(format!("{}.json", suite_name));
     if !suite_path.exists() {
@@ -18,6 +19,9 @@ pub fn run_benchmark(
 
     println!("\n  l3ds — Benchmark Suite: {}", suite_name);
     println!("  Iterations: {}", iterations);
+    if simulate {
+        println!("  SYNTHETIC DEMO — not native inference or benchmark evidence");
+    }
     println!("  ================================================================");
 
     let venv_python = root.join(".venv/bin/python");
@@ -48,11 +52,13 @@ pub fn run_benchmark(
     );
     println!("  ----------------------------------------------------------------");
 
+    let mut failures = 0usize;
     for profile in target_profiles {
         let entrypoint = root.join(&profile.entrypoint);
 
         // Run python benchmark harness
-        let output = Command::new(&python_bin)
+        let mut command = Command::new(&python_bin);
+        command
             .arg(&entrypoint)
             .arg("--engine")
             .arg(&profile.engine)
@@ -63,8 +69,11 @@ pub fn run_benchmark(
             .arg("--bench-suite")
             .arg(&suite_path)
             .arg("--iterations")
-            .arg(iterations.to_string())
-            .output();
+            .arg(iterations.to_string());
+        if simulate {
+            command.arg("--simulate");
+        }
+        let output = command.output();
 
         match output {
             Ok(out) => {
@@ -92,9 +101,10 @@ pub fn run_benchmark(
                     }
                     println!(
                         "  {:<16} {:<10} {:<10} {:<10} {:<12}",
-                        profile.id, "-", "-", "-", "OK (raw)"
+                        profile.id, "-", "-", "-", "ERROR"
                     );
                     println!("    Raw output:\n{}", stdout_str);
+                    failures += 1;
                 } else {
                     let stderr_str = String::from_utf8_lossy(&out.stderr);
                     let preview = stderr_str.lines().next().unwrap_or("Failed");
@@ -103,6 +113,7 @@ pub fn run_benchmark(
                         profile.id, "-", "-", "-", "ERROR"
                     );
                     eprintln!("    Error: {}", preview);
+                    failures += 1;
                 }
             }
             Err(e) => {
@@ -111,9 +122,13 @@ pub fn run_benchmark(
                     profile.id, "-", "-", "-", "SPAWN_ERR"
                 );
                 eprintln!("    Process error: {:#}", e);
+                failures += 1;
             }
         }
     }
     println!("\n  Benchmark complete.\n");
+    if failures > 0 {
+        bail!("{failures} decision profile(s) failed; no synthetic fallback was counted")
+    }
     Ok(())
 }

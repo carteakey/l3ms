@@ -3,7 +3,7 @@
 A keyboard-first, script-first terminal toolkit and benchmark harness for local **Decision Models** ("System 1" models). 
 Companion to **[`l3ms`](https://github.com/carteakey/l3ms)** (Language Models) and **[`l2m2`](https://github.com/carteakey/l2m2)** (Latent Media Models).
 
-Unlike autoregressive LLMs (System 2) that generate token-by-token JSON, decision models map a state and a closed option set into typed outputs (`choice`, `score`, `noul`) with calibrated probabilities in **a single forward pass** (13ms – 70ms).
+Unlike autoregressive LLMs (System 2) that generate token-by-token JSON, decision models map a state and a closed option set into typed outputs (`choice`, `score`, `noul`). The latency figures below are manifest expectations, not verified local benchmark results.
 
 ---
 
@@ -59,6 +59,13 @@ cargo build --release
   --question '{"squad": {"type": "choice", "instructions": "Assign team", "criteria": {"infra": "Infrastructure", "billing": "Billing"}}}'
 ```
 
+Normal profile and benchmark commands fail if the native model is unavailable;
+they never substitute fabricated decisions. Use `--simulate` only for an
+explicit synthetic demo, not performance or migration acceptance. The SemIf
+bridge currently has no native forward pass and therefore requires that demo
+flag until its adapter is implemented. Hosted profiles require a configured API
+credential for real requests.
+
 ### Run Comparative Latency & Option-Flip Benchmark
 ```bash
 ./target/release/l3ds --bench --suite routing-gate --iterations 10
@@ -72,12 +79,12 @@ Test competitors under real-time clock deadlines (e.g. 100ms ticks):
 
 ---
 
-## Why Local Decision Models Win in Real-Time Games
+## Real-Time Game Target
 
 Under a real-time game clock (such as Snake, Drone Swarm, or Bomber Arena):
 1. **Clock Deadlines:** The simulation advances every 100ms.
-2. **Local vs Remote WAN:** Local inference on an RTX 4070 takes **~17ms (Smol)** or **~68ms (Big)**, consistently beating the deadline. Remote APIs (Jev) experience WAN roundtrips (150ms – 400ms+), resulting in missed ticks, frozen units, and eliminations.
-3. **Accuracy vs Pure Speed:** While smaller encoders like Laya are ultra-fast (~13ms), Nagi-Big (4B) provides the spatial reasoning capacity needed to evade dynamic traps while still easily clearing the 100ms threshold.
+2. **Local vs Remote WAN:** The manifest targets **~17ms (Smol)** and **~70ms (Big)** on the intended host, versus a longer expected remote roundtrip. These are design targets until a native, reproducible run is recorded.
+3. **Accuracy vs Pure Speed:** The smaller Laya/Nagi-Smol and larger Nagi-Big profiles explore this tradeoff. Actual quality and deadline performance require real model measurements; `--simulate` output is not evidence.
 
 ---
 

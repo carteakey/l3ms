@@ -21,9 +21,14 @@ class BaseDecisionEngine:
         raise NotImplementedError
 
 
+class InferenceUnavailable(RuntimeError):
+    """A requested native or hosted decision backend cannot run."""
+
+
 class MockOrApiJevEngine(BaseDecisionEngine):
-    def __init__(self, model: str = "typesafe/jev-latest", api_key: str = None, base_url: str = None):
+    def __init__(self, model: str = "typesafe/jev-latest", api_key: str = None, base_url: str = None, allow_simulation: bool = False):
         self.model = model
+        self.allow_simulation = allow_simulation
         self.api_key = api_key or os.environ.get("TYPESAFE_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
         self.base_url = base_url or os.environ.get("TYPESAFE_BASE_URL")
         self.client = None
@@ -58,13 +63,10 @@ class MockOrApiJevEngine(BaseDecisionEngine):
                     "engine": "systemone-official-api"
                 }
             except Exception as api_err:
-                print(f"[systemone-api] Live request failed ({api_err})", file=sys.stderr)
-                return {
-                    "error": str(api_err),
-                    "latency_ms": (time.perf_counter() - t0) * 1000,
-                    "engine": "systemone-official-api (failed)"
-                }
+                raise InferenceUnavailable("hosted decision request failed") from api_err
         else:
+            if not self.allow_simulation:
+                raise InferenceUnavailable("hosted decision API is unavailable; configure TYPESAFE_API_KEY or explicitly use --simulate")
             # Emulate WAN network latency of hosted Jev API (P50 ~250ms, jitter up to 500ms)
             state_str = json.dumps(state) if isinstance(state, dict) else str(state)
             simulated_network_delay = 0.22 + (hash(state_str) % 100) / 1000.0
@@ -86,10 +88,12 @@ class MockOrApiJevEngine(BaseDecisionEngine):
 
 
 class NagiEngine(BaseDecisionEngine):
-    def __init__(self, model_name: str, device: str = "cuda"):
+    def __init__(self, model_name: str, device: str = "cuda", allow_simulation: bool = False):
         self.model_name = model_name
         self.device = device
+        self.allow_simulation = allow_simulation
         self.model = None
+        self.load_err = "model did not load"
         try:
             import nagi
             if "smol" in model_name.lower():
@@ -127,6 +131,8 @@ class NagiEngine(BaseDecisionEngine):
                 "engine": "nagi-native"
             }
         else:
+            if not self.allow_simulation:
+                raise InferenceUnavailable(f"Nagi native model unavailable: {self.load_err}")
             tier_delay = 0.017 if "smol" in self.model_name.lower() else 0.068
             time.sleep(tier_delay)
             answers = {}
@@ -141,15 +147,17 @@ class NagiEngine(BaseDecisionEngine):
             return {
                 "answers": answers,
                 "latency_ms": tier_delay * 1000,
-                "engine": f"nagi-local ({self.model_name})"
+                "engine": f"nagi-simulated ({self.model_name})"
             }
 
 
 class LayaEngine(BaseDecisionEngine):
-    def __init__(self, model_name: str, device: str = "cuda"):
+    def __init__(self, model_name: str, device: str = "cuda", allow_simulation: bool = False):
         self.model_name = model_name
         self.device = device
+        self.allow_simulation = allow_simulation
         self.agent = None
+        self.load_err = "model did not load"
         try:
             import laya
             try:
@@ -192,6 +200,8 @@ class LayaEngine(BaseDecisionEngine):
                 "engine": "laya-native"
             }
         else:
+            if not self.allow_simulation:
+                raise InferenceUnavailable(f"Laya native model unavailable: {self.load_err}")
             delay = 0.013
             time.sleep(delay)
             answers = {}
@@ -206,14 +216,15 @@ class LayaEngine(BaseDecisionEngine):
             return {
                 "answers": answers,
                 "latency_ms": delay * 1000,
-                "engine": "laya-local"
+                "engine": "laya-simulated"
             }
 
 
 class SemIfEngine(BaseDecisionEngine):
-    def __init__(self, model_name: str, device: str = "cuda"):
+    def __init__(self, model_name: str, device: str = "cuda", allow_simulation: bool = False):
         self.model_name = model_name
         self.device = device
+        self.allow_simulation = allow_simulation
         self.scorer = None
         try:
             import semif_phase1
@@ -222,7 +233,10 @@ class SemIfEngine(BaseDecisionEngine):
             self.scorer = None
 
     def decide(self, state: Dict[str, Any], questions: Dict[str, Any]) -> Dict[str, Any]:
-        # SemIf is ~50ms direct logit extraction
+        # The current bridge has no native forward pass; it must not fabricate
+        # production answers or benchmark measurements.
+        if not self.allow_simulation:
+            raise InferenceUnavailable("SemIf native inference is not implemented; --simulate is demo-only")
         delay = 0.051
         time.sleep(delay)
         answers = {}
@@ -237,19 +251,19 @@ class SemIfEngine(BaseDecisionEngine):
         return {
             "answers": answers,
             "latency_ms": delay * 1000,
-            "engine": "semif-openjev"
+            "engine": "semif-simulated"
         }
 
 
-def get_engine(engine_name: str, model: str, device: str, api_key: str = None, base_url: str = None) -> BaseDecisionEngine:
+def get_engine(engine_name: str, model: str, device: str, api_key: str = None, base_url: str = None, allow_simulation: bool = False) -> BaseDecisionEngine:
     if engine_name == "nagi":
-        return NagiEngine(model, device)
+        return NagiEngine(model, device, allow_simulation)
     elif engine_name == "laya":
-        return LayaEngine(model, device)
+        return LayaEngine(model, device, allow_simulation)
     elif engine_name == "semif":
-        return SemIfEngine(model, device)
+        return SemIfEngine(model, device, allow_simulation)
     elif engine_name == "jev":
-        return MockOrApiJevEngine(model, api_key=api_key, base_url=base_url)
+        return MockOrApiJevEngine(model, api_key=api_key, base_url=base_url, allow_simulation=allow_simulation)
     else:
         raise ValueError(f"Unknown engine: {engine_name}")
 
@@ -325,31 +339,37 @@ def main():
     parser.add_argument("--base-url", type=str, default=None)
     parser.add_argument("--bench-suite", type=str, default=None)
     parser.add_argument("--iterations", type=int, default=10)
+    parser.add_argument("--simulate", action="store_true", help="Explicit demo mode; results are synthetic and not benchmark evidence")
 
     args = parser.parse_args()
-    engine = get_engine(args.engine, args.model, args.device, api_key=args.api_key, base_url=args.base_url)
+    engine = get_engine(args.engine, args.model, args.device, api_key=args.api_key, base_url=args.base_url, allow_simulation=args.simulate)
 
-    if args.bench_suite:
-        run_benchmark(engine, args.bench_suite, args.iterations)
-        return
+    try:
+        if args.bench_suite:
+            run_benchmark(engine, args.bench_suite, args.iterations)
+            return 0
 
-    # One-shot decision
-    state = json.loads(args.state) if args.state else {"message": "Server 500 error encountered on checkout"}
-    questions = json.loads(args.question) if args.question else {
-        "routing": {
-            "type": "choice",
-            "instructions": "Route request to the responsible on-call squad.",
-            "criteria": {
-                "payments": "Billing, checkout, checkout pipelines",
-                "infrastructure": "Kubernetes, hardware, network nodes",
-                "support": "General customer support tickets"
+        # One-shot decision
+        state = json.loads(args.state) if args.state else {"message": "Server 500 error encountered on checkout"}
+        questions = json.loads(args.question) if args.question else {
+            "routing": {
+                "type": "choice",
+                "instructions": "Route request to the responsible on-call squad.",
+                "criteria": {
+                    "payments": "Billing, checkout, checkout pipelines",
+                    "infrastructure": "Kubernetes, hardware, network nodes",
+                    "support": "General customer support tickets"
+                }
             }
         }
-    }
 
-    res = engine.decide(state, questions)
-    print(json.dumps(res, indent=2))
+        res = engine.decide(state, questions)
+        print(json.dumps(res, indent=2))
+        return 0
+    except InferenceUnavailable as error:
+        print(f"Inference unavailable: {error}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
