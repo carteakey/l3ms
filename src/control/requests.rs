@@ -214,12 +214,8 @@ impl InferenceRequest {
                                 input
                                     .voice_reference
                                     .as_ref()
-                                    .is_some_and(|path| !path.as_os_str().is_empty())
-                                    && input
-                                        .reference_text
-                                        .as_deref()
-                                        .is_some_and(|text| !text.trim().is_empty()),
-                                "voice cloning requires reference audio and transcript"
+                                    .is_some_and(|path| !path.as_os_str().is_empty()),
+                                "voice cloning requires reference audio"
                             );
                         }
                         SpeechMode::VoiceDesign => {
@@ -392,7 +388,7 @@ mod tests {
     }
 
     #[test]
-    fn voice_cloning_requires_reference_and_transcript() {
+    fn voice_cloning_requires_a_nonempty_reference_path() {
         let catalog = catalog();
         let mut speech = InferenceRequest::Media {
             profile: key(Lane::Media, "breeze-tts-2"),
@@ -411,7 +407,6 @@ mod tests {
         } = &mut speech
         {
             input.voice_reference = Some(PathBuf::new());
-            input.reference_text = Some("reference words".into());
         }
         assert!(speech.validate(&catalog).is_err());
         if let InferenceRequest::Media {
