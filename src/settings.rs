@@ -284,6 +284,45 @@ pub fn load_resolved_stack_settings_in(
     )
 }
 
+/// Resolve the current operator's stack roots without changing settings.
+pub fn load_current_stack_settings_in(
+    repo_root: &Path,
+    user_data_root: &Path,
+) -> Result<ResolvedStackSettings> {
+    let host_data_root = std::env::var_os("L3MS_HOST_SETTINGS_DIR")
+        .map(|value| {
+            anyhow::ensure!(
+                !value.is_empty(),
+                "L3MS_HOST_SETTINGS_DIR must not be empty"
+            );
+            Ok(PathBuf::from(value))
+        })
+        .transpose()?;
+    let mut environment = BTreeMap::new();
+    for (key, value) in std::env::vars_os() {
+        let Some(key) = key.to_str() else { continue };
+        if !matches!(
+            key,
+            "L3MS_MEDIA_TOOLKIT_ROOT" | "L3MS_DECISIONS_TOOLKIT_ROOT" | "L3MS_GPU_POLICY"
+        ) && !key.starts_with("L3MS_TASK_DEFAULT_")
+        {
+            continue;
+        }
+        let value = value
+            .into_string()
+            .map_err(|_| anyhow!("{key} must be UTF-8 for stack settings resolution"))?;
+        environment.insert(key.to_owned(), value);
+    }
+    load_resolved_stack_settings_in(
+        repo_root,
+        host_data_root.as_deref(),
+        user_data_root,
+        &environment,
+        &StackOverrides::default(),
+        &std::env::current_dir().context("resolve current directory")?,
+    )
+}
+
 fn resolve_declared_path(base: &Path, path: &Path) -> PathBuf {
     if path.is_absolute() {
         path.to_path_buf()

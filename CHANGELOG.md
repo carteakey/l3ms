@@ -10,6 +10,10 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Added a read-only Stack Catalog tab (F8/Alt+8) for language, media/TTS, and
+  decision profiles, using the same configured toolkit roots as `--list stack`.
+  Profile details show declared tasks, runtime, device, and source; installation
+  and runtime health remain separate checks.
 - Imported L2M2 and L3DS source histories under `toolkits/` while keeping
   their manifests, lockfiles, standalone commands, and runtime state separate.
   Added an offline `l3ms --list stack` catalog and the first shared settings/job

@@ -1,6 +1,5 @@
 //! Command-line launcher for the Rust L3MS application.
 
-use std::collections::BTreeMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
@@ -17,8 +16,7 @@ use crate::{
     prompt_store::list_prompts,
     script_store::{collect_scripts_in, ScriptMode},
     settings::{
-        export_profile_in, import_profile_in, load_resolved_stack_settings_in, load_settings_in,
-        StackOverrides,
+        export_profile_in, import_profile_in, load_current_stack_settings_in, load_settings_in,
     },
 };
 
@@ -253,25 +251,7 @@ fn list(mode: ListMode) -> Result<u8> {
 fn print_stack_list() -> Result<()> {
     let root = repository_root()?;
     let user_data_root = crate::state_store::data_root()?;
-    let host_data_root = env::var_os("L3MS_HOST_SETTINGS_DIR")
-        .map(|value| {
-            anyhow::ensure!(
-                !value.is_empty(),
-                "L3MS_HOST_SETTINGS_DIR must not be empty"
-            );
-            Ok(PathBuf::from(value))
-        })
-        .transpose()?;
-    let invocation_dir = env::current_dir().context("resolve current directory")?;
-    let environment = stack_environment()?;
-    let resolved = load_resolved_stack_settings_in(
-        &root,
-        host_data_root.as_deref(),
-        &user_data_root,
-        &environment,
-        &StackOverrides::default(),
-        &invocation_dir,
-    )?;
+    let resolved = load_current_stack_settings_in(&root, &user_data_root)?;
     let catalog = Catalog::load_from_roots(
         &root,
         &resolved.media_toolkit_root,
@@ -282,27 +262,6 @@ fn print_stack_list() -> Result<()> {
         println!("{}", format_stack_profile(profile));
     }
     Ok(())
-}
-
-fn stack_environment() -> Result<BTreeMap<String, String>> {
-    let mut values = BTreeMap::new();
-    for (key, value) in env::vars_os() {
-        let Some(key) = key.to_str() else {
-            continue;
-        };
-        if !matches!(
-            key,
-            "L3MS_MEDIA_TOOLKIT_ROOT" | "L3MS_DECISIONS_TOOLKIT_ROOT" | "L3MS_GPU_POLICY"
-        ) && !key.starts_with("L3MS_TASK_DEFAULT_")
-        {
-            continue;
-        }
-        let value = value
-            .into_string()
-            .map_err(|_| anyhow::anyhow!("{key} must be UTF-8 for stack settings resolution"))?;
-        values.insert(key.to_owned(), value);
-    }
-    Ok(values)
 }
 
 fn format_stack_profile(profile: &CatalogProfile) -> String {

@@ -19,11 +19,12 @@ pub enum CommandContext {
     Jobs,
     Maintenance,
     ParamBuilder,
+    StackCatalog,
 }
 
 impl CommandContext {
-    /// The eight top-level TUI tabs, in navigation order.
-    pub const TABS: [Self; 8] = [
+    /// Command contexts used by top-level views.
+    pub const TABS: [Self; 9] = [
         Self::Workbench,
         Self::ModelOps,
         Self::ParamBuilder,
@@ -32,6 +33,7 @@ impl CommandContext {
         Self::Download,
         Self::Jobs,
         Self::Maintenance,
+        Self::StackCatalog,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -45,6 +47,7 @@ impl CommandContext {
             Self::Jobs => "jobs",
             Self::Maintenance => "maintenance",
             Self::ParamBuilder => "param-builder",
+            Self::StackCatalog => "stack-catalog",
         }
     }
 }
@@ -69,6 +72,10 @@ pub enum CommandId {
     OpenDownload,
     OpenJobs,
     OpenMaintenance,
+    OpenStackCatalog,
+    StackCatalogSelectPrevious,
+    StackCatalogSelectNext,
+    StackCatalogRefresh,
     ParamBuilderToggleFocus,
     ParamBuilderNextParam,
     ParamBuilderPrevParam,
@@ -166,7 +173,7 @@ pub enum CommandId {
 impl CommandId {
     /// Every command identifier. Kept in declaration order for completeness
     /// checks and integrations which want to validate their dispatch table.
-    pub const ALL: [Self; 96] = [
+    pub const ALL: [Self; 100] = [
         Self::Quit,
         Self::ShowHelp,
         Self::ShowPalette,
@@ -178,6 +185,10 @@ impl CommandId {
         Self::OpenDownload,
         Self::OpenJobs,
         Self::OpenMaintenance,
+        Self::OpenStackCatalog,
+        Self::StackCatalogSelectPrevious,
+        Self::StackCatalogSelectNext,
+        Self::StackCatalogRefresh,
         Self::ParamBuilderToggleFocus,
         Self::ParamBuilderNextParam,
         Self::ParamBuilderPrevParam,
@@ -279,6 +290,10 @@ impl CommandId {
             Self::OpenDownload => "global.open-download",
             Self::OpenJobs => "global.open-jobs",
             Self::OpenMaintenance => "global.open-maintenance",
+            Self::OpenStackCatalog => "global.open-stack-catalog",
+            Self::StackCatalogSelectPrevious => "stack-catalog.select-previous",
+            Self::StackCatalogSelectNext => "stack-catalog.select-next",
+            Self::StackCatalogRefresh => "stack-catalog.refresh",
             Self::ParamBuilderToggleFocus => "param-builder.toggle-focus",
             Self::ParamBuilderNextParam => "param-builder.next-param",
             Self::ParamBuilderPrevParam => "param-builder.prev-param",
@@ -479,7 +494,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     command!(
         OpenParamBuilder,
         Global,
-        "F3 / Alt+3",
+        "—",
         "Param Builder",
         "Open Param Builder tab",
         true,
@@ -560,7 +575,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     command!(
         OpenChat,
         Global,
-        "F4 / Alt+4",
+        "F3 / Alt+3",
         "Chat",
         "Open Chat tab",
         true,
@@ -569,7 +584,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     command!(
         OpenBrowser,
         Global,
-        "F5 / Alt+5",
+        "F4 / Alt+4",
         "Model Browser",
         "Open Model Browser tab",
         true,
@@ -578,7 +593,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     command!(
         OpenDownload,
         Global,
-        "F6 / Alt+6",
+        "F5 / Alt+5",
         "Download",
         "Open Download tab",
         true,
@@ -587,7 +602,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     command!(
         OpenJobs,
         Global,
-        "F7 / Alt+7",
+        "F6 / Alt+6",
         "Jobs",
         "Open Jobs tab",
         true,
@@ -596,11 +611,54 @@ pub static COMMANDS: &[CommandSpec] = &[
     command!(
         OpenMaintenance,
         Global,
-        "F8 / Alt+8",
+        "F7 / Alt+7",
         "Maintenance",
         "Open Maintenance tab",
         true,
         ["scripts", "navigate", "switch"]
+    ),
+    command!(
+        OpenStackCatalog,
+        Global,
+        "F8 / Alt+8",
+        "Stack Catalog",
+        "Open Stack Catalog tab",
+        true,
+        [
+            "language",
+            "media",
+            "tts",
+            "decisions",
+            "profiles",
+            "navigate"
+        ]
+    ),
+    command!(
+        StackCatalogSelectPrevious,
+        StackCatalog,
+        "↑ / k",
+        "Previous profile",
+        "Stack Catalog: select previous profile",
+        true,
+        ["up"]
+    ),
+    command!(
+        StackCatalogSelectNext,
+        StackCatalog,
+        "↓ / j",
+        "Next profile",
+        "Stack Catalog: select next profile",
+        true,
+        ["down"]
+    ),
+    command!(
+        StackCatalogRefresh,
+        StackCatalog,
+        "r",
+        "Refresh catalog",
+        "Stack Catalog: refresh manifests",
+        true,
+        ["reload"]
     ),
     command!(
         PreviousTab,

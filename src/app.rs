@@ -25,6 +25,7 @@ use crate::{
     chat_history::ChatHistory,
     commands::{command, search_all_commands, visible_commands, CommandContext, CommandId},
     config_store::{load_config, DownloadConfig},
+    control::catalog::{Catalog, CatalogProfile, Device, Lane, Readiness},
     download_editor::DownloadEditor,
     download_preflight::{
         probe_disk_space, run_download_preflight_cancellable, DiskSpace, DownloadPreflight,
@@ -68,7 +69,7 @@ use unicode_width::UnicodeWidthStr;
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
 
-const TAB_NAMES: [&str; 7] = [
+const TAB_NAMES: [&str; 8] = [
     "Workbench",
     "Model Ops",
     "Chat",
@@ -76,6 +77,7 @@ const TAB_NAMES: [&str; 7] = [
     "Download",
     "Jobs",
     "Maintenance",
+    "Stack Catalog",
 ];
 const BACKGROUND_QUEUE_CAPACITY: usize = 512;
 const EVENTS_PER_TICK: usize = 128;
@@ -103,6 +105,7 @@ enum Tab {
     Download,
     Jobs,
     Maintenance,
+    StackCatalog,
 }
 
 impl Tab {
@@ -115,6 +118,7 @@ impl Tab {
             Self::Download => 4,
             Self::Jobs => 5,
             Self::Maintenance => 6,
+            Self::StackCatalog => 7,
         }
     }
 
@@ -126,7 +130,8 @@ impl Tab {
             3 => Self::Browser,
             4 => Self::Download,
             5 => Self::Jobs,
-            _ => Self::Maintenance,
+            6 => Self::Maintenance,
+            _ => Self::StackCatalog,
         }
     }
 }
@@ -370,6 +375,10 @@ struct App {
     browser_state: TableState,
     browser_scanning: bool,
 
+    stack_catalog: Option<Catalog>,
+    stack_catalog_error: Option<String>,
+    stack_catalog_state: TableState,
+
     download: DownloadUiState,
     download_page: usize,
     download_state: TableState,
@@ -517,6 +526,9 @@ impl App {
             browser_files: Vec::new(),
             browser_state: TableState::default().with_selected(Some(0)),
             browser_scanning: false,
+            stack_catalog: None,
+            stack_catalog_error: None,
+            stack_catalog_state: TableState::default().with_selected(Some(0)),
             download,
             download_page: 0,
             download_state: TableState::default().with_selected(Some(0)),
@@ -1276,7 +1288,7 @@ impl App {
 
     fn handle_global_navigation_key(&mut self, key: KeyEvent) -> bool {
         let destination = match key.code {
-            KeyCode::F(number @ 1..=7) => Some(number as usize - 1),
+            KeyCode::F(number @ 1..=8) => Some(number as usize - 1),
             KeyCode::Char('1') if key.modifiers.contains(KeyModifiers::ALT) => Some(0),
             KeyCode::Char('2') if key.modifiers.contains(KeyModifiers::ALT) => Some(1),
             KeyCode::Char('3') if key.modifiers.contains(KeyModifiers::ALT) => Some(2),
@@ -1284,6 +1296,7 @@ impl App {
             KeyCode::Char('5') if key.modifiers.contains(KeyModifiers::ALT) => Some(4),
             KeyCode::Char('6') if key.modifiers.contains(KeyModifiers::ALT) => Some(5),
             KeyCode::Char('7') if key.modifiers.contains(KeyModifiers::ALT) => Some(6),
+            KeyCode::Char('8') if key.modifiers.contains(KeyModifiers::ALT) => Some(7),
             KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) => {
                 Some((self.tab.index() + TAB_NAMES.len() - 1) % TAB_NAMES.len())
             }
@@ -1295,14 +1308,8 @@ impl App {
         let Some(destination) = destination else {
             return false;
         };
-        self.store_active_script_view();
+        self.leave_tab_inputs();
         self.tab = Tab::from_index(destination);
-        self.input_mode = InputMode::Normal;
-        self.script_input_target = None;
-        self.script_versions_target = None;
-        self.show_chat_sessions = false;
-        self.show_chat_prompts = false;
-        self.show_help = false;
         if self.tab == Tab::Chat {
             self.input_mode = InputMode::ChatMessage;
             if self.chat_client.is_none() && !self.chat_connection_pending {
@@ -1310,8 +1317,20 @@ impl App {
             }
         } else if self.tab == Tab::Browser {
             self.ensure_browser_scan();
+        } else if self.tab == Tab::StackCatalog {
+            self.refresh_stack_catalog();
         }
         true
+    }
+
+    fn leave_tab_inputs(&mut self) {
+        self.store_active_script_view();
+        self.input_mode = InputMode::Normal;
+        self.script_input_target = None;
+        self.script_versions_target = None;
+        self.show_chat_sessions = false;
+        self.show_chat_prompts = false;
+        self.show_help = false;
     }
 
     fn request_quit(&mut self) {
@@ -2057,6 +2076,7 @@ impl App {
             Tab::Download => self.handle_download_key(key)?,
             Tab::Jobs => self.handle_jobs_key(key),
             Tab::Maintenance => self.handle_maintenance_key(key),
+            Tab::StackCatalog => self.handle_stack_catalog_key(key),
         }
         Ok(())
     }
@@ -2070,6 +2090,7 @@ impl App {
             Tab::Download => CommandContext::Download,
             Tab::Jobs => CommandContext::Jobs,
             Tab::Maintenance => CommandContext::Maintenance,
+            Tab::StackCatalog => CommandContext::StackCatalog,
         }
     }
 
@@ -2091,6 +2112,22 @@ impl App {
             }
         }
 
+        if matches!(
+            command_id,
+            OpenWorkbench
+                | OpenModelOps
+                | OpenChat
+                | OpenBrowser
+                | OpenDownload
+                | OpenJobs
+                | OpenMaintenance
+                | OpenStackCatalog
+                | PreviousTab
+                | NextTab
+        ) {
+            self.leave_tab_inputs();
+        }
+
         match command_id {
             Quit => self.request_quit(),
             ShowHelp => self.show_help = true,
@@ -2105,14 +2142,39 @@ impl App {
             OpenDownload => self.tab = Tab::Download,
             OpenJobs => self.tab = Tab::Jobs,
             OpenMaintenance => self.tab = Tab::Maintenance,
+            OpenStackCatalog => {
+                self.tab = Tab::StackCatalog;
+                self.refresh_stack_catalog();
+            }
+            StackCatalogSelectPrevious => {
+                let count = self
+                    .stack_catalog
+                    .as_ref()
+                    .map_or(0, |catalog| catalog.list().len());
+                select_previous_table(&mut self.stack_catalog_state, count);
+            }
+            StackCatalogSelectNext => {
+                let count = self
+                    .stack_catalog
+                    .as_ref()
+                    .map_or(0, |catalog| catalog.list().len());
+                select_next_table(&mut self.stack_catalog_state, count);
+            }
+            StackCatalogRefresh => self.refresh_stack_catalog(),
             PreviousTab => {
                 self.tab =
                     Tab::from_index((self.tab.index() + TAB_NAMES.len() - 1) % TAB_NAMES.len());
                 self.ensure_browser_scan();
+                if self.tab == Tab::StackCatalog {
+                    self.refresh_stack_catalog();
+                }
             }
             NextTab => {
                 self.tab = Tab::from_index(self.tab.index() + 1);
                 self.ensure_browser_scan();
+                if self.tab == Tab::StackCatalog {
+                    self.refresh_stack_catalog();
+                }
             }
             WorkbenchSelectPrevious => {
                 let count = self.visible_model_count();
@@ -3294,6 +3356,49 @@ impl App {
         }
     }
 
+    fn refresh_stack_catalog(&mut self) {
+        let catalog = crate::settings::load_current_stack_settings_in(&self.root, &self.data_root)
+            .and_then(|settings| {
+                Catalog::load_from_roots(
+                    &self.root,
+                    settings.media_toolkit_root,
+                    settings.decisions_toolkit_root,
+                )
+            });
+        match catalog {
+            Ok(catalog) => {
+                let count = catalog.list().len();
+                self.stack_catalog = Some(catalog);
+                self.stack_catalog_error = None;
+                clamp_table_selection(&mut self.stack_catalog_state, count);
+                self.status = format!("Stack catalog refreshed · {count} manifest-only profile(s)");
+            }
+            Err(error) => {
+                self.stack_catalog = None;
+                self.stack_catalog_error = Some(format!("{error:#}"));
+                self.stack_catalog_state.select(None);
+                self.status = "Could not read Stack Catalog manifests".into();
+                if let Some(error) = &self.stack_catalog_error {
+                    self.push_log(format!("Stack Catalog: {error}"));
+                }
+            }
+        }
+    }
+
+    fn handle_stack_catalog_key(&mut self, key: KeyEvent) {
+        let command = match key.code {
+            KeyCode::Up | KeyCode::Char('k') => Some(CommandId::StackCatalogSelectPrevious),
+            KeyCode::Down | KeyCode::Char('j') => Some(CommandId::StackCatalogSelectNext),
+            KeyCode::Char('r') => Some(CommandId::StackCatalogRefresh),
+            _ => None,
+        };
+        if let Some(command) = command {
+            if let Err(error) = self.execute_command(command) {
+                self.status = format!("Stack Catalog: {error:#}");
+            }
+        }
+    }
+
     fn scan_browser(&mut self) {
         if self.browser_scanning {
             return;
@@ -3959,6 +4064,7 @@ impl App {
             Tab::Download => self.draw_download(frame, areas[2]),
             Tab::Jobs => self.draw_jobs(frame, areas[2]),
             Tab::Maintenance => self.draw_maintenance(frame, areas[2]),
+            Tab::StackCatalog => self.draw_stack_catalog(frame, areas[2]),
         }
         self.draw_log(frame, areas[3]);
         self.draw_footer(frame, areas[4]);
@@ -4843,6 +4949,89 @@ impl App {
         );
     }
 
+    fn draw_stack_catalog(&mut self, frame: &mut Frame, area: Rect) {
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+            .split(area);
+
+        let Some(catalog) = self.stack_catalog.as_ref() else {
+            let message = self.stack_catalog_error.as_deref().unwrap_or(
+                "Stack Catalog has not been loaded. Reopen this tab or press r to refresh.",
+            );
+            frame.render_widget(
+                Paragraph::new(message)
+                    .style(theme::warning())
+                    .block(
+                        theme::block()
+                            .title("Stack Catalog · read-only manifest view")
+                            .borders(Borders::ALL),
+                    )
+                    .wrap(Wrap { trim: false }),
+                area,
+            );
+            return;
+        };
+
+        let profiles = catalog.list();
+        let count_for = |lane| {
+            profiles
+                .iter()
+                .filter(|profile| profile.key.lane == lane)
+                .count()
+        };
+        let title = format!(
+            "{} profile(s) · language {} · media {} · decisions {} · r refresh",
+            profiles.len(),
+            count_for(Lane::Language),
+            count_for(Lane::Media),
+            count_for(Lane::Decisions),
+        );
+        let rows = profiles.iter().map(|profile| {
+            Row::new(vec![
+                Cell::from(profile.key.lane.as_str()),
+                Cell::from(profile.key.profile_id.to_string()),
+                Cell::from(profile.name.as_str()),
+                Cell::from(readiness_label(profile.readiness)),
+            ])
+        });
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Percentage(14),
+                Constraint::Percentage(32),
+                Constraint::Percentage(34),
+                Constraint::Percentage(20),
+            ],
+        )
+        .style(theme::text())
+        .header(Row::new(["Lane", "Profile ID", "Name", "Readiness"]).style(theme::title()))
+        .block(theme::block().title(title).borders(Borders::ALL))
+        .row_highlight_style(theme::selected())
+        .highlight_symbol("▶ ");
+        frame.render_stateful_widget(table, sections[0], &mut self.stack_catalog_state);
+
+        let details = self
+            .stack_catalog_state
+            .selected()
+            .and_then(|index| profiles.get(index))
+            .map_or_else(
+                || Text::from("No manifest profiles are available."),
+                stack_profile_details,
+            );
+        frame.render_widget(
+            Paragraph::new(details)
+                .style(theme::text())
+                .block(
+                    theme::block()
+                        .title("Selected profile · ↑/↓ or j/k select · r refresh")
+                        .borders(Borders::ALL),
+                )
+                .wrap(Wrap { trim: false }),
+            sections[1],
+        );
+    }
+
     fn draw_download(&mut self, frame: &mut Frame, area: Rect) {
         let compact = area.width < 120 || area.height < 24;
         let section_constraints = if compact && area.height < 12 {
@@ -5177,11 +5366,11 @@ impl App {
             }
         };
         let controls = if self.script_input_target.is_some() {
-            "Esc list │ F1–F7 tabs │ Ctrl+P palette │ Ctrl+C quit"
+            "Esc list │ F1–F8 tabs │ Ctrl+P palette │ Ctrl+C quit"
         } else if self.tab == Tab::Download && self.download.focus() != DownloadFocus::Table {
             "Tab/Shift+Tab fields │ Esc table │ Ctrl+P palette │ Ctrl+C quit"
         } else {
-            "F1–F7 tabs │ Alt+←/→ cycle │ Ctrl+P palette │ ? help │ q quit"
+            "F1–F8 tabs │ Alt+←/→ cycle │ Ctrl+P palette │ ? help │ q quit"
         };
         let footer = format!(" {}{}  │ {controls} ", self.status, input);
         frame.render_widget(
@@ -5199,9 +5388,12 @@ impl App {
         let mut help = vec![
             Line::from(Span::styled("L3MS Rust key bindings", theme::title())),
             Line::from(""),
-            Line::from("Global  F1–F7/Alt+1–7 tabs · Alt+←/→ cycle · Ctrl+P palette · q quit"),
+            Line::from("Global  F1–F8/Alt+1–8 tabs · Alt+←/→ cycle · Ctrl+P palette · q quit"),
             Line::from(""),
         ];
+        if self.tab == Tab::StackCatalog {
+            help.push(Line::from("Stack Catalog  ↑/↓ or j/k select · r refresh"));
+        }
         help.push(Line::from(Span::styled(
             format!("{} commands", context),
             theme::title(),
@@ -5365,6 +5557,44 @@ impl App {
             area,
         );
     }
+}
+
+fn readiness_label(readiness: Readiness) -> &'static str {
+    match readiness {
+        Readiness::ManifestPresent => "manifest-only",
+        Readiness::Installed => "installed",
+        Readiness::Healthy => "healthy",
+    }
+}
+
+fn stack_profile_details(profile: &CatalogProfile) -> Text<'static> {
+    let tasks = profile
+        .tasks
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let device = match &profile.device {
+        Some(Device::Cpu) => "cpu",
+        Some(Device::Cuda) => "cuda",
+        Some(Device::Remote) => "remote",
+        Some(Device::Other(device)) => device,
+        None => "not declared",
+    };
+    Text::from(vec![
+        Line::from(format!("{} · {}", profile.key, profile.name)),
+        Line::from(format!("Runtime: {} · Device: {device}", profile.runtime)),
+        Line::from(format!(
+            "Tasks: {tasks} · {}",
+            if profile.disabled {
+                "disabled"
+            } else {
+                "declared"
+            }
+        )),
+        Line::from(format!("Source: {}", profile.source_path.display())),
+        Line::from("Manifest-only: installation and runtime health have not been checked."),
+    ])
 }
 
 impl Drop for App {
@@ -6572,6 +6802,98 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect()
+    }
+
+    fn write_stack_fixture(fixture: &AppFixture) {
+        fs::write(
+            fixture.root.join("llama-swap.yaml"),
+            "models:\n  local-chat:\n    cmd: server\n",
+        )
+        .unwrap();
+        let media = fixture.root.join("toolkits/l2m2");
+        let decisions = fixture.root.join("toolkits/l3ds");
+        fs::create_dir_all(&media).unwrap();
+        fs::create_dir_all(&decisions).unwrap();
+        fs::write(media.join("media-runtimes.json"), r#"{"schema_version":1,"profiles":[{"id":"breeze","name":"Speech fixture","runtime":"audio.cpp","tasks":["tts","clon","design"],"script":"media-models/speech.sh"}]}"#).unwrap();
+        fs::write(decisions.join("decision-runtimes.json"), r#"{"version":"1.0","profiles":[{"id":"nagi","name":"Decision fixture","engine":"nagi","type":"local","model":"org/nagi","device":"cpu","entrypoint":"decision-models/runner.py"}]}"#).unwrap();
+    }
+
+    #[test]
+    fn stack_catalog_keyboard_and_palette_navigation_are_read_only() {
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        let mut app = fixture.app();
+        app.handle_key(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.tab, Tab::StackCatalog);
+        assert_eq!(app.stack_catalog.as_ref().unwrap().list().len(), 3);
+        assert!(app
+            .stack_catalog
+            .as_ref()
+            .unwrap()
+            .list()
+            .iter()
+            .all(|p| p.readiness == Readiness::ManifestPresent));
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.stack_catalog_state.selected(), Some(1));
+        for size in [(140, 45), (80, 24), (40, 12)] {
+            let mut terminal = Terminal::new(TestBackend::new(size.0, size.1)).unwrap();
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+            if size.0 == 140 {
+                let text = terminal_text(&terminal);
+                assert!(text.contains("manifest-only"));
+                assert!(text.contains("media:breeze"));
+                assert!(text.contains("tts, clon, design"));
+            }
+        }
+        app.execute_command(CommandId::OpenMaintenance).unwrap();
+        app.execute_command(CommandId::NextTab).unwrap();
+        assert_eq!(app.tab, Tab::StackCatalog);
+        app.execute_command(CommandId::OpenStackCatalog).unwrap();
+        app.execute_command(CommandId::OpenMaintenance).unwrap();
+        app.focus_script_editor(ScriptEditorTarget::Maintenance);
+        let before = app.maintenance_editor.content().to_owned();
+        app.execute_command(CommandId::OpenStackCatalog).unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.maintenance_editor.content(), before);
+        assert!(app.script_input_target.is_none());
+        assert!(app.running_process.is_none());
+        assert!(!app.model_action_pending);
+        assert!(!app.chat_connection_pending);
+    }
+
+    #[test]
+    fn stack_catalog_uses_configured_roots_and_reports_refresh_errors() {
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        let external_media = fixture.data.path().join("media");
+        fs::create_dir_all(&external_media).unwrap();
+        fs::write(external_media.join("media-runtimes.json"), r#"{"schema_version":1,"profiles":[{"id":"external","name":"Configured media","runtime":"audio.cpp","tasks":["tts"],"script":"speech.sh"}]}"#).unwrap();
+        let mut settings = crate::settings::Settings::default();
+        settings.stack.media_toolkit_root = Some("media".into());
+        crate::settings::save_settings_in(fixture.data.path(), &settings).unwrap();
+        let mut app = fixture.app();
+        app.execute_command(CommandId::OpenStackCatalog).unwrap();
+        assert!(app.stack_catalog.as_ref().unwrap().list().iter().any(|p| p
+            .key
+            .profile_id
+            .as_str()
+            == "external"));
+        fs::remove_file(external_media.join("media-runtimes.json")).unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.stack_catalog.is_none());
+        assert!(app
+            .stack_catalog_error
+            .as_ref()
+            .unwrap()
+            .contains("media-runtimes.json"));
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(terminal_text(&terminal).contains("read-only manifest view"));
+        assert!(app.running_process.is_none());
     }
 
     #[test]
