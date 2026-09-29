@@ -1,5 +1,6 @@
 target/
 .venv/
+.nagi-smol-env.*/
 __pycache__/
 *.pyc
 .cache/

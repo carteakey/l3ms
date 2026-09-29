@@ -2,12 +2,18 @@ import contextlib
 import builtins
 import importlib.util
 import io
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 
 RUNNER = Path(__file__).with_name("runner.py")
+TOOLKIT_ROOT = RUNNER.parents[1]
+SETUP_SCRIPT = TOOLKIT_ROOT / "maintenance" / "setup-env.sh"
+NAGI_SMOL_LOCK = TOOLKIT_ROOT / "requirements" / "nagi-smol.lock.txt"
 SPEC = importlib.util.spec_from_file_location("l3ds_runner", RUNNER)
 runner = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(runner)
@@ -68,6 +74,74 @@ class RunnerSafetyTest(unittest.TestCase):
         with contextlib.redirect_stdout(output), self.assertRaises(runner.InferenceUnavailable):
             runner.run_benchmark(engine, str(RUNNER.parents[1] / "suites" / "routing-gate.json"), 1)
         self.assertNotIn("BENCH_RESULT:", output.getvalue())
+
+
+class NagiSmolSetupTest(unittest.TestCase):
+    def test_setup_defaults_to_a_no_write_dry_run(self):
+        venv = TOOLKIT_ROOT / ".venv"
+        existed_before = venv.exists() or venv.is_symlink()
+        result = subprocess.run(
+            ["bash", str(SETUP_SCRIPT)],
+            cwd=TOOLKIT_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("no changes", result.stdout)
+        self.assertIn("--install", result.stdout)
+        self.assertIn("Model weights: not part of this setup", result.stdout)
+        self.assertEqual(venv.exists() or venv.is_symlink(), existed_before)
+
+    def test_install_refuses_to_modify_an_existing_venv(self):
+        with tempfile.TemporaryDirectory(prefix="l3ds-setup-test-") as temp:
+            root = Path(temp)
+            maintenance = root / "maintenance"
+            requirements = root / "requirements"
+            maintenance.mkdir()
+            requirements.mkdir()
+            setup_copy = maintenance / "setup-env.sh"
+            shutil.copyfile(SETUP_SCRIPT, setup_copy)
+            shutil.copyfile(NAGI_SMOL_LOCK, requirements / NAGI_SMOL_LOCK.name)
+            existing_venv = root / ".venv"
+            existing_venv.mkdir()
+            sentinel = existing_venv / "preserve.txt"
+            sentinel.write_text("keep", encoding="utf-8")
+
+            result = subprocess.run(
+                ["bash", str(setup_copy), "--install"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("refusing to modify existing environment", result.stderr)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep")
+
+    def test_lock_is_pinned_to_observed_nagi_only_dependency_set(self):
+        requirements = [
+            line.strip()
+            for line in NAGI_SMOL_LOCK.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        self.assertTrue(
+            any(
+                line
+                == "nagi-decisions @ git+https://github.com/nagisanzenin/nagi.git@"
+                "80f8c5e71832e227c8bf14cc52bbb448d3771c7a"
+                for line in requirements
+            )
+        )
+        self.assertIn("torch==2.6.0+cu124", requirements)
+        self.assertIn("transformers==5.17.0", requirements)
+        self.assertIn("peft==0.21.0", requirements)
+        self.assertFalse(any("semif" in line.lower() for line in requirements))
+        self.assertFalse(any("laya" in line.lower() for line in requirements))
+        for line in requirements[1:]:
+            self.assertIn("==", line, f"dependency is not exactly pinned: {line}")
 
 
 if __name__ == "__main__":

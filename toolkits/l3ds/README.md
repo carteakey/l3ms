@@ -43,6 +43,57 @@ compatible checkout, run:
 cargo build --release
 ```
 
+### Prepare the Nagi-Smol Python environment
+
+The environment installer is deliberately a no-op by default. From this
+directory, inspect its plan first:
+
+```bash
+./maintenance/setup-env.sh --dry-run
+```
+
+Only after separately approving the Python/CUDA package download, run
+`./maintenance/setup-env.sh --install`. It creates a fresh child `.venv` from
+[`requirements/nagi-smol.lock.txt`](requirements/nagi-smol.lock.txt), pinned to
+the Nagi source commit and the dependency versions observed in the original
+L3DS environment. The lock is Nagi-only: it excludes SemIf, whose declared
+exact Torch and Hugging Face pins conflict with the observed Nagi stack. An
+existing `.venv` is never overwritten, and staging is discarded if installation
+fails.
+
+This setup may download multi-gigabyte CUDA wheels. It installs Python packages
+only; it does not fetch model weights, run inference, or contact a hosted model
+API. The pins are reproducible environment inputs, not evidence that Nagi
+inference or the manifest's expected latency has been validated. They target
+CPython 3.12.13 on Linux x86_64 with CUDA 12.4 wheels; other platforms need a
+separately validated lock. The shared Hugging Face cache had no model snapshots
+at the latest migration audit, so a real smoke run still needs a separately
+approved Nagi-Smol model acquisition. No model weights have been acquired by
+this setup work, and the model artifact revision/checksum remain unrecorded;
+capture them during that authorized acquisition before calling inference
+reproducible.
+
+After the weights are available, use the Hub's offline mode for a cache-only
+smoke test; this prevents the test from silently initiating model acquisition:
+
+```bash
+HF_HUB_OFFLINE=1 ./target/release/l3ds --profile nagi-smol \
+  --state '{"alert":"test"}' \
+  --question '{"route":{"type":"choice","criteria":{"infra":"Infrastructure","billing":"Billing"}}}'
+```
+
+For Phase 3 evidence, require a successful native result labeled
+`"engine": "nagi-native"` (never `--simulate`), then run the bounded benchmark
+and retain its P50/P95 and option-flip results:
+
+```bash
+./target/release/l3ds --bench --profile nagi-smol \
+  --suite routing-gate --iterations 10
+```
+
+Neither the environment setup nor a successful CLI build/list substitutes for
+those live checks.
+
 ### Inspect Profiles
 ```bash
 ./target/release/l3ds --list

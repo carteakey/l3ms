@@ -1,0 +1,56 @@
+# Observed Nagi dependency closure from the original L3DS Python 3.12.13
+# environment, narrowed to Nagi only. This is a pinned input, not proof of a
+# successful native forward pass. Target: Linux x86_64 with CUDA 12.4 wheels.
+# The model weights are intentionally not part of this environment lock.
+nagi-decisions @ git+https://github.com/nagisanzenin/nagi.git@80f8c5e71832e227c8bf14cc52bbb448d3771c7a
+accelerate==1.15.0
+annotated-doc==0.0.5
+anyio==4.15.1
+certifi==2026.7.22
+click==8.5.0
+filelock==3.32.3
+fsspec==2026.7.0
+h11==0.16.0
+hf-xet==1.6.0
+httpcore==1.0.9
+httpx==0.28.1
+huggingface-hub==1.33.0
+idna==3.20
+Jinja2==3.1.6
+markdown-it-py==4.2.0
+MarkupSafe==3.0.3
+mdurl==0.1.2
+mpmath==1.3.0
+networkx==3.6.1
+nvidia-cublas-cu12==12.4.5.8
+nvidia-cuda-cupti-cu12==12.4.127
+nvidia-cuda-nvrtc-cu12==12.4.127
+nvidia-cuda-runtime-cu12==12.4.127
+nvidia-cudnn-cu12==9.1.0.70
+nvidia-cufft-cu12==11.2.1.3
+nvidia-curand-cu12==10.3.5.147
+nvidia-cusolver-cu12==11.6.1.9
+nvidia-cusparse-cu12==12.3.1.170
+nvidia-cusparselt-cu12==0.6.2
+nvidia-nccl-cu12==2.21.5
+nvidia-nvjitlink-cu12==12.4.127
+nvidia-nvtx-cu12==12.4.127
+numpy==2.5.3
+packaging==26.3
+peft==0.21.0
+psutil==7.2.2
+Pygments==2.21.0
+PyYAML==6.0.3
+regex==2026.9.10
+rich==15.0.0
+safetensors==0.8.0
+setuptools==78.1.0
+shellingham==1.5.4
+sympy==1.13.1
+tokenizers==0.23.2
+torch==2.6.0+cu124
+tqdm==4.70.1
+transformers==5.17.0
+triton==3.2.0
+typer==0.27.2
+typing_extensions==4.16.0
