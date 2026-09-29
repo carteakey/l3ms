@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 RUNNER = Path(__file__).with_name("runner.py")
 TOOLKIT_ROOT = RUNNER.parents[1]
-SETUP_SCRIPT = TOOLKIT_ROOT / "maintenance" / "setup-env.sh"
+SETUP_SCRIPT = TOOLKIT_ROOT / "maintenance" / "prepare-nagi-smol-env.sh"
 NAGI_SMOL_LOCK = TOOLKIT_ROOT / "requirements" / "nagi-smol.lock.txt"
 SPEC = importlib.util.spec_from_file_location("l3ds_runner", RUNNER)
 runner = importlib.util.module_from_spec(SPEC)
@@ -101,7 +101,7 @@ class NagiSmolSetupTest(unittest.TestCase):
             requirements = root / "requirements"
             maintenance.mkdir()
             requirements.mkdir()
-            setup_copy = maintenance / "setup-env.sh"
+            setup_copy = maintenance / "prepare-nagi-smol-env.sh"
             shutil.copyfile(SETUP_SCRIPT, setup_copy)
             shutil.copyfile(NAGI_SMOL_LOCK, requirements / NAGI_SMOL_LOCK.name)
             existing_venv = root / ".venv"

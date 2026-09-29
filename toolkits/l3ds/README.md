@@ -45,15 +45,19 @@ cargo build --release
 
 ### Prepare the Nagi-Smol Python environment
 
-The environment installer is deliberately a no-op by default. From this
+The new pinned environment installer is deliberately a no-op by default. From this
 directory, inspect its plan first:
 
 ```bash
-./maintenance/setup-env.sh --dry-run
+./maintenance/prepare-nagi-smol-env.sh --dry-run
 ```
 
+The existing `maintenance/setup-env.sh` retains its original install behavior
+for standalone compatibility; the pinned Nagi-only path is the separate script
+above and does not run as part of the migration checks.
+
 Only after separately approving the Python/CUDA package download, run
-`./maintenance/setup-env.sh --install`. It creates a fresh child `.venv` from
+`./maintenance/prepare-nagi-smol-env.sh --install`. It creates a fresh child `.venv` from
 [`requirements/nagi-smol.lock.txt`](requirements/nagi-smol.lock.txt), pinned to
 the Nagi source commit and the dependency versions observed in the original
 L3DS environment. The lock is Nagi-only: it excludes SemIf, whose declared
