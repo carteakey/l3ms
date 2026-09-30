@@ -47,7 +47,7 @@ impl ChatRequest {
         }
     }
 
-    fn payload(&self) -> Value {
+    pub(crate) fn payload(&self) -> Value {
         let mut messages = Vec::with_capacity(self.messages.len() + 1);
         if !self.system_prompt.trim().is_empty() {
             messages.push(json!({

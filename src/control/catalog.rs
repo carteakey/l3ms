@@ -271,6 +271,7 @@ pub(crate) enum NativeProfileSource {
 #[derive(Clone, Debug, Default)]
 pub struct Catalog {
     profiles: Vec<CatalogProfile>,
+    roots: Option<[PathBuf; 3]>,
 }
 
 impl Catalog {
@@ -309,7 +310,21 @@ impl Catalog {
         load_decisions(&decisions_root, &mut profiles, &mut keys)?;
 
         profiles.sort_by(|left, right| left.key.cmp(&right.key));
-        Ok(Self { profiles })
+        Ok(Self {
+            profiles,
+            roots: Some([language_root, media_root, decisions_root]),
+        })
+    }
+
+    /// Re-read native manifests from their original canonical roots. Empty
+    /// lanes retain their configured locations; the current working directory
+    /// and cached profile contents never supply replacement roots.
+    pub fn refresh(&self) -> Result<Self> {
+        let roots = self
+            .roots
+            .as_ref()
+            .context("catalog has no loaded manifest roots")?;
+        Self::load_from_roots(&roots[0], &roots[1], &roots[2])
     }
 
     /// Profiles in stable lane and profile-ID order.
@@ -687,6 +702,34 @@ mod tests {
 
         let error = Catalog::load(root.path()).expect_err("missing manifest must fail");
         assert!(error.to_string().contains("decision-runtimes.json"));
+    }
+
+    #[test]
+    fn refresh_retains_empty_lane_roots_and_reloads_native_changes() {
+        let root = fixture_root();
+        write(
+            root.path(),
+            "toolkits/l2m2/media-runtimes.json",
+            r#"{"schema_version":1,"profiles":[]}"#,
+        );
+        let catalog = Catalog::load(root.path()).unwrap();
+        assert!(!catalog
+            .list()
+            .iter()
+            .any(|profile| profile.key.lane == Lane::Media));
+        write(
+            root.path(),
+            "toolkits/l2m2/media-runtimes.json",
+            r#"{"schema_version":1,"profiles":[{"id":"added","name":"Added","runtime":"audio.cpp","tasks":["tts"],"script":"media-models/added.sh"}]}"#,
+        );
+        let refreshed = catalog.refresh().unwrap();
+        assert!(refreshed
+            .inspect(&ProfileKey::new(Lane::Media, "added").unwrap())
+            .is_some());
+        assert!(catalog
+            .inspect(&ProfileKey::new(Lane::Media, "added").unwrap())
+            .is_none());
+        assert!(Catalog::default().refresh().is_err());
     }
 
     #[test]

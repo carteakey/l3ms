@@ -290,6 +290,9 @@ impl InferenceRequest {
 pub enum InferenceResult {
     Chat {
         content: String,
+        /// Reasoning is distinct from assistant content, including when a
+        /// bounded token budget produces only reasoning.
+        reasoning: String,
         completion_tokens: Option<u64>,
     },
     MediaPending {
@@ -367,7 +370,16 @@ impl InferenceResult {
                     }
                 }
             }
-            Self::Chat { .. } | Self::MediaComplete { .. } => {}
+            Self::Chat {
+                content, reasoning, ..
+            } => {
+                ensure!(
+                    !content.is_empty() || !reasoning.is_empty(),
+                    "chat result has no output"
+                );
+                ensure_text_budget([content.as_str(), reasoning.as_str()])?;
+            }
+            Self::MediaComplete { .. } => {}
         }
         Ok(())
     }
@@ -489,6 +501,7 @@ mod tests {
         };
         assert!(valid.validate_for(&request).is_ok());
         let wrong_lane = InferenceResult::Chat {
+            reasoning: String::new(),
             content: "yes".into(),
             completion_tokens: None,
         };
@@ -510,6 +523,39 @@ mod tests {
             .validate_for(&request)
             .is_err());
         }
+    }
+
+    #[test]
+    fn chat_results_preserve_reasoning_only_output_with_combined_size_bound() {
+        let request = InferenceRequest::Chat {
+            profile: key(Lane::Language, "gemma-4-26b-qat-mtp"),
+            turns: vec![ChatTurn {
+                role: ChatRole::User,
+                content: "hi".into(),
+            }],
+            max_tokens: 64,
+        };
+        assert!(InferenceResult::Chat {
+            content: String::new(),
+            reasoning: "thinking".into(),
+            completion_tokens: Some(8)
+        }
+        .validate_for(&request)
+        .is_ok());
+        assert!(InferenceResult::Chat {
+            content: String::new(),
+            reasoning: String::new(),
+            completion_tokens: None
+        }
+        .validate_for(&request)
+        .is_err());
+        assert!(InferenceResult::Chat {
+            content: "x".repeat(MAX_REQUEST_BYTES),
+            reasoning: "y".into(),
+            completion_tokens: None
+        }
+        .validate_for(&request)
+        .is_err());
     }
 
     #[test]
