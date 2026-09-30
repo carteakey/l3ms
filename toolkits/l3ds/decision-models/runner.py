@@ -25,6 +25,44 @@ class InferenceUnavailable(RuntimeError):
     """A requested native or hosted decision backend cannot run."""
 
 
+MAX_INPUT_BYTES = 1024 * 1024
+
+
+def reject_nonfinite_json(_value):
+    raise ValueError("non-finite JSON number")
+
+
+def one_shot_inputs(args):
+    """Read coordinator input without exposing state/questions in argv."""
+    if args.input_stdin:
+        payload = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
+        if not payload or len(payload) > MAX_INPUT_BYTES:
+            raise ValueError("invalid input size")
+        envelope = json.loads(payload.decode("utf-8"), parse_constant=reject_nonfinite_json)
+        if not isinstance(envelope, dict) or set(envelope) != {"state", "questions"}:
+            raise ValueError("invalid input envelope")
+        state, questions = envelope["state"], envelope["questions"]
+        if not isinstance(questions, dict) or not 1 <= len(questions) <= 128:
+            raise ValueError("invalid question count")
+        if not all(isinstance(key, str) and key.strip() and len(key.encode("utf-8")) <= 128
+                   and isinstance(value, dict) and value for key, value in questions.items()):
+            raise ValueError("invalid questions")
+        return state, questions
+    state = json.loads(args.state) if args.state else {"message": "Server 500 error encountered on checkout"}
+    questions = json.loads(args.question) if args.question else {
+        "routing": {
+            "type": "choice",
+            "instructions": "Route request to the responsible on-call squad.",
+            "criteria": {
+                "payments": "Billing, checkout, checkout pipelines",
+                "infrastructure": "Kubernetes, hardware, network nodes",
+                "support": "General customer support tickets"
+            }
+        }
+    }
+    return state, questions
+
+
 class MockOrApiJevEngine(BaseDecisionEngine):
     def __init__(self, model: str = "typesafe/jev-latest", api_key: str = None, base_url: str = None, allow_simulation: bool = False):
         self.model = model
@@ -341,6 +379,7 @@ def main():
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--state", type=str, default=None)
     parser.add_argument("--question", type=str, default=None)
+    parser.add_argument("--input-stdin", action="store_true", help="Read a bounded JSON {state, questions} object from stdin; keeps input out of argv")
     parser.add_argument("--api-key", type=str, default=None)
     parser.add_argument("--base-url", type=str, default=None)
     parser.add_argument("--bench-suite", type=str, default=None)
@@ -348,27 +387,22 @@ def main():
     parser.add_argument("--simulate", action="store_true", help="Explicit demo mode; results are synthetic and not benchmark evidence")
 
     args = parser.parse_args()
-    engine = get_engine(args.engine, args.model, args.device, api_key=args.api_key, base_url=args.base_url, allow_simulation=args.simulate)
+    if args.input_stdin and (args.state is not None or args.question is not None or args.bench_suite is not None):
+        parser.error("--input-stdin cannot be combined with --state, --question, or --bench-suite")
+    if not args.bench_suite:
+        try:
+            state, questions = one_shot_inputs(args)
+        except (ValueError, UnicodeError, RecursionError):
+            print("Invalid decision input: expected bounded JSON state/questions", file=sys.stderr)
+            return 2
 
     try:
+        engine = get_engine(args.engine, args.model, args.device, api_key=args.api_key, base_url=args.base_url, allow_simulation=args.simulate)
         if args.bench_suite:
             run_benchmark(engine, args.bench_suite, args.iterations)
             return 0
 
         # One-shot decision
-        state = json.loads(args.state) if args.state else {"message": "Server 500 error encountered on checkout"}
-        questions = json.loads(args.question) if args.question else {
-            "routing": {
-                "type": "choice",
-                "instructions": "Route request to the responsible on-call squad.",
-                "criteria": {
-                    "payments": "Billing, checkout, checkout pipelines",
-                    "infrastructure": "Kubernetes, hardware, network nodes",
-                    "support": "General customer support tickets"
-                }
-            }
-        }
-
         res = engine.decide(state, questions)
         print(json.dumps(res, indent=2))
         return 0

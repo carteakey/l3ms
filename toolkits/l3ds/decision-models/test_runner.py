@@ -2,12 +2,13 @@ import contextlib
 import builtins
 import importlib.util
 import io
+import json
 import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 RUNNER = Path(__file__).with_name("runner.py")
@@ -23,6 +24,37 @@ QUESTIONS = {"route": {"criteria": {"one": "First", "two": "Second"}}}
 
 
 class RunnerSafetyTest(unittest.TestCase):
+    def test_stdin_inputs_preserve_native_payload_without_loading_for_parse(self):
+        engine = Mock()
+        engine.decide.return_value = {"answers": {"route": {"choice": "one"}}, "engine": "fixture"}
+        data = json.dumps({"state": STATE, "questions": QUESTIONS}).encode()
+        with patch("sys.argv", [str(RUNNER), "--engine", "nagi", "--model", "fixture", "--input-stdin"]), \
+             patch("sys.stdin", io.TextIOWrapper(io.BytesIO(data))), \
+             patch.object(runner, "get_engine", return_value=engine), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(runner.main(), 0)
+        engine.decide.assert_called_once_with(STATE, QUESTIONS)
+
+    def test_invalid_stdin_fails_before_engine_construction_without_echoing_input(self):
+        for payload in [b"secret-malformed", b"\xff", b"{}", b"[]", b"x" * (runner.MAX_INPUT_BYTES + 1),
+                        b'{"state":NaN,"questions":{"route":{"type":"score"}}}',
+                        b'{"state":{},"questions":{}}', b'{"state":{},"questions":{"x":"invalid"}}',
+                        b'{"state":{},"questions":{"x":{}},"secret":"credential"}']:
+            with self.subTest(payload_size=len(payload)), \
+                 patch("sys.argv", [str(RUNNER), "--engine", "nagi", "--model", "fixture", "--input-stdin"]), \
+                 patch("sys.stdin", io.TextIOWrapper(io.BytesIO(payload))), \
+                 patch.object(runner, "get_engine") as construct, contextlib.redirect_stderr(io.StringIO()) as errors:
+                self.assertEqual(runner.main(), 2)
+                construct.assert_not_called()
+                self.assertNotIn("secret", errors.getvalue())
+
+    def test_stdin_cannot_override_legacy_args_or_benchmark_mode(self):
+        for extra in [["--state", "{}"], ["--question", "{}"], ["--bench-suite", "fixture.json"]]:
+            with patch("sys.argv", [str(RUNNER), "--engine", "nagi", "--model", "fixture", "--input-stdin", *extra]), \
+                 patch.object(runner, "get_engine") as construct, contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                runner.main()
+            self.assertEqual(error.exception.code, 2)
+            construct.assert_not_called()
+
     def test_unavailable_nagi_and_laya_fail_instead_of_fabricating_answers(self):
         for engine_type in (runner.NagiEngine, runner.LayaEngine):
             with self.subTest(engine=engine_type.__name__):

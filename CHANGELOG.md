@@ -10,6 +10,10 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Added an optional bounded `--input-stdin` mode to the L3DS native runner so
+  coordinator decision payloads need not appear in process arguments. Existing
+  `--state`/`--question` and benchmark commands remain available; invalid
+  one-shot input is rejected before model loading.
 - Added a read-only Stack Catalog tab (F8/Alt+8) for language, media/TTS, and
   decision profiles, using the same configured toolkit roots as `--list stack`.
   Profile details show declared tasks, runtime, device, and source; installation

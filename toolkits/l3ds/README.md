@@ -121,6 +121,20 @@ bridge currently has no native forward pass and therefore requires that demo
 flag until its adapter is implemented. Hosted profiles require a configured API
 credential for real requests.
 
+The native Python runner also accepts `--input-stdin` for coordinator or script
+callers. Feed a UTF-8 JSON object with exactly `state` and `questions` (at most
+1 MiB) from a private file or pipe; these payloads then do not appear in the
+runner's process arguments. Invalid input is rejected before model loading.
+
+```bash
+.venv/bin/python decision-models/runner.py \
+  --engine nagi --model nagisanzeninz/nagi-smol-v0 --device cuda \
+  --input-stdin < request.json
+```
+
+This option cannot be combined with `--state`, `--question`, or `--bench-suite`.
+It does not install dependencies/models or enable coordinated GPU scheduling.
+
 ### Run Comparative Latency & Option-Flip Benchmark
 ```bash
 ./target/release/l3ds --bench --suite routing-gate --iterations 10
