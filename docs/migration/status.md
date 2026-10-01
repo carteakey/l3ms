@@ -20,7 +20,7 @@ CAR-220 Phase 9, and CAR-221 Phase 10.
 | 2. Independent operation | In progress | Imported child builds, tests, profile lists, and explicit old-root lists pass; CI added locally, pre-push validation pending. |
 | 3. Runtime cutover | In progress | Bounded L2M2 GPU-mode pilot, real branch L3MS language request, and a Qwen Image 2.1 branch-script generation passed; original ComfyUI service was restored after language use. L3DS now fails closed instead of synthesizing answers, but real decision weights and full deployed-path reconciliation remain pending. |
 | 4. Shared contracts | In development | Read-only catalog and offline `l3ms --list stack`, layered settings, existing-store job metadata, and typed lane request/result validation are on the branch. Adapter contracts and full compatibility/live release gates remain; release stays gated by Phase 3. |
-| 5. Runtime adapters | In development | Concrete bounded language execution, local decision supervision, and inert media/TTS command recipes pass fixtures. Lifecycle/admission adapters, GPU release verification, real TTS/decision pilots, and a user-facing switch remain pending; no public execution action is enabled. |
+| 5. Runtime adapters | In development | Concrete bounded language execution, ComfyUI job handling, local decision supervision, and inert media/TTS command recipes pass fixtures. Lifecycle/admission adapters, GPU release verification, real TTS/decision pilots, and a user-facing switch remain pending; no public execution action is enabled. |
 | 6. Local coordinator | In development | Durable bounded queue/admission core, advisory host/device ownership guard, request-ID reconnect lookup, and bounded v1 IPC messages exist offline. A listening IPC daemon, adapter dispatch, installation, result/stream delivery, and cross-client inference remain pending. |
 | 7. HTTP ingress | Pending | Gateway to the same coordinator. |
 | 8. Unified workbench | In development | Read-only three-lane Stack Catalog tab and palette navigation share CLI toolkit-root resolution. Coordinated run/observe/cancel and task-form parity remain pending. |
@@ -104,15 +104,23 @@ CAR-220 Phase 9, and CAR-221 Phase 10.
 
 ## Open decisions
 
-Latest offline safety checkpoint (2026-09-30): **376 root tests passed, 1
+Latest offline adapter/safety checkpoint (2026-09-30): **385 root tests passed, 1
 ignored**, with fmt, Clippy, and whitespace checks passing. A deterministic
 fork-inheritance regression reproduced an ownership guard release defect;
 explicit unlock now releases both complete and partially acquired guards even
 while a child retains inherited descriptors. A second regression rejects child
 success with truncated stdin. Backend IDs also have a restart-retention test:
 they can be persisted before dispatch and are retained without automatic replay.
-The ComfyUI adapter remains under implementation, and no live service was
-changed. These are safety checks, not completion of the lifecycle/live gates.
+The concrete ComfyUI adapter passes nine tests: unchanged graph/UUID submission,
+adapter-local single-use ownership, native terminal status, bounded artifact
+references, scoped cancellation with no unsafe fallback, unknown/no-op states,
+uncertain submission without replay, manifest runtime drift, response limits,
+and deadline/cancellation waits. It requires an explicit installed-server
+compatibility assertion; durable token recovery and lifecycle/GPU-release proof
+are not implemented. Luna workers provided native protocol and focused safety
+reviews; the root implemented the adapter after narrowing an overlong worker
+task. No live service was changed. These are offline checks, not completion of
+the lifecycle/live gates.
 
 - Choose the host admission mode for direct llama-swap/ComfyUI requests before
   claiming automatic cross-engine switching. The plan allows coordination

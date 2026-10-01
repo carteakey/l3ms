@@ -10,6 +10,9 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Added an internal bounded ComfyUI jobs adapter with single-use submission
+  tokens, native status/artifact validation, and owned-job scoped cancellation.
+  Public run/switch actions remain disabled pending lifecycle acceptance.
 - Added an optional bounded `--input-stdin` mode to the L3DS native runner so
   coordinator decision payloads need not appear in process arguments. Existing
   `--state`/`--question` and benchmark commands remain available; invalid

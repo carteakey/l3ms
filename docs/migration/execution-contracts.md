@@ -64,7 +64,8 @@ and job metadata. Each argv item is capped at 64 KiB and aggregate argv at 256 K
 the shared 1 MiB request budget does not guarantee that a native CLI can accept a
 1 MiB single argument. Clone references must be nonempty regular files; relative
 paths anchor to the toolkit root, while explicit absolute external samples are
-allowed. Generic ComfyUI workflow graphs require a separate HTTP adapter.
+allowed. Generic ComfyUI workflow graphs use the separate bounded jobs adapter
+described below, not a script command recipe.
 
 ## ComfyUI job safety
 
@@ -75,6 +76,25 @@ release. The older global `/interrupt` operation is not a safe fallback.
 Its scoped-looking variant checks the running job before setting a global
 interrupt flag; the installed jobs cancellation instead checks and signals
 under the queue mutex.
+
+The concrete branch adapter accepts a caller-configured HTTP endpoint/auth and
+that explicit compatibility assertion. Preparation validates the refreshed
+native profile and preserves the graph unchanged; submission refreshes again
+and refuses changed runtime identity. Its private, non-Clone token exposes the
+UUID before dispatch, is tied to its adapter instance, and permits submission
+at most once. It remains used after rejected or uncertain dispatch. Status and
+cancellation cannot target an arbitrary UUID or an unattempted token. Durable
+token recovery after restart is not implemented; retained backend IDs are
+inputs to future startup reconciliation, not authorization to blindly cancel.
+
+HTTP headers and body reads check cancellation/deadlines at 25 ms intervals.
+Responses are capped at 2 MiB, artifact counts at 128, and relative descriptors
+reject traversal, absolute paths, control characters and URL metacharacters.
+No redirect or automatic replay is allowed. History workflow/error payloads
+are discarded; snapshots and failures do not expose prompts or artifact names
+through Debug. Terminal state requires matching native history status flags,
+not just the jobs normalizer's default `completed` label. Other ComfyUI
+versions may fail this contract and must not trigger a global interrupt fallback.
 
 The native `/prompt` handler does not reject duplicate client IDs. Therefore a
 future executor must allocate a fresh ID, persist it before dispatch, submit at

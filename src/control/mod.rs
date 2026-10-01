@@ -2,6 +2,7 @@
 //! Native execution is not yet connected to public CLI/UI actions.
 
 pub mod catalog;
+pub mod comfy;
 pub mod decision;
 pub mod inference;
 pub mod ipc;
