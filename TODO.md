@@ -5,7 +5,57 @@ All intentionally committed TODO items were reconciled into the single Linear
 on 2026-08-10. See CAR-140 through CAR-146 for the seven grouped issues and
 their acceptance criteria. Linear is the source of truth for committed work;
 this file is reserved for ideas and research that have not been intentionally
-committed.
+committed, except for the requested next-work index below, which summarizes
+existing Linear migration issues rather than replacing their acceptance criteria.
+
+## Monorepo: next work
+
+Checkpoint: `d701314` on `feature/l3ms-monorepo`; 385 root tests passed,
+1 ignored. This is offline implementation evidence, not live cutover acceptance.
+See the [migration status](docs/migration/status.md),
+[plan](docs/monorepo-consolidation-plan.md), and
+[execution contracts](docs/migration/execution-contracts.md).
+
+### Safety decisions and runtime completion — CAR-217
+
+- [ ] Choose direct-client admission policy: exclusive coordinated ingress, or
+  verified blocking/draining of direct requests. Refuse unsafe swaps meanwhile.
+- [ ] Implement concrete lifecycle adapters and reconcile actual runtime
+  ownership; verify stop, GPU release, startup/health, and bounded rollback.
+- [ ] Connect bounded media/TTS command recipes to execution and artifact
+  discovery. Verify hosted decision SDK retry/auth behavior before enabling it.
+- [ ] Define durable ComfyUI ownership recovery: fresh IDs persisted before
+  submission, no replay, and reconciliation of unknown/cancelled backend jobs.
+
+### Coordinator and clients — CAR-218 / CAR-219
+
+- [ ] Implement the local IPC daemon with private socket/peer authentication,
+  bounded transport, singleton ownership, startup reconciliation, and concrete
+  dispatch. Deliver results, artifact references, and streams without persisting
+  sensitive payloads.
+- [ ] Integrate CLI and keyboard-first UI run/observe/cancel with the same
+  coordinator, settings, routing, and request IDs; preserve standalone commands.
+- [ ] Add HTTP ingress to that coordinator only after local operation is proven;
+  verify authentication and cancellation/reconnect behavior across clients.
+
+### Live acceptance and publication — CAR-216 / CAR-220 / CAR-221
+
+- [ ] Obtain approval for the fresh Nagi environment and multi-GB weights;
+  complete real local-decision inference without synthetic fallback.
+- [ ] Run real Breeze standard/design/clone/streaming TTS acceptance and a
+  coordinated language → media → language pilot in an agreed maintenance window.
+  Record before/after service/GPU state, artifacts, cancellation, and restoration.
+- [ ] Finish import/standalone compatibility and CI checks; exercise crash,
+  restart, timeout, contention, and rollback paths before enabling public actions.
+- [ ] Complete visual/keyboard/mobile review of the three-lane site and verify
+  generated data against native manifests; do not publish before the audit gate.
+- [ ] Sanitize the exact outgoing history/export, replace the key-like example
+  with a clear placeholder, and re-audit endpoints, host paths, secrets, and large
+  files. Publication remains NO-GO; no push/history rewrite without authorization.
+- [ ] Reconcile final deployed paths and document rollback/retirement criteria.
+  Keep original repos and runtime state until acceptance; retire nothing early.
+
+Pi delegation remains deferred at the owner's request.
 
 ## Speculative / research
 
