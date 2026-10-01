@@ -104,6 +104,16 @@ CAR-220 Phase 9, and CAR-221 Phase 10.
 
 ## Open decisions
 
+Latest offline safety checkpoint (2026-09-30): **376 root tests passed, 1
+ignored**, with fmt, Clippy, and whitespace checks passing. A deterministic
+fork-inheritance regression reproduced an ownership guard release defect;
+explicit unlock now releases both complete and partially acquired guards even
+while a child retains inherited descriptors. A second regression rejects child
+success with truncated stdin. Backend IDs also have a restart-retention test:
+they can be persisted before dispatch and are retained without automatic replay.
+The ComfyUI adapter remains under implementation, and no live service was
+changed. These are safety checks, not completion of the lifecycle/live gates.
+
 - Choose the host admission mode for direct llama-swap/ComfyUI requests before
   claiming automatic cross-engine switching. The plan allows coordination
   only where the runtime can block and drain new direct work, or where callers

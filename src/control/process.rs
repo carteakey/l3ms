@@ -466,6 +466,17 @@ mod linux {
                 if output_pipes.reached_eof()
                     || Instant::now().saturating_duration_since(exited_at) >= POST_EXIT_DRAIN
                 {
+                    if input_offset < stdin_payload.map_or(0, <[u8]>::len) {
+                        return Err(fail_after_spawn(
+                            &mut child,
+                            child_pid,
+                            &mut output_pipes,
+                            &mut input_writer,
+                            &mut capture,
+                            recovery_policy,
+                            ProcessFailureKind::InputWriteFailed,
+                        ));
+                    }
                     return finish_after_exit(
                         &mut child,
                         child_pid,
@@ -676,7 +687,6 @@ mod linux {
             }
             Err(error) => match error.kind() {
                 io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => Ok(InputWrite::Progress),
-                io::ErrorKind::BrokenPipe => Ok(InputWrite::Closed),
                 _ => Err(error),
             },
         }
@@ -1066,6 +1076,27 @@ mod tests {
         assert!(stdout.contains("stdout:input"));
         assert!(stderr.contains("stderr"));
         assert!(output.status().success());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn early_stdin_close_cannot_report_success_with_truncated_input() {
+        let context = OperationContext::new(Instant::now() + Duration::from_secs(3), &NeverCancel);
+        let payload = vec![b'x'; MAX_STDIN_BYTES];
+        let failure = execute(
+            shell("exec 0<&-; printf misleading-success; sleep 0.05"),
+            Some(&payload),
+            limits(MAX_STDIN_BYTES, 128),
+            &context,
+            recovery(),
+        )
+        .unwrap_err();
+        assert_eq!(failure.kind(), ProcessFailureKind::InputWriteFailed);
+        assert_eq!(
+            failure.disposition(),
+            ProcessFailureDisposition::ChildGroupReaped
+        );
+        assert!(!format!("{failure:?}").contains("misleading-success"));
     }
 
     #[cfg(target_os = "linux")]

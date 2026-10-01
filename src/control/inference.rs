@@ -747,6 +747,35 @@ mod tests {
     }
 
     #[test]
+    fn backend_identity_can_be_persisted_before_dispatch_and_survives_restart() {
+        let temp = TempDir::new().unwrap();
+        let mut coordinator = core(temp.path(), 8);
+        coordinator.confirm_reconciled().unwrap();
+        let now = Instant::now();
+        let id = coordinator
+            .submit("owned-comfy".into(), media(), Duration::from_secs(10), now)
+            .unwrap();
+        coordinator.reserve_next(now).unwrap().unwrap();
+        coordinator.mark_running(id, now).unwrap();
+        let backend = "12345678-1234-1234-1234-123456789abc";
+        coordinator.attach_backend(id, backend.into()).unwrap();
+        let persisted = std::fs::read_to_string(temp.path().join("jobs.json")).unwrap();
+        assert!(persisted.contains(backend));
+        assert!(!persisted.contains("--text"));
+        drop(coordinator);
+
+        let mut restarted = core(temp.path(), 8);
+        assert_eq!(restarted.request_state("owned-comfy"), Some("interrupted"));
+        assert_eq!(
+            restarted.admission(),
+            AdmissionState::ReconciliationRequired
+        );
+        assert!(restarted.reserve_next(now).is_err());
+        let recovered = std::fs::read_to_string(temp.path().join("jobs.json")).unwrap();
+        assert!(recovered.contains(backend));
+    }
+
+    #[test]
     fn uncertain_completion_and_pre_dispatch_cancellation_require_acknowledgement() {
         let temp = TempDir::new().unwrap();
         let mut coordinator = core(temp.path(), 8);

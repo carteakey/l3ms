@@ -66,6 +66,29 @@ the shared 1 MiB request budget does not guarantee that a native CLI can accept 
 paths anchor to the toolkit root, while explicit absolute external samples are
 allowed. Generic ComfyUI workflow graphs require a separate HTTP adapter.
 
+## ComfyUI job safety
+
+The installed ComfyUI implementation supports caller-supplied canonical UUID
+prompt IDs and an atomic, job-scoped `/api/jobs/{id}/cancel` operation. This is
+an explicit compatibility requirement, not a guarantee about every ComfyUI
+release. The older global `/interrupt` operation is not a safe fallback.
+Its scoped-looking variant checks the running job before setting a global
+interrupt flag; the installed jobs cancellation instead checks and signals
+under the queue mutex.
+
+The native `/prompt` handler does not reject duplicate client IDs. Therefore a
+future executor must allocate a fresh ID, persist it before dispatch, submit at
+most once, and reconcile that same ID after a lost response. A request timeout
+cannot prove that submission failed. Local token ownership also cannot fence
+another direct client that deliberately reuses that UUID.
+
+A cancellation response acknowledges only that a cancellation was dispatched,
+not completion or VRAM release. A no-op response or a missing job is not proof
+of cleanup: dequeued pending work can disappear without a terminal history
+entry, and history can be cleared. Unknown state retains the reservation until
+reconciliation establishes safe ownership. Artifact descriptors must remain
+backend-relative references; they are not trusted local filesystem paths.
+
 The Linux process runner starts a fresh process group, keeps stdout and stderr
 distinct under one combined byte budget, and bounds stdin, reads, waits, and
 recovery. It retains the unreaped leader until the final group signal to avoid
@@ -74,6 +97,14 @@ permitted; closed pipes alone do not prove cleanup. The executable must be
 trusted not to escape its group/daemonize. Group cleanup does not establish
 remote backend-job cancellation or GPU release. Child output remains sensitive
 and must not be copied wholesale into persistent job history.
+
+Successful supervision also requires the entire stdin payload to have been
+written; early stdin closure or leader exit with unwritten bytes fails even
+when the child exits zero. Pipe writes assume the normal Rust runtime's ignored
+SIGPIPE disposition. Callers must not reset it to the default disposition, or
+provide blocking `pre_exec` hooks: synchronous OS process creation is not
+preemptible by the polling deadline. These constraints apply to trusted native
+commands, not arbitrary executable sandboxing.
 
 ## Release gates
 

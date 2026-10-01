@@ -29,6 +29,10 @@
 - Updated default reasoning effort from `medium` to `xhigh` across all Qwen3.8 Flash Next tiers (`qwen38-flash-next`, `qwen38-flash-next-exp`, `qwen38-flash-next-mtp`, `qwen38-flash-next-vision`) in `llama-swap.yaml` and `chat-template.jinja`. Extended `param_registry.rs` `--reasoning-effort` choice set to support `xhigh` and `max`.
 
 ### Fixed
+- Coordinator guards explicitly unlock before closing their descriptors so
+  concurrent fork/exec activity cannot prolong a released ownership lock.
+- Native process supervision now rejects truncated stdin delivery, even when
+  the child exits successfully, rather than accepting misleading output.
 - Integrated **PR #29166** (`qwen4exp: fix per-block bias indexing when a unified cache holds several sequences` by Akio Nishimura) into the Unified QSA Sparsity + MTP stack (`vendor/llama.cpp-pr-test-28770-28699-28213`). Resolves block bias mask corruption during multi-sequence / concurrent slot requests where `set_input_qsa` indexed `bid_cell` by block position rather than entry index. Validated live multi-turn / MTP serving with 88.0% draft acceptance and 11,868 MiB peak VRAM.
 - Capped filename collision retry loop in `swap_yaml::snapshot()` at 10,000 attempts to avoid unbounded busy-loops under filesystem anomalies.
 - Hardened `swap_yaml::atomic_write()` with temporary-file collision retries and monotonic nonce counters matching the storage modules.

@@ -18,6 +18,18 @@ pub struct CoordinatorLock {
     _files: Vec<File>,
 }
 
+impl Drop for CoordinatorLock {
+    fn drop(&mut self) {
+        // CLOEXEC prevents inheritance across exec, but another thread's fork
+        // can retain these open file descriptions until exec/exit. Closing only
+        // our descriptors would leave the advisory locks held in that window.
+        // Unlock the shared descriptions explicitly before closing them.
+        for file in &self._files {
+            let _ = file.unlock();
+        }
+    }
+}
+
 impl CoordinatorLock {
     #[cfg(unix)]
     pub fn acquire(directory: &Path, gpus: impl IntoIterator<Item = u32>) -> Result<Self> {
@@ -40,7 +52,7 @@ impl CoordinatorLock {
         }
         let names = std::iter::once("coordinator.lock".to_owned())
             .chain(unique_gpus.into_iter().map(|gpu| format!("gpu-{gpu}.lock")));
-        let mut files = Vec::new();
+        let mut guard = Self { _files: Vec::new() };
         for name in names {
             let path = directory.join(name);
             let file = match OpenOptions::new()
@@ -81,9 +93,9 @@ impl CoordinatorLock {
             file.try_lock().map_err(|error| {
                 anyhow::anyhow!("host coordinator ownership unavailable: {error}")
             })?;
-            files.push(file);
+            guard._files.push(file);
         }
-        Ok(Self { _files: files })
+        Ok(guard)
     }
 
     #[cfg(not(unix))]
@@ -113,6 +125,46 @@ mod tests {
         drop(first);
         assert!(file.is_file());
         assert!(CoordinatorLock::acquire(directory.path(), [0]).is_ok());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn dropping_guard_releases_lock_even_while_a_fork_inherits_its_descriptor() {
+        use std::io::Write;
+        use std::os::fd::FromRawFd;
+
+        let directory = private_directory();
+        let guard = CoordinatorLock::acquire(directory.path(), [0]).unwrap();
+        let mut pipe = [-1; 2];
+        assert_eq!(
+            unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) },
+            0
+        );
+        let reader = unsafe { File::from_raw_fd(pipe[0]) };
+        let mut writer = unsafe { File::from_raw_fd(pipe[1]) };
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0);
+        if child == 0 {
+            // Only async-signal-safe calls after fork in this threaded test
+            // process. Keep inherited lock descriptors open until parent signals.
+            unsafe {
+                libc::close(pipe[1]);
+                let mut byte = 0u8;
+                libc::read(pipe[0], (&mut byte as *mut u8).cast(), 1);
+                libc::_exit(0);
+            }
+        }
+        drop(reader);
+        drop(guard);
+        let acquired = CoordinatorLock::acquire(directory.path(), [0]);
+        // Always release/reap the child before asserting the result.
+        writer.write_all(b"x").unwrap();
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+        assert!(
+            acquired.is_ok(),
+            "guard drop left a fork-inherited lock held"
+        );
     }
 
     #[test]
