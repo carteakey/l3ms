@@ -131,6 +131,9 @@ zero SO_ERROR can still mean unconnected; the reviewer withdrew an initial
 same-descriptor polling suggestion after that evidence. Client frames are never
 replayed. The daemon/event loop, installation, coordinator dispatch and result
 streams remain pending; no live service was changed or started.
+The CAR-218 progress-comment sync for this transport checkpoint was blocked by
+the connector's export safety check and was not posted. User approval is needed
+before sending implementation details to Linear; this document remains current.
 
 - Choose the host admission mode for direct llama-swap/ComfyUI requests before
   claiming automatic cross-engine switching. The plan allows coordination
