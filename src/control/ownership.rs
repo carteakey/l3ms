@@ -158,9 +158,20 @@ mod tests {
         drop(guard);
         let acquired = CoordinatorLock::acquire(directory.path(), [0]);
         // Always release/reap the child before asserting the result.
-        writer.write_all(b"x").unwrap();
+        let wake_result = writer.write_all(b"x");
+        drop(writer); // EOF also releases the child if writing failed.
         let mut status = 0;
-        assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+        let waited = loop {
+            let result = unsafe { libc::waitpid(child, &mut status, 0) };
+            if result < 0
+                && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+            {
+                continue;
+            }
+            break result;
+        };
+        assert_eq!(waited, child);
+        wake_result.unwrap();
         assert!(
             acquired.is_ok(),
             "guard drop left a fork-inherited lock held"
