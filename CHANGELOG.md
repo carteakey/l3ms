@@ -10,6 +10,8 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Replaced a confirmed documentation-only API-key example with an unmistakable
+  placeholder; active credentials and service configuration are unchanged.
 - Added an internal Linux control-daemon owner with serial bounded peer serving,
   listener-before-history locking, closed startup admission, and cleanup on exit.
   Runtime dispatch and service installation remain disabled.

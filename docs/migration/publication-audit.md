@@ -8,6 +8,16 @@ This recheck is pinned to committed snapshot `2287d9d822e1e0325271108d8589799218
 
 No network or service status was checked. Whether the documented Funnel endpoint is currently live is unverified.
 
+### Current-tree follow-up — 2026-10-01
+
+The confirmed documentation-only sample in `configuration.md` now uses
+`YOUR_API_KEY_HERE`. This is a documentation change only; active configuration
+still references the environment-backed credential. Historical blobs still
+contain the old example, and this follow-up is not an audit of the newer branch
+or an outgoing export. The public endpoint/path/history findings and NO-GO
+decision remain unchanged. No history rewrite, export, push or publication was
+performed.
+
 ## Findings
 
 ### Public endpoint and service exposure — blocker

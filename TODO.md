@@ -60,8 +60,9 @@ See the [migration status](docs/migration/status.md),
   restart, timeout, contention, and rollback paths before enabling public actions.
 - [ ] Complete visual/keyboard/mobile review of the three-lane site and verify
   generated data against native manifests; do not publish before the audit gate.
-- [ ] Sanitize the exact outgoing history/export, replace the key-like example
-  with a clear placeholder, and re-audit endpoints, host paths, secrets, and large
+- [x] Replace the confirmed documentation-only key-like example in the current
+  tree with a clear placeholder; historical blobs remain unaudited/unchanged.
+- [ ] Sanitize the exact outgoing history/export and re-audit endpoints, host paths, secrets, and large
   files. Publication remains NO-GO; no push/history rewrite without authorization.
 - [ ] Reconcile final deployed paths and document rollback/retirement criteria.
   Keep original repos and runtime state until acceptance; retire nothing early.

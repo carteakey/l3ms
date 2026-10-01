@@ -208,7 +208,7 @@ macros:
 apiKeys:
   - "sk-hunter2"
   # tip, one liner: printf "sk-%s\n" "$(head -c 48 /dev/urandom | base64 )"
-  - "sk-gyCPiKUcIfPlaM4OSMZekkprgijPx6+OsmQs8Rsg0xZ9qpy6gKWsIKqHOk+cgXVx"
+  - "YOUR_API_KEY_HERE+OsmQs8Rsg0xZ9qpy6gKWsIKqHOk+cgXVx"
 
   # use environment variable macros to keep secrets out of the config
   - "${env.API_KEY_1}"
