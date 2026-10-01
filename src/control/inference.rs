@@ -16,6 +16,10 @@ use std::time::{Duration, Instant};
 use anyhow::{ensure, Context, Result};
 
 use super::catalog::{Catalog, Lane, RuntimeIdentity};
+use super::ipc::{
+    self, AcceptedOperation, ClientRequest, RequestStatus, ResponseEnvelope, ResponseErrorCode,
+    ResponseMessage,
+};
 use super::requests::InferenceRequest;
 use super::routes::{resolve_profile_route, ResolvedProfileRoute};
 use super::runtime::{Cancellation, ResourceClaim};
@@ -23,6 +27,22 @@ use crate::job_history::{CrossToolkitJobStart, CrossToolkitJobUpdate, JobHistory
 
 const MAX_CAPACITY: usize = 128;
 const MAX_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Fixed submission failures; no request contents, native paths or OS errors.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubmissionError {
+    Unavailable,
+    QueueFull,
+    DuplicateRequest,
+    InvalidRequest,
+    Internal,
+}
+impl std::fmt::Display for SubmissionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "coordinator submission: {self:?}")
+    }
+}
+impl std::error::Error for SubmissionError {}
 
 #[derive(Clone)]
 pub struct RequestCancellation(Arc<AtomicBool>);
@@ -210,6 +230,111 @@ impl CoordinatorCore {
         self.admission = AdmissionState::ReconciliationRequired;
     }
 
+    /// IPC control operations only: never reserves work or starts an engine.
+    /// Submit acceptance follows durable persistence, not merely validation.
+    pub fn handle_client_request(
+        &mut self,
+        request: ClientRequest,
+        now: Instant,
+    ) -> ResponseEnvelope {
+        if ipc::validate_request_id(request.request_id()).is_err() {
+            return ResponseEnvelope::v1(ResponseMessage::Error {
+                request_id: None,
+                code: ResponseErrorCode::InvalidRequest,
+            });
+        }
+        let message = match request {
+            ClientRequest::Submit {
+                request_id,
+                request,
+                timeout,
+            } => match self.submit_checked(request_id.clone(), request, timeout, now) {
+                Ok(_) => ResponseMessage::Accepted {
+                    request_id,
+                    operation: AcceptedOperation::Submit,
+                    state: RequestStatus::Queued,
+                },
+                Err(error) => wire_error(
+                    request_id,
+                    match error {
+                        SubmissionError::Unavailable => ResponseErrorCode::Unavailable,
+                        SubmissionError::QueueFull => ResponseErrorCode::QueueFull,
+                        SubmissionError::DuplicateRequest => ResponseErrorCode::DuplicateRequest,
+                        SubmissionError::InvalidRequest => ResponseErrorCode::InvalidRequest,
+                        SubmissionError::Internal => ResponseErrorCode::Internal,
+                    },
+                ),
+            },
+            ClientRequest::Status { request_id } => match self.wire_state(&request_id) {
+                Some(state) => ResponseMessage::Status { request_id, state },
+                None => wire_error(request_id, ResponseErrorCode::Internal),
+            },
+            ClientRequest::Cancel { request_id } => match self.wire_state(&request_id) {
+                Some(RequestStatus::Queued | RequestStatus::Running) => {
+                    if self.cancel_request(&request_id).is_err() {
+                        self.quarantine();
+                        wire_error(request_id, ResponseErrorCode::Internal)
+                    } else {
+                        match self.wire_state(&request_id) {
+                            Some(state) => ResponseMessage::Accepted {
+                                request_id,
+                                operation: AcceptedOperation::Cancel,
+                                state,
+                            },
+                            None => wire_error(request_id, ResponseErrorCode::Internal),
+                        }
+                    }
+                }
+                Some(_) => wire_error(request_id, ResponseErrorCode::InvalidRequest),
+                None => wire_error(request_id, ResponseErrorCode::Internal),
+            },
+        };
+        ResponseEnvelope::v1(message)
+    }
+
+    fn wire_state(&self, request_id: &str) -> Option<RequestStatus> {
+        let Some(job) = self
+            .history
+            .records()
+            .iter()
+            .find(|job| job.metadata.request_id.as_deref() == Some(request_id))
+        else {
+            return Some(RequestStatus::NotFound);
+        };
+        Some(match job.metadata.result_state.as_deref() {
+            Some("queued") => RequestStatus::Queued,
+            Some("running") => RequestStatus::Running,
+            Some("succeeded") => RequestStatus::Succeeded,
+            Some("failed") => RequestStatus::Failed,
+            Some("cancelled") => RequestStatus::Cancelled,
+            Some("interrupted") => RequestStatus::Interrupted,
+            None => return None,
+            Some(_) => return None,
+        })
+    }
+
+    /// One authenticated socket exchange for a future bounded daemon loop.
+    /// Handler persistence is synchronous trusted-local-filesystem work; it
+    /// cannot be preempted. If acknowledgment IO fails after acceptance, keep
+    /// accepted work and use retained request-ID status to reconcile, not replay.
+    #[cfg(target_os = "linux")]
+    pub fn serve_connection(
+        &mut self,
+        connection: &mut super::local_ipc::LocalConnection,
+        context: &super::runtime::OperationContext<'_>,
+    ) -> Result<(), super::local_ipc::LocalIpcError> {
+        use super::local_ipc::LocalIpcError;
+        let request = connection.read_request(context)?;
+        if context.is_cancelled() {
+            return Err(LocalIpcError::Cancelled);
+        }
+        if context.remaining().is_zero() {
+            return Err(LocalIpcError::Deadline);
+        }
+        let response = self.handle_client_request(request, Instant::now());
+        connection.write_response(&response, context)
+    }
+
     pub fn submit(
         &mut self,
         request_id: String,
@@ -217,57 +342,76 @@ impl CoordinatorCore {
         timeout: Duration,
         now: Instant,
     ) -> Result<u64> {
-        ensure!(
-            self.admission == AdmissionState::Ready,
-            "runtime reconciliation is required"
-        );
-        ensure!(
-            self.pending.len() + self.active.len() < self.capacity,
-            "coordinator queue is full"
-        );
-        ensure!(
-            !timeout.is_zero() && timeout <= MAX_TIMEOUT,
-            "request timeout must be positive and at most 24 hours"
-        );
-        ensure!(
-            !self
-                .history
-                .records()
-                .iter()
-                .any(|job| job.metadata.request_id.as_ref() == Some(&request_id)),
-            "request ID is already retained; refusing replay"
-        );
-        let profile = request.validate(&self.catalog)?;
-        let route = resolve_profile_route(&self.catalog, &profile.key)?;
-        let resource = *self.bindings.get(&route.runtime).ok_or_else(|| {
-            anyhow::anyhow!("no explicit host resource binding for {}", route.runtime)
-        })?;
+        self.submit_checked(request_id, request, timeout, now)
+            .map_err(anyhow::Error::new)
+    }
+
+    pub fn submit_checked(
+        &mut self,
+        request_id: String,
+        request: InferenceRequest,
+        timeout: Duration,
+        now: Instant,
+    ) -> std::result::Result<u64, SubmissionError> {
+        if self.admission != AdmissionState::Ready {
+            return Err(SubmissionError::Unavailable);
+        }
+        if timeout.is_zero()
+            || timeout > MAX_TIMEOUT
+            || ipc::validate_request_id(&request_id).is_err()
+        {
+            return Err(SubmissionError::InvalidRequest);
+        }
+        if self
+            .history
+            .records()
+            .iter()
+            .any(|job| job.metadata.request_id.as_ref() == Some(&request_id))
+        {
+            return Err(SubmissionError::DuplicateRequest);
+        }
+        if self.pending.len() + self.active.len() >= self.capacity {
+            return Err(SubmissionError::QueueFull);
+        }
+        let profile = request
+            .validate(&self.catalog)
+            .map_err(|_| SubmissionError::InvalidRequest)?;
+        let route = resolve_profile_route(&self.catalog, &profile.key)
+            .map_err(|_| SubmissionError::InvalidRequest)?;
+        let resource = *self
+            .bindings
+            .get(&route.runtime)
+            .ok_or(SubmissionError::Unavailable)?;
         let deadline = now
             .checked_add(timeout)
-            .context("request deadline overflow")?;
+            .ok_or(SubmissionError::InvalidRequest)?;
         let mut candidate = self.history.clone();
-        let job_id = candidate.begin_cross_toolkit(CrossToolkitJobStart {
-            toolkit: match profile.key.lane {
-                Lane::Language => "l3ms",
-                Lane::Media => "l2m2",
-                Lane::Decisions => "l3ds",
-            }
-            .into(),
-            profile: Some(profile.key.profile_id.to_string()),
-            task: Some(request.task().into()),
-            request_id: Some(request_id.clone()),
-        })?;
-        ensure!(
-            self.pending
-                .iter()
-                .map(|p| p.job_id)
-                .chain(self.active.keys().copied())
-                .all(|id| candidate.records().iter().any(|job| job.id == id)),
-            "history capacity would evict accepted work"
-        );
-        candidate
-            .persist_in(&self.data_root)
-            .context("persist acceptance before dispatch")?;
+        let job_id = candidate
+            .begin_cross_toolkit(CrossToolkitJobStart {
+                toolkit: match profile.key.lane {
+                    Lane::Language => "l3ms",
+                    Lane::Media => "l2m2",
+                    Lane::Decisions => "l3ds",
+                }
+                .into(),
+                profile: Some(profile.key.profile_id.to_string()),
+                task: Some(request.task().into()),
+                request_id: Some(request_id.clone()),
+            })
+            .map_err(|_| SubmissionError::InvalidRequest)?;
+        if !self
+            .pending
+            .iter()
+            .map(|p| p.job_id)
+            .chain(self.active.keys().copied())
+            .all(|id| candidate.records().iter().any(|job| job.id == id))
+        {
+            return Err(SubmissionError::QueueFull);
+        }
+        if candidate.persist_in(&self.data_root).is_err() {
+            self.quarantine();
+            return Err(SubmissionError::Internal);
+        }
         self.history = candidate;
         self.pending.push_back(Pending {
             job_id,
@@ -287,7 +431,10 @@ impl CoordinatorCore {
     /// until cleanup/completion is acknowledged.
     pub fn cancel(&mut self, job_id: u64) -> Result<()> {
         if let Some(index) = self.pending.iter().position(|p| p.job_id == job_id) {
-            self.persist_update(job_id, "cancelled", None, None)?;
+            if let Err(error) = self.persist_update(job_id, "cancelled", None, None) {
+                self.quarantine();
+                return Err(error);
+            }
             self.pending.remove(index);
             return Ok(());
         }
@@ -458,6 +605,13 @@ impl CoordinatorCore {
     }
 }
 
+fn wire_error(request_id: String, code: ResponseErrorCode) -> ResponseMessage {
+    ResponseMessage::Error {
+        request_id: Some(request_id),
+        code,
+    }
+}
+
 fn resources_conflict(left: ResourceClaim, right: ResourceClaim) -> bool {
     matches!((left, right), (ResourceClaim::ExclusiveGpu(a), ResourceClaim::ExclusiveGpu(b)) if a == b)
 }
@@ -514,6 +668,445 @@ mod tests {
             profile: ProfileKey::new(Lane::Decisions, "jev-api").unwrap(), state: serde_json::json!({}),
             questions: serde_json::json!({"route":{"type":"choice","criteria":{"yes":"Accept","no":"Reject"}}}).as_object().unwrap().clone(),
         }
+    }
+
+    #[test]
+    fn rpc_submit_is_durable_and_classifies_rejections_without_payloads() {
+        let temp = TempDir::new().unwrap();
+        let mut coordinator = core(temp.path(), 1);
+        let now = Instant::now();
+        let submit = |id: &str| ClientRequest::Submit {
+            request_id: id.into(),
+            request: chat(),
+            timeout: Duration::from_secs(10),
+        };
+        assert_eq!(
+            coordinator
+                .handle_client_request(submit("one"), now)
+                .message,
+            wire_error("one".into(), ResponseErrorCode::Unavailable)
+        );
+        assert_eq!(coordinator.queued_count(), 0);
+        coordinator.confirm_reconciled().unwrap();
+        assert_eq!(
+            coordinator
+                .handle_client_request(submit("one"), now)
+                .message,
+            ResponseMessage::Accepted {
+                request_id: "one".into(),
+                operation: AcceptedOperation::Submit,
+                state: RequestStatus::Queued
+            }
+        );
+        let persisted = std::fs::read_to_string(temp.path().join("jobs.json")).unwrap();
+        assert!(persisted.contains("one"));
+        assert!(!persisted.contains("REQUEST_PAYLOAD_MUST_NOT_BE_PERSISTED"));
+        assert_eq!(
+            coordinator
+                .handle_client_request(submit("one"), now)
+                .message,
+            wire_error("one".into(), ResponseErrorCode::DuplicateRequest)
+        );
+        assert_eq!(
+            coordinator
+                .handle_client_request(submit("two"), now)
+                .message,
+            wire_error("two".into(), ResponseErrorCode::QueueFull)
+        );
+        assert_eq!(coordinator.queued_count(), 1);
+    }
+
+    #[test]
+    fn rpc_cancel_preserves_active_reservation_and_never_relabels_terminal_work() {
+        let temp = TempDir::new().unwrap();
+        let mut coordinator = core(temp.path(), 8);
+        coordinator.confirm_reconciled().unwrap();
+        let now = Instant::now();
+        let queued = coordinator
+            .submit("queued".into(), chat(), Duration::from_secs(10), now)
+            .unwrap();
+        assert_eq!(
+            coordinator
+                .handle_client_request(
+                    ClientRequest::Cancel {
+                        request_id: "queued".into()
+                    },
+                    now
+                )
+                .message,
+            ResponseMessage::Accepted {
+                request_id: "queued".into(),
+                operation: AcceptedOperation::Cancel,
+                state: RequestStatus::Cancelled
+            }
+        );
+        assert!(!coordinator
+            .history()
+            .records()
+            .iter()
+            .find(|job| job.id == queued)
+            .unwrap()
+            .is_running());
+        assert_eq!(
+            coordinator
+                .handle_client_request(
+                    ClientRequest::Cancel {
+                        request_id: "queued".into()
+                    },
+                    now
+                )
+                .message,
+            wire_error("queued".into(), ResponseErrorCode::InvalidRequest)
+        );
+        let active = coordinator
+            .submit("active".into(), chat(), Duration::from_secs(10), now)
+            .unwrap();
+        let ticket = coordinator.reserve_next(now).unwrap().unwrap();
+        coordinator.mark_running(active, now).unwrap();
+        assert_eq!(
+            coordinator
+                .handle_client_request(
+                    ClientRequest::Cancel {
+                        request_id: "active".into()
+                    },
+                    now
+                )
+                .message,
+            ResponseMessage::Accepted {
+                request_id: "active".into(),
+                operation: AcceptedOperation::Cancel,
+                state: RequestStatus::Running
+            }
+        );
+        assert!(ticket.cancellation.is_cancelled());
+        assert_eq!(coordinator.active_count(), 1);
+        assert!(coordinator.confirm_reconciled().is_err());
+        coordinator
+            .complete(active, Completion::Cancelled, vec![], now)
+            .unwrap();
+        assert_eq!(
+            coordinator
+                .handle_client_request(
+                    ClientRequest::Status {
+                        request_id: "active".into()
+                    },
+                    now
+                )
+                .message,
+            ResponseMessage::Status {
+                request_id: "active".into(),
+                state: RequestStatus::Cancelled
+            }
+        );
+        assert_eq!(
+            coordinator
+                .handle_client_request(
+                    ClientRequest::Cancel {
+                        request_id: "missing".into()
+                    },
+                    now
+                )
+                .message,
+            wire_error("missing".into(), ResponseErrorCode::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn rpc_persistence_failures_never_acknowledge_acceptance_or_cancellation() {
+        let temp = TempDir::new().unwrap();
+        let blocked = temp.path().join("blocked");
+        let mut coordinator = core(&blocked, 8);
+        coordinator.confirm_reconciled().unwrap();
+        std::fs::write(&blocked, "fixture").unwrap();
+        let now = Instant::now();
+        let result = coordinator.handle_client_request(
+            ClientRequest::Submit {
+                request_id: "failed".into(),
+                request: chat(),
+                timeout: Duration::from_secs(10),
+            },
+            now,
+        );
+        assert_eq!(
+            result.message,
+            wire_error("failed".into(), ResponseErrorCode::Internal)
+        );
+        assert_eq!(
+            coordinator.admission(),
+            AdmissionState::ReconciliationRequired
+        );
+        assert_eq!(coordinator.queued_count(), 0);
+        assert!(coordinator.history().records().is_empty());
+        assert!(!format!("{:?}", result.message).contains("fixture"));
+        let mut coordinator = core(temp.path(), 8);
+        coordinator.confirm_reconciled().unwrap();
+        coordinator
+            .submit("queued".into(), chat(), Duration::from_secs(10), now)
+            .unwrap();
+        coordinator.data_root = blocked;
+        assert_eq!(
+            coordinator
+                .handle_client_request(
+                    ClientRequest::Cancel {
+                        request_id: "queued".into()
+                    },
+                    now
+                )
+                .message,
+            wire_error("queued".into(), ResponseErrorCode::Internal)
+        );
+        assert_eq!(coordinator.queued_count(), 1);
+        assert_eq!(coordinator.request_state("queued"), Some("queued"));
+        assert_eq!(
+            coordinator.admission(),
+            AdmissionState::ReconciliationRequired
+        );
+    }
+
+    #[test]
+    fn rpc_invalid_inputs_and_unbound_runtimes_have_fixed_errors() {
+        let temp = TempDir::new().unwrap();
+        let mut coordinator = core(temp.path(), 8);
+        coordinator.confirm_reconciled().unwrap();
+        let now = Instant::now();
+        assert_eq!(
+            coordinator
+                .handle_client_request(
+                    ClientRequest::Status {
+                        request_id: "bad\nid".into()
+                    },
+                    now
+                )
+                .message,
+            ResponseMessage::Error {
+                request_id: None,
+                code: ResponseErrorCode::InvalidRequest
+            }
+        );
+        let mut invalid = chat();
+        if let InferenceRequest::Chat { turns, .. } = &mut invalid {
+            turns.clear();
+        }
+        let rejected = coordinator.handle_client_request(
+            ClientRequest::Submit {
+                request_id: "invalid".into(),
+                request: invalid,
+                timeout: Duration::from_secs(1),
+            },
+            now,
+        );
+        assert_eq!(
+            rejected.message,
+            wire_error("invalid".into(), ResponseErrorCode::InvalidRequest)
+        );
+        coordinator.bindings.clear();
+        assert_eq!(
+            coordinator
+                .handle_client_request(
+                    ClientRequest::Submit {
+                        request_id: "unbound".into(),
+                        request: chat(),
+                        timeout: Duration::from_secs(1)
+                    },
+                    now
+                )
+                .message,
+            wire_error("unbound".into(), ResponseErrorCode::Unavailable)
+        );
+        assert_eq!(coordinator.queued_count(), 0);
+        assert_eq!(
+            coordinator
+                .handle_client_request(
+                    ClientRequest::Status {
+                        request_id: "missing".into()
+                    },
+                    now
+                )
+                .message,
+            ResponseMessage::Status {
+                request_id: "missing".into(),
+                state: RequestStatus::NotFound
+            }
+        );
+    }
+
+    #[test]
+    fn rpc_restart_returns_interrupted_and_refuses_duplicate_replay() {
+        let temp = TempDir::new().unwrap();
+        let now = Instant::now();
+        let mut coordinator = core(temp.path(), 8);
+        coordinator.confirm_reconciled().unwrap();
+        coordinator
+            .submit("retained".into(), chat(), Duration::from_secs(10), now)
+            .unwrap();
+        drop(coordinator);
+        let mut restarted = core(temp.path(), 8);
+        assert_eq!(
+            restarted
+                .handle_client_request(
+                    ClientRequest::Status {
+                        request_id: "retained".into()
+                    },
+                    now
+                )
+                .message,
+            ResponseMessage::Status {
+                request_id: "retained".into(),
+                state: RequestStatus::Interrupted
+            }
+        );
+        assert_eq!(restarted.queued_count(), 0);
+        restarted.confirm_reconciled().unwrap();
+        assert_eq!(
+            restarted
+                .handle_client_request(
+                    ClientRequest::Submit {
+                        request_id: "retained".into(),
+                        request: chat(),
+                        timeout: Duration::from_secs(10)
+                    },
+                    now
+                )
+                .message,
+            wire_error("retained".into(), ResponseErrorCode::DuplicateRequest)
+        );
+    }
+
+    #[test]
+    fn retained_id_without_state_is_not_misreported_as_not_found() {
+        let temp = TempDir::new().unwrap();
+        let now = Instant::now();
+        let mut coordinator = core(temp.path(), 8);
+        coordinator.confirm_reconciled().unwrap();
+        let id = coordinator
+            .submit("incomplete".into(), chat(), Duration::from_secs(10), now)
+            .unwrap();
+        coordinator.cancel(id).unwrap();
+        drop(coordinator);
+        let path = temp.path().join("jobs.json");
+        let mut jobs: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        jobs[0].as_object_mut().unwrap().remove("result_state");
+        jobs[0]["exit"] = serde_json::json!("0");
+        std::fs::write(path, jobs.to_string()).unwrap();
+        let mut restarted = core(temp.path(), 8);
+        assert_eq!(
+            restarted
+                .handle_client_request(
+                    ClientRequest::Status {
+                        request_id: "incomplete".into()
+                    },
+                    now
+                )
+                .message,
+            wire_error("incomplete".into(), ResponseErrorCode::Internal)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn lost_socket_ack_keeps_durable_work_for_reconnect_without_dispatch() {
+        use crate::control::{
+            ipc::{
+                RequestEnvelope, WireChatRole, WireChatTurn, WireInferenceRequest,
+                WireRequestMessage,
+            },
+            local_ipc::{LocalConnection, LocalListener},
+            runtime::{NeverCancel, OperationContext},
+        };
+        use std::net::Shutdown;
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixStream;
+        let data = TempDir::new().unwrap();
+        let socket = TempDir::new().unwrap();
+        let locks = TempDir::new().unwrap();
+        for directory in [socket.path(), locks.path()] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let listener = LocalListener::bind(socket.path(), locks.path(), [0]).unwrap();
+        let mut coordinator = core(data.path(), 8);
+        coordinator.confirm_reconciled().unwrap();
+        let mut peer = UnixStream::connect(socket.path().join("coordinator.sock")).unwrap();
+        ipc::write_request(
+            &mut peer,
+            &RequestEnvelope::v1(WireRequestMessage::Submit {
+                request_id: "lost-ack".into(),
+                timeout_ms: 10000,
+                request: WireInferenceRequest::Language {
+                    profile_id: "gemma-4-26b-qat-mtp".into(),
+                    turns: vec![WireChatTurn {
+                        role: WireChatRole::User,
+                        content: "SENSITIVE_SOCKET_PAYLOAD".into(),
+                    }],
+                    max_tokens: 8,
+                },
+            }),
+        )
+        .unwrap();
+        peer.shutdown(Shutdown::Both).unwrap();
+        drop(peer);
+        let context = OperationContext::new(Instant::now() + Duration::from_secs(2), &NeverCancel);
+        let mut connection = listener.accept(&context).unwrap();
+        assert!(coordinator
+            .serve_connection(&mut connection, &context)
+            .is_err());
+        assert_eq!(coordinator.queued_count(), 1);
+        assert_eq!(coordinator.active_count(), 0);
+        assert_eq!(coordinator.request_state("lost-ack"), Some("queued"));
+        assert!(!std::fs::read_to_string(data.path().join("jobs.json"))
+            .unwrap()
+            .contains("SENSITIVE_SOCKET_PAYLOAD"));
+        let directory = socket.path().to_owned();
+        let client = std::thread::spawn(move || {
+            let mut responses = Vec::new();
+            for operation in [
+                WireRequestMessage::Status {
+                    request_id: "lost-ack".into(),
+                },
+                WireRequestMessage::Cancel {
+                    request_id: "lost-ack".into(),
+                },
+                WireRequestMessage::Status {
+                    request_id: "lost-ack".into(),
+                },
+            ] {
+                let ctx =
+                    OperationContext::new(Instant::now() + Duration::from_secs(2), &NeverCancel);
+                let mut connection = LocalConnection::connect(&directory, &ctx).unwrap();
+                connection
+                    .write_request(&RequestEnvelope::v1(operation), &ctx)
+                    .unwrap();
+                responses.push(connection.read_response(&ctx).unwrap().message);
+            }
+            responses
+        });
+        for _ in 0..3 {
+            let ctx = OperationContext::new(Instant::now() + Duration::from_secs(2), &NeverCancel);
+            let mut reconnected = listener.accept(&ctx).unwrap();
+            coordinator
+                .serve_connection(&mut reconnected, &ctx)
+                .unwrap();
+        }
+        assert_eq!(
+            client.join().unwrap(),
+            vec![
+                ResponseMessage::Status {
+                    request_id: "lost-ack".into(),
+                    state: RequestStatus::Queued
+                },
+                ResponseMessage::Accepted {
+                    request_id: "lost-ack".into(),
+                    operation: AcceptedOperation::Cancel,
+                    state: RequestStatus::Cancelled
+                },
+                ResponseMessage::Status {
+                    request_id: "lost-ack".into(),
+                    state: RequestStatus::Cancelled
+                }
+            ]
+        );
+        assert_eq!(coordinator.queued_count(), 0);
+        assert_eq!(coordinator.active_count(), 0);
     }
 
     #[test]

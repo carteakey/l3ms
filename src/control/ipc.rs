@@ -448,7 +448,7 @@ fn validate_response_ids(message: &ResponseMessage) -> Result<(), ProtocolError>
     }
 }
 
-fn validate_request_id(value: &str) -> Result<(), ProtocolError> {
+pub(crate) fn validate_request_id(value: &str) -> Result<(), ProtocolError> {
     // The frame cap bounds this clone before the shared history validator
     // applies its canonical identifier length, character, and secret rules.
     if value.len() > MAX_FRAME_BYTES {

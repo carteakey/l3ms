@@ -155,10 +155,37 @@ work. This transport is not a daemon/event loop, result stream, installation,
 coordinator dispatch, or proof of runtime admission. Two independent test clients
 exercise socket/status framing only; they do not satisfy the live inference gate.
 
+## Coordinator control RPC
+
+Internal IPC submit/status/cancel now uses the durable queue's single authoritative
+submission path and typed rejection categories. The older Rust `submit` interface
+remains available as an anyhow-returning wrapper; it no longer exposes free-form
+validation or OS details. Missing runtime bindings or unreconciled admission
+return unavailable; retained IDs refuse replay even at full queue capacity.
+Opaque caller IDs reuse the history validator and are never filesystem paths.
+
+Submission is acknowledged only after candidate history is persisted and the
+request enters memory. Queued cancellation is persisted before removal; active
+cancellation acknowledges signalling and retains the reservation. A reserved
+request may still report queued until execution is marked running; cancellation
+acceptance is not terminal cleanup. Persistence failure closes admission rather
+than acknowledging a change whose durable outcome may be uncertain.
+
+The Linux single-connection handler checks its I/O context before control
+mutation and never reserves or starts inference. Local filesystem persistence is
+synchronous and not preemptible. If reply delivery fails after acceptance, work
+stays accepted and a fresh connection queries the retained ID; it is not replayed.
+Restart status reports interruption, not automatic execution. A retained ID
+without a valid lifecycle state is an internal error, not not-found.
+
+This is control handling, not the daemon owner/event loop, lifecycle reconciliation,
+inference dispatch, or result delivery. Listener-before-history ownership and
+bounded peer scheduling remain required for that future loop.
+
 ## Release gates
 
 No adapter is connected to a public run/switch command yet. IPC currently defines
-messages, framing, and authenticated bounded Linux transport, not an installed
+messages, framing, authenticated bounded Linux transport, and control handling, not an installed
 listening daemon or result/stream delivery. Concrete lifecycle/admission adapters, backend ID and
 artifact propagation, coordinated client integration, and real TTS/local decision acceptance
 must all be verified before enabling coordinated inference. The public export

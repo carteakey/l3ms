@@ -10,6 +10,9 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Connected internal IPC submit/status/cancel handling to the durable coordinator
+  queue with typed, redacted rejection codes and reconnect-safe acknowledgments.
+  Persistence failures close admission; no daemon or inference dispatch is enabled.
 - Added internal Linux private Unix-socket IPC transport with peer UID checks,
   lifetime ownership locks, bounded cancellable IO, and single-exchange framing.
   No coordinator service is installed or exposed through CLI/UI yet.
