@@ -10,8 +10,8 @@ existing Linear migration issues rather than replacing their acceptance criteria
 
 ## Monorepo: next work
 
-Latest offline checkpoint: control-RPC integration on `feature/l3ms-monorepo`;
-406 root tests passed,
+Latest offline checkpoint: bounded control-daemon ownership on `feature/l3ms-monorepo`;
+415 root tests passed,
 1 ignored. This is offline implementation evidence, not live cutover acceptance.
 See the [migration status](docs/migration/status.md),
 [plan](docs/monorepo-consolidation-plan.md), and
@@ -36,13 +36,14 @@ See the [migration status](docs/migration/status.md),
 - [x] Connect IPC submit/status/cancel to the durable queue with fixed rejection
   codes, persistence-before-acknowledgment, lost-ack reconnect tests, and active
   cancellation that retains reservations until cleanup is acknowledged.
+- [x] Add a listener/history-owning serial control loop with bounded peer time
+  and connection attempts, closed startup admission, and safe ownership cleanup.
 - [ ] Implement the local IPC daemon with private socket/peer authentication,
   bounded transport, singleton ownership, startup reconciliation, and concrete
   dispatch. Deliver results, artifact references, and streams without persisting
   sensitive payloads.
-  Next implementation slice: a listener/history-owning bounded daemon loop that
-  starts unreconciled, limits peer work, and shuts down safely; dispatch must
-  remain closed until real lifecycle/admission checks are integrated.
+  Next implementation slice: connect concrete lifecycle/admission reconciliation
+  and supervised dispatch; keep dispatch closed until those checks are integrated.
 - [ ] Integrate CLI and keyboard-first UI run/observe/cancel with the same
   coordinator, settings, routing, and request IDs; preserve standalone commands.
 - [ ] Add HTTP ingress to that coordinator only after local operation is proven;

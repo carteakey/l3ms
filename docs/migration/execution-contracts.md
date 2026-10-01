@@ -178,15 +178,40 @@ stays accepted and a fresh connection queries the retained ID; it is not replaye
 Restart status reports interruption, not automatic execution. A retained ID
 without a valid lifecycle state is an internal error, not not-found.
 
-This is control handling, not the daemon owner/event loop, lifecycle reconciliation,
-inference dispatch, or result delivery. Listener-before-history ownership and
-bounded peer scheduling remain required for that future loop.
+Control handling does not perform lifecycle reconciliation, inference dispatch,
+or result delivery.
+
+## Bounded control-daemon owner
+
+The internal Linux `ControlDaemon` acquires the listener and host/device locks
+before loading or normalizing history. Its core is private and remains
+unreconciled: status/cancel can be served, but submissions are unavailable and
+there is no dispatch or admission-opening interface. Every runtime GPU binding
+must be covered by a requested device lock. Data, socket and lock directories
+must already exist, be private, and have the current effective owner; trusted
+local directories/ancestors must not be concurrently replaced.
+
+A consuming `run` session handles one peer at a time, one exchange per peer,
+with 1–4096 connection attempts and a positive peer deadline of at most 30
+seconds. Peer deadlines are capped by the caller's overall deadline and forward
+its cancellation. Malformed, disconnected, denied or timed-out peers do not
+replay or stop subsequent peers; listener errors stop the loop. Overall
+cancellation/deadline stops intake. Filesystem persistence remains synchronous
+and non-preemptible. Counts are returned without IDs, paths or payloads.
+
+All return paths drop history ownership, unlink only the owned socket inode,
+and release the retained locks. Startup failure after binding also cleans up.
+Existing sockets are never reclaimed automatically. Same-user flooding can
+still deny service; serial serving bounds memory/work, not fairness. This is
+fixture-tested foreground infrastructure, not a CLI command, installed service,
+runtime lifecycle owner or enabled inference scheduler.
 
 ## Release gates
 
 No adapter is connected to a public run/switch command yet. IPC currently defines
-messages, framing, authenticated bounded Linux transport, and control handling, not an installed
-listening daemon or result/stream delivery. Concrete lifecycle/admission adapters, backend ID and
+messages, framing, authenticated bounded Linux transport, control handling and
+a bounded internal control loop, not an installed dispatching daemon or
+result/stream delivery. Concrete lifecycle/admission adapters, backend ID and
 artifact propagation, coordinated client integration, and real TTS/local decision acceptance
 must all be verified before enabling coordinated inference. The public export
 remains blocked by the separate publication audit; no endpoint cutover is implied.

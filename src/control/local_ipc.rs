@@ -326,7 +326,7 @@ fn checked<T>(
     active(context)?;
     result.map_err(LocalIpcError::Protocol)
 }
-fn private_directory(directory: &Path) -> Result<PathBuf, LocalIpcError> {
+pub(crate) fn private_directory(directory: &Path) -> Result<PathBuf, LocalIpcError> {
     let directory = directory
         .canonicalize()
         .map_err(|_| LocalIpcError::UnsafePath)?;

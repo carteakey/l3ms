@@ -3,6 +3,8 @@
 
 pub mod catalog;
 pub mod comfy;
+#[cfg(target_os = "linux")]
+pub mod daemon;
 pub mod decision;
 pub mod inference;
 pub mod ipc;

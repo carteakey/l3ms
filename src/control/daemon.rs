@@ -1,0 +1,488 @@
+//! Internal Linux control-loop owner; not an installed or dispatching daemon.
+//!
+//! Binding acquires listener/host/device ownership before history is loaded or
+//! reconciled. Admission stays closed: this loop cannot dispatch, reconcile a
+//! runtime, or expose its core for mutation. Each invocation consumes the owner
+//! and releases its endpoint and locks on every return path.
+//!
+//! One authenticated peer is served at a time, one exchange per connection.
+//! Peer time and accepted/denied connection attempts are bounded. Same-user
+//! denial of service is still possible; UID authentication is not app isolation.
+//! Local filesystem operations are synchronous and cannot be preempted. Caller
+//! supplied private local directories and their ancestors must remain trusted.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use super::catalog::{Catalog, RuntimeIdentity};
+use super::inference::CoordinatorCore;
+use super::local_ipc::{private_directory, LocalIpcError, LocalListener};
+use super::runtime::{OperationContext, ResourceClaim};
+
+/// Explicit paths: no directory creation, default live store, or stale reclaim.
+pub struct DaemonConfig {
+    pub socket_directory: PathBuf,
+    pub lock_directory: PathBuf,
+    pub data_directory: PathBuf,
+    pub gpus: Vec<u32>,
+    pub queue_capacity: usize,
+    pub peer_timeout: Duration,
+    pub max_connections: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DaemonError {
+    InvalidConfig,
+    Transport(LocalIpcError),
+    HistoryUnavailable,
+}
+impl std::fmt::Display for DaemonError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "coordinator loop: {self:?}")
+    }
+}
+impl std::error::Error for DaemonError {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StopReason {
+    Cancelled,
+    Deadline,
+    ConnectionLimit,
+}
+
+/// Counts only; never includes peer data, request IDs, paths or errors.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RunReport {
+    /// Full request/reply exchanges, including business-error responses.
+    pub completed_exchanges: usize,
+    /// Denied or failed connections, NOT rejected inference requests. A failed
+    /// reply can follow a durable mutation: reconnect by ID, never replay.
+    pub failed_connections: usize,
+    pub stopped: StopReason,
+}
+
+pub struct ControlDaemon {
+    // Drop history/payload ownership before removing the socket and host guard.
+    core: CoordinatorCore,
+    listener: LocalListener,
+    peer_timeout: Duration,
+    max_connections: usize,
+}
+
+impl ControlDaemon {
+    pub fn bind(
+        config: DaemonConfig,
+        catalog: Catalog,
+        bindings: BTreeMap<RuntimeIdentity, ResourceClaim>,
+        repository_root: &Path,
+    ) -> Result<Self, DaemonError> {
+        if !(1..=128).contains(&config.queue_capacity)
+            || !(1..=4096).contains(&config.max_connections)
+            || config.peer_timeout.is_zero()
+            || config.peer_timeout > Duration::from_secs(30)
+            || bindings.values().any(|claim| {
+                matches!(claim, ResourceClaim::ExclusiveGpu(gpu) if !config.gpus.contains(gpu))
+            })
+        {
+            return Err(DaemonError::InvalidConfig);
+        }
+        let data = private_directory(&config.data_directory).map_err(DaemonError::Transport)?;
+        let listener = LocalListener::bind(
+            &config.socket_directory,
+            &config.lock_directory,
+            config.gpus,
+        )
+        .map_err(DaemonError::Transport)?;
+        let core = CoordinatorCore::load(
+            catalog,
+            bindings,
+            data,
+            repository_root,
+            config.queue_capacity,
+        )
+        .map_err(|_| DaemonError::HistoryUnavailable)?;
+        Ok(Self {
+            core,
+            listener,
+            peer_timeout: config.peer_timeout,
+            max_connections: config.max_connections,
+        })
+    }
+
+    /// Consuming, bounded session. A failed exchange is never retried. The
+    /// overall deadline also limits a peer arriving just before shutdown.
+    /// Cancellation/deadline stops intake; no backend was started to clean up.
+    pub fn run(mut self, context: &OperationContext<'_>) -> Result<RunReport, DaemonError> {
+        let mut report = RunReport {
+            completed_exchanges: 0,
+            failed_connections: 0,
+            stopped: StopReason::ConnectionLimit,
+        };
+        for _ in 0..self.max_connections {
+            if let Some(reason) = stop_reason(context) {
+                report.stopped = reason;
+                return Ok(report);
+            }
+            let mut peer = match self.listener.accept(context) {
+                Ok(peer) => peer,
+                Err(LocalIpcError::Cancelled) => {
+                    report.stopped = StopReason::Cancelled;
+                    return Ok(report);
+                }
+                Err(LocalIpcError::Deadline) => {
+                    report.stopped = StopReason::Deadline;
+                    return Ok(report);
+                }
+                Err(LocalIpcError::PeerDenied) => {
+                    report.failed_connections += 1;
+                    continue;
+                }
+                Err(error) => return Err(DaemonError::Transport(error)),
+            };
+            let deadline = (Instant::now() + self.peer_timeout).min(context.deadline());
+            let cancellation = ForwardCancellation(context);
+            let peer_context = OperationContext::new(deadline, &cancellation);
+            if self.core.serve_connection(&mut peer, &peer_context).is_ok() {
+                report.completed_exchanges += 1;
+            } else {
+                report.failed_connections += 1;
+            }
+            if let Some(reason) = stop_reason(context) {
+                report.stopped = reason;
+                return Ok(report);
+            }
+        }
+        Ok(report)
+    }
+}
+
+// Forward only cancellation, not the peer deadline, to the bounded context.
+struct ForwardCancellation<'a>(&'a OperationContext<'a>);
+impl super::runtime::Cancellation for ForwardCancellation<'_> {
+    fn is_cancelled(&self) -> bool {
+        self.0.is_cancelled()
+    }
+}
+
+fn stop_reason(context: &OperationContext<'_>) -> Option<StopReason> {
+    if context.is_cancelled() {
+        Some(StopReason::Cancelled)
+    } else if context.remaining().is_zero() {
+        Some(StopReason::Deadline)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::control::ipc::{
+        RequestEnvelope, RequestStatus, ResponseErrorCode, ResponseMessage, WireChatRole,
+        WireChatTurn, WireInferenceRequest, WireRequestMessage,
+    };
+    use crate::control::local_ipc::LocalConnection;
+    use crate::control::ownership::CoordinatorLock;
+    use crate::control::runtime::{Cancellation, NeverCancel};
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixStream;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tempfile::TempDir;
+
+    struct Fixture {
+        socket: TempDir,
+        locks: TempDir,
+        data: TempDir,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let fixture = Self {
+                socket: TempDir::new().unwrap(),
+                locks: TempDir::new().unwrap(),
+                data: TempDir::new().unwrap(),
+            };
+            for path in [
+                fixture.socket.path(),
+                fixture.locks.path(),
+                fixture.data.path(),
+            ] {
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            fixture
+        }
+        fn config(&self, limit: usize) -> DaemonConfig {
+            DaemonConfig {
+                socket_directory: self.socket.path().into(),
+                lock_directory: self.locks.path().into(),
+                data_directory: self.data.path().into(),
+                gpus: vec![0],
+                queue_capacity: 8,
+                peer_timeout: Duration::from_millis(100),
+                max_connections: limit,
+            }
+        }
+        fn bind(&self, config: DaemonConfig) -> Result<ControlDaemon, DaemonError> {
+            let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+            ControlDaemon::bind(config, Catalog::load(root).unwrap(), BTreeMap::new(), root)
+        }
+        fn released(&self) {
+            assert!(!self.socket.path().join("coordinator.sock").exists());
+            assert!(CoordinatorLock::acquire(self.locks.path(), [0]).is_ok());
+        }
+    }
+    fn exchange(directory: &Path, message: WireRequestMessage) -> ResponseMessage {
+        let context = OperationContext::new(Instant::now() + Duration::from_secs(3), &NeverCancel);
+        let mut peer = LocalConnection::connect(directory, &context).unwrap();
+        peer.write_request(&RequestEnvelope::v1(message), &context)
+            .unwrap();
+        peer.read_response(&context).unwrap().message
+    }
+
+    #[test]
+    fn status_is_served_but_submission_stays_closed_and_owner_is_released() {
+        let fixture = Fixture::new();
+        let daemon = fixture.bind(fixture.config(2)).unwrap();
+        let directory = fixture.socket.path().to_owned();
+        let client = std::thread::spawn(move || {
+            assert_eq!(
+                exchange(
+                    &directory,
+                    WireRequestMessage::Status {
+                        request_id: "missing".into(),
+                    }
+                ),
+                ResponseMessage::Status {
+                    request_id: "missing".into(),
+                    state: RequestStatus::NotFound,
+                }
+            );
+            assert_eq!(
+                exchange(
+                    &directory,
+                    WireRequestMessage::Submit {
+                        request_id: "closed".into(),
+                        timeout_ms: 1000,
+                        request: WireInferenceRequest::Language {
+                            profile_id: "gemma-4-26b-qat-mtp".into(),
+                            max_tokens: 8,
+                            turns: vec![WireChatTurn {
+                                role: WireChatRole::User,
+                                content: "PRIVATE_PROMPT".into()
+                            }],
+                        },
+                    }
+                ),
+                ResponseMessage::Error {
+                    request_id: Some("closed".into()),
+                    code: ResponseErrorCode::Unavailable,
+                }
+            );
+        });
+        let ctx = OperationContext::new(Instant::now() + Duration::from_secs(3), &NeverCancel);
+        let report = daemon.run(&ctx).unwrap();
+        client.join().unwrap();
+        assert_eq!(
+            report,
+            RunReport {
+                completed_exchanges: 2,
+                failed_connections: 0,
+                stopped: StopReason::ConnectionLimit
+            }
+        );
+        assert!(!fixture.data.path().join("jobs.json").exists());
+        fixture.released();
+    }
+
+    #[test]
+    fn malformed_and_stalled_peers_do_not_block_next_peer() {
+        let fixture = Fixture::new();
+        let daemon = fixture.bind(fixture.config(3)).unwrap();
+        let directory = fixture.socket.path().to_owned();
+        // Fill two connections before the good peer. First frame is invalid,
+        // second holds an incomplete length prefix beyond the peer deadline.
+        let mut malformed = UnixStream::connect(directory.join("coordinator.sock")).unwrap();
+        malformed.write_all(&[0, 0, 0, 1, b'{']).unwrap();
+        let mut stalled = UnixStream::connect(directory.join("coordinator.sock")).unwrap();
+        stalled.write_all(&[0]).unwrap();
+        let client = std::thread::spawn(move || {
+            exchange(
+                &directory,
+                WireRequestMessage::Status {
+                    request_id: "after-bad-peers".into(),
+                },
+            )
+        });
+        let ctx = OperationContext::new(Instant::now() + Duration::from_secs(3), &NeverCancel);
+        let report = daemon.run(&ctx).unwrap();
+        assert!(matches!(
+            client.join().unwrap(),
+            ResponseMessage::Status {
+                state: RequestStatus::NotFound,
+                ..
+            }
+        ));
+        assert_eq!(
+            report,
+            RunReport {
+                completed_exchanges: 1,
+                failed_connections: 2,
+                stopped: StopReason::ConnectionLimit
+            }
+        );
+        fixture.released();
+    }
+
+    struct Flag(AtomicBool);
+    impl Cancellation for Flag {
+        fn is_cancelled(&self) -> bool {
+            self.0.load(Ordering::Acquire)
+        }
+    }
+    #[test]
+    fn cancellation_interrupts_stalled_peer_and_releases_ownership() {
+        let fixture = Fixture::new();
+        let mut config = fixture.config(10);
+        config.peer_timeout = Duration::from_secs(30);
+        let daemon = fixture.bind(config).unwrap();
+        let _stalled = UnixStream::connect(fixture.socket.path().join("coordinator.sock")).unwrap();
+        let cancelled = Flag(AtomicBool::new(false));
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(50));
+                cancelled.0.store(true, Ordering::Release);
+            });
+            let ctx = OperationContext::new(Instant::now() + Duration::from_secs(3), &cancelled);
+            assert_eq!(daemon.run(&ctx).unwrap().stopped, StopReason::Cancelled);
+        });
+        fixture.released();
+    }
+
+    #[test]
+    fn overall_deadline_limits_idle_listener_and_stalled_peer() {
+        for stalled in [false, true] {
+            let fixture = Fixture::new();
+            let daemon = fixture.bind(fixture.config(10)).unwrap();
+            let _peer = stalled.then(|| {
+                UnixStream::connect(fixture.socket.path().join("coordinator.sock")).unwrap()
+            });
+            let ctx =
+                OperationContext::new(Instant::now() + Duration::from_millis(40), &NeverCancel);
+            assert_eq!(daemon.run(&ctx).unwrap().stopped, StopReason::Deadline);
+            fixture.released();
+        }
+    }
+
+    #[test]
+    fn competing_owner_does_not_touch_history() {
+        let fixture = Fixture::new();
+        std::fs::write(fixture.data.path().join("jobs.json"), "untouched").unwrap();
+        let _guard = CoordinatorLock::acquire(fixture.locks.path(), [0]).unwrap();
+        assert!(matches!(
+            fixture.bind(fixture.config(1)),
+            Err(DaemonError::Transport(LocalIpcError::OwnershipUnavailable))
+        ));
+        assert_eq!(
+            std::fs::read_to_string(fixture.data.path().join("jobs.json")).unwrap(),
+            "untouched"
+        );
+        assert!(!fixture.socket.path().join("coordinator.sock").exists());
+    }
+
+    #[test]
+    fn startup_history_failure_releases_socket_and_guard() {
+        let fixture = Fixture::new();
+        std::fs::create_dir(fixture.data.path().join("jobs.json")).unwrap();
+        assert!(matches!(
+            fixture.bind(fixture.config(1)),
+            Err(DaemonError::HistoryUnavailable)
+        ));
+        fixture.released();
+    }
+
+    #[test]
+    fn invalid_configuration_and_nonprivate_data_fail_before_binding() {
+        let fixture = Fixture::new();
+        for invalid in 0..4 {
+            let mut config = fixture.config(1);
+            match invalid {
+                0 => config.max_connections = 0,
+                1 => config.queue_capacity = 129,
+                2 => config.peer_timeout = Duration::ZERO,
+                _ => config.peer_timeout = Duration::from_secs(31),
+            }
+            assert!(matches!(
+                fixture.bind(config),
+                Err(DaemonError::InvalidConfig)
+            ));
+        }
+        std::fs::set_permissions(fixture.data.path(), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        assert!(matches!(
+            fixture.bind(fixture.config(1)),
+            Err(DaemonError::Transport(LocalIpcError::UnsafePath))
+        ));
+        fixture.released();
+    }
+
+    #[test]
+    fn startup_interrupts_durable_work_without_replay() {
+        use crate::job_history::{CrossToolkitJobStart, JobHistory};
+        let fixture = Fixture::new();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let (mut history, _) = JobHistory::load_in(fixture.data.path(), root).unwrap();
+        history
+            .begin_cross_toolkit(CrossToolkitJobStart {
+                toolkit: "l3ms".into(),
+                request_id: Some("before-restart".into()),
+                ..CrossToolkitJobStart::default()
+            })
+            .unwrap();
+        history.persist_in(fixture.data.path()).unwrap();
+        drop(history);
+        let daemon = fixture.bind(fixture.config(1)).unwrap();
+        assert_eq!(daemon.core.queued_count(), 0);
+        assert_eq!(daemon.core.active_count(), 0);
+        let directory = fixture.socket.path().to_owned();
+        let client = std::thread::spawn(move || {
+            exchange(
+                &directory,
+                WireRequestMessage::Status {
+                    request_id: "before-restart".into(),
+                },
+            )
+        });
+        let ctx = OperationContext::new(Instant::now() + Duration::from_secs(3), &NeverCancel);
+        daemon.run(&ctx).unwrap();
+        assert_eq!(
+            client.join().unwrap(),
+            ResponseMessage::Status {
+                request_id: "before-restart".into(),
+                state: RequestStatus::Interrupted,
+            }
+        );
+        fixture.released();
+    }
+
+    #[test]
+    fn every_bound_gpu_requires_an_owned_device_lock() {
+        use crate::control::catalog::Lane;
+        let fixture = Fixture::new();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let bindings = BTreeMap::from([(
+            RuntimeIdentity::new(Lane::Language, "llama-swap").unwrap(),
+            ResourceClaim::ExclusiveGpu(1),
+        )]);
+        assert!(matches!(
+            ControlDaemon::bind(
+                fixture.config(1),
+                Catalog::load(root).unwrap(),
+                bindings,
+                root,
+            ),
+            Err(DaemonError::InvalidConfig)
+        ));
+        fixture.released();
+    }
+}
