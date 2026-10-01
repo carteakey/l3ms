@@ -154,6 +154,14 @@ exit. The consuming serial loop bounds peer time and connection attempts and
 has no dispatch or admission-opening interface. No live service was touched;
 installation, lifecycle reconciliation and result delivery remain pending.
 
+2026-10-01 decision-route correction: the native Nagi Smol/Big bridge now passes
+the declared repository ID to its loader, including CPU fallback; previously it
+selected only a tier and silently loaded the upstream default repository. Three
+new offline mock regressions cover repository forwarding and preserve Huge's
+existing call shape. L3DS Python: fourteen tests pass. No weights or environment
+were installed. Public-metadata-only acquisition preflight is recorded in
+[l3ds-prep.md](l3ds-prep.md); installation approval remains pending.
+
 - Choose the host admission mode for direct llama-swap/ComfyUI requests before
   claiming automatic cross-engine switching. The plan allows coordination
   only where the runtime can block and drain new direct work, or where callers

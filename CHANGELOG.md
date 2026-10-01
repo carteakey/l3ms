@@ -10,6 +10,8 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Fixed native Nagi Smol/Big loading to honor the manifest's repository ID on
+  both the requested device and CPU fallback, rather than silently using defaults.
 - Replaced a confirmed documentation-only API-key example with an unmistakable
   placeholder; active credentials and service configuration are unchanged.
 - Added an internal Linux control-daemon owner with serial bounded peer serving,

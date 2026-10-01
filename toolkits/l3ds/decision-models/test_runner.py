@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 
 RUNNER = Path(__file__).with_name("runner.py")
@@ -106,6 +106,62 @@ class RunnerSafetyTest(unittest.TestCase):
         with contextlib.redirect_stdout(output), self.assertRaises(runner.InferenceUnavailable):
             runner.run_benchmark(engine, str(RUNNER.parents[1] / "suites" / "routing-gate.json"), 1)
         self.assertNotIn("BENCH_RESULT:", output.getvalue())
+
+
+class NagiRepositoryTest(unittest.TestCase):
+    def test_smol_and_big_loaders_receive_declared_repository(self):
+        cases = [
+            ("load_smol", "nagisanzeninz/nagi-smol-v0"),
+            ("load_big", "nagisanzeninz/nagi-big-v3"),
+        ]
+        for loader_name, repository in cases:
+            with self.subTest(loader=loader_name):
+                fake_nagi = Mock()
+                loaded_model = object()
+                loader = getattr(fake_nagi, loader_name)
+                loader.return_value = loaded_model
+
+                with patch.dict("sys.modules", {"nagi": fake_nagi}):
+                    engine = runner.NagiEngine(repository, device="cuda")
+
+                self.assertIs(engine.model, loaded_model)
+                loader.assert_called_once_with(repo=repository, device="cuda")
+
+    def test_smol_and_big_cpu_fallback_reuses_declared_repository(self):
+        cases = [
+            ("load_smol", "nagisanzeninz/nagi-smol-v0"),
+            ("load_big", "nagisanzeninz/nagi-big-v3"),
+        ]
+        for loader_name, repository in cases:
+            with self.subTest(loader=loader_name):
+                fake_nagi = Mock()
+                loaded_model = object()
+                loader = getattr(fake_nagi, loader_name)
+                loader.side_effect = [RuntimeError("CUDA unavailable"), loaded_model]
+
+                with patch.dict("sys.modules", {"nagi": fake_nagi}), \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    engine = runner.NagiEngine(repository, device="cuda")
+
+                self.assertIs(engine.model, loaded_model)
+                self.assertEqual(
+                    loader.call_args_list,
+                    [
+                        call(repo=repository, device="cuda"),
+                        call(repo=repository, device="cpu"),
+                    ],
+                )
+
+    def test_huge_loader_call_shape_remains_unchanged(self):
+        fake_nagi = Mock()
+        loaded_model = object()
+        fake_nagi.load_huge.return_value = loaded_model
+
+        with patch.dict("sys.modules", {"nagi": fake_nagi}):
+            engine = runner.NagiEngine("nagisanzeninz/nagi-huge-v0", device="cuda")
+
+        self.assertIs(engine.model, loaded_model)
+        fake_nagi.load_huge.assert_called_once_with(device="cuda")
 
 
 class NagiSmolSetupTest(unittest.TestCase):

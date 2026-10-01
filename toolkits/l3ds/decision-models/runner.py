@@ -138,22 +138,22 @@ class NagiEngine(BaseDecisionEngine):
             import nagi
             if "smol" in model_name.lower():
                 try:
-                    self.model = nagi.load_smol(device=device)
+                    self.model = nagi.load_smol(repo=model_name, device=device)
                 except Exception as cuda_err:
                     if device != "cpu":
                         print(f"[{model_name}] CUDA initialization ({cuda_err}), falling back to CPU...", file=sys.stderr)
-                        self.model = nagi.load_smol(device="cpu")
+                        self.model = nagi.load_smol(repo=model_name, device="cpu")
                     else:
                         raise
             elif "huge" in model_name.lower():
                 self.model = nagi.load_huge(device=device)
             else:
                 try:
-                    self.model = nagi.load_big(device=device)
+                    self.model = nagi.load_big(repo=model_name, device=device)
                 except Exception as cuda_err:
                     if device != "cpu":
                         print(f"[{model_name}] CUDA initialization ({cuda_err}), falling back to CPU...", file=sys.stderr)
-                        self.model = nagi.load_big(device="cpu")
+                        self.model = nagi.load_big(repo=model_name, device="cpu")
                     else:
                         raise
         except Exception as e:
