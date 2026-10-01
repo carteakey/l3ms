@@ -126,11 +126,40 @@ provide blocking `pre_exec` hooks: synchronous OS process creation is not
 preemptible by the polling deadline. These constraints apply to trusted native
 commands, not arbitrary executable sandboxing.
 
+## Local IPC transport
+
+The Linux transport now binds a pathname Unix socket in a pre-existing,
+current-effective-UID-owned private directory and restricts the socket to 0600.
+It retains the shared host/device ownership guard for the listener lifetime;
+the future daemon must create this listener before loading/writing history.
+Both client and accepted connections verify `SO_PEERCRED` against that UID.
+This authenticates local user identity, not individual applications of that
+user, and assumes trusted directory ancestors on a local filesystem.
+
+Existing paths, including stale sockets and symlinks, are refused rather than
+silently removed. Normal drop removes only a matching socket inode; replacement
+entries are preserved. A crash or unverifiable post-bind setup failure can leave
+a stale endpoint; explicit safe recovery remains daemon integration work.
+
+Accept/connect and nonblocking frame reads/writes obey cancellation and absolute
+operation deadlines with at most 25 ms polling waits. Whole-frame limits reuse
+IPC v1; trickling bytes do not reset deadlines. A tested Linux AF_UNIX full
+backlog returns EAGAIN without a pending connection, even when SO_ERROR is zero;
+only connection establishment is retried, never a request frame. The connection
+enforces one request/reply and poisons itself after partial/failed IO. Explicit
+reply IDs must match; generic v1 errors may omit an ID on that single exchange.
+Failures expose fixed categories, not socket paths or payloads.
+
+The caller supplies operation contexts and must bound active peers and handler
+work. This transport is not a daemon/event loop, result stream, installation,
+coordinator dispatch, or proof of runtime admission. Two independent test clients
+exercise socket/status framing only; they do not satisfy the live inference gate.
+
 ## Release gates
 
 No adapter is connected to a public run/switch command yet. IPC currently defines
-messages and framing, not a listening daemon, authenticated peer transport, or
-result/stream delivery. Concrete lifecycle/admission adapters, backend ID and
+messages, framing, and authenticated bounded Linux transport, not an installed
+listening daemon or result/stream delivery. Concrete lifecycle/admission adapters, backend ID and
 artifact propagation, coordinated client integration, and real TTS/local decision acceptance
 must all be verified before enabling coordinated inference. The public export
 remains blocked by the separate publication audit; no endpoint cutover is implied.

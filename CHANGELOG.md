@@ -10,6 +10,9 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Added internal Linux private Unix-socket IPC transport with peer UID checks,
+  lifetime ownership locks, bounded cancellable IO, and single-exchange framing.
+  No coordinator service is installed or exposed through CLI/UI yet.
 - Added an internal bounded ComfyUI jobs adapter with single-use submission
   tokens, native status/artifact validation, and owned-job scoped cancellation.
   Public run/switch actions remain disabled pending lifecycle acceptance.

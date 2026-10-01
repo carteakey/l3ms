@@ -29,6 +29,9 @@ See the [migration status](docs/migration/status.md),
 
 ### Coordinator and clients — CAR-218 / CAR-219
 
+- [x] Build and fixture-test Linux private socket transport, peer UID checks,
+  retained host/device locks, bounded IO, and single-exchange request IDs.
+  This is transport only; no installed daemon or inference dispatch yet.
 - [ ] Implement the local IPC daemon with private socket/peer authentication,
   bounded transport, singleton ownership, startup reconciliation, and concrete
   dispatch. Deliver results, artifact references, and streams without persisting

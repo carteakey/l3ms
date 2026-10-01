@@ -7,6 +7,8 @@ pub mod decision;
 pub mod inference;
 pub mod ipc;
 pub mod language;
+#[cfg(target_os = "linux")]
+pub mod local_ipc;
 pub mod native_commands;
 pub mod native_paths;
 pub mod ownership;

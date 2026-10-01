@@ -4,8 +4,8 @@
 //! open sockets, authenticate peers, acquire a host-wide lock, dispatch work,
 //! or perform lifecycle operations. A future daemon must supply those
 //! guarantees separately. The generic `Read`/`Write` helpers are blocking and
-//! do not enforce IO deadlines; a future transport must bound peer IO outside
-//! this module. Requests intentionally have no `Debug` output so prompts,
+//! do not enforce IO deadlines; the Linux `local_ipc` transport bounds peer IO
+//! outside this module. Requests intentionally have no `Debug` output so prompts,
 //! workflow graphs, speech text, and native arguments are not dumped
 //! accidentally by diagnostic logging. Version 1 returns acceptance and
 //! lifecycle status only; result bodies, artifact retrieval, and streaming
