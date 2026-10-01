@@ -4,6 +4,33 @@ Recorded 2026-09-28 for the [consolidation plan](../monorepo-consolidation-plan.
 This is L3DS-only preparation evidence; it does not complete the repository-wide
 Phase 0 gate.
 
+## Nagi-Smol acquisition preflight — 2026-10-01
+
+This follow-up read public metadata/source only. It did not install packages,
+download weights, execute model code, or alter the existing environment/cache.
+The owner has not approved installation/acquisition; live acceptance stays gated.
+
+The [Nagi model inventory](https://huggingface.co/nagisanzeninz/nagi-smol-v0/tree/6d842eed3cf2ba619a7ecade77e00eed16f22c57)
+reports `model.pt` at 1,920,127,806 bytes and `config.snapshot.yaml` at 910 bytes.
+The repository also contains many training checkpoints; a whole-repository
+download would be wasteful and is not the intended acquisition contract.
+The pinned [Nagi loader](https://github.com/nagisanzenin/nagi/blob/80f8c5e71832e227c8bf14cc52bbb448d3771c7a/src/nagi/api.py)
+loads those two files with `hf_hub_download`, not an unrestricted snapshot.
+
+The configuration names `answerdotai/ModernBERT-large` as the backbone. Its
+[pinned inventory](https://huggingface.co/answerdotai/ModernBERT-large/tree/45bb4654a4d5aaff24dd11d4781fa46d39bf8c13)
+reports `model.safetensors` at 1,583,544,840 bytes, plus small config/tokenizer
+files. Do not acquire duplicate PyTorch or ONNX exports. The two primary weight
+files alone total 3,503,672,646 bytes (about 3.50 GB / 3.26 GiB); Python/CUDA
+packages and staging/cache space are additional. The repo filesystem had about
+33 GiB free during this check. Recheck free space before any approved install.
+
+Before live acceptance, pin/cache only the required revisions/files, verify
+their recorded hashes, and test the actual loader in offline mode. Metadata is
+not proof of a successful native forward pass. Preserve the original environment
+and cache, and obtain approval for the separate branch environment and download
+budget before running the opt-in preparer.
+
 ## Source baseline
 
 - Checkout: `/home/kchauhan/repos/l3ds`
