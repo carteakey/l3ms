@@ -10,6 +10,7 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Moved the `model-inventory-manager` Codex skill to [skillrex](https://github.com/carteakey/skillrex/tree/main/skills/model-inventory-manager) (history preserved); dropped the stale May `.skill` bundle and the now-empty `codex-skills/` directory.
 - Extracted shared filesystem utilities (`atomic_write`, `write_unique_snapshot`, `safe_stamp`, `format_utc_seconds`, `resolve_allow_missing`, `ensure_single_component`) into `src/fs_util.rs` to deduplicate ~300 lines of identical logic across `config_store` and `script_store`.
 - Added typed `ModelState` enum and `SwapModel::model_state()` to `llama_swap.rs` for compiler-checked model lifecycle states.
 - Marked compile-time `repository_root()` and `versions_root()` in `config_store` and `script_store` as deprecated with clear guidance to use runtime-resolved root paths via `_in()` functions.
