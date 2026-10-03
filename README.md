@@ -109,6 +109,20 @@ and `toolkits/l3ds`; layered settings can override them with
 `L3MS_HOST_SETTINGS_DIR` selects a host settings directory before user
 settings are applied.
 
+On Linux, observe or cancel a retained coordinator request using an explicitly
+configured private socket directory:
+
+```bash
+l3ms --coordinator-status request-123 --coordinator-socket-dir /path/to/private/socket-dir
+l3ms --coordinator-cancel request-123 --coordinator-socket-dir /path/to/private/socket-dir
+```
+
+These commands use a three-second IPC deadline and return compact JSON. They do
+not start a daemon, submit inference, or fall back to a direct engine. A missing
+coordinator fails explicitly. Cancellation acceptance is not proof that active
+work has finished; query the same request ID for its terminal status. Service
+installation and coordinated inference remain gated by migration acceptance.
+
 Show quick-start instructions without opening TUI:
 
 ```bash

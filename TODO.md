@@ -10,8 +10,8 @@ existing Linear migration issues rather than replacing their acceptance criteria
 
 ## Monorepo: next work
 
-Latest offline checkpoint: bounded control-daemon ownership on `feature/l3ms-monorepo`;
-415 root tests passed,
+Latest offline checkpoint: coordinator CLI and Breeze execution on `feature/l3ms-monorepo`;
+426 root tests passed,
 1 ignored. This is offline implementation evidence, not live cutover acceptance.
 See the [migration status](docs/migration/status.md),
 [plan](docs/monorepo-consolidation-plan.md), and
@@ -23,8 +23,11 @@ See the [migration status](docs/migration/status.md),
   verified blocking/draining of direct requests. Refuse unsafe swaps meanwhile.
 - [ ] Implement concrete lifecycle adapters and reconcile actual runtime
   ownership; verify stop, GPU release, startup/health, and bounded rollback.
-- [ ] Connect bounded media/TTS command recipes to execution and artifact
-  discovery. Verify hosted decision SDK retry/auth behavior before enabling it.
+- [x] Connect Breeze speech recipes to bounded execution and per-job WAV/chunk
+  artifact validation. Real-model tests and coordinator dispatch remain gated.
+- [ ] Add explicit artifact contracts for other native media scripts; do not
+  guess from logs or scan shared output directories. Verify hosted decision
+  SDK retry/auth behavior before enabling it.
 - [ ] Define durable ComfyUI ownership recovery: fresh IDs persisted before
   submission, no replay, and reconciliation of unknown/cancelled backend jobs.
 
@@ -46,6 +49,7 @@ See the [migration status](docs/migration/status.md),
   and supervised dispatch; keep dispatch closed until those checks are integrated.
 - [ ] Integrate CLI and keyboard-first UI run/observe/cancel with the same
   coordinator, settings, routing, and request IDs; preserve standalone commands.
+  Linux CLI request status/cancel is implemented; submit/results and UI remain.
 - [ ] Add HTTP ingress to that coordinator only after local operation is proven;
   verify authentication and cancellation/reconnect behavior across clients.
 

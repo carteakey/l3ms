@@ -67,6 +67,31 @@ paths anchor to the toolkit root, while explicit absolute external samples are
 allowed. Generic ComfyUI workflow graphs use the separate bounded jobs adapter
 described below, not a script command recipe.
 
+## Breeze speech execution
+
+The internal executor composes the native Breeze recipe and bounded child runner
+for standard speech, design, cloning and streaming. The caller supplies a fresh,
+existing absolute mode-0700 current-UID job directory. Existing result/chunk
+targets are rejected before spawning; explicit `--output` and `--out-dir`
+prevent inherited default output settings from redirecting artifact discovery.
+Captured logs are discarded, never parsed for output paths or persisted.
+
+Success requires child-group cleanup plus a regular, single-link in-root WAV,
+with a bounded RIFF/RIFX PCM/float format and nonempty aligned sample data.
+This validates container structure, not audible quality; RF64/BW64, compressed
+formats and real synthesis acceptance require separate contracts/evidence.
+Streaming also requires 1–63 safe-named, sorted WAV chunks, for at most 64
+artifact references and 512 MiB total. Symlinks, hard links, directories, missing
+outputs, malformed/empty WAVs and oversized artifacts fail without success.
+Relative references remain separate from the private in-memory output root.
+
+Cancellation/deadlines are checked through execution and artifact inspection;
+post-child errors retain the reaped disposition and never authorize replay.
+The caller must keep the toolkit/job directory and ancestors trusted and stable;
+filesystem operations themselves cannot be preempted. This is not a filesystem
+sandbox or GPU-release proof. Generic media scripts have no inferred artifact
+contract and remain unwired to coordinator dispatch.
+
 ## ComfyUI job safety
 
 The installed ComfyUI implementation supports caller-supplied canonical UUID
@@ -207,6 +232,14 @@ fixture-tested foreground infrastructure, not a CLI command, installed service,
 runtime lifecycle owner or enabled inference scheduler.
 
 ## Release gates
+
+The Linux CLI can query/cancel one retained request through an explicitly supplied
+private socket directory with a single three-second exchange. It validates both
+request IDs and reply operation, prints bounded JSON, and returns nonzero for a
+typed error. It never starts the daemon, submits inference, retries a frame or
+falls back to an engine. A cancelled active request retains its lease until
+cleanup is acknowledged; the CLI does not claim otherwise. This is control
+integration, not full run/result/stream or keyboard-workbench parity.
 
 No adapter is connected to a public run/switch command yet. IPC currently defines
 messages, framing, authenticated bounded Linux transport, control handling and

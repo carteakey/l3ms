@@ -11,6 +11,8 @@ pub mod ipc;
 pub mod language;
 #[cfg(target_os = "linux")]
 pub mod local_ipc;
+#[cfg(target_os = "linux")]
+pub mod media_execution;
 pub mod native_commands;
 pub mod native_paths;
 pub mod ownership;

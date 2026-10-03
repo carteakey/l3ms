@@ -225,6 +225,32 @@ pub fn prepare_native_command(
     }
 }
 
+/// Prepare Breeze speech with an explicit caller-owned output directory.
+/// Existing callers of `prepare_native_command` retain the native wrapper's
+/// default output behavior; the bounded executor uses this helper to prevent
+/// timestamp-based writes into a shared inherited output directory.
+pub fn prepare_breeze_speech_recipe(
+    catalog: &Catalog,
+    request: &InferenceRequest,
+    output_directory: &std::path::Path,
+) -> Result<NativeCommandRecipe> {
+    let mut recipe = prepare_native_command(catalog, request)?;
+    ensure!(
+        matches!(
+            &recipe.expectation,
+            NativeOutputExpectation::BreezeSpeech { .. }
+        ),
+        "explicit Breeze output requires a Breeze speech request"
+    );
+    let output = output_directory.join("result.wav");
+    recipe.argv.push(text_argument("--output")?);
+    recipe.argv.push(path_argument(&output)?);
+    recipe.argv.push(text_argument("--out-dir")?);
+    recipe.argv.push(path_argument(output_directory)?);
+    ensure_argv_budget(&recipe.executable, &recipe.argv)?;
+    Ok(recipe)
+}
+
 fn ensure_route_matches_verified_path(
     route: &ResolvedProfileRoute,
     verified: &VerifiedNativePath,

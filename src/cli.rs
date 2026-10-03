@@ -5,6 +5,8 @@ use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(target_os = "linux")]
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use clap::{ArgGroup, Parser, ValueEnum};
@@ -20,6 +22,10 @@ use crate::{
     },
 };
 
+#[cfg(target_os = "linux")]
+const COORDINATOR_TIMEOUT: Duration = Duration::from_secs(3);
+const MAX_COORDINATOR_RESPONSE_BYTES: usize = 2 * 1024;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "l3ms",
@@ -27,7 +33,7 @@ use crate::{
     about = "L3MS launcher (TUI + interactive model and bench CLI)",
     group(
         ArgGroup::new("action")
-            .args(["run", "bench", "list", "quickstart", "settings", "export_profile", "import_profile", "compare_results"])
+            .args(["run", "bench", "list", "quickstart", "settings", "export_profile", "import_profile", "compare_results", "coordinator_status", "coordinator_cancel"])
             .multiple(false)
     )
 )]
@@ -74,14 +80,21 @@ struct Cli {
     #[arg(long, value_names = ["LEFT", "RIGHT"], num_args = 2)]
     compare_results: Option<Vec<PathBuf>>,
 
+    /// Query one retained coordinator request by caller-owned request ID.
+    #[arg(long, value_name = "ID", requires = "coordinator_socket_dir")]
+    coordinator_status: Option<String>,
+
+    /// Cancel one retained queued/running coordinator request by request ID.
+    #[arg(long, value_name = "ID", requires = "coordinator_socket_dir")]
+    coordinator_cancel: Option<String>,
+
+    /// Existing private directory containing coordinator.sock; never inferred.
+    #[arg(long, value_name = "DIRECTORY")]
+    coordinator_socket_dir: Option<PathBuf>,
+
     /// Shell-style arguments appended to the selected benchmark script.
-    #[arg(
-        long,
-        default_value = "",
-        value_name = "ARGS",
-        allow_hyphen_values = true
-    )]
-    extra: String,
+    #[arg(long, value_name = "ARGS", allow_hyphen_values = true)]
+    extra: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -92,6 +105,12 @@ enum ListMode {
     Prompts,
     Stack,
     All,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CoordinatorOperation {
+    Status,
+    Cancel,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -106,6 +125,17 @@ pub fn run() -> Result<u8> {
 }
 
 fn dispatch(cli: Cli) -> Result<u8> {
+    if let Some((operation, request_id, socket_directory)) = coordinator_action(&cli)? {
+        let response = coordinator_exchange(socket_directory, operation, request_id)?;
+        let json = coordinator_response_json(&response)?;
+        let exit_code = u8::from(matches!(
+            response,
+            crate::control::ipc::ResponseMessage::Error { .. }
+        ));
+        println!("{json}");
+        return Ok(exit_code);
+    }
+
     if cli.quickstart {
         print_quickstart();
         return Ok(0);
@@ -153,29 +183,179 @@ fn dispatch(cli: Cli) -> Result<u8> {
     }
 
     if let Some(mode) = cli.list {
-        if !cli.extra.trim().is_empty() {
+        if !cli.extra.as_deref().unwrap_or_default().trim().is_empty() {
             bail!("--extra is only valid with --bench");
         }
         return list(mode);
     }
 
     if let Some(filter) = cli.run {
-        if !cli.extra.trim().is_empty() {
+        if !cli.extra.as_deref().unwrap_or_default().trim().is_empty() {
             bail!("--extra is only valid with --bench");
         }
         return interactive_run(&filter);
     }
 
     if let Some(filter) = cli.bench {
-        return interactive_bench(&filter, &cli.extra);
+        return interactive_bench(&filter, cli.extra.as_deref().unwrap_or_default());
     }
 
-    if !cli.extra.trim().is_empty() {
+    if !cli.extra.as_deref().unwrap_or_default().trim().is_empty() {
         bail!("--extra is only valid with --bench");
     }
 
     crate::app::run_tui()?;
     Ok(0)
+}
+
+fn coordinator_action(cli: &Cli) -> Result<Option<(CoordinatorOperation, &str, &Path)>> {
+    let action = match (
+        cli.coordinator_status.as_deref(),
+        cli.coordinator_cancel.as_deref(),
+    ) {
+        (Some(_), Some(_)) => bail!("choose only one coordinator operation"),
+        (Some(request_id), None) => Some((CoordinatorOperation::Status, request_id)),
+        (None, Some(request_id)) => Some((CoordinatorOperation::Cancel, request_id)),
+        (None, None) => None,
+    };
+
+    let Some((operation, request_id)) = action else {
+        if cli.coordinator_socket_dir.is_some() {
+            bail!("--coordinator-socket-dir requires --coordinator-status or --coordinator-cancel");
+        }
+        return Ok(None);
+    };
+
+    if cli.extra.is_some() {
+        bail!("--extra cannot be used with coordinator operations");
+    }
+    let socket_directory = cli.coordinator_socket_dir.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("coordinator operations require --coordinator-socket-dir")
+    })?;
+    Ok(Some((operation, request_id, socket_directory)))
+}
+
+fn coordinator_exchange(
+    socket_directory: &Path,
+    operation: CoordinatorOperation,
+    request_id: &str,
+) -> Result<crate::control::ipc::ResponseMessage> {
+    #[cfg(target_os = "linux")]
+    {
+        coordinator_exchange_linux(socket_directory, operation, request_id)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (socket_directory, operation, request_id);
+        bail!("coordinator IPC is supported only on Linux");
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn coordinator_exchange_linux(
+    socket_directory: &Path,
+    operation: CoordinatorOperation,
+    request_id: &str,
+) -> Result<crate::control::ipc::ResponseMessage> {
+    use crate::control::{
+        ipc::{ProtocolError, RequestEnvelope, WireRequestMessage},
+        local_ipc::{LocalConnection, LocalIpcError},
+        runtime::{NeverCancel, OperationContext},
+    };
+
+    crate::control::ipc::validate_request_id(request_id)
+        .map_err(|_| anyhow::anyhow!("invalid coordinator request ID"))?;
+    let message = match operation {
+        CoordinatorOperation::Status => WireRequestMessage::Status {
+            request_id: request_id.to_owned(),
+        },
+        CoordinatorOperation::Cancel => WireRequestMessage::Cancel {
+            request_id: request_id.to_owned(),
+        },
+    };
+
+    let context = OperationContext::new(Instant::now() + COORDINATOR_TIMEOUT, &NeverCancel);
+    let mut connection = LocalConnection::connect(socket_directory, &context)
+        .map_err(|error| safe_coordinator_error(error, true))?;
+    connection
+        .write_request(&RequestEnvelope::v1(message), &context)
+        .map_err(|error| safe_coordinator_error(error, false))?;
+    connection
+        .read_response(&context)
+        .map(|response| response.message)
+        .map_err(|error| {
+            let error = match error {
+                LocalIpcError::Protocol(ProtocolError::InvalidRequestId) => {
+                    anyhow::anyhow!("invalid coordinator request ID")
+                }
+                other => safe_coordinator_error(other, false),
+            };
+            error
+        })
+        .and_then(|response| validate_coordinator_response(operation, response))
+}
+
+#[cfg(target_os = "linux")]
+fn safe_coordinator_error(
+    error: crate::control::local_ipc::LocalIpcError,
+    connecting: bool,
+) -> anyhow::Error {
+    use crate::control::local_ipc::LocalIpcError;
+
+    let message = match error {
+        LocalIpcError::UnsafePath => "coordinator directory or socket is unsafe",
+        LocalIpcError::Unavailable if connecting => "coordinator is unavailable",
+        LocalIpcError::Unavailable => "coordinator exchange failed",
+        LocalIpcError::Deadline | LocalIpcError::Cancelled => "coordinator operation timed out",
+        LocalIpcError::Protocol(crate::control::ipc::ProtocolError::InvalidRequestId) => {
+            "invalid coordinator request ID"
+        }
+        LocalIpcError::Protocol(_) | LocalIpcError::ResponseMismatch => {
+            "coordinator response is invalid"
+        }
+        LocalIpcError::PeerDenied => "coordinator peer is not authorized",
+        LocalIpcError::OwnershipUnavailable => "coordinator ownership is unavailable",
+        LocalIpcError::ExistingSocket => "coordinator endpoint is unavailable",
+        LocalIpcError::Io | LocalIpcError::OutOfOrder => "coordinator exchange failed",
+    };
+    anyhow::anyhow!(message)
+}
+
+fn coordinator_response_json(response: &crate::control::ipc::ResponseMessage) -> Result<String> {
+    let json = serde_json::to_string(response)
+        .map_err(|_| anyhow::anyhow!("coordinator response could not be encoded"))?;
+    if json.len() > MAX_COORDINATOR_RESPONSE_BYTES {
+        bail!("coordinator response exceeded the output limit");
+    }
+    Ok(json)
+}
+
+fn validate_coordinator_response(
+    operation: CoordinatorOperation,
+    response: crate::control::ipc::ResponseMessage,
+) -> Result<crate::control::ipc::ResponseMessage> {
+    use crate::control::ipc::{AcceptedOperation, RequestStatus, ResponseMessage};
+
+    let matches_operation = matches!(
+        (&operation, &response),
+        (_, ResponseMessage::Error { .. })
+            | (CoordinatorOperation::Status, ResponseMessage::Status { .. })
+            | (
+                CoordinatorOperation::Cancel,
+                ResponseMessage::Accepted {
+                    operation: AcceptedOperation::Cancel,
+                    state: RequestStatus::Queued
+                        | RequestStatus::Running
+                        | RequestStatus::Cancelled,
+                    ..
+                }
+            )
+    );
+    if !matches_operation {
+        bail!("coordinator response is invalid");
+    }
+    Ok(response)
 }
 
 fn print_quickstart() {
@@ -671,14 +851,281 @@ mod tests {
         .unwrap();
         assert_eq!(cli.compare_results.unwrap().len(), 2);
 
+        let cli = Cli::try_parse_from([
+            "l3ms",
+            "--coordinator-status",
+            "request-1",
+            "--coordinator-socket-dir",
+            "/run/user/1000/l3ms",
+        ])
+        .unwrap();
+        assert_eq!(cli.coordinator_status.as_deref(), Some("request-1"));
+        assert_eq!(
+            cli.coordinator_socket_dir.as_deref(),
+            Some(Path::new("/run/user/1000/l3ms"))
+        );
+        assert!(Cli::try_parse_from([
+            "l3ms",
+            "--coordinator-status",
+            "request-1",
+            "--coordinator-cancel",
+            "request-1",
+            "--coordinator-socket-dir",
+            "/run/user/1000/l3ms",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from(["l3ms", "--coordinator-status", "request-1",]).is_err());
+        assert!(Cli::try_parse_from([
+            "l3ms",
+            "--coordinator-status",
+            "request-1",
+            "--coordinator-socket-dir",
+            "/run/user/1000/l3ms",
+            "--list",
+            "stack",
+        ])
+        .is_err());
+
         assert!(Cli::try_parse_from(["l3ms", "--list", "media"]).is_err());
 
         let cli = Cli::try_parse_from(["l3ms", "--bench", "qwen", "--extra", "--ctx-size 32768"])
             .unwrap();
-        assert_eq!(cli.extra, "--ctx-size 32768");
+        assert_eq!(cli.extra.as_deref(), Some("--ctx-size 32768"));
 
         assert!(Cli::try_parse_from(["l3ms", "--run", "--bench"]).is_err());
         assert!(Cli::try_parse_from(["l3ms", "--list", "invalid"]).is_err());
+    }
+
+    #[test]
+    fn coordinator_options_require_action_and_reject_any_extra_argument() {
+        let cli = Cli::try_parse_from(["l3ms", "--coordinator-socket-dir", "/run/user/1000/l3ms"])
+            .unwrap();
+        assert!(coordinator_action(&cli).is_err());
+
+        let cli = Cli::try_parse_from([
+            "l3ms",
+            "--coordinator-status",
+            "request-1",
+            "--coordinator-socket-dir",
+            "/run/user/1000/l3ms",
+            "--extra",
+            "",
+        ])
+        .unwrap();
+        assert!(coordinator_action(&cli).is_err());
+
+        let cli = Cli::try_parse_from([
+            "l3ms",
+            "--coordinator-cancel",
+            "request-1",
+            "--coordinator-socket-dir",
+            "/run/user/1000/l3ms",
+        ])
+        .unwrap();
+        assert_eq!(
+            coordinator_action(&cli).unwrap(),
+            Some((
+                CoordinatorOperation::Cancel,
+                "request-1",
+                Path::new("/run/user/1000/l3ms")
+            ))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn coordinator_status_and_cancel_use_typed_private_socket_exchanges() {
+        use crate::control::ipc::{
+            AcceptedOperation, ClientRequest, RequestStatus, ResponseEnvelope, ResponseMessage,
+        };
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+
+        for (operation, response) in [
+            (
+                CoordinatorOperation::Status,
+                ResponseMessage::Status {
+                    request_id: "request-1".into(),
+                    state: RequestStatus::Running,
+                },
+            ),
+            (
+                CoordinatorOperation::Cancel,
+                ResponseMessage::Accepted {
+                    request_id: "request-1".into(),
+                    operation: AcceptedOperation::Cancel,
+                    state: RequestStatus::Cancelled,
+                },
+            ),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            let socket_path = directory.path().join("coordinator.sock");
+            let listener = UnixListener::bind(&socket_path).unwrap();
+            std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = crate::control::ipc::read_request(&mut stream).unwrap();
+                crate::control::ipc::write_response(
+                    &mut stream,
+                    &ResponseEnvelope::v1(response.clone()),
+                )
+                .unwrap();
+                request
+            });
+
+            let response = coordinator_exchange(directory.path(), operation, "request-1").unwrap();
+            let request = server.join().unwrap();
+            match (operation, request) {
+                (CoordinatorOperation::Status, ClientRequest::Status { request_id }) => {
+                    assert_eq!(request_id, "request-1");
+                    assert_eq!(
+                        response,
+                        ResponseMessage::Status {
+                            request_id,
+                            state: RequestStatus::Running
+                        }
+                    );
+                }
+                (CoordinatorOperation::Cancel, ClientRequest::Cancel { request_id }) => {
+                    assert_eq!(request_id, "request-1");
+                    assert_eq!(
+                        response,
+                        ResponseMessage::Accepted {
+                            request_id,
+                            operation: AcceptedOperation::Cancel,
+                            state: RequestStatus::Cancelled
+                        }
+                    );
+                }
+                _ => panic!("coordinator operation did not match its typed IPC request"),
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn coordinator_rejects_wrong_operation_response() {
+        use crate::control::ipc::{
+            AcceptedOperation, ClientRequest, RequestStatus, ResponseEnvelope, ResponseMessage,
+        };
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket_path = directory.path().join("coordinator.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = crate::control::ipc::read_request(&mut stream).unwrap();
+            crate::control::ipc::write_response(
+                &mut stream,
+                &ResponseEnvelope::v1(ResponseMessage::Accepted {
+                    request_id: "request-1".into(),
+                    operation: AcceptedOperation::Submit,
+                    state: RequestStatus::Queued,
+                }),
+            )
+            .unwrap();
+            request
+        });
+
+        let error =
+            coordinator_exchange(directory.path(), CoordinatorOperation::Status, "request-1")
+                .unwrap_err();
+        assert_eq!(error.to_string(), "coordinator response is invalid");
+        assert!(matches!(
+            server.join().unwrap(),
+            ClientRequest::Status { request_id } if request_id == "request-1"
+        ));
+    }
+
+    #[test]
+    fn coordinator_response_json_is_compact_and_bounded() {
+        use crate::control::ipc::{AcceptedOperation, RequestStatus, ResponseMessage};
+
+        for state in [
+            RequestStatus::Queued,
+            RequestStatus::Running,
+            RequestStatus::Cancelled,
+        ] {
+            assert!(validate_coordinator_response(
+                CoordinatorOperation::Cancel,
+                ResponseMessage::Accepted {
+                    request_id: "request-1".into(),
+                    operation: AcceptedOperation::Cancel,
+                    state,
+                }
+            )
+            .is_ok());
+        }
+        for state in [
+            RequestStatus::Succeeded,
+            RequestStatus::Failed,
+            RequestStatus::Interrupted,
+            RequestStatus::NotFound,
+        ] {
+            assert!(validate_coordinator_response(
+                CoordinatorOperation::Cancel,
+                ResponseMessage::Accepted {
+                    request_id: "request-1".into(),
+                    operation: AcceptedOperation::Cancel,
+                    state,
+                }
+            )
+            .is_err());
+        }
+
+        let json = coordinator_response_json(&ResponseMessage::Status {
+            request_id: "request-1".into(),
+            state: RequestStatus::Queued,
+        })
+        .unwrap();
+        assert!(json.len() <= MAX_COORDINATOR_RESPONSE_BYTES);
+        assert!(!json.contains('\n'));
+        assert!(json.contains("\"type\":\"status\""));
+        assert!(coordinator_response_json(&ResponseMessage::Status {
+            request_id: "x".repeat(MAX_COORDINATOR_RESPONSE_BYTES + 1),
+            state: RequestStatus::Queued,
+        })
+        .is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn coordinator_transport_failures_use_fixed_messages_without_fallback() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let missing = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(missing.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let unavailable =
+            coordinator_exchange(missing.path(), CoordinatorOperation::Status, "request-1")
+                .unwrap_err();
+        assert_eq!(unavailable.to_string(), "coordinator is unavailable");
+        assert!(!missing.path().join("coordinator.sock").exists());
+
+        let unsafe_directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(
+            unsafe_directory.path(),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let unsafe_path = coordinator_exchange(
+            unsafe_directory.path(),
+            CoordinatorOperation::Cancel,
+            "request-1",
+        )
+        .unwrap_err();
+        assert_eq!(
+            unsafe_path.to_string(),
+            "coordinator directory or socket is unsafe"
+        );
+        assert!(!unsafe_path
+            .to_string()
+            .contains(unsafe_directory.path().to_str().unwrap()));
     }
 
     #[test]

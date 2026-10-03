@@ -20,8 +20,8 @@ CAR-220 Phase 9, and CAR-221 Phase 10.
 | 2. Independent operation | In progress | Imported child builds, tests, profile lists, and explicit old-root lists pass; CI added locally, pre-push validation pending. |
 | 3. Runtime cutover | In progress | Bounded L2M2 GPU-mode pilot, real branch L3MS language request, and a Qwen Image 2.1 branch-script generation passed; original ComfyUI service was restored after language use. L3DS now fails closed instead of synthesizing answers, but real decision weights and full deployed-path reconciliation remain pending. |
 | 4. Shared contracts | In development | Read-only catalog and offline `l3ms --list stack`, layered settings, existing-store job metadata, and typed lane request/result validation are on the branch. Adapter contracts and full compatibility/live release gates remain; release stays gated by Phase 3. |
-| 5. Runtime adapters | In development | Concrete bounded language execution, ComfyUI job handling, local decision supervision, and inert media/TTS command recipes pass fixtures. Lifecycle/admission adapters, GPU release verification, real TTS/decision pilots, and a user-facing switch remain pending; no public execution action is enabled. |
-| 6. Local coordinator | In development | Durable bounded queue/admission core, advisory host/device ownership guard, request-ID reconnect lookup, bounded v1 IPC messages, authenticated Linux socket transport, submit/status/cancel handling, and a bounded serial control-loop owner exist offline. Lifecycle reconciliation, adapter dispatch, installation, result/stream delivery, and cross-client inference remain pending. |
+| 5. Runtime adapters | In development | Concrete bounded language execution, ComfyUI job handling, local decision supervision, Breeze speech execution/artifact validation, and inert generic media command recipes pass fixtures. Lifecycle/admission adapters, GPU release verification, real TTS/decision pilots, and a user-facing switch remain pending; no public inference action is enabled. |
+| 6. Local coordinator | In development | Durable queue, ownership locks, v1 IPC/transport, control handling, bounded serial owner and Linux CLI status/cancel exist offline. Lifecycle reconciliation, adapter dispatch, installation, result/stream delivery, and cross-client inference remain pending. |
 | 7. HTTP ingress | Pending | Gateway to the same coordinator. |
 | 8. Unified workbench | In development | Read-only three-lane Stack Catalog tab and palette navigation share CLI toolkit-root resolution. Coordinated run/observe/cancel and task-form parity remain pending. |
 | 9. Public site | In development | Local static site now has separate language, media/TTS, and decision views generated from native manifests; six generator/site checks pass. Visual/browser review and all publication gates remain pending. |
@@ -104,7 +104,7 @@ CAR-220 Phase 9, and CAR-221 Phase 10.
 
 ## Open decisions
 
-Latest offline adapter/transport/control/safety checkpoint: **415 root tests passed, 1
+Latest offline adapter/transport/control/safety checkpoint: **426 root tests passed, 1
 ignored**, with fmt, Clippy, and whitespace checks passing. A deterministic
 fork-inheritance regression reproduced an ownership guard release defect;
 explicit unlock now releases both complete and partially acquired guards even
@@ -161,6 +161,15 @@ new offline mock regressions cover repository forwarding and preserve Huge's
 existing call shape. L3DS Python: fourteen tests pass. No weights or environment
 were installed. Public-metadata-only acquisition preflight is recorded in
 [l3ds-prep.md](l3ds-prep.md); installation approval remains pending.
+
+2026-10-03 CLI/Breeze checkpoint: five new CLI regressions cover parser bounds,
+private-socket status/cancel exchanges, wrong-operation replies, bounded JSON,
+and explicit unavailable errors without fallback. Six Breeze fixtures cover all
+four modes, explicit fresh private outputs, sorted chunks, missing/unsafe/bounded
+artifacts, redacted failures, cancellation/deadline cleanup, and PCM container
+validation rather than a bare WAVE marker. Root: 426 passed, 1 ignored; no real
+model or live service was used. Dispatch, lifecycle reconciliation and full UI
+integration remain incomplete.
 
 - Choose the host admission mode for direct llama-swap/ComfyUI requests before
   claiming automatic cross-engine switching. The plan allows coordination

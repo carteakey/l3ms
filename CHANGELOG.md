@@ -10,6 +10,11 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Added Linux coordinator request status/cancel CLI commands with explicit
+  private socket selection, bounded IPC, typed reply validation, and no fallback.
+- Added bounded Breeze speech execution with explicit per-job outputs, validated
+  PCM/float WAV artifacts and streaming chunks, and retained cleanup dispositions.
+  Inference dispatch and real-model acceptance remain gated.
 - Fixed native Nagi Smol/Big loading to honor the manifest's repository ID on
   both the requested device and CPU fallback, rather than silently using defaults.
 - Replaced a confirmed documentation-only API-key example with an unmistakable
