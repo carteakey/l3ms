@@ -19,6 +19,36 @@ L3MS
 
 ## Goal
 
+### Agreed product intent — 2026-10-03
+
+Turn three related repositories into one coherent local inference stack, with
+the mature L3MS repository absorbing L2M2 and L3DS.
+
+The problem is not just that the code lives in three folders. Each lane has
+separate setup, configuration, commands, UI and runtime management. The desired
+product provides one place to discover models, configure routes, run work and
+manage resources—especially switching between engines competing for the same
+GPU.
+
+The intended result is:
+
+- Clean language, media—including TTS—and decision lanes, retaining their
+  native engines and independently usable standalone tools.
+- Shared UI, configuration, service routing, scheduling, job status,
+  cancellation and results where unification improves the operator workflow.
+- Different inference engines behind the orchestration layer, without forcing
+  every modality into a llama.cpp-shaped interface.
+- README, branding and the L3MS site that reflect the expanded scope.
+- A branch-based migration that preserves the working setup, local state and
+  rollback paths until replacement workflows are verified and accepted.
+
+The monorepo is the organizational foundation. The completion criterion is a
+usable integrated stack—not merely imported source trees or passing
+infrastructure tests. Those are milestones, not completion. This product intent
+governs the phase gates below; partial implementation must not redefine it.
+
+### Delivery milestones
+
 Bring L2M2 (media models) and L3DS (decision models) into the L3MS Git repository
 without interrupting current language-model serving, media generation, or decision
 experiments. First establish a safe folder structure and preserve each toolkit's
