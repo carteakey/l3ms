@@ -39,6 +39,7 @@ use super::runtime::{OperationContext, RecoveryPolicy};
 const SYSTEMD_RUN: &str = "/usr/bin/systemd-run";
 const SYSTEMCTL: &str = "/usr/bin/systemctl";
 const MAX_COORDINATOR_ID_BYTES: usize = 32;
+const MAX_WORKING_DIRECTORY_BYTES: usize = 4096;
 const MAX_ARGUMENT_BYTES: usize = 64 * 1024;
 const MAX_ARGUMENTS: usize = 4096;
 const MAX_AGGREGATE_ARGUMENT_BYTES: usize = 256 * 1024;
@@ -92,12 +93,14 @@ impl Error for ManagedServiceErrorKind {}
 /// recipe is created; no shell command string or environment override exists.
 pub struct LaunchRecipe {
     executable: PathBuf,
+    working_directory: PathBuf,
     arguments: Vec<OsString>,
 }
 
 impl LaunchRecipe {
     pub fn new(
         executable: impl AsRef<Path>,
+        working_directory: impl AsRef<Path>,
         arguments: impl IntoIterator<Item = OsString>,
     ) -> Result<Self, ManagedServiceErrorKind> {
         let path = executable.as_ref();
@@ -114,8 +117,40 @@ impl LaunchRecipe {
             return Err(ManagedServiceErrorKind::InvalidRecipe);
         }
 
+        let requested_working_directory = working_directory.as_ref();
+        if !requested_working_directory.is_absolute()
+            || requested_working_directory
+                .as_os_str()
+                .as_bytes()
+                .contains(&0)
+            || requested_working_directory.as_os_str().as_bytes().len()
+                > MAX_WORKING_DIRECTORY_BYTES
+        {
+            return Err(ManagedServiceErrorKind::InvalidRecipe);
+        }
+        let working_directory = requested_working_directory
+            .canonicalize()
+            .map_err(|_| ManagedServiceErrorKind::InvalidRecipe)?;
+        let working_directory_metadata = working_directory
+            .metadata()
+            .map_err(|_| ManagedServiceErrorKind::InvalidRecipe)?;
+        if !working_directory_metadata.is_dir()
+            || working_directory.as_os_str().as_bytes().contains(&0)
+            || working_directory.as_os_str().as_bytes().len() > MAX_WORKING_DIRECTORY_BYTES
+            || working_directory.to_str().is_none()
+        {
+            return Err(ManagedServiceErrorKind::InvalidRecipe);
+        }
+
         let mut collected = Vec::new();
-        let mut total = executable.as_os_str().as_bytes().len();
+        let mut total = executable
+            .as_os_str()
+            .as_bytes()
+            .len()
+            .saturating_add(working_directory.as_os_str().as_bytes().len());
+        if total > MAX_AGGREGATE_ARGUMENT_BYTES {
+            return Err(ManagedServiceErrorKind::InvalidRecipe);
+        }
         for argument in arguments {
             let bytes = argument.as_os_str().as_bytes();
             if bytes.len() > MAX_ARGUMENT_BYTES
@@ -132,6 +167,7 @@ impl LaunchRecipe {
         }
         Ok(Self {
             executable,
+            working_directory,
             arguments: collected,
         })
     }
@@ -436,12 +472,18 @@ impl ManagedServiceController {
             .arg("--no-ask-password")
             .arg("--quiet")
             .arg("--no-block")
+            .arg("--expand-environment=no")
             .arg("--service-type=exec")
             .arg(format!("--unit={}", intent.unit_name))
             .arg(format!("--description={description}"))
             .arg("--property=KillMode=control-group")
             .arg("--property=Restart=no")
             .arg(format!("--property=TimeoutStopSec={timeout}"))
+            .arg({
+                let mut property = OsString::from("--property=WorkingDirectory=");
+                property.push(&prepared.recipe.working_directory);
+                property
+            })
             .arg("--")
             .arg(&prepared.recipe.executable)
             .args(&prepared.recipe.arguments);
@@ -664,7 +706,7 @@ impl ManagedServiceController {
 
 #[cfg(test)]
 impl ManagedServiceController {
-    fn with_test_executables(
+    pub(crate) fn with_test_executables(
         coordinator_id: impl Into<String>,
         systemd_run: PathBuf,
         systemctl: PathBuf,
@@ -910,6 +952,7 @@ fn launch_fingerprint(recipe: &LaunchRecipe) -> String {
     };
     feed(b"l3ms-launch-recipe-v1");
     feed(recipe.executable.as_os_str().as_bytes());
+    feed(recipe.working_directory.as_os_str().as_bytes());
     for argument in &recipe.arguments {
         feed(argument.as_os_str().as_bytes());
     }
@@ -978,6 +1021,7 @@ fn verify_executable(path: &Path) -> Result<(), ManagedServiceErrorKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::ffi::OsStringExt;
     use std::os::unix::fs::PermissionsExt;
     use std::time::Instant;
     use tempfile::TempDir;
@@ -988,6 +1032,7 @@ mod tests {
     struct Fixture {
         directory: TempDir,
         state: PathBuf,
+        runner_arguments: PathBuf,
         recipe_executable: PathBuf,
         controller: ManagedServiceController,
     }
@@ -997,6 +1042,7 @@ mod tests {
             let directory = tempfile::tempdir().unwrap();
             fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
             let state = directory.path().join("state");
+            let runner_arguments = directory.path().join("runner-arguments");
             let runner = directory.path().join("systemd-run");
             let systemctl = directory.path().join("systemctl");
             let recipe_executable = directory.path().join("service");
@@ -1012,13 +1058,19 @@ mod tests {
             Self {
                 directory,
                 state,
+                runner_arguments,
                 recipe_executable,
                 controller,
             }
         }
 
         fn recipe(&self) -> LaunchRecipe {
-            LaunchRecipe::new(&self.recipe_executable, [OsString::from("fixture-arg")]).unwrap()
+            LaunchRecipe::new(
+                &self.recipe_executable,
+                self.directory.path(),
+                [OsString::from("fixture-arg")],
+            )
+            .unwrap()
         }
 
         fn install_scripts(&self, intent: &ServiceIntentRecord, launch_result: &str) {
@@ -1033,7 +1085,8 @@ mod tests {
         ) {
             let runner = self.directory.path().join("systemd-run");
             let runner_script = format!(
-                "#!/bin/sh\nprintf active > '{}'\nexit {}\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf active > '{}'\nexit {}\n",
+                self.runner_arguments.display(),
                 self.state.display(),
                 launch_result
             );
@@ -1122,6 +1175,75 @@ exit 1
             fixture.recipe().launch_identity()
         );
         assert!(!fixture.state.exists());
+    }
+
+    #[test]
+    fn working_directory_is_explicit_and_part_of_recipe_identity() {
+        let fixture = Fixture::new();
+        let prepared = fixture
+            .controller
+            .prepare_start(fixture.recipe(), Duration::from_secs(10))
+            .unwrap();
+        let intent = prepared.intent_record().clone();
+        let another_directory = tempfile::tempdir().unwrap();
+        let other_recipe = LaunchRecipe::new(
+            &fixture.recipe_executable,
+            another_directory.path(),
+            [OsString::from("fixture-arg")],
+        )
+        .unwrap();
+        assert_ne!(
+            intent.launch_identity(),
+            other_recipe.launch_identity().as_str()
+        );
+
+        fixture.install_scripts(&intent, "0");
+        let context = fixture.context(Duration::from_secs(2));
+        let _handle = fixture.controller.dispatch(prepared, &context).unwrap();
+        let runner_arguments = fs::read_to_string(&fixture.runner_arguments).unwrap();
+        assert!(runner_arguments
+            .lines()
+            .any(|argument| argument == "--expand-environment=no"));
+        let property = format!(
+            "--property=WorkingDirectory={}",
+            fixture.directory.path().canonicalize().unwrap().display()
+        );
+        assert!(runner_arguments
+            .lines()
+            .any(|argument| argument == property));
+    }
+
+    #[test]
+    fn rejects_invalid_working_directories() {
+        let fixture = Fixture::new();
+        let args = [OsString::from("fixture-arg")];
+        assert_eq!(
+            LaunchRecipe::new(&fixture.recipe_executable, "relative", args.clone()).err(),
+            Some(ManagedServiceErrorKind::InvalidRecipe)
+        );
+        assert_eq!(
+            LaunchRecipe::new(
+                &fixture.recipe_executable,
+                fixture.directory.path().join("missing"),
+                args.clone()
+            )
+            .err(),
+            Some(ManagedServiceErrorKind::InvalidRecipe)
+        );
+        assert_eq!(
+            LaunchRecipe::new(
+                &fixture.recipe_executable,
+                &fixture.recipe_executable,
+                args.clone()
+            )
+            .err(),
+            Some(ManagedServiceErrorKind::InvalidRecipe)
+        );
+        let nul_path = PathBuf::from(OsString::from_vec(b"/tmp/dir\0suffix".to_vec()));
+        assert_eq!(
+            LaunchRecipe::new(&fixture.recipe_executable, nul_path, args).err(),
+            Some(ManagedServiceErrorKind::InvalidRecipe)
+        );
     }
 
     #[test]

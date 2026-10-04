@@ -200,6 +200,21 @@ paths without creation. Root: 457 passed, 1 ignored; Clippy, formatting and
 whitespace checks pass. No actual service command or GPU query was run. Durable
 intent storage, owned cgroup cleanup and adapter/admission wiring remain pending.
 
+2026-10-03 durable-service-owner checkpoint: eight store fixtures validate
+strict bounded restored records, immutable duplicates, private inode/type checks,
+FIFO rejection, corruption/unsafe entries, capacity and no automatic creation.
+Seven owner fixtures compose the actual store/controller under retained host
+ownership, asserting record-before-launch, lost-launch-result observation without
+replay, persistence refusal, deadline refusal, post-persistence cancellation,
+nonmember-handle rejection and corrupt-store stop refusal. Mutable owner methods
+serialize one instance; shared-directory/controller identity remains a caller
+precondition. A focused Luna review found no blocker under that contract.
+Twelve controller fixtures now include explicit working directories in identity
+and argv; environment expansion is disabled. Root: 474 passed, 1 ignored;
+Clippy/all-targets, formatting and whitespace checks pass. No live manager/GPU
+operation occurred; only installed `systemd-run --help` was read. Records remain
+retained, with no retirement/release/admission proof or daemon dispatch wiring.
+
 - Choose the host admission mode for direct llama-swap/ComfyUI requests before
   claiming automatic cross-engine switching. The plan allows coordination
   only where the runtime can block and drain new direct work, or where callers

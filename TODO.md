@@ -10,8 +10,8 @@ existing Linear migration issues rather than replacing their acceptance criteria
 
 ## Monorepo: next work
 
-Latest offline checkpoint: transient-service ownership and history isolation on
-`feature/l3ms-monorepo`; 457 root tests passed,
+Latest offline checkpoint: durable transient-service launch ownership on
+`feature/l3ms-monorepo`; 474 root tests passed,
 1 ignored. This is offline implementation evidence, not live cutover acceptance.
 See the [migration status](docs/migration/status.md),
 [plan](docs/monorepo-consolidation-plan.md), and
@@ -25,8 +25,9 @@ See the [migration status](docs/migration/status.md),
   ownership; verify stop, GPU release, startup/health, and bounded rollback.
   The fixture-tested NVIDIA probe provides point-in-time idle evidence only;
   owned runtime/cgroup cleanup and ingress exclusion remain separate gates.
-  Transient-service intent/handle inspection and stop are fixture-tested, but
-  durable intent storage and adapter/admission wiring are still pending.
+  Transient-service launch now persists its intent before dispatch under host
+  ownership. Add proven cgroup cleanup and explicit retirement of retained
+  intents before opening admission; adapter/daemon wiring is still pending.
 - [x] Connect Breeze speech recipes to bounded execution and per-job WAV/chunk
   artifact validation. Real-model tests and coordinator dispatch remain gated.
 - [ ] Add explicit artifact contracts for other native media scripts; do not

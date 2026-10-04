@@ -35,6 +35,9 @@ The internal Linux controller prepares a unique transient-unit intent before
 dispatch; callers must persist that record under the retained coordinator lock.
 Dispatch consumes its token once. Fixed, root-owned systemd client binaries use
 explicit argv, `KillMode=control-group`, `Restart=no` and a finite stop timeout.
+Recipes require an existing canonical working directory, included in their
+identity. `--expand-environment=no` preserves literal command arguments rather
+than manager-side variable expansion ([systemd-run documentation](https://raw.githubusercontent.com/systemd/systemd/main/man/systemd-run.xml)); unsupported versions fail rather than dropping the flag.
 Existing loaded units or installed unit files are refused before launch.
 Post-spawn failures preserve the intent as ownership-uncertain; killing the
 local launcher cannot prove that the manager rejected its start.
@@ -50,6 +53,29 @@ same-user operators must not concurrently replace/restart that unique unit.
 Manager stop acknowledgment is not cgroup emptiness, health, ingress exclusion
 or GPU-release proof. This controller is not yet a runtime adapter or wired
 to admission/dispatch; fixtures start only private fake executables.
+
+The composed `ManagedRuntimeOwner` now borrows a retained host guard and records
+each intent before dispatch. The dedicated existing absolute mode-0700 store
+uses descriptor-relative, no-symlink access; intent files are mode 0600,
+current-UID, single-link regular files. Schema/fields are strict, each record is
+capped at 4 KiB and the store at 128 entries. Create-new writes synchronize the
+file and parent before acknowledgment; duplicate, corrupt, unexpected or unsafe
+entries fail closed. FIFO/special-file entries are rejected before reading.
+Failure can retain a partial record: no delete, repair or automatic retry occurs.
+Only bounded ownership metadata is stored, never argv, environment or payloads.
+
+Restart observation composes the stored records with live controller checks;
+it does not recreate recipes or replay launches. Stop first verifies the retained
+record and then the live handle, retaining the record even on success. There is
+no intent retirement operation yet; reaching the cap refuses new launches.
+Caller lifecycle logic must reconcile unresolved records and prove admission and
+resource authority before starting an engine. The wrapper is not wired to the
+daemon and neither its host lock nor successful observation opens admission.
+Filesystem synchronization is synchronous/non-preemptible on the trusted local
+filesystem; contexts are checked before and after it. Mutable methods serialize
+operations through one owner; callers must create only one owner for the same
+store/controller under the shared host guard. Seven fake-manager fixtures
+exercise the actual store/controller composition without live services.
 
 ## NVIDIA idle observation
 

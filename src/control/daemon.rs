@@ -190,7 +190,14 @@ fn verify_history_isolation(data: &Path, standalone: &Path) -> Result<(), Daemon
         Ok(metadata) if !metadata.is_file() || metadata.nlink() != 1 => {
             return Err(DaemonError::HistoryConflict);
         }
-        Ok(_) => {}
+        Ok(metadata) => match standalone.join("jobs.json").metadata() {
+            Ok(legacy) if (metadata.dev(), metadata.ino()) == (legacy.dev(), legacy.ino()) => {
+                return Err(DaemonError::HistoryConflict);
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(DaemonError::HistoryConflict),
+        },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => return Err(DaemonError::HistoryConflict),
     }
@@ -486,6 +493,22 @@ mod tests {
             assert_eq!(std::fs::read_to_string(legacy).unwrap(), "legacy contents");
             fixture.released();
         }
+        // Legacy clients follow symlinks too. The coordinator's regular file
+        // can have nlink=1 while the legacy path resolves to the same inode.
+        let fixture = Fixture::new();
+        let coordinated = fixture.data.path().join("jobs.json");
+        std::fs::write(&coordinated, "coordinator contents").unwrap();
+        std::os::unix::fs::symlink(&coordinated, fixture.standalone.path().join("jobs.json"))
+            .unwrap();
+        assert!(matches!(
+            fixture.bind(fixture.config(1)),
+            Err(DaemonError::HistoryConflict)
+        ));
+        assert_eq!(
+            std::fs::read_to_string(coordinated).unwrap(),
+            "coordinator contents"
+        );
+        fixture.released();
     }
 
     #[test]

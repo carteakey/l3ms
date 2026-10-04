@@ -10,6 +10,11 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Connected transient-service launch to a durable, private write-ahead intent
+  store under retained host ownership. Restart observes without replay; failed
+  persistence refuses launch and preserves records for reconciliation.
+- Runtime service recipes now pin their working directory and disable systemd
+  environment expansion, preserving literal arguments and repo-relative paths.
 - Added an internal transient-service ownership controller with persistable,
   single-use start intents and generation-matched inspection/stop. Startup
   uncertainty retains its intent; no live service or admission is enabled.
