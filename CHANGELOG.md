@@ -10,6 +10,11 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Added an internal transient-service ownership controller with persistable,
+  single-use start intents and generation-matched inspection/stop. Startup
+  uncertainty retains its intent; no live service or admission is enabled.
+- Coordinator startup now rejects history-directory aliases and linked history
+  files, keeping its single-writer store separate from standalone UI/bench jobs.
 - Added a bounded internal NVIDIA idle-observation probe with explicit device
   identity/memory limits and fail-closed compute-claimant checks. It is not a
   runtime lease, admission fence or live GPU-release acceptance.

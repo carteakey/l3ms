@@ -29,6 +29,28 @@ of an earlier reservation. Internal symlinks are allowed; escaping ones are not.
 Path verification assumes trusted toolkit directories and is not a sandbox or
 a defense against concurrent malicious filesystem replacement.
 
+## Managed transient-service ownership
+
+The internal Linux controller prepares a unique transient-unit intent before
+dispatch; callers must persist that record under the retained coordinator lock.
+Dispatch consumes its token once. Fixed, root-owned systemd client binaries use
+explicit argv, `KillMode=control-group`, `Restart=no` and a finite stop timeout.
+Existing loaded units or installed unit files are refused before launch.
+Post-spawn failures preserve the intent as ownership-uncertain; killing the
+local launcher cannot prove that the manager rejected its start.
+
+Validated restored records are data, not stop capabilities. Reconciliation
+issues a private handle only for a matching active transient unit, intent marker,
+InvocationID and cgroup. Ownership uses the documented `Transient` property,
+not an assumption that `FragmentPath` is empty ([systemd property documentation](https://raw.githubusercontent.com/systemd/systemd/main/man/org.freedesktop.systemd1.xml)).
+State/stop recheck that generation. A disappeared or unverifiable cgroup is
+unknown, not released. Stop is name-targeted and cannot atomically compare an
+InvocationID: the host lock must serialize coordinator callers and trusted
+same-user operators must not concurrently replace/restart that unique unit.
+Manager stop acknowledgment is not cgroup emptiness, health, ingress exclusion
+or GPU-release proof. This controller is not yet a runtime adapter or wired
+to admission/dispatch; fixtures start only private fake executables.
+
 ## NVIDIA idle observation
 
 The internal Linux probe uses the fixed `/usr/bin/nvidia-smi` executable and an
@@ -236,9 +258,12 @@ or result delivery.
 The daemon's explicit data directory must remain separate from the standalone
 UI/bench history directory. Both use the compatible `jobs.json` format, but the
 legacy client does not acquire coordinator ownership locks. Those locks alone
-therefore cannot prevent competing writes to one store. Installation/dispatch
-must add an alias-rejection gate before selecting operator paths; current
-foreground fixtures use isolated directories and do not implement that gate.
+therefore cannot prevent competing writes to one store. Binding now requires an
+explicit absolute standalone data path and rejects directory aliases (including
+symlinks/inode aliases) and nonregular or multiply linked coordinator history
+files before binding/loading. A missing standalone directory is not created.
+Installation must supply the actual standalone client path; this gate cannot
+discover arbitrary other writers, and trusted ancestors must remain stable.
 Coordinated clients must use IPC for writes, never load and persist the daemon's
 history themselves. A combined read-only view is distinct from merging stores.
 

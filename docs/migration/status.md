@@ -189,6 +189,17 @@ Root: 444 passed, 1 ignored; Clippy, formatting and whitespace checks pass. All
 GPU tests use fake executables. No live service, admission or inference dispatch
 was enabled. The managed-service ownership primitive is still in development.
 
+2026-10-03 managed-ownership/history-isolation checkpoint: ten controller
+fixtures verify single-use pre-dispatch intents, bounded restored records,
+uncertain-launch retention, transient generation/cgroup checks, rejection of
+preexisting/non-transient units and refusal to stop changed generations. Stop
+acknowledgment is not cgroup/GPU release; same-user replacement races remain an
+explicit trust constraint. Twelve daemon fixtures now include canonical
+directory aliases, symlink/hard-link history rejection and absent standalone
+paths without creation. Root: 457 passed, 1 ignored; Clippy, formatting and
+whitespace checks pass. No actual service command or GPU query was run. Durable
+intent storage, owned cgroup cleanup and adapter/admission wiring remain pending.
+
 - Choose the host admission mode for direct llama-swap/ComfyUI requests before
   claiming automatic cross-engine switching. The plan allows coordination
   only where the runtime can block and drain new direct work, or where callers

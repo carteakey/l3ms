@@ -10,8 +10,8 @@ existing Linear migration issues rather than replacing their acceptance criteria
 
 ## Monorepo: next work
 
-Latest offline checkpoint: shared coordinator client and NVIDIA observation on
-`feature/l3ms-monorepo`; 444 root tests passed,
+Latest offline checkpoint: transient-service ownership and history isolation on
+`feature/l3ms-monorepo`; 457 root tests passed,
 1 ignored. This is offline implementation evidence, not live cutover acceptance.
 See the [migration status](docs/migration/status.md),
 [plan](docs/monorepo-consolidation-plan.md), and
@@ -25,6 +25,8 @@ See the [migration status](docs/migration/status.md),
   ownership; verify stop, GPU release, startup/health, and bounded rollback.
   The fixture-tested NVIDIA probe provides point-in-time idle evidence only;
   owned runtime/cgroup cleanup and ingress exclusion remain separate gates.
+  Transient-service intent/handle inspection and stop are fixture-tested, but
+  durable intent storage and adapter/admission wiring are still pending.
 - [x] Connect Breeze speech recipes to bounded execution and per-job WAV/chunk
   artifact validation. Real-model tests and coordinator dispatch remain gated.
 - [ ] Add explicit artifact contracts for other native media scripts; do not
@@ -51,8 +53,8 @@ See the [migration status](docs/migration/status.md),
   sensitive payloads.
   Next implementation slice: connect concrete lifecycle/admission reconciliation
   and supervised dispatch; keep dispatch closed until those checks are integrated.
-  Keep coordinator and legacy UI/bench history stores separate; reject directory
-  aliases before installation and test concurrent workflows without lost history.
+  Startup now rejects history aliases; installation must supply the actual
+  standalone store path. Verify concurrent workflows without lost history.
 - [ ] Integrate CLI and keyboard-first UI run/observe/cancel with the same
   coordinator, settings, routing, and request IDs; preserve standalone commands.
   Linux CLI request status/cancel is implemented; submit/results and UI remain.

@@ -25,6 +25,8 @@ pub struct DaemonConfig {
     pub socket_directory: PathBuf,
     pub lock_directory: PathBuf,
     pub data_directory: PathBuf,
+    /// Legacy UI/bench store to exclude. May not exist yet; never created here.
+    pub standalone_data_directory: PathBuf,
     pub gpus: Vec<u32>,
     pub queue_capacity: usize,
     pub peer_timeout: Duration,
@@ -36,6 +38,7 @@ pub enum DaemonError {
     InvalidConfig,
     Transport(LocalIpcError),
     HistoryUnavailable,
+    HistoryConflict,
 }
 impl std::fmt::Display for DaemonError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -88,6 +91,7 @@ impl ControlDaemon {
             return Err(DaemonError::InvalidConfig);
         }
         let data = private_directory(&config.data_directory).map_err(DaemonError::Transport)?;
+        verify_history_isolation(&data, &config.standalone_data_directory)?;
         let listener = LocalListener::bind(
             &config.socket_directory,
             &config.lock_directory,
@@ -157,6 +161,42 @@ impl ControlDaemon {
     }
 }
 
+/// Check before binding or loading history. Callers must pass the same legacy
+/// store their standalone clients use; trusted directory ancestors remain
+/// stable during the session. This is not a lock respected by legacy writers.
+fn verify_history_isolation(data: &Path, standalone: &Path) -> Result<(), DaemonError> {
+    use std::os::unix::fs::MetadataExt;
+    if !standalone.is_absolute() {
+        return Err(DaemonError::InvalidConfig);
+    }
+    let standalone = crate::fs_util::resolve_allow_missing(standalone)
+        .map_err(|_| DaemonError::HistoryConflict)?;
+    if data == standalone {
+        return Err(DaemonError::HistoryConflict);
+    }
+    let data_metadata = data.metadata().map_err(|_| DaemonError::HistoryConflict)?;
+    match standalone.metadata() {
+        Ok(metadata) => {
+            if !metadata.is_dir()
+                || (metadata.dev(), metadata.ino()) == (data_metadata.dev(), data_metadata.ino())
+            {
+                return Err(DaemonError::HistoryConflict);
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(DaemonError::HistoryConflict),
+    }
+    match std::fs::symlink_metadata(data.join("jobs.json")) {
+        Ok(metadata) if !metadata.is_file() || metadata.nlink() != 1 => {
+            return Err(DaemonError::HistoryConflict);
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(DaemonError::HistoryConflict),
+    }
+    Ok(())
+}
+
 // Forward only cancellation, not the peer deadline, to the bounded context.
 struct ForwardCancellation<'a>(&'a OperationContext<'a>);
 impl super::runtime::Cancellation for ForwardCancellation<'_> {
@@ -195,6 +235,7 @@ mod tests {
         socket: TempDir,
         locks: TempDir,
         data: TempDir,
+        standalone: TempDir,
     }
     impl Fixture {
         fn new() -> Self {
@@ -202,6 +243,7 @@ mod tests {
                 socket: TempDir::new().unwrap(),
                 locks: TempDir::new().unwrap(),
                 data: TempDir::new().unwrap(),
+                standalone: TempDir::new().unwrap(),
             };
             for path in [
                 fixture.socket.path(),
@@ -217,6 +259,7 @@ mod tests {
                 socket_directory: self.socket.path().into(),
                 lock_directory: self.locks.path().into(),
                 data_directory: self.data.path().into(),
+                standalone_data_directory: self.standalone.path().into(),
                 gpus: vec![0],
                 queue_capacity: 8,
                 peer_timeout: Duration::from_millis(100),
@@ -391,12 +434,73 @@ mod tests {
     }
 
     #[test]
-    fn startup_history_failure_releases_socket_and_guard() {
+    fn nonregular_history_fails_before_binding() {
         let fixture = Fixture::new();
         std::fs::create_dir(fixture.data.path().join("jobs.json")).unwrap();
         assert!(matches!(
             fixture.bind(fixture.config(1)),
-            Err(DaemonError::HistoryUnavailable)
+            Err(DaemonError::HistoryConflict)
+        ));
+        fixture.released();
+    }
+
+    #[test]
+    fn standalone_directory_and_symlink_aliases_are_rejected_without_writes() {
+        let fixture = Fixture::new();
+        let history = fixture.data.path().join("jobs.json");
+        std::fs::write(&history, "preserve me").unwrap();
+        let mut config = fixture.config(1);
+        config.standalone_data_directory = fixture.data.path().into();
+        assert!(matches!(
+            fixture.bind(config),
+            Err(DaemonError::HistoryConflict)
+        ));
+        let alias = fixture.standalone.path().join("alias");
+        std::os::unix::fs::symlink(fixture.data.path(), &alias).unwrap();
+        let mut config = fixture.config(1);
+        config.standalone_data_directory = alias;
+        assert!(matches!(
+            fixture.bind(config),
+            Err(DaemonError::HistoryConflict)
+        ));
+        assert_eq!(std::fs::read_to_string(history).unwrap(), "preserve me");
+        fixture.released();
+    }
+
+    #[test]
+    fn aliased_history_files_are_rejected_and_preserved() {
+        for symlink in [false, true] {
+            let fixture = Fixture::new();
+            let legacy = fixture.standalone.path().join("jobs.json");
+            let coordinated = fixture.data.path().join("jobs.json");
+            std::fs::write(&legacy, "legacy contents").unwrap();
+            if symlink {
+                std::os::unix::fs::symlink(&legacy, &coordinated).unwrap();
+            } else {
+                std::fs::hard_link(&legacy, &coordinated).unwrap();
+            }
+            assert!(matches!(
+                fixture.bind(fixture.config(1)),
+                Err(DaemonError::HistoryConflict)
+            ));
+            assert_eq!(std::fs::read_to_string(legacy).unwrap(), "legacy contents");
+            fixture.released();
+        }
+    }
+
+    #[test]
+    fn absent_standalone_store_is_not_created_and_relative_path_is_rejected() {
+        let fixture = Fixture::new();
+        let absent = fixture.standalone.path().join("not-created");
+        let mut config = fixture.config(1);
+        config.standalone_data_directory = absent.clone();
+        drop(fixture.bind(config).unwrap());
+        assert!(!absent.exists());
+        let mut config = fixture.config(1);
+        config.standalone_data_directory = "relative".into();
+        assert!(matches!(
+            fixture.bind(config),
+            Err(DaemonError::InvalidConfig)
         ));
         fixture.released();
     }
