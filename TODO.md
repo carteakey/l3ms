@@ -49,6 +49,8 @@ See the [migration status](docs/migration/status.md),
   sensitive payloads.
   Next implementation slice: connect concrete lifecycle/admission reconciliation
   and supervised dispatch; keep dispatch closed until those checks are integrated.
+  Keep coordinator and legacy UI/bench history stores separate; reject directory
+  aliases before installation and test concurrent workflows without lost history.
 - [ ] Integrate CLI and keyboard-first UI run/observe/cancel with the same
   coordinator, settings, routing, and request IDs; preserve standalone commands.
   Linux CLI request status/cancel is implemented; submit/results and UI remain.

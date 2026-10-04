@@ -288,6 +288,16 @@ HTTP ingress with native protocol adapters, authentication, streaming/cancellati
 and durable media job tracking. Keep existing public URLs unchanged until an explicit endpoint cutover.
 Read-only catalog, status, and route discovery never cause an engine swap.
 
+Job persistence has one writer per store. The coordinator owns its private
+request-history directory; standalone UI/bench history remains separate while
+those workflows still write directly. Reusing the legacy history format does
+not authorize two owners to share `jobs.json`. Coordinated clients observe and
+mutate request state through IPC only. Before enabling dispatch, reject a
+coordinator data directory that aliases a legacy client store and test both
+histories surviving concurrent standalone and coordinated use. A later unified
+history view may read both stores; consolidation requires an explicit migration
+to coordinator-owned writes, not a shared file path.
+
 | Responsibility | Owner and source of truth | What L3MS shares |
 | --- | --- | --- |
 | Language profiles and serving | Root `llama-swap.yaml`; llama-swap owns live model state and chat/embedding routes. | Catalog display, health, load/unload controls, telemetry, jobs. |

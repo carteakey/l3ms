@@ -217,6 +217,15 @@ or result delivery.
 
 ## Bounded control-daemon owner
 
+The daemon's explicit data directory must remain separate from the standalone
+UI/bench history directory. Both use the compatible `jobs.json` format, but the
+legacy client does not acquire coordinator ownership locks. Those locks alone
+therefore cannot prevent competing writes to one store. Installation/dispatch
+must add an alias-rejection gate before selecting operator paths; current
+foreground fixtures use isolated directories and do not implement that gate.
+Coordinated clients must use IPC for writes, never load and persist the daemon's
+history themselves. A combined read-only view is distinct from merging stores.
+
 The internal Linux `ControlDaemon` acquires the listener and host/device locks
 before loading or normalizing history. Its core is private and remains
 unreconciled: status/cancel can be served, but submissions are unavailable and
