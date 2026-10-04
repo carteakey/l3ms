@@ -10,8 +10,8 @@ existing Linear migration issues rather than replacing their acceptance criteria
 
 ## Monorepo: next work
 
-Latest offline checkpoint: coordinator CLI and Breeze execution on `feature/l3ms-monorepo`;
-426 root tests passed,
+Latest offline checkpoint: shared control settings on `feature/l3ms-monorepo`;
+429 root tests passed,
 1 ignored. This is offline implementation evidence, not live cutover acceptance.
 See the [migration status](docs/migration/status.md),
 [plan](docs/monorepo-consolidation-plan.md), and
@@ -41,6 +41,8 @@ See the [migration status](docs/migration/status.md),
   cancellation that retains reservations until cleanup is acknowledged.
 - [x] Add a listener/history-owning serial control loop with bounded peer time
   and connection attempts, closed startup admission, and safe ownership cleanup.
+- [x] Resolve optional coordinator socket/artifact paths through shared settings;
+  keep defaults absent and omit host-local paths from portable exports.
 - [ ] Implement the local IPC daemon with private socket/peer authentication,
   bounded transport, singleton ownership, startup reconciliation, and concrete
   dispatch. Deliver results, artifact references, and streams without persisting

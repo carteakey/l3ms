@@ -104,7 +104,7 @@ CAR-220 Phase 9, and CAR-221 Phase 10.
 
 ## Open decisions
 
-Latest offline adapter/transport/control/safety checkpoint: **426 root tests passed, 1
+Latest offline adapter/transport/control/safety checkpoint: **429 root tests passed, 1
 ignored**, with fmt, Clippy, and whitespace checks passing. A deterministic
 fork-inheritance regression reproduced an ownership guard release defect;
 explicit unlock now releases both complete and partially acquired guards even
@@ -170,6 +170,13 @@ artifacts, redacted failures, cancellation/deadline cleanup, and PCM container
 validation rather than a bare WAVE marker. Root: 426 passed, 1 ignored; no real
 model or live service was used. Dispatch, lifecycle reconciliation and full UI
 integration remain incomplete.
+
+2026-10-03 shared-control-settings checkpoint: optional socket/artifact paths
+share existing host/user/environment/explicit precedence and declaring-directory
+anchoring. Defaults remain absent, resolution creates no files, and portable
+exports strip both paths without changing the operator's store. Three new
+settings regressions include an isolated-process check of environment-variable
+collection. Root: 429 passed, 1 ignored; no deployment or admission was enabled.
 
 - Choose the host admission mode for direct llama-swap/ComfyUI requests before
   claiming automatic cross-engine switching. The plan allows coordination

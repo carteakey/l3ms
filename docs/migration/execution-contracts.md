@@ -5,6 +5,15 @@ live acceptance record. See [status.md](status.md) for phase gates and evidence.
 
 ## Ownership and dispatch
 
+Shared stack settings now resolve optional `coordinator_socket_dir` and
+`artifact_root` paths through host/user settings, `L3MS_COORDINATOR_SOCKET_DIR`
+and `L3MS_ARTIFACT_ROOT`, then explicit overrides. Neither has a built-in
+default. Stored relative paths anchor to their declaring settings directory;
+environment/CLI paths anchor to the invocation directory. Resolution is
+read-only and does not create a socket, output directory or service. Portable
+profile exports omit these machine-local paths. Runtime consumers must still
+verify private ownership and admission before use.
+
 The future executor must acquire the shared host/device ownership guard, reconcile
 actual runtimes and GPU use, prove admission, and reserve accepted work through
 the coordinator before invoking an adapter. A configured resource claim is not

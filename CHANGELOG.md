@@ -10,6 +10,8 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Added opt-in shared coordinator socket and artifact-root settings with layered
+  path resolution; portable profile exports strip both host-local paths.
 - Added Linux coordinator request status/cancel CLI commands with explicit
   private socket selection, bounded IPC, typed reply validation, and no fallback.
 - Added bounded Breeze speech execution with explicit per-job outputs, validated
