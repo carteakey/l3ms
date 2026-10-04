@@ -29,6 +29,22 @@ of an earlier reservation. Internal symlinks are allowed; escaping ones are not.
 Path verification assumes trusted toolkit directories and is not a sandbox or
 a defense against concurrent malicious filesystem replacement.
 
+## NVIDIA idle observation
+
+The internal Linux probe uses the fixed `/usr/bin/nvidia-smi` executable and an
+explicit GPU UUID, expected index and maximum idle memory allowance. It reads
+identity/memory, compute claimants, then identity/memory again, with bounded
+child supervision, a shared operation deadline and 64 KiB per-query output
+limits. Malformed/unsupported values, changed device capacity, foreign devices,
+compute claimants and excessive memory usage fail closed with fixed errors.
+There is no automatically learned idle baseline or retained claimant PID.
+
+A positive result is only a point-in-time observation. It does not cover
+graphics/desktop ownership, prevent new direct requests, establish a runtime
+lease, or prove cgroup cleanup. Concrete switching must separately prove owned
+runtime termination and ingress exclusion; this probe is not wired to admission.
+Tests use fake executables only, not the actual GPU or running services.
+
 ## Language
 
 The concrete language adapter translates the native model key and ordered
@@ -252,7 +268,10 @@ runtime lifecycle owner or enabled inference scheduler.
 ## Release gates
 
 The Linux CLI can query/cancel one retained request through an explicitly supplied
-private socket directory with a single three-second exchange. It validates both
+private socket directory or an opt-in shared socket setting, with a single
+three-second exchange. The explicit flag wins; absent configuration is an error,
+not an inferred socket or automatic startup. Settings are read only for control
+actions without a directory flag. A common Linux client module validates both
 request IDs and reply operation, prints bounded JSON, and returns nonzero for a
 typed error. It never starts the daemon, submits inference, retries a frame or
 falls back to an engine. A cancelled active request retains its lease until

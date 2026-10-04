@@ -10,8 +10,8 @@ existing Linear migration issues rather than replacing their acceptance criteria
 
 ## Monorepo: next work
 
-Latest offline checkpoint: shared control settings on `feature/l3ms-monorepo`;
-429 root tests passed,
+Latest offline checkpoint: shared coordinator client and NVIDIA observation on
+`feature/l3ms-monorepo`; 444 root tests passed,
 1 ignored. This is offline implementation evidence, not live cutover acceptance.
 See the [migration status](docs/migration/status.md),
 [plan](docs/monorepo-consolidation-plan.md), and
@@ -23,6 +23,8 @@ See the [migration status](docs/migration/status.md),
   verified blocking/draining of direct requests. Refuse unsafe swaps meanwhile.
 - [ ] Implement concrete lifecycle adapters and reconcile actual runtime
   ownership; verify stop, GPU release, startup/health, and bounded rollback.
+  The fixture-tested NVIDIA probe provides point-in-time idle evidence only;
+  owned runtime/cgroup cleanup and ingress exclusion remain separate gates.
 - [x] Connect Breeze speech recipes to bounded execution and per-job WAV/chunk
   artifact validation. Real-model tests and coordinator dispatch remain gated.
 - [ ] Add explicit artifact contracts for other native media scripts; do not

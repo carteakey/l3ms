@@ -2,10 +2,14 @@
 //! Native execution is not yet connected to public CLI/UI actions.
 
 pub mod catalog;
+#[cfg(target_os = "linux")]
+pub mod client;
 pub mod comfy;
 #[cfg(target_os = "linux")]
 pub mod daemon;
 pub mod decision;
+#[cfg(target_os = "linux")]
+pub mod gpu_probe;
 pub mod inference;
 pub mod ipc;
 pub mod language;

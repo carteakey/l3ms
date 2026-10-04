@@ -178,6 +178,17 @@ exports strip both paths without changing the operator's store. Three new
 settings regressions include an isolated-process check of environment-variable
 collection. Root: 429 passed, 1 ignored; no deployment or admission was enabled.
 
+2026-10-03 common-client/NVIDIA checkpoint: Linux CLI status/cancel now uses the
+shared one-shot client and opt-in socket configuration, with explicit flag
+precedence and no inferred default or automatic startup. Client fixtures cover
+submit/status/cancel reply shapes, correlation, fixed errors and no fallback;
+CLI fixtures preserve parser, path-selection and bounded JSON behavior. Ten
+NVIDIA fixtures cover explicit identity, bounded queries, malformed/unsupported
+readings, changing capacity, claimants, memory limits and cancellation/deadlines.
+Root: 444 passed, 1 ignored; Clippy, formatting and whitespace checks pass. All
+GPU tests use fake executables. No live service, admission or inference dispatch
+was enabled. The managed-service ownership primitive is still in development.
+
 - Choose the host admission mode for direct llama-swap/ComfyUI requests before
   claiming automatic cross-engine switching. The plan allows coordination
   only where the runtime can block and drain new direct work, or where callers

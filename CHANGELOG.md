@@ -10,6 +10,12 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Added a bounded internal NVIDIA idle-observation probe with explicit device
+  identity/memory limits and fail-closed compute-claimant checks. It is not a
+  runtime lease, admission fence or live GPU-release acceptance.
+- Shared Linux coordinator exchange validation between clients; CLI status/cancel
+  may use an opt-in shared socket setting, with an explicit flag taking precedence.
+  Missing configuration remains an error; no service is started automatically.
 - Added opt-in shared coordinator socket and artifact-root settings with layered
   path resolution; portable profile exports strip both host-local paths.
 - Added Linux coordinator request status/cancel CLI commands with explicit
