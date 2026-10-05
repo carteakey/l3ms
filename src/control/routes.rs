@@ -11,7 +11,7 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{ensure, Context, Result};
 
 use super::catalog::{
-    Catalog, NativeProfileSource, ProfileId, ProfileKey, Readiness, RuntimeIdentity, Task,
+    Catalog, Device, NativeProfileSource, ProfileId, ProfileKey, Readiness, RuntimeIdentity, Task,
 };
 
 const MAX_NATIVE_PATH_BYTES: usize = 512;
@@ -50,6 +50,9 @@ pub struct ResolvedProfileRoute {
     pub profile: ProfileKey,
     /// Namespaced runtime declared or implied by the native manifest.
     pub runtime: RuntimeIdentity,
+    /// Declared native device; changes invalidate accepted resource assumptions.
+    /// Absence does not imply CPU or establish runtime readiness.
+    pub device: Option<Device>,
     /// Native dispatch location and associated manifest values.
     pub native_route: NativeRoute,
     /// Original task labels from the native catalog entry, without aliases.
@@ -100,6 +103,7 @@ pub fn resolve_profile_route(catalog: &Catalog, key: &ProfileKey) -> Result<Reso
     Ok(ResolvedProfileRoute {
         profile: profile.key.clone(),
         runtime: profile.runtime.clone(),
+        device: profile.device.clone(),
         native_route,
         tasks: profile.tasks.clone(),
         readiness: profile.readiness,

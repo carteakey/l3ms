@@ -264,6 +264,36 @@ executable regression reproduced the failure with its write guard removed.
 With the guard restored, the full suite passed 531 tests, 1 ignored.
 Production spawn behavior and failure disposition are unchanged.
 
+### 2026-10-05 — owned intent retirement, isolated transport and CPU worker
+
+Root verification: 556 passed, 1 ignored; locked/offline all-targets tests,
+strict denied-warning Clippy, formatting and whitespace checks pass without
+lint suppression. Explicit intent retirement freshly checks stopped generation
+and cgroup, validates exact private records, then unlinks/syncs with retained
+metadata on uncertainty. Runtime identity and declared native device are now
+part of accepted-route checks, including both recipe refreshes. Uncertain
+completion retains its active reservation until separate verified-cleanup
+acknowledgment; interrupted outcomes cannot be reclassified by ordinary completion.
+
+The isolated byte transport pins coordinator PID/UID/start, pidfd and retained
+nsfs identity. Real child-namespace fixtures verify the FD handoff, private Unix
+peer, isolated loopback backend, early response/backpressure and uncertain partial
+writes. Captured EACCES for cross-user-namespace `/proc` namespace lookup was
+resolved by authoritative FD handoff, not a boolean bypass. Namespace loopback
+setup is fixture-only; no real manager units, inference engines or GPU were used.
+Production manager launch/property validation and native admission/drain remain.
+
+A one-job CPU-only local-decision worker now checks accepted routes, disables
+CUDA discovery and downloads, supports cancellation and returns typed native
+outputs/cleanup categories over bounded channels. Its success fixture initially
+returned an undeclared answer, correctly rejected by native validation; the
+fixture's accepted choices were corrected and full verification rerun. Restricted
+CPU startup refuses GPU/hosted bindings and unresolved retained history. Default
+profiles remain CUDA/remote, not silently converted. Output quotas reserve each
+job's maximum before dispatch rather than competing with other active output.
+Daemon execution/event-loop wiring, public submit/UI/HTTP, general media mapping,
+live acceptance and publication remain incomplete. No goal-completion claim.
+
 - Choose the host admission mode for direct llama-swap/ComfyUI requests before
   claiming automatic cross-engine switching. The plan allows coordination
   only where the runtime can block and drain new direct work, or where callers

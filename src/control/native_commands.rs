@@ -153,21 +153,57 @@ pub fn prepare_native_command(
     catalog: &Catalog,
     request: &InferenceRequest,
 ) -> Result<NativeCommandRecipe> {
+    prepare_native_command_inner(catalog, request, None)
+}
+
+/// Prepare against an already accepted native route. Every refreshed route
+/// must match that snapshot, including the declared device. This is not
+/// admission or resource ownership; the coordinator must authorize dispatch.
+pub fn prepare_native_command_for_route(
+    catalog: &Catalog,
+    request: &InferenceRequest,
+    accepted: &ResolvedProfileRoute,
+) -> Result<NativeCommandRecipe> {
+    prepare_native_command_inner(catalog, request, Some(accepted))
+}
+
+fn prepare_native_command_inner(
+    catalog: &Catalog,
+    request: &InferenceRequest,
+    accepted: Option<&ResolvedProfileRoute>,
+) -> Result<NativeCommandRecipe> {
     let key = request.profile();
+    if let Some(accepted) = accepted {
+        ensure!(
+            resolve_profile_route(catalog, key)? == *accepted,
+            "accepted native route changed"
+        );
+    }
     let cached_profile = catalog
         .inspect(key)
         .with_context(|| format!("unknown profile {key}"))?;
     let reserved_runtime = cached_profile.runtime.clone();
+    let reserved_device = cached_profile.device.clone();
 
     let validated_catalog = catalog
         .refresh()
         .context("refresh native catalog before command preparation")?;
+    if let Some(accepted) = accepted {
+        ensure!(
+            resolve_profile_route(&validated_catalog, key)? == *accepted,
+            "accepted native route changed"
+        );
+    }
     let validated_profile = request
         .validate(&validated_catalog)
         .map_err(|_| anyhow!("native inference request failed validation"))?;
     ensure!(
         validated_profile.runtime == reserved_runtime,
         "runtime identity for {key} changed; executor must rebind and reconcile resources"
+    );
+    ensure!(
+        validated_profile.device == reserved_device,
+        "native device changed; executor must rebind and reconcile resources"
     );
 
     if matches!(
@@ -201,8 +237,15 @@ pub fn prepare_native_command(
         profile.runtime == reserved_runtime,
         "runtime identity for {key} changed; executor must rebind and reconcile resources"
     );
+    ensure!(
+        profile.device == reserved_device,
+        "native device changed; executor must rebind and reconcile resources"
+    );
     let route = resolve_profile_route(&current_catalog, key)
         .with_context(|| format!("resolve current native route for {key}"))?;
+    if let Some(accepted) = accepted {
+        ensure!(route == *accepted, "accepted native route changed");
+    }
     ensure_route_matches_verified_path(&route, &verified)?;
 
     match request {
@@ -1156,6 +1199,36 @@ mod tests {
         assert!(debug.contains("<redacted>"));
         assert!(!debug.contains("speech prompt"));
         assert!(recipe.stdin_payload.is_some());
+    }
+
+    #[test]
+    fn accepted_route_preparation_refuses_model_only_changes() {
+        let fixture = Fixture::new("media-profile", "media-models/unused.sh", &["tts"]);
+        fixture.write_decision_files(true);
+        let catalog = fixture.catalog();
+        let request = decision_request("nagi-smol");
+        let accepted = resolve_profile_route(&catalog, request.profile()).unwrap();
+        let manifest_path = fixture.decisions_root.join("decision-runtimes.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["profiles"][0]["model"] = serde_json::json!("different/model");
+        fs::write(&manifest_path, manifest.to_string()).unwrap();
+        let error = prepare_native_command_for_route(&catalog, &request, &accepted).unwrap_err();
+        assert!(error.to_string().contains("accepted native route changed"));
+    }
+
+    #[test]
+    fn stale_native_device_never_reuses_the_catalog_resource_assumption() {
+        let fixture = Fixture::new("media-profile", "media-models/unused.sh", &["tts"]);
+        fixture.write_decision_files(true);
+        let catalog = fixture.catalog();
+        let manifest_path = fixture.decisions_root.join("decision-runtimes.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["profiles"][0]["device"] = serde_json::json!("cpu");
+        fs::write(&manifest_path, manifest.to_string()).unwrap();
+        let error = prepare_native_command(&catalog, &decision_request("nagi-smol")).unwrap_err();
+        assert!(error.to_string().contains("native device changed"));
     }
 
     #[test]

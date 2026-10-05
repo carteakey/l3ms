@@ -424,6 +424,7 @@ impl ResultPage {
 pub struct ResultBuffer {
     jobs: HashMap<String, ResultEntry>,
     total_event_bytes: usize,
+    total_reserved_bytes: usize,
     tombstones: HashMap<String, Tombstone>,
     tombstone_order: VecDeque<String>,
 }
@@ -435,6 +436,7 @@ impl fmt::Debug for ResultBuffer {
             .field("retained_jobs", &self.jobs.len())
             .field("retained_tombstones", &self.tombstones.len())
             .field("event_bytes", &self.total_event_bytes)
+            .field("reserved_bytes", &self.total_reserved_bytes)
             .finish()
     }
 }
@@ -450,6 +452,7 @@ impl ResultBuffer {
         Self {
             jobs: HashMap::new(),
             total_event_bytes: 0,
+            total_reserved_bytes: 0,
             tombstones: HashMap::new(),
             tombstone_order: VecDeque::new(),
         }
@@ -458,6 +461,28 @@ impl ResultBuffer {
     /// Begins one request result. IDs remain unavailable for reuse while a
     /// retained job or bounded tombstone carries that ID.
     pub fn begin(&mut self, request_id: &str, lane: Lane) -> Result<(), ResultBufferError> {
+        self.begin_with_budget(request_id, lane, 0)
+    }
+
+    /// Read-only acceptance check for a full per-job output reservation. The
+    /// single daemon owner must call begin_reserved after durable acceptance,
+    /// without intervening mutation. No cache entry or tombstone is created.
+    pub fn can_begin_reserved(&self, request_id: &str) -> Result<(), ResultBufferError> {
+        self.check_begin(request_id, MAX_JOB_EVENT_BYTES)
+    }
+
+    /// Reserve the full 8 MiB serialized-event allowance before dispatch.
+    /// Appends consume this reservation; terminal acknowledgment frees only
+    /// unused quota. Retained output still counts against the global cap.
+    pub fn begin_reserved(
+        &mut self,
+        request_id: &str,
+        lane: Lane,
+    ) -> Result<(), ResultBufferError> {
+        self.begin_with_budget(request_id, lane, MAX_JOB_EVENT_BYTES)
+    }
+
+    fn check_begin(&self, request_id: &str, reserved: usize) -> Result<(), ResultBufferError> {
         validate_id(request_id)?;
         if self.jobs.contains_key(request_id) || self.tombstones.contains_key(request_id) {
             return Err(ResultBufferError::DuplicateRequest);
@@ -465,8 +490,28 @@ impl ResultBuffer {
         if self.jobs.len() >= MAX_RETAINED_JOBS {
             return Err(ResultBufferError::CapacityExceeded);
         }
-        self.jobs
-            .insert(request_id.to_owned(), ResultEntry::new(lane));
+        if self
+            .total_event_bytes
+            .checked_add(self.total_reserved_bytes)
+            .and_then(|bytes| bytes.checked_add(reserved))
+            .is_none_or(|bytes| bytes > MAX_TOTAL_EVENT_BYTES)
+        {
+            return Err(ResultBufferError::CapacityExceeded);
+        }
+        Ok(())
+    }
+
+    fn begin_with_budget(
+        &mut self,
+        request_id: &str,
+        lane: Lane,
+        reserved: usize,
+    ) -> Result<(), ResultBufferError> {
+        self.check_begin(request_id, reserved)?;
+        let mut entry = ResultEntry::new(lane);
+        entry.reserved_bytes = reserved;
+        self.jobs.insert(request_id.to_owned(), entry);
+        self.total_reserved_bytes += reserved;
         Ok(())
     }
 
@@ -479,7 +524,7 @@ impl ResultBuffer {
         event: ResultEvent,
     ) -> Result<(), ResultBufferError> {
         validate_id(request_id)?;
-        let (lane, latest_cursor, event_bytes, chat_raw_bytes, terminal) = {
+        let (lane, latest_cursor, event_bytes, chat_raw_bytes, terminal, reserved_bytes) = {
             let job = self.job(request_id)?;
             (
                 job.lane,
@@ -487,6 +532,7 @@ impl ResultBuffer {
                 job.event_bytes,
                 job.chat_raw_bytes,
                 job.terminal,
+                job.reserved_bytes,
             )
         };
         if terminal.is_some() {
@@ -541,7 +587,9 @@ impl ResultBuffer {
             .is_none()
             || self
                 .total_event_bytes
-                .checked_add(staged_bytes)
+                .checked_add(self.total_reserved_bytes)
+                .and_then(|bytes| bytes.checked_add(staged_bytes))
+                .and_then(|bytes| bytes.checked_sub(staged_bytes.min(reserved_bytes)))
                 .filter(|bytes| *bytes <= MAX_TOTAL_EVENT_BYTES)
                 .is_none()
         {
@@ -560,6 +608,9 @@ impl ResultBuffer {
         job.latest_cursor = last_cursor;
         job.event_bytes += staged_bytes;
         job.chat_raw_bytes = new_chat_raw_bytes;
+        let consumed_reservation = staged_bytes.min(job.reserved_bytes);
+        job.reserved_bytes -= consumed_reservation;
+        self.total_reserved_bytes -= consumed_reservation;
         self.total_event_bytes += staged_bytes;
         Ok(())
     }
@@ -572,11 +623,17 @@ impl ResultBuffer {
         terminal: ResultTerminal,
     ) -> Result<(), ResultBufferError> {
         validate_id(request_id)?;
-        let job = self.job_mut(request_id)?;
-        if job.terminal.is_some() {
-            return Err(ResultBufferError::AlreadyTerminal);
-        }
-        job.terminal = Some(terminal);
+        let freed = {
+            let job = self.job_mut(request_id)?;
+            if job.terminal.is_some() {
+                return Err(ResultBufferError::AlreadyTerminal);
+            }
+            job.terminal = Some(terminal);
+            let freed = job.reserved_bytes;
+            job.reserved_bytes = 0;
+            freed
+        };
+        self.total_reserved_bytes -= freed;
         Ok(())
     }
 
@@ -726,6 +783,7 @@ impl ResultBuffer {
 }
 
 struct ResultEntry {
+    reserved_bytes: usize,
     lane: Lane,
     events: Vec<StoredResultEvent>,
     latest_cursor: u64,
@@ -742,6 +800,7 @@ struct StoredResultEvent {
 impl ResultEntry {
     fn new(lane: Lane) -> Self {
         Self {
+            reserved_bytes: 0,
             lane,
             events: Vec::new(),
             latest_cursor: 0,
@@ -1098,6 +1157,86 @@ fn validate_group_part(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reserved_outputs_cannot_be_consumed_by_other_jobs() {
+        let mut buffer = ResultBuffer::new();
+        for index in 0..MAX_TOTAL_EVENT_BYTES / MAX_JOB_EVENT_BYTES {
+            buffer
+                .begin_reserved(&format!("reserved-{index}"), Lane::Language)
+                .unwrap();
+        }
+        assert_eq!(buffer.total_reserved_bytes, MAX_TOTAL_EVENT_BYTES);
+        assert_eq!(
+            buffer.can_begin_reserved("one-more"),
+            Err(ResultBufferError::CapacityExceeded)
+        );
+        buffer.begin("unreserved", Lane::Language).unwrap();
+        assert_eq!(
+            buffer.append("unreserved", ResultEvent::ChatContent("small".into())),
+            Err(ResultBufferError::CapacityExceeded)
+        );
+        assert_eq!(buffer.total_event_bytes, 0);
+        buffer
+            .append("reserved-0", ResultEvent::ChatContent("small".into()))
+            .unwrap();
+        assert!(buffer.total_event_bytes > 0);
+        assert_eq!(
+            buffer.total_event_bytes + buffer.total_reserved_bytes,
+            MAX_TOTAL_EVENT_BYTES
+        );
+        buffer
+            .terminal("reserved-0", ResultTerminal::Succeeded)
+            .unwrap();
+        buffer
+            .terminal("reserved-1", ResultTerminal::Cancelled)
+            .unwrap();
+        buffer.can_begin_reserved("one-more").unwrap();
+        buffer.begin_reserved("one-more", Lane::Decisions).unwrap();
+        assert!(buffer.total_event_bytes + buffer.total_reserved_bytes <= MAX_TOTAL_EVENT_BYTES);
+        let retained = buffer.total_event_bytes;
+        buffer.evict_terminal("reserved-0").unwrap();
+        assert_eq!(buffer.total_event_bytes, 0);
+        assert!(retained > 0);
+        assert_eq!(
+            buffer.can_begin_reserved("reserved-0"),
+            Err(ResultBufferError::DuplicateRequest)
+        );
+    }
+
+    #[test]
+    fn reserved_acceptance_check_is_read_only_and_failed_append_keeps_quota() {
+        let mut buffer = ResultBuffer::new();
+        buffer.can_begin_reserved("checked").unwrap();
+        buffer.can_begin_reserved("checked").unwrap();
+        assert_eq!(
+            buffer
+                .page("checked", 0, MAX_PAGE_BYTES)
+                .unwrap()
+                .availability,
+            Availability::Unknown
+        );
+        assert_eq!(buffer.total_reserved_bytes, 0);
+        buffer.begin_reserved("checked", Lane::Decisions).unwrap();
+        assert_eq!(
+            buffer.can_begin_reserved("checked"),
+            Err(ResultBufferError::DuplicateRequest)
+        );
+        assert_eq!(
+            buffer.append("checked", ResultEvent::ChatContent("wrong-lane".into())),
+            Err(ResultBufferError::WrongLane)
+        );
+        assert_eq!(buffer.total_reserved_bytes, MAX_JOB_EVENT_BYTES);
+        buffer
+            .terminal("checked", ResultTerminal::Interrupted)
+            .unwrap();
+        assert_eq!(buffer.total_reserved_bytes, 0);
+        assert_eq!(
+            buffer.terminal("checked", ResultTerminal::Cancelled),
+            Err(ResultBufferError::AlreadyTerminal)
+        );
+        assert_eq!(buffer.total_reserved_bytes, 0);
+    }
 
     fn request_id(index: usize) -> String {
         format!("result:{index}")

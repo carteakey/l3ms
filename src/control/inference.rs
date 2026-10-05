@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{ensure, Context, Result};
 
-use super::catalog::{Catalog, Lane, ProfileKey, RuntimeIdentity};
+use super::catalog::{Catalog, Device, Lane, ProfileKey, RuntimeIdentity};
 use super::ipc::{
     self, AcceptedOperation, ClientRequest, RequestStatus, ResponseEnvelope, ResponseErrorCode,
     ResponseMessage,
@@ -111,6 +111,7 @@ struct Active {
     route: ResolvedProfileRoute,
     resource: ResourceClaim,
     cancellation: RequestCancellation,
+    cleanup_unresolved: bool,
     deadline: Instant,
     reserved: Instant,
     started: Option<Instant>,
@@ -190,6 +191,7 @@ pub struct CoordinatorCore {
     active: BTreeMap<u64, Active>,
     capacity: usize,
     admission: AdmissionState,
+    cpu_decisions_only: bool,
 }
 
 impl CoordinatorCore {
@@ -220,6 +222,7 @@ impl CoordinatorCore {
             active: BTreeMap::new(),
             capacity,
             admission: AdmissionState::ReconciliationRequired,
+            cpu_decisions_only: false,
         })
     }
 
@@ -234,6 +237,58 @@ impl CoordinatorCore {
     }
     pub fn history(&self) -> &JobHistory {
         &self.history
+    }
+
+    pub fn catalog(&self) -> &Catalog {
+        &self.catalog
+    }
+
+    /// Opt into child-owned CPU local decisions only. The daemon must retain
+    /// host ownership and use the bounded CPU worker, which disables CUDA and
+    /// never downloads models. This is not reconciliation for resident engines.
+    /// Any interrupted or foreign retained history refuses this startup path.
+    pub fn confirm_cpu_decisions_ready(&mut self) -> Result<()> {
+        ensure!(
+            self.active.is_empty() && self.pending.is_empty(),
+            "reservations require reconciliation"
+        );
+        ensure!(
+            !self.bindings.is_empty(),
+            "CPU decision bindings are absent"
+        );
+        let refreshed = self.catalog.refresh()?;
+        for (runtime, resource) in &self.bindings {
+            ensure!(
+                runtime.lane == Lane::Decisions
+                    && matches!(runtime.as_str(), "nagi" | "laya")
+                    && *resource == ResourceClaim::None,
+                "CPU decision bindings must exclude GPU and hosted engines"
+            );
+            ensure!(
+                refreshed.list().iter().any(|profile| {
+                    profile.runtime == *runtime
+                        && !profile.disabled
+                        && resolve_profile_route(&refreshed, &profile.key)
+                            .is_ok_and(|route| cpu_decision_route(&route))
+                }),
+                "bound runtime has no explicit CPU local decision profile"
+            );
+        }
+        ensure!(
+            self.history.records().iter().all(|job| {
+                job.kind == "cross-toolkit"
+                    && job.metadata.toolkit.as_deref() == Some("l3ds")
+                    && matches!(
+                        job.metadata.result_state.as_deref(),
+                        Some("succeeded" | "failed" | "cancelled")
+                    )
+            }),
+            "retained history requires explicit native cleanup reconciliation"
+        );
+        self.catalog = refreshed;
+        self.cpu_decisions_only = true;
+        self.admission = AdmissionState::Ready;
+        Ok(())
     }
 
     /// Reconnect lookup uses the caller's retained request ID, never a numeric
@@ -469,6 +524,11 @@ impl CoordinatorCore {
             .bindings
             .get(&route.runtime)
             .ok_or(SubmissionError::Unavailable)?;
+        if self.cpu_decisions_only
+            && (!cpu_decision_route(&route) || resource != ResourceClaim::None)
+        {
+            return Err(SubmissionError::Unavailable);
+        }
         let deadline = now
             .checked_add(timeout)
             .ok_or(SubmissionError::InvalidRequest)?;
@@ -589,6 +649,7 @@ impl CoordinatorCore {
                 cancellation: cancellation.clone(),
                 deadline,
                 reserved: now,
+                cleanup_unresolved: false,
                 started: None,
                 queue_wait,
             },
@@ -668,6 +729,12 @@ impl CoordinatorCore {
                 return Err(DispatchBeginError::RouteChanged);
             }
         };
+        if self.cpu_decisions_only
+            && (!cpu_decision_route(&current_route) || ticket.resource != ResourceClaim::None)
+        {
+            self.quarantine();
+            return Err(DispatchBeginError::RouteChanged);
+        }
         let accepted_route = self
             .active
             .get(&ticket.job_id)
@@ -796,6 +863,10 @@ impl CoordinatorCore {
             .get(&job_id)
             .context("unknown dispatch reservation")?;
         ensure!(
+            !active.cleanup_unresolved,
+            "uncertain outcome requires cleanup acknowledgment, not reclassification"
+        );
+        ensure!(
             outcome != Completion::Succeeded || active.started.is_some(),
             "undispatched request cannot succeed"
         );
@@ -816,11 +887,39 @@ impl CoordinatorCore {
             return Err(error
                 .context("completion persistence failed; reconcile ownership before more work"));
         }
-        self.active.remove(&job_id);
         if outcome == Completion::Uncertain {
+            // A terminal outcome is not a cleanup acknowledgment. Preserve
+            // the reservation until the executor separately proves cleanup.
+            self.active
+                .get_mut(&job_id)
+                .expect("validated active reservation")
+                .cleanup_unresolved = true;
             self.quarantine();
+        } else {
+            self.active.remove(&job_id);
         }
         Ok(timing)
+    }
+
+    /// Release an uncertain reservation only after the host executor has
+    /// independently verified native cleanup and resource ownership. This
+    /// method performs no probes, does not rewrite the interrupted outcome,
+    /// and never opens admission; full reconciliation is still required.
+    pub fn acknowledge_reconciled_cleanup(&mut self, job_id: u64) -> Result<()> {
+        let active = self
+            .active
+            .get(&job_id)
+            .context("unknown dispatch reservation")?;
+        ensure!(
+            active.cleanup_unresolved,
+            "reservation has no unresolved cleanup"
+        );
+        ensure!(
+            self.admission == AdmissionState::ReconciliationRequired,
+            "cleanup acknowledgment requires quarantine"
+        );
+        self.active.remove(&job_id);
+        Ok(())
     }
 
     fn persist_update(
@@ -850,6 +949,14 @@ fn wire_error(request_id: String, code: ResponseErrorCode) -> ResponseMessage {
         request_id: Some(request_id),
         code,
     }
+}
+
+fn cpu_decision_route(route: &ResolvedProfileRoute) -> bool {
+    route.profile.lane == Lane::Decisions
+        && route.runtime.lane == Lane::Decisions
+        && matches!(route.runtime.as_str(), "nagi" | "laya")
+        && route.device == Some(Device::Cpu)
+        && matches!(&route.native_route, super::routes::NativeRoute::DecisionRunner { profile_type, .. } if profile_type == "local")
 }
 
 fn toolkit_for_lane(lane: Lane) -> &'static str {
@@ -1120,6 +1227,94 @@ mod tests {
             .map(str::to_owned)
     }
 
+    fn cpu_fixture_core(fixture: &DispatchFixture, resource: ResourceClaim) -> CoordinatorCore {
+        let root = fixture.root.path();
+        std::fs::write(root.join("decisions/decision-runtimes.json"), serde_json::json!({
+            "version": "1.0", "profiles": [
+                {"id":"cpu", "name":"CPU", "engine":"nagi", "type":"local", "model":"fixture", "device":"cpu", "entrypoint":"runner.py"},
+                {"id":"gpu", "name":"GPU", "engine":"nagi", "type":"local", "model":"fixture", "device":"cuda", "entrypoint":"runner.py"}
+            ]
+        }).to_string()).unwrap();
+        let catalog = Catalog::load_from_roots(
+            root.join("language"),
+            root.join("media"),
+            root.join("decisions"),
+        )
+        .unwrap();
+        CoordinatorCore::load(
+            catalog,
+            BTreeMap::from([(
+                RuntimeIdentity::new(Lane::Decisions, "nagi").unwrap(),
+                resource,
+            )]),
+            root,
+            root,
+            8,
+        )
+        .unwrap()
+    }
+
+    fn cpu_request(profile: &str) -> InferenceRequest {
+        let mut request = hosted();
+        if let InferenceRequest::Decision { profile: key, .. } = &mut request {
+            *key = ProfileKey::new(Lane::Decisions, profile).unwrap();
+        }
+        request
+    }
+
+    #[test]
+    fn cpu_admission_refuses_gpu_profiles_even_when_the_runtime_binding_is_shared() {
+        let fixture = DispatchFixture::new();
+        let mut core = cpu_fixture_core(&fixture, ResourceClaim::None);
+        core.confirm_cpu_decisions_ready().unwrap();
+        assert!(core
+            .submit(
+                "cpu".into(),
+                cpu_request("cpu"),
+                Duration::from_secs(5),
+                Instant::now()
+            )
+            .is_ok());
+        assert_eq!(
+            core.submit_checked(
+                "gpu".into(),
+                cpu_request("gpu"),
+                Duration::from_secs(5),
+                Instant::now()
+            ),
+            Err(SubmissionError::Unavailable)
+        );
+        assert_eq!(core.queued_count(), 1);
+        assert_eq!(core.request_state("gpu"), None);
+    }
+
+    #[test]
+    fn cpu_startup_rejects_gpu_bindings_and_unresolved_restart_history() {
+        let fixture = DispatchFixture::new();
+        let mut wrong = cpu_fixture_core(&fixture, ResourceClaim::ExclusiveGpu(0));
+        assert!(wrong.confirm_cpu_decisions_ready().is_err());
+        assert_eq!(wrong.admission(), AdmissionState::ReconciliationRequired);
+        drop(wrong);
+        let mut core = cpu_fixture_core(&fixture, ResourceClaim::None);
+        core.confirm_cpu_decisions_ready().unwrap();
+        core.submit(
+            "unresolved".into(),
+            cpu_request("cpu"),
+            Duration::from_secs(5),
+            Instant::now(),
+        )
+        .unwrap();
+        drop(core);
+        let mut restarted = cpu_fixture_core(&fixture, ResourceClaim::None);
+        assert_eq!(restarted.request_state("unresolved"), Some("interrupted"));
+        assert!(restarted.confirm_cpu_decisions_ready().is_err());
+        assert_eq!(
+            restarted.admission(),
+            AdmissionState::ReconciliationRequired
+        );
+        assert_eq!(restarted.queued_count(), 0);
+    }
+
     #[test]
     fn begin_dispatch_revalidates_and_durably_marks_the_stable_route_running() {
         let fixture = DispatchFixture::new();
@@ -1144,6 +1339,31 @@ mod tests {
                 .iter()
                 .any(|job| job.id == job_id
                     && job.metadata.result_state.as_deref() == Some("running"))
+        );
+    }
+
+    #[test]
+    fn device_only_manifest_change_quarantines_before_dispatch() {
+        let fixture = DispatchFixture::new();
+        let mut coordinator = fixture.coordinator();
+        let now = Instant::now();
+        let (_, ticket) = fixture.reserve(&mut coordinator, now);
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&fixture.media_manifest).unwrap()).unwrap();
+        manifest["profiles"][0]["device"] = serde_json::json!("cuda");
+        std::fs::write(&fixture.media_manifest, manifest.to_string()).unwrap();
+        assert_eq!(
+            coordinator.begin_dispatch(&ticket, now),
+            Err(DispatchBeginError::RouteChanged)
+        );
+        assert_eq!(
+            coordinator.admission(),
+            AdmissionState::ReconciliationRequired
+        );
+        assert_eq!(coordinator.active_count(), 1);
+        assert_eq!(
+            persisted_state(fixture.root.path(), "dispatch-fixture").as_deref(),
+            Some("queued")
         );
     }
 
@@ -2167,6 +2387,7 @@ mod tests {
             .submit("cancelled".into(), chat(), Duration::from_secs(10), now)
             .unwrap();
         let ticket = coordinator.reserve_next(now).unwrap().unwrap();
+        assert!(coordinator.acknowledge_reconciled_cleanup(id).is_err());
         assert!(coordinator.attach_backend(id, "backend".into()).is_err());
         coordinator.cancel(id).unwrap();
         assert!(ticket.cancellation.is_cancelled());
@@ -2182,6 +2403,19 @@ mod tests {
         assert!(coordinator
             .submit("new".into(), chat(), Duration::from_secs(10), now)
             .is_err());
+        assert_eq!(coordinator.active_count(), 1);
+        assert!(coordinator.confirm_reconciled().is_err());
+        assert_eq!(coordinator.request_state("cancelled"), Some("interrupted"));
+        assert!(coordinator
+            .complete(id, Completion::Cancelled, vec![], now)
+            .is_err());
+        coordinator.acknowledge_reconciled_cleanup(id).unwrap();
+        assert_eq!(coordinator.active_count(), 0);
+        assert_eq!(coordinator.request_state("cancelled"), Some("interrupted"));
+        assert_eq!(
+            coordinator.admission(),
+            AdmissionState::ReconciliationRequired
+        );
         coordinator.confirm_reconciled().unwrap();
         assert!(coordinator
             .submit("cancelled".into(), chat(), Duration::from_secs(10), now)

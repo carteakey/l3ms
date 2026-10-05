@@ -11,7 +11,8 @@ existing Linear migration issues rather than replacing their acceptance criteria
 ## Monorepo: next work
 
 Latest offline checkpoint: native results IPC/CLI and runtime-bound launch
-intents on `feature/l3ms-monorepo`; 531 root tests passed,
+intents, verified private engine transport and bounded CPU worker on
+`feature/l3ms-monorepo`; 556 root tests passed,
 1 ignored. This is offline implementation evidence, not live cutover acceptance.
 The repeat-run fixture `ETXTBSY` race is corrected with test-only fork/write
 serialization; production launch failures remain fail-closed without retries.
@@ -36,6 +37,10 @@ See the [migration status](docs/migration/status.md),
   observation failure so reconciliation does not repeat the stop operation.
   Runtime-bound intents now persist lane/name and match that binding during
   restart observation; never infer it from ports or process names.
+  Proof-based intent retirement and an isolated-engine Unix bridge with retained
+  coordinator identity/namespace descriptors now pass fixtures, including a real
+  isolated loopback relay. Managed launch and lifecycle wiring remain pending;
+  a successful `unshare` command alone is not admission/GPU acceptance.
 - [x] Connect Breeze speech recipes to bounded execution and per-job WAV/chunk
   artifact validation. Real-model tests and coordinator dispatch remain gated.
 - [ ] Add explicit artifact contracts for other native media scripts; do not
@@ -70,6 +75,11 @@ See the [migration status](docs/migration/status.md),
   Bounded native result retention and v2 page queries are integrated with the
   internal daemon and shared client; reconnect/restart fixtures pass. Native
   event production, explicit terminal retention and supervised dispatch remain.
+  CPU-only worker and restricted core admission are implemented and tested;
+  next dispatch slice: connect them to the opt-in daemon loop,
+  preserving responsive status/cancel/result polling. Require an explicit CPU
+  profile and no-GPU resource binding; current CUDA profiles stay gated. Never
+  reinterpret a configured CPU fallback as CPU admission.
 - [ ] Integrate CLI and keyboard-first UI run/observe/cancel with the same
   coordinator, settings, routing, and request IDs; preserve standalone commands.
   Linux CLI request status/cancel/results is implemented; submit, output

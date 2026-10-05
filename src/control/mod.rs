@@ -11,6 +11,10 @@ pub mod comfy;
 pub mod daemon;
 pub mod decision;
 #[cfg(target_os = "linux")]
+pub mod decision_worker;
+#[cfg(target_os = "linux")]
+pub mod engine_transport;
+#[cfg(target_os = "linux")]
 pub mod gpu_probe;
 pub mod inference;
 pub mod ipc;

@@ -12,14 +12,18 @@ use std::fmt;
 use std::time::Duration;
 
 use super::catalog::RuntimeIdentity;
-use super::cgroup_release::{CgroupObservation, CgroupReleaseErrorKind, CgroupReleaseProbe};
+use super::cgroup_release::{
+    CgroupObservation, CgroupObservationKind, CgroupReleaseErrorKind, CgroupReleaseProbe,
+};
 use super::managed_service::{
     LaunchRecipe, ManagedServiceController, ManagedServiceErrorKind, OwnedService, ReconcileResult,
     ServiceIntentRecord, StartDisposition, StartFailure, StoppedService,
 };
 use super::ownership::CoordinatorLock;
 use super::runtime::OperationContext;
-use super::service_intents::{ServiceIntentStore, ServiceIntentStoreError};
+use super::service_intents::{
+    ServiceIntentRetireDisposition, ServiceIntentStore, ServiceIntentStoreError,
+};
 
 pub enum OwnerStartError {
     Preparation(ManagedServiceErrorKind),
@@ -132,7 +136,7 @@ impl fmt::Debug for StoppedServiceObservation {
 /// another stop command.
 pub struct StopAndObserveError {
     kind: StopAndObserveErrorKind,
-    receipt: Option<StoppedService>,
+    receipt: Option<Box<StoppedService>>,
 }
 
 impl StopAndObserveError {
@@ -141,11 +145,11 @@ impl StopAndObserveError {
     }
 
     pub fn receipt(&self) -> Option<&StoppedService> {
-        self.receipt.as_ref()
+        self.receipt.as_deref()
     }
 
     pub fn into_receipt(self) -> Option<StoppedService> {
-        self.receipt
+        self.receipt.map(|receipt| *receipt)
     }
 }
 
@@ -169,6 +173,75 @@ impl fmt::Display for StopAndObserveError {
 }
 
 impl std::error::Error for StopAndObserveError {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IntentRetirementDisposition {
+    /// No unlink was acknowledged; the retained write-ahead record remains.
+    NotRetired,
+    /// Unlink succeeded but parent-directory durability could not be confirmed.
+    DurabilityUncertain,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IntentRetirementErrorKind {
+    InvalidProof,
+    Cancelled,
+    DeadlineExceeded,
+    Cgroup(CgroupReleaseErrorKind),
+    Manager(ManagedServiceErrorKind),
+    Store(ServiceIntentStoreError),
+}
+
+/// Fixed, redacted retirement failure. The original safe intent metadata is
+/// retained even when unlink may have occurred, so a caller can reconcile the
+/// exact record without retrying by unit name.
+pub struct IntentRetirementError {
+    kind: IntentRetirementErrorKind,
+    disposition: IntentRetirementDisposition,
+    intent: Box<ServiceIntentRecord>,
+}
+
+impl IntentRetirementError {
+    pub fn kind(&self) -> IntentRetirementErrorKind {
+        self.kind
+    }
+
+    pub fn disposition(&self) -> IntentRetirementDisposition {
+        self.disposition
+    }
+
+    pub fn intent_record(&self) -> &ServiceIntentRecord {
+        &self.intent
+    }
+
+    pub fn into_intent_record(self) -> ServiceIntentRecord {
+        *self.intent
+    }
+}
+
+impl fmt::Debug for IntentRetirementError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("IntentRetirementError")
+            .field("kind", &self.kind)
+            .field("disposition", &self.disposition)
+            .field("intent", &"<retained privately>")
+            .finish()
+    }
+}
+
+impl fmt::Display for IntentRetirementError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self.disposition {
+            IntentRetirementDisposition::NotRetired => "stopped service intent was not retired",
+            IntentRetirementDisposition::DurabilityUncertain => {
+                "stopped service intent retirement durability is uncertain"
+            }
+        })
+    }
+}
+
+impl std::error::Error for IntentRetirementError {}
 
 /// Borrowing the guard prevents normal callers from dropping host exclusion
 /// while this owner is in use. The caller must use the same configured host
@@ -330,20 +403,117 @@ impl<'host> ManagedRuntimeOwner<'host> {
             Err(kind) => {
                 return Err(StopAndObserveError {
                     kind: StopAndObserveErrorKind::Observation(kind),
-                    receipt: Some(receipt),
+                    receipt: Some(Box::new(receipt)),
                 });
             }
         };
         if !observation.matches(&receipt) {
             return Err(StopAndObserveError {
                 kind: StopAndObserveErrorKind::Observation(CgroupReleaseErrorKind::InvalidReceipt),
-                receipt: Some(receipt),
+                receipt: Some(Box::new(receipt)),
             });
         }
         Ok(StoppedServiceObservation {
             receipt,
             observation,
         })
+    }
+
+    /// Retire a retained intent only after rechecking its opaque stop receipt,
+    /// a fresh cgroup observation, and the current manager generation. The
+    /// exact record is then descriptor-relatively validated and unlinked, with
+    /// its parent directory synced. The caller must retain the host guard and
+    /// trust that no same-UID manager client replaces/restarts the unit and
+    /// that the launched executable stays within its cgroup. Neither success
+    /// nor the cgroup observation proves GPU release, admission closure, or a
+    /// released resource claim.
+    pub fn retire_stopped(
+        &mut self,
+        stopped: &StoppedServiceObservation,
+        probe: &CgroupReleaseProbe,
+        context: &OperationContext<'_>,
+    ) -> Result<(), IntentRetirementError> {
+        let receipt = stopped.receipt();
+        let intent = receipt.intent_record().clone();
+        let fail = |kind, disposition| IntentRetirementError {
+            kind,
+            disposition,
+            intent: Box::new(intent.clone()),
+        };
+
+        retirement_context(context)
+            .map_err(|kind| fail(kind, IntentRetirementDisposition::NotRetired))?;
+        if !stopped.observation().matches(receipt)
+            || !matches!(
+                stopped.observation().kind(),
+                CgroupObservationKind::Empty | CgroupObservationKind::Removed
+            )
+        {
+            return Err(fail(
+                IntentRetirementErrorKind::InvalidProof,
+                IntentRetirementDisposition::NotRetired,
+            ));
+        }
+
+        let fresh = probe.observe(receipt, context).map_err(|kind| {
+            let kind = match kind {
+                CgroupReleaseErrorKind::Cancelled => IntentRetirementErrorKind::Cancelled,
+                CgroupReleaseErrorKind::DeadlineExceeded => {
+                    IntentRetirementErrorKind::DeadlineExceeded
+                }
+                other => IntentRetirementErrorKind::Cgroup(other),
+            };
+            fail(kind, IntentRetirementDisposition::NotRetired)
+        })?;
+        if !fresh.matches(receipt)
+            || !matches!(
+                fresh.kind(),
+                CgroupObservationKind::Empty | CgroupObservationKind::Removed
+            )
+        {
+            return Err(fail(
+                IntentRetirementErrorKind::InvalidProof,
+                IntentRetirementDisposition::NotRetired,
+            ));
+        }
+        retirement_context(context)
+            .map_err(|kind| fail(kind, IntentRetirementDisposition::NotRetired))?;
+
+        self.controller
+            .verify_stopped_receipt(receipt, context)
+            .map_err(|kind| {
+                let kind = match kind {
+                    ManagedServiceErrorKind::Cancelled => IntentRetirementErrorKind::Cancelled,
+                    ManagedServiceErrorKind::DeadlineExceeded => {
+                        IntentRetirementErrorKind::DeadlineExceeded
+                    }
+                    other => IntentRetirementErrorKind::Manager(other),
+                };
+                fail(kind, IntentRetirementDisposition::NotRetired)
+            })?;
+        retirement_context(context)
+            .map_err(|kind| fail(kind, IntentRetirementDisposition::NotRetired))?;
+
+        self.store
+            .retire_record(&intent, context)
+            .map_err(|failure| {
+                let disposition = match failure.disposition() {
+                    ServiceIntentRetireDisposition::NotRetired => {
+                        IntentRetirementDisposition::NotRetired
+                    }
+                    ServiceIntentRetireDisposition::DurabilityUncertain => {
+                        IntentRetirementDisposition::DurabilityUncertain
+                    }
+                };
+                let kind = match failure.kind() {
+                    ServiceIntentStoreError::Cancelled => IntentRetirementErrorKind::Cancelled,
+                    ServiceIntentStoreError::DeadlineExceeded => {
+                        IntentRetirementErrorKind::DeadlineExceeded
+                    }
+                    other => IntentRetirementErrorKind::Store(other),
+                };
+                fail(kind, disposition)
+            })
     }
 }
 
@@ -361,6 +531,15 @@ fn observation_context(context: &OperationContext<'_>) -> Result<(), OwnerObserv
         ManagedServiceErrorKind::Cancelled => OwnerObservationError::Cancelled,
         _ => OwnerObservationError::DeadlineExceeded,
     })
+}
+fn retirement_context(context: &OperationContext<'_>) -> Result<(), IntentRetirementErrorKind> {
+    if context.is_cancelled() {
+        Err(IntentRetirementErrorKind::Cancelled)
+    } else if context.remaining().is_zero() {
+        Err(IntentRetirementErrorKind::DeadlineExceeded)
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -417,7 +596,8 @@ if pathlib.Path(sys.argv[0]).name == 'fake-run':
         assert record['runtime_name'] == 'comfyui'
     with (root / 'starts').open('a') as log:
         log.write('start\n')
-    state.write_text(json.dumps(dict(unit=unit, description=description)))
+    state.write_text(json.dumps(dict(unit=unit, description=description,
+                                     active='active', invocation='a'*32)))
     sys.exit(9 if (root / 'fail-launcher').exists() else 0)
 if 'list-units' in args or 'list-unit-files' in args:
     sys.exit(0)
@@ -427,6 +607,8 @@ if 'stop' in args:
     state.unlink()
     sys.exit(0)
 if 'show' in args:
+    if (root / 'fail-show').exists():
+        sys.exit(23)
     if not state.exists():
         print('LoadState=not-found')
         sys.exit(0)
@@ -434,9 +616,9 @@ if 'show' in args:
     if args[-1] != data['unit']:
         print('LoadState=not-found')
         sys.exit(0)
-    print('LoadState=loaded\nActiveState=active\nTransient=yes')
-    print('InvocationID=' + 'a' * 32)
-    print('ControlGroup=/user.slice/' + data['unit'])
+    print('LoadState=loaded\nActiveState=' + data.get('active', 'active') + '\nTransient=yes')
+    print('InvocationID=' + data.get('invocation', 'a' * 32))
+    print('ControlGroup=' + data.get('cgroup', '/user.slice/' + data['unit']))
     print('FragmentPath=/run/user/1000/systemd/transient/' + data['unit'])
     print('Description=' + data['description'])
     print('Restart=no\nKillMode=control-group')
@@ -475,16 +657,38 @@ sys.exit(23)
         }
 
         fn cgroup_probe(&self, service: &OwnedService, events: Option<&str>) -> CgroupReleaseProbe {
-            let leaf = self
-                .cgroups
-                .path()
-                .join("user.slice")
-                .join(service.unit_name());
+            let leaf = self.cgroup_leaf(service);
             fs::create_dir_all(&leaf).unwrap();
             if let Some(events) = events {
                 fs::write(leaf.join("cgroup.events"), events).unwrap();
             }
             CgroupReleaseProbe::with_test_root(self.cgroups.path()).unwrap()
+        }
+
+        fn cgroup_leaf(&self, service: &OwnedService) -> std::path::PathBuf {
+            self.cgroups
+                .path()
+                .join("user.slice")
+                .join(service.unit_name())
+        }
+
+        fn start(&self, owner: &mut ManagedRuntimeOwner<'_>) -> OwnedService {
+            owner
+                .start(self.recipe(), Duration::from_secs(1), &self.context())
+                .unwrap()
+        }
+
+        fn stop_with_observation(
+            &self,
+            owner: &mut ManagedRuntimeOwner<'_>,
+            service: &OwnedService,
+            events: Option<&str>,
+        ) -> (CgroupReleaseProbe, StoppedServiceObservation) {
+            let probe = self.cgroup_probe(service, events);
+            let stopped = owner
+                .stop_and_observe(service, &probe, &self.context())
+                .unwrap();
+            (probe, stopped)
         }
     }
 
@@ -719,6 +923,306 @@ sys.exit(23)
         assert!(fixture.root.path().join("stops").exists());
         assert_eq!(owner.store.list().unwrap().len(), 1);
         assert!(!format!("{result:?}").contains(handle.unit_name()));
+    }
+
+    #[test]
+    fn stopped_intent_retires_only_after_fresh_empty_or_removed_observation() {
+        for removed in [false, true] {
+            let fixture = Fixture::new();
+            let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+            let mut owner = fixture.owner(&guard);
+            let handle = fixture.start(&mut owner);
+            let probe = if removed {
+                CgroupReleaseProbe::with_test_root(fixture.cgroups.path()).unwrap()
+            } else {
+                fixture.cgroup_probe(&handle, Some("populated 0\nfrozen 0\n"))
+            };
+            let stopped = owner
+                .stop_and_observe(&handle, &probe, &fixture.context())
+                .unwrap();
+            assert_eq!(
+                stopped.observation().kind(),
+                if removed {
+                    CgroupObservationKind::Removed
+                } else {
+                    CgroupObservationKind::Empty
+                }
+            );
+            let record_path = fixture
+                .intents
+                .path()
+                .join(format!("{}.json", handle.unit_name()));
+            assert!(record_path.exists());
+
+            owner
+                .retire_stopped(&stopped, &probe, &fixture.context())
+                .unwrap();
+            assert!(owner.store.list().unwrap().is_empty());
+            assert!(!record_path.exists());
+            assert_eq!(
+                fs::read_to_string(fixture.root.path().join("stops")).unwrap(),
+                "stop\n"
+            );
+        }
+    }
+
+    #[test]
+    fn retirement_reobserves_and_refuses_occupied_or_missing_events() {
+        for replacement in [Some("populated 1\nfrozen 0\n"), None] {
+            let fixture = Fixture::new();
+            let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+            let mut owner = fixture.owner(&guard);
+            let handle = fixture.start(&mut owner);
+            let (probe, stopped) =
+                fixture.stop_with_observation(&mut owner, &handle, Some("populated 0\nfrozen 0\n"));
+            let events_path = fixture.cgroup_leaf(&handle).join("cgroup.events");
+            if let Some(contents) = replacement {
+                fs::write(&events_path, contents).unwrap();
+            } else {
+                fs::remove_file(&events_path).unwrap();
+            }
+
+            let error = owner
+                .retire_stopped(&stopped, &probe, &fixture.context())
+                .unwrap_err();
+            assert_eq!(error.disposition(), IntentRetirementDisposition::NotRetired);
+            assert!(matches!(
+                error.kind(),
+                IntentRetirementErrorKind::Cgroup(
+                    CgroupReleaseErrorKind::CgroupNotEmpty | CgroupReleaseErrorKind::MissingEvents
+                )
+            ));
+            assert_eq!(error.intent_record(), handle.intent_record());
+            assert_eq!(owner.store.list().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn retirement_refuses_active_replaced_or_unknown_manager_state() {
+        let modes = [
+            ("active", 'a', ManagedServiceErrorKind::ServiceNotActive),
+            ("inactive", 'b', ManagedServiceErrorKind::OwnershipMismatch),
+            (
+                "activating",
+                'a',
+                ManagedServiceErrorKind::UnitStateUnverifiable,
+            ),
+        ];
+        for (active, invocation, expected) in modes {
+            let fixture = Fixture::new();
+            let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+            let mut owner = fixture.owner(&guard);
+            let handle = fixture.start(&mut owner);
+            let mut replacement: serde_json::Value = serde_json::from_slice(
+                &fs::read(fixture.root.path().join("manager-state.json")).unwrap(),
+            )
+            .unwrap();
+            let (probe, stopped) =
+                fixture.stop_with_observation(&mut owner, &handle, Some("populated 0\nfrozen 0\n"));
+            replacement["active"] = serde_json::Value::String(active.to_owned());
+            replacement["invocation"] =
+                serde_json::Value::String(invocation.to_string().repeat(32));
+            fs::write(
+                fixture.root.path().join("manager-state.json"),
+                serde_json::to_vec(&replacement).unwrap(),
+            )
+            .unwrap();
+
+            let error = owner
+                .retire_stopped(&stopped, &probe, &fixture.context())
+                .unwrap_err();
+            assert_eq!(error.disposition(), IntentRetirementDisposition::NotRetired);
+            assert_eq!(error.kind(), IntentRetirementErrorKind::Manager(expected));
+            assert_eq!(owner.store.list().unwrap().len(), 1);
+        }
+
+        let fixture = Fixture::new();
+        let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+        let mut owner = fixture.owner(&guard);
+        let handle = fixture.start(&mut owner);
+        let (probe, stopped) =
+            fixture.stop_with_observation(&mut owner, &handle, Some("populated 0\nfrozen 0\n"));
+        fs::write(fixture.root.path().join("fail-show"), "").unwrap();
+        let error = owner
+            .retire_stopped(&stopped, &probe, &fixture.context())
+            .unwrap_err();
+        assert_eq!(error.disposition(), IntentRetirementDisposition::NotRetired);
+        assert!(matches!(
+            error.kind(),
+            IntentRetirementErrorKind::Manager(ManagedServiceErrorKind::ManagerCommandFailed)
+        ));
+        assert_eq!(owner.store.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn mismatched_or_unsafe_retained_record_is_never_unlinked() {
+        let fixture = Fixture::new();
+        let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+        let mut owner = fixture.owner(&guard);
+        let handle = owner
+            .start_for_runtime(
+                RuntimeIdentity::new(Lane::Media, "comfyui").unwrap(),
+                fixture.recipe(),
+                Duration::from_secs(1),
+                &fixture.context(),
+            )
+            .unwrap();
+        let (probe, stopped) =
+            fixture.stop_with_observation(&mut owner, &handle, Some("populated 0\nfrozen 0\n"));
+        let record_path = fixture
+            .intents
+            .path()
+            .join(format!("{}.json", handle.unit_name()));
+        let mut stored: serde_json::Value =
+            serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+        stored["runtime_name"] = serde_json::Value::String("llama-swap".to_owned());
+        fs::write(&record_path, serde_json::to_vec(&stored).unwrap()).unwrap();
+
+        let error = owner
+            .retire_stopped(&stopped, &probe, &fixture.context())
+            .unwrap_err();
+        assert_eq!(error.disposition(), IntentRetirementDisposition::NotRetired);
+        assert_eq!(
+            error.kind(),
+            IntentRetirementErrorKind::Store(ServiceIntentStoreError::IntentMismatch)
+        );
+        assert_eq!(error.intent_record(), handle.intent_record());
+        assert!(record_path.exists());
+
+        for unsafe_kind in ["corrupt", "mode", "symlink", "other-corrupt"] {
+            let fixture = Fixture::new();
+            let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+            let mut owner = fixture.owner(&guard);
+            let handle = fixture.start(&mut owner);
+            let (probe, stopped) =
+                fixture.stop_with_observation(&mut owner, &handle, Some("populated 0\nfrozen 0\n"));
+            let record_path = fixture
+                .intents
+                .path()
+                .join(format!("{}.json", handle.unit_name()));
+            match unsafe_kind {
+                "corrupt" => fs::write(&record_path, b"{not-json").unwrap(),
+                "mode" => {
+                    fs::set_permissions(&record_path, fs::Permissions::from_mode(0o644)).unwrap()
+                }
+                "symlink" => {
+                    let target = fixture.root.path().join("outside-record");
+                    fs::write(&target, b"preserve-target").unwrap();
+                    fs::remove_file(&record_path).unwrap();
+                    std::os::unix::fs::symlink(&target, &record_path).unwrap();
+                }
+                "other-corrupt" => {
+                    fs::write(fixture.intents.path().join("unexpected"), b"retain me").unwrap();
+                }
+                _ => unreachable!(),
+            }
+
+            let error = owner
+                .retire_stopped(&stopped, &probe, &fixture.context())
+                .unwrap_err();
+            assert_eq!(error.disposition(), IntentRetirementDisposition::NotRetired);
+            assert!(matches!(
+                error.kind(),
+                IntentRetirementErrorKind::Store(ServiceIntentStoreError::CorruptStore)
+            ));
+            assert!(record_path.exists());
+            if unsafe_kind == "symlink" {
+                assert_eq!(
+                    fs::read(fixture.root.path().join("outside-record")).unwrap(),
+                    b"preserve-target"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn retirement_reclaims_capacity_without_replaying_or_rewriting_other_records() {
+        let fixture = Fixture::new();
+        let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+        let mut owner = fixture.owner(&guard);
+        let handle = fixture.start(&mut owner);
+        let (probe, stopped) =
+            fixture.stop_with_observation(&mut owner, &handle, Some("populated 0\nfrozen 0\n"));
+        let mut stored_count = owner.store.list().unwrap().len();
+        let mut suffix = 0_u128;
+        while stored_count < 128 {
+            let record = ServiceIntentRecord::from_persisted_parts(
+                "fixture".to_owned(),
+                format!("l3ms-fixture-{suffix:032x}.service"),
+                "b".repeat(64),
+                30_000,
+            )
+            .unwrap();
+            if record.unit_name() != handle.unit_name() {
+                owner.store.record(&record).unwrap();
+                stored_count += 1;
+            }
+            suffix += 1;
+        }
+        assert_eq!(owner.store.list().unwrap().len(), 128);
+        let extra = ServiceIntentRecord::from_persisted_parts(
+            "fixture".to_owned(),
+            format!("l3ms-fixture-{:032x}.service", 9999_u128),
+            "d".repeat(64),
+            30_000,
+        )
+        .unwrap();
+        assert_eq!(
+            owner.store.record(&extra),
+            Err(ServiceIntentStoreError::CapacityExceeded)
+        );
+
+        owner
+            .retire_stopped(&stopped, &probe, &fixture.context())
+            .unwrap();
+        assert_eq!(owner.store.list().unwrap().len(), 127);
+        owner.store.record(&extra).unwrap();
+        assert_eq!(owner.store.list().unwrap().len(), 128);
+        assert_eq!(
+            fs::read_to_string(fixture.root.path().join("starts")).unwrap(),
+            "start\n"
+        );
+    }
+
+    #[test]
+    fn cancellation_or_deadline_before_retirement_preserves_intent() {
+        struct Cancel;
+        impl Cancellation for Cancel {
+            fn is_cancelled(&self) -> bool {
+                true
+            }
+        }
+        for cancelled in [true, false] {
+            let fixture = Fixture::new();
+            let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+            let mut owner = fixture.owner(&guard);
+            let handle = fixture.start(&mut owner);
+            let (probe, stopped) =
+                fixture.stop_with_observation(&mut owner, &handle, Some("populated 0\nfrozen 0\n"));
+            let context = if cancelled {
+                OperationContext::new(Instant::now() + Duration::from_secs(2), &Cancel)
+            } else {
+                OperationContext::new(Instant::now(), &NeverCancel)
+            };
+            let error = owner
+                .retire_stopped(&stopped, &probe, &context)
+                .unwrap_err();
+            assert_eq!(error.disposition(), IntentRetirementDisposition::NotRetired);
+            assert_eq!(
+                error.kind(),
+                if cancelled {
+                    IntentRetirementErrorKind::Cancelled
+                } else {
+                    IntentRetirementErrorKind::DeadlineExceeded
+                }
+            );
+            assert_eq!(error.intent_record(), handle.intent_record());
+            assert!(fixture
+                .intents
+                .path()
+                .join(format!("{}.json", handle.unit_name()))
+                .exists());
+        }
     }
 
     #[test]

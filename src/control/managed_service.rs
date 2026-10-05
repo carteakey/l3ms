@@ -417,10 +417,12 @@ impl fmt::Debug for OwnedService {
 /// Evidence that the manager acknowledged stopping this exact owned
 /// generation. This is not evidence that its cgroup is empty or a resource
 /// has been released. The private fields prevent callers from manufacturing a
-/// receipt from a unit name or an arbitrary cgroup path.
+/// receipt from a unit name or an arbitrary cgroup path. The original intent
+/// is retained privately so later release checks use the exact runtime and
+/// launch identity that were durably prepared.
 #[derive(Eq, PartialEq)]
 pub struct StoppedService {
-    unit_name: String,
+    intent: ServiceIntentRecord,
     invocation_id: String,
     cgroup: String,
 }
@@ -433,11 +435,18 @@ impl StoppedService {
     }
 
     pub(crate) fn unit_name(&self) -> &str {
-        &self.unit_name
+        self.intent.unit_name()
     }
 
     pub(crate) fn invocation_id(&self) -> &str {
         &self.invocation_id
+    }
+
+    /// Original validated intent metadata. This does not authorize any manager
+    /// operation and is retained so callers can reconcile after a failed
+    /// ledger retirement.
+    pub fn intent_record(&self) -> &ServiceIntentRecord {
+        &self.intent
     }
 
     #[cfg(test)]
@@ -446,17 +455,23 @@ impl StoppedService {
         invocation_id: String,
         cgroup: String,
     ) -> Option<Self> {
+        let stem = unit_name.strip_prefix("l3ms-")?.strip_suffix(".service")?;
+        let (coordinator_id, random) = stem.rsplit_once('-')?;
         if unit_name.len() <= 96
-            && unit_name.starts_with("l3ms-")
-            && unit_name.ends_with(".service")
-            && unit_name.bytes().all(|byte| {
-                byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"-.".contains(&byte)
-            })
+            && coordinator_id.len() <= MAX_COORDINATOR_ID_BYTES
+            && random.len() == UNIT_RANDOM_BYTES * 2
             && valid_invocation_id(&invocation_id)
             && valid_cgroup(&cgroup, &unit_name)
         {
-            Some(Self {
+            let intent = ServiceIntentRecord::from_persisted_parts(
+                coordinator_id.to_owned(),
                 unit_name,
+                "b".repeat(64),
+                30_000,
+            )
+            .ok()?;
+            Some(Self {
+                intent,
                 invocation_id,
                 cgroup,
             })
@@ -696,6 +711,42 @@ impl ManagedServiceController {
         .unwrap_or(ManagedServiceState::Unknown))
     }
 
+    /// Recheck a stop receipt without issuing another stop command. A
+    /// missing transient unit is acceptable only because this opaque receipt
+    /// already includes a generation-matched stop acknowledgment. If a unit
+    /// remains, it must still be the exact inactive invocation and cgroup;
+    /// active, replaced, or unknown state fails closed. The caller must keep
+    /// the host guard and trust that no concurrent same-user manager client
+    /// replaces or restarts this unit.
+    pub(crate) fn verify_stopped_receipt(
+        &self,
+        receipt: &StoppedService,
+        context: &OperationContext<'_>,
+    ) -> Result<(), ManagedServiceErrorKind> {
+        let intent = receipt.intent_record();
+        if intent.coordinator_id != self.coordinator_id
+            || !valid_intent(intent)
+            || !valid_invocation_id(&receipt.invocation_id)
+            || !valid_cgroup(&receipt.cgroup, &intent.unit_name)
+        {
+            return Err(ManagedServiceErrorKind::OwnershipMismatch);
+        }
+        context_error(context)?;
+        let Some(snapshot) = self.show_unit(intent, context)? else {
+            context_error(context)?;
+            return Ok(());
+        };
+        match owned_snapshot(
+            intent,
+            &snapshot,
+            Some((&receipt.invocation_id, &receipt.cgroup)),
+        )? {
+            ManagedServiceState::Stopped => Ok(()),
+            ManagedServiceState::Running => Err(ManagedServiceErrorKind::ServiceNotActive),
+            ManagedServiceState::Unknown => Err(ManagedServiceErrorKind::UnitStateUnverifiable),
+        }
+    }
+
     /// Stop only after the active generation matches InvocationID and cgroup.
     /// systemctl stop is name-targeted, so the coordinator host lock must
     /// serialize its callers, and external same-user restarts/replacements
@@ -850,7 +901,7 @@ impl ManagedServiceController {
 
 fn stopped_receipt(service: &OwnedService) -> StoppedService {
     StoppedService {
-        unit_name: service.intent.unit_name.clone(),
+        intent: service.intent.clone(),
         invocation_id: service.invocation_id.clone(),
         cgroup: service.cgroup.clone(),
     }

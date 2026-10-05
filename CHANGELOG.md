@@ -10,6 +10,23 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Add an explicit retained-intent retirement operation that freshly verifies
+  stopped generation/cgroup state, deletes only the matching secure record and
+  syncs the directory; failures retain metadata and distinguish uncertain durability.
+- Add an isolated-engine Unix byte transport pinned to the coordinator's live
+  process and retained network-namespace descriptor. This is transport only;
+  managed launch, admission/drain and GPU switching remain gated.
+- Add a bounded CPU-only local-decision worker with checked accepted routes,
+  offline/CUDA-disabled execution, cancellation and typed cleanup outcomes.
+  Default profiles are unchanged; public daemon/CLI dispatch is not enabled.
+- Reserve result-output quota before execution so other jobs cannot consume a
+  dispatching job's allowance; terminal results retain their actual quota use.
+- Explicitly disable HTTP client retry policies in language and Comfy adapters.
+- Retain active reservations after uncertain completion until explicitly
+  verified cleanup is acknowledged; preserve interrupted outcomes and closed
+  admission instead of treating a terminal record as released ownership.
+- Include declared native devices in accepted routes and revalidate them during
+  command preparation, rejecting device-only manifest changes before dispatch.
 - Added bounded, reconnectable native result pages over IPC v2 while preserving
   v1 control operations. Output cache availability is separate from durable job
   status; restart never replays inference. Native dispatch remains gated.

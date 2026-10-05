@@ -245,6 +245,7 @@ impl ComfyAdapter {
             .map_err(|_| no_dispatch(ComfyErrorKind::Configuration))?;
         runtime.block_on(async {
             let client = reqwest::Client::builder()
+                .retry(reqwest::retry::never())
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(context.remaining().min(Duration::from_secs(2)))
                 .timeout(context.remaining())

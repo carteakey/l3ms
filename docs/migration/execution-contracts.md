@@ -33,10 +33,51 @@ The final `begin_dispatch` gate privately retains the accepted request, refreshe
 the catalog, compares the complete payload and route, verifies its runtime
 resource binding and queued history association, then rechecks cancellation and
 the actual deadline before durably marking running. Tampered/stale tickets or
-persistence failures close admission while retaining their reservation. Native
+persistence failures close admission while retaining their reservation. The
+accepted route includes the declared native device, including an absent device;
+a device-only manifest change invalidates the ticket rather than reusing its
+resource assumptions. Native command preparation checks that device at both
+catalog refreshes, alongside runtime identity. This rejects stale reservations;
+it does not itself prove that a CPU/GPU binding or running backend is safe. Native
 executors must use this gate rather than the compatibility `mark_running` method.
 
+An uncertain completion durably records `interrupted` and closes admission while
+retaining its active reservation. Ordinary completion cannot reclassify that
+outcome. Only `acknowledge_reconciled_cleanup` removes the reservation after the
+host executor independently verifies cleanup/resource ownership; it preserves
+the interrupted outcome and does not reopen admission. The method is a caller
+contract, not a native cleanup probe or permission to discard unknown ownership.
+
 ## Managed transient-service ownership
+
+`ManagedRuntimeOwner::retire_stopped` explicitly retires a retained launch intent
+only after fresh Empty/Removed cgroup observation and a fresh absent-or-exactly-
+inactive manager generation check. The stop receipt retains its original intent.
+The store validates all records and the exact bound record, rechecks descriptor/
+inode/owner/mode/link constraints, unlinks only that filename, then syncs its
+directory. Pre-unlink failures preserve the record; sync failure after unlink
+returns `DurabilityUncertain` with original metadata rather than retrying. Success
+does not release a GPU claim or establish admission. The held host lock, trusted
+stable store and no concurrent same-user unit replacement remain assumptions.
+
+The private `EngineTransport` helper accepts opaque native bytes only from its
+captured coordinator PID/UID/start identity, retaining a pidfd and authoritative
+network-namespace file descriptor. It verifies nsfs/device/inode and requires its
+own actual namespace to differ. Reading the coordinator namespace through `/proc`
+inside a user namespace is not a viable fallback on this host (EACCES); the
+namespace descriptor must be handed over before isolation. Source identity,
+private 0700 directory/0600 Unix socket, bounded nonblocking relay and byte limits
+fail closed. Caps are per connection/direction, not per HTTP request; half-close
+and byte receipts are not native completion, async-job drain or GPU proof.
+The trusted coordinator must retain its original network namespace.
+
+Real isolated-child fixtures verify retained-FD handoff, loopback backend relay,
+early response, backpressure and post-dispatch uncertainty. No live engines or
+user-manager units were launched. A candidate manager launch uses `OpenFile`
+to open the coordinator namespace before service isolation; systemd documents
+manager-opened named descriptors, but actual launch/property/descriptor-name
+validation is not yet wired or accepted. See the
+[systemd 262 service documentation](https://raw.githubusercontent.com/systemd/systemd/v262/man/systemd.service.xml).
 
 The manager's generation-matched stop acknowledgment now produces an opaque,
 non-cloneable `StoppedService` receipt. A read-only `CgroupReleaseProbe` can
@@ -305,6 +346,24 @@ eviction removes a payload; active jobs are never silently evicted. A bounded
 retains its separate replay-prevention responsibility. The dispatch integration
 must establish an explicit retention policy and reserve result capacity before
 native execution; the cache itself neither admits nor replays requests.
+`can_begin_reserved` is a read-only single-owner acceptance check, followed by
+`begin_reserved` after durable acceptance. It reserves the full 8 MiB allowance
+against the shared 64 MiB event budget before dispatch. Appends consume reserved
+quota transactionally; terminal acknowledgment frees only unused quota, while
+retained output remains charged. Other jobs cannot consume that reservation,
+and capacity exhaustion must reject intake rather than silently evict results.
+
+The `CpuDecisionWorker` owns one serial thread, a bounded ticket channel and one
+completion channel. Its in-flight slot is freed only when completion is consumed;
+refused handoffs return their owned ticket. Only accepted CPU local Nagi/Laya
+routes with `ResourceClaim::None` execute; the final prepared route is checked
+against both refreshed catalogs, with offline flags and CUDA visibility disabled.
+The core's opt-in CPU startup path excludes GPU/hosted bindings and interrupted
+or foreign retained history, and enforces CPU-only admission even when CPU/CUDA
+profiles share a runtime. It is not resident-engine reconciliation. Default
+catalog profiles are unchanged. Worker shutdown requests cancellation; detached
+or missing completions are not cleanup proof. Native daemon event-loop wiring
+and public submit actions are still in progress, not accepted as functional.
 
 The page carries authoritative retained-history status separately from cache
 availability. Restart can therefore report `succeeded` with `Unknown` cached

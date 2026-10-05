@@ -135,6 +135,7 @@ impl LanguageAdapter {
     ) -> Result<InferenceResult, LanguageFailure> {
         check_context(context, DispatchDisposition::NoDispatch)?;
         let client = reqwest::Client::builder()
+            .retry(reqwest::retry::never())
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(context.remaining().min(Duration::from_secs(2)))
             .timeout(context.remaining())

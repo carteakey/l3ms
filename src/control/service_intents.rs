@@ -3,8 +3,10 @@
 //! The caller must hold the host singleton lock for every store operation.
 //! The existing absolute directory must be a dedicated, trusted directory on
 //! a stable local filesystem. This module neither creates directories nor
-//! removes, repairs, or reclaims records. A retained record is a write-ahead
-//! fact only; its absence does not establish that a service stopped.
+//! repairs records. Its only removal path is crate-private and requires the
+//! owner to present a generation-bound stopped-service proof. A retained
+//! record is a write-ahead fact only; its absence does not establish that a
+//! service stopped.
 
 use std::ffi::{CStr, CString};
 use std::fmt;
@@ -18,6 +20,7 @@ use std::path::{Component, Path};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::managed_service::{runtime_identity_from_persisted_parts, ServiceIntentRecord};
+use super::runtime::OperationContext;
 
 const MAX_INTENTS: usize = 128;
 const MAX_RECORD_BYTES: usize = 4 * 1024;
@@ -34,6 +37,9 @@ pub enum ServiceIntentStoreError {
     DuplicateIntent,
     CapacityExceeded,
     CorruptStore,
+    IntentMismatch,
+    Cancelled,
+    DeadlineExceeded,
     Io,
 }
 
@@ -45,6 +51,9 @@ impl fmt::Display for ServiceIntentStoreError {
             Self::DuplicateIntent => "service intent record already exists",
             Self::CapacityExceeded => "service intent store capacity exceeded",
             Self::CorruptStore => "service intent store contents are invalid",
+            Self::IntentMismatch => "retained service intent does not match the receipt",
+            Self::Cancelled => "service intent retirement was cancelled",
+            Self::DeadlineExceeded => "service intent retirement deadline expired",
             Self::Io => "service intent store operation failed",
         })
     }
@@ -54,11 +63,34 @@ impl std::error::Error for ServiceIntentStoreError {}
 
 /// Linux write-ahead store for pending service start intents.
 ///
-/// The store retains each record permanently. It exposes no retirement or
-/// deletion operation and must not be shared across coordinators without the
-/// caller's host singleton lock.
+/// There is no public deletion operation. The crate-private retirement path
+/// accepts a complete validated record only and is called by the owner after
+/// generation, manager, and cgroup checks. The store must not be shared across
+/// coordinators without the caller's host singleton lock.
 pub struct ServiceIntentStore {
     directory: File,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ServiceIntentRetireDisposition {
+    NotRetired,
+    DurabilityUncertain,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ServiceIntentRetireFailure {
+    kind: ServiceIntentStoreError,
+    disposition: ServiceIntentRetireDisposition,
+}
+
+impl ServiceIntentRetireFailure {
+    pub(crate) fn kind(self) -> ServiceIntentStoreError {
+        self.kind
+    }
+
+    pub(crate) fn disposition(self) -> ServiceIntentRetireDisposition {
+        self.disposition
+    }
 }
 
 impl fmt::Debug for ServiceIntentStore {
@@ -154,6 +186,144 @@ impl ServiceIntentStore {
         }
         records.sort_by(|left, right| left.unit_name().cmp(right.unit_name()));
         Ok(records)
+    }
+
+    /// Removes only the exact, fully validated retained record associated
+    /// with a stopped-service receipt. This is crate-private so callers cannot
+    /// delete intents by unit name or bypass the owner's fresh cgroup and
+    /// manager observations. Once unlink succeeds, parent-directory sync is
+    /// mandatory; a sync failure is reported as durability-uncertain and must
+    /// not be retried automatically.
+    pub(crate) fn retire_record(
+        &self,
+        intent: &ServiceIntentRecord,
+        context: &OperationContext<'_>,
+    ) -> Result<(), ServiceIntentRetireFailure> {
+        self.retire_record_with_sync(intent, context, |directory| directory.sync_all())
+    }
+
+    fn retire_record_with_sync(
+        &self,
+        intent: &ServiceIntentRecord,
+        context: &OperationContext<'_>,
+        sync_directory: impl FnOnce(&File) -> io::Result<()>,
+    ) -> Result<(), ServiceIntentRetireFailure> {
+        let not_retired = |kind| ServiceIntentRetireFailure {
+            kind,
+            disposition: ServiceIntentRetireDisposition::NotRetired,
+        };
+        let uncertain = |kind| ServiceIntentRetireFailure {
+            kind,
+            disposition: ServiceIntentRetireDisposition::DurabilityUncertain,
+        };
+
+        check_retirement_context(context).map_err(not_retired)?;
+        PersistedIntent::from_record(intent).map_err(not_retired)?;
+        let records = self.list().map_err(not_retired)?;
+        check_retirement_context(context).map_err(not_retired)?;
+        if !records.iter().any(|record| record == intent) {
+            return Err(not_retired(ServiceIntentStoreError::IntentMismatch));
+        }
+
+        let filename = format!("{}{}", intent.unit_name(), JSON_SUFFIX);
+        let name = CString::new(filename.as_str())
+            .map_err(|_| not_retired(ServiceIntentStoreError::IntentMismatch))?;
+        check_retirement_context(context).map_err(not_retired)?;
+        let entry_stat = stat_at_nofollow(self.directory.as_raw_fd(), &name)
+            .map_err(|_| not_retired(ServiceIntentStoreError::CorruptStore))?;
+        check_retirement_context(context).map_err(not_retired)?;
+        if !valid_stat_file(&entry_stat, unsafe { libc::geteuid() })
+            || entry_stat.st_size < 0
+            || entry_stat.st_size as usize > MAX_RECORD_BYTES
+        {
+            return Err(not_retired(ServiceIntentStoreError::CorruptStore));
+        }
+
+        check_retirement_context(context).map_err(not_retired)?;
+        let fd = unsafe {
+            libc::openat(
+                self.directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(not_retired(ServiceIntentStoreError::CorruptStore));
+        }
+        let mut file = unsafe { File::from_raw_fd(fd) };
+        check_retirement_context(context).map_err(not_retired)?;
+        let opened =
+            stat_fd(file.as_raw_fd()).map_err(|_| not_retired(ServiceIntentStoreError::Io))?;
+        check_retirement_context(context).map_err(not_retired)?;
+        if !valid_stat_file(&opened, unsafe { libc::geteuid() })
+            || opened.st_size != entry_stat.st_size
+            || !same_inode(&opened, &entry_stat)
+        {
+            return Err(not_retired(ServiceIntentStoreError::CorruptStore));
+        }
+
+        let mut bytes = Vec::with_capacity(opened.st_size as usize);
+        {
+            let mut bounded = Read::by_ref(&mut file).take((MAX_RECORD_BYTES + 1) as u64);
+            bounded
+                .read_to_end(&mut bytes)
+                .map_err(|_| not_retired(ServiceIntentStoreError::Io))?;
+        }
+        check_retirement_context(context).map_err(not_retired)?;
+        if bytes.len() > MAX_RECORD_BYTES || bytes.len() as i64 != opened.st_size {
+            return Err(not_retired(ServiceIntentStoreError::CorruptStore));
+        }
+        let after_read =
+            stat_fd(file.as_raw_fd()).map_err(|_| not_retired(ServiceIntentStoreError::Io))?;
+        check_retirement_context(context).map_err(not_retired)?;
+        if !valid_stat_file(&after_read, unsafe { libc::geteuid() })
+            || !same_inode(&opened, &after_read)
+            || after_read.st_size != opened.st_size
+        {
+            return Err(not_retired(ServiceIntentStoreError::CorruptStore));
+        }
+        let persisted: PersistedIntent = serde_json::from_slice(&bytes)
+            .map_err(|_| not_retired(ServiceIntentStoreError::CorruptStore))?;
+        let stored = persisted
+            .into_record()
+            .map_err(|_| not_retired(ServiceIntentStoreError::CorruptStore))?;
+        if stored != *intent || format!("{}{}", stored.unit_name(), JSON_SUFFIX) != filename {
+            return Err(not_retired(ServiceIntentStoreError::IntentMismatch));
+        }
+
+        check_retirement_context(context).map_err(not_retired)?;
+        let directory_stat = stat_fd(self.directory.as_raw_fd())
+            .map_err(|_| not_retired(ServiceIntentStoreError::Io))?;
+        check_retirement_context(context).map_err(not_retired)?;
+        if !is_directory(&directory_stat)
+            || directory_stat.st_uid != unsafe { libc::geteuid() }
+            || directory_stat.st_mode & 0o7777 != DIRECTORY_MODE
+        {
+            return Err(not_retired(ServiceIntentStoreError::UnsafeDirectory));
+        }
+        let current_name = stat_at_nofollow(self.directory.as_raw_fd(), &name)
+            .map_err(|_| not_retired(ServiceIntentStoreError::CorruptStore))?;
+        check_retirement_context(context).map_err(not_retired)?;
+        if !valid_stat_file(&current_name, unsafe { libc::geteuid() })
+            || !same_inode(&opened, &current_name)
+            || current_name.st_size != opened.st_size
+        {
+            return Err(not_retired(ServiceIntentStoreError::CorruptStore));
+        }
+        check_retirement_context(context).map_err(not_retired)?;
+        if unsafe { libc::unlinkat(self.directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+            return Err(not_retired(ServiceIntentStoreError::Io));
+        }
+
+        // Cancellation after unlink cannot roll back the commit. Still sync
+        // the directory to resolve durability; success is final even if the
+        // caller's context expires while these non-preemptible operations run.
+        let _context_after_unlink = check_retirement_context(context);
+        if sync_directory(&self.directory).is_err() {
+            return Err(uncertain(ServiceIntentStoreError::Io));
+        }
+        let _context_after_sync = check_retirement_context(context);
+        Ok(())
     }
 
     fn entry_names(&self) -> Result<Vec<String>, ServiceIntentStoreError> {
@@ -260,6 +430,20 @@ impl ServiceIntentStore {
         }
         Ok(record)
     }
+}
+
+fn check_retirement_context(context: &OperationContext<'_>) -> Result<(), ServiceIntentStoreError> {
+    if context.is_cancelled() {
+        Err(ServiceIntentStoreError::Cancelled)
+    } else if context.remaining().is_zero() {
+        Err(ServiceIntentStoreError::DeadlineExceeded)
+    } else {
+        Ok(())
+    }
+}
+
+fn same_inode(left: &libc::stat, right: &libc::stat) -> bool {
+    left.st_dev == right.st_dev && left.st_ino == right.st_ino
 }
 
 struct DirectoryStream(*mut libc::DIR);
@@ -455,9 +639,13 @@ fn valid_file_metadata(metadata: &std::fs::Metadata, uid: libc::uid_t) -> bool {
 #[cfg(test)]
 mod tests {
     use super::super::catalog::{Lane, RuntimeIdentity};
+    use super::super::runtime::NeverCancel;
     use super::*;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::time::{Duration, Instant};
+
+    static NEVER_CANCEL: NeverCancel = NeverCancel;
 
     fn private_directory() -> tempfile::TempDir {
         let directory = tempfile::tempdir().unwrap();
@@ -503,6 +691,10 @@ mod tests {
 
     fn raw_record(record: &ServiceIntentRecord) -> Vec<u8> {
         serde_json::to_vec(&PersistedIntent::from_record(record).unwrap()).unwrap()
+    }
+
+    fn context() -> OperationContext<'static> {
+        OperationContext::new(Instant::now() + Duration::from_secs(3), &NEVER_CANCEL)
     }
 
     #[test]
@@ -575,6 +767,57 @@ mod tests {
             Err(ServiceIntentStoreError::DuplicateIntent)
         );
         assert_eq!(std::fs::read(path).unwrap(), before);
+    }
+
+    #[test]
+    fn private_retirement_requires_exact_bound_record_and_syncs_removal() {
+        let directory = private_directory();
+        let store = ServiceIntentStore::open(directory.path()).unwrap();
+        let original = runtime_intent(18);
+        store.record(&original).unwrap();
+        let path = directory.path().join(filename(&original));
+        let before = std::fs::read(&path).unwrap();
+        let mismatched = ServiceIntentRecord::from_persisted_parts_with_runtime(
+            original.coordinator_id().to_owned(),
+            original.unit_name().to_owned(),
+            original.launch_identity().to_owned(),
+            original.stop_timeout_millis(),
+            Some(RuntimeIdentity::new(Lane::Language, "llama-swap").unwrap()),
+        )
+        .unwrap();
+
+        let failure = store.retire_record(&mismatched, &context()).unwrap_err();
+        assert_eq!(failure.kind(), ServiceIntentStoreError::IntentMismatch);
+        assert_eq!(
+            failure.disposition(),
+            ServiceIntentRetireDisposition::NotRetired
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+
+        store.retire_record(&original, &context()).unwrap();
+        assert!(!path.exists());
+        assert!(store.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn post_unlink_sync_failure_is_durability_uncertain_not_retryable_success() {
+        let directory = private_directory();
+        let store = ServiceIntentStore::open(directory.path()).unwrap();
+        let original = runtime_intent(19);
+        store.record(&original).unwrap();
+        let path = directory.path().join(filename(&original));
+
+        let failure = store
+            .retire_record_with_sync(&original, &context(), |_| {
+                Err(io::Error::other("fixture sync failure"))
+            })
+            .unwrap_err();
+        assert_eq!(failure.kind(), ServiceIntentStoreError::Io);
+        assert_eq!(
+            failure.disposition(),
+            ServiceIntentRetireDisposition::DurabilityUncertain
+        );
+        assert!(!path.exists());
     }
 
     #[test]

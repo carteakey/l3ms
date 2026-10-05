@@ -8,11 +8,14 @@ use std::error::Error;
 use std::fmt;
 use std::time::Duration;
 
-use super::catalog::Catalog;
-use super::native_commands::{prepare_native_command, NativeOutputExpectation};
+use super::catalog::{Catalog, Device, Lane};
+use super::native_commands::{
+    prepare_native_command, prepare_native_command_for_route, NativeCommandRecipe,
+    NativeOutputExpectation,
+};
 use super::process::{self, ProcessFailureDisposition, ProcessLimits};
 use super::requests::{InferenceRequest, InferenceResult};
-use super::routes::{resolve_profile_route, NativeRoute};
+use super::routes::{resolve_profile_route, NativeRoute, ResolvedProfileRoute};
 use super::runtime::{OperationContext, RecoveryPolicy};
 
 const MAX_RESULT_BYTES: usize = 1024 * 1024;
@@ -88,12 +91,76 @@ pub fn execute_native_decision(
     if !matches!(engine.as_str(), "nagi" | "laya") || profile_type != "local" {
         return Err(DecisionExecutionError::NotDispatched);
     }
+    execute_prepared_recipe(catalog, request, &recipe, None, false, context, recovery)
+}
+
+/// Execute only a route already accepted by the coordinator's immediately
+/// preceding dispatch gate. This is the narrow CPU-only worker seam: the
+/// checked recipe helper must re-resolve the full accepted route, including
+/// device, before returning the prepared command. Device selection is derived
+/// from that route by `decision_recipe`; it is never inferred from fallback
+/// metadata or arbitrary argv parsing.
+pub(crate) fn execute_accepted_cpu_decision(
+    catalog: &Catalog,
+    request: &InferenceRequest,
+    accepted_route: &ResolvedProfileRoute,
+    context: &OperationContext<'_>,
+    recovery: RecoveryPolicy,
+) -> Result<NativeDecisionResult, DecisionExecutionError> {
+    if !accepted_cpu_decision_route(request, accepted_route) {
+        return Err(DecisionExecutionError::NotDispatched);
+    }
+    let recipe = prepare_native_command_for_route(catalog, request, accepted_route)
+        .map_err(|_| DecisionExecutionError::NotDispatched)?;
+    if !recipe_matches_route(&recipe, accepted_route) {
+        return Err(DecisionExecutionError::NotDispatched);
+    }
+    execute_prepared_recipe(
+        catalog,
+        request,
+        &recipe,
+        Some(accepted_route),
+        true,
+        context,
+        recovery,
+    )
+}
+
+fn execute_prepared_recipe(
+    catalog: &Catalog,
+    request: &InferenceRequest,
+    recipe: &NativeCommandRecipe,
+    accepted_route: Option<&ResolvedProfileRoute>,
+    cpu_only: bool,
+    context: &OperationContext<'_>,
+    recovery: RecoveryPolicy,
+) -> Result<NativeDecisionResult, DecisionExecutionError> {
+    let NativeOutputExpectation::DecisionJsonStdout {
+        engine,
+        profile_type,
+        ..
+    } = &recipe.expectation
+    else {
+        return Err(DecisionExecutionError::NotDispatched);
+    };
+    if !matches!(engine.as_str(), "nagi" | "laya") || profile_type != "local" {
+        return Err(DecisionExecutionError::NotDispatched);
+    }
+    if let Some(route) = accepted_route {
+        if !accepted_cpu_decision_route(request, route) || !recipe_matches_route(recipe, route) {
+            return Err(DecisionExecutionError::NotDispatched);
+        }
+    }
     let mut command = std::process::Command::new(&recipe.executable);
     command.args(&recipe.argv).current_dir(&recipe.cwd);
-    if profile_type == "local" {
-        command
-            .env("HF_HUB_OFFLINE", "1")
-            .env("TRANSFORMERS_OFFLINE", "1");
+    command
+        .env("HF_HUB_OFFLINE", "1")
+        .env("TRANSFORMERS_OFFLINE", "1")
+        .env("HF_DATASETS_OFFLINE", "1");
+    if cpu_only {
+        // The accepted route is explicitly CPU. Do not let CUDA be discovered
+        // by a local library that ignores the runner's --device argument.
+        command.env("CUDA_VISIBLE_DEVICES", "");
     }
     let limits = ProcessLimits::new(1024 * 1024, 2 * 1024 * 1024)
         .map_err(|_| DecisionExecutionError::NotDispatched)?;
@@ -113,8 +180,11 @@ pub fn execute_native_decision(
             process: disposition,
         },
     })?;
-    decode_decision_result(catalog, request, output.stdout())
-        .map_err(DecisionExecutionError::InvalidResult)
+    let decoded = match accepted_route {
+        Some(route) => decode_decision_result_for_route(request, route, output.stdout()),
+        None => decode_decision_result(catalog, request, output.stdout()),
+    };
+    decoded.map_err(DecisionExecutionError::InvalidResult)
 }
 
 pub fn decode_decision_result(
@@ -136,6 +206,21 @@ pub fn decode_decision_result(
         .map_err(|_| DecisionDecodeError::InvalidRequest)?;
     let route = resolve_profile_route(&catalog, request.profile())
         .map_err(|_| DecisionDecodeError::InvalidRequest)?;
+    decode_decision_result_for_route(request, &route, stdout)
+}
+
+fn decode_decision_result_for_route(
+    request: &InferenceRequest,
+    route: &ResolvedProfileRoute,
+    stdout: &[u8],
+) -> Result<NativeDecisionResult, DecisionDecodeError> {
+    if stdout.len() > MAX_RESULT_BYTES {
+        return Err(DecisionDecodeError::TooLarge);
+    }
+    if !matches!(request, InferenceRequest::Decision { .. }) || request.profile() != &route.profile
+    {
+        return Err(DecisionDecodeError::InvalidRequest);
+    }
     if !matches!(route.native_route, NativeRoute::DecisionRunner { .. }) {
         return Err(DecisionDecodeError::InvalidRequest);
     }
@@ -187,6 +272,45 @@ pub fn decode_decision_result(
         native_latency,
         native_usage,
     })
+}
+
+fn accepted_cpu_decision_route(request: &InferenceRequest, route: &ResolvedProfileRoute) -> bool {
+    let InferenceRequest::Decision { profile, .. } = request else {
+        return false;
+    };
+    let NativeRoute::DecisionRunner { profile_type, .. } = &route.native_route else {
+        return false;
+    };
+    profile == &route.profile
+        && route.profile.lane == Lane::Decisions
+        && route.runtime.lane == Lane::Decisions
+        && matches!(route.runtime.as_str(), "nagi" | "laya")
+        && route.device == Some(Device::Cpu)
+        && profile_type == "local"
+}
+
+fn recipe_matches_route(recipe: &NativeCommandRecipe, route: &ResolvedProfileRoute) -> bool {
+    let (
+        NativeRoute::DecisionRunner {
+            model,
+            profile_type,
+            tier,
+            ..
+        },
+        NativeOutputExpectation::DecisionJsonStdout {
+            engine,
+            model: recipe_model,
+            profile_type: recipe_type,
+            tier: recipe_tier,
+        },
+    ) = (&route.native_route, &recipe.expectation)
+    else {
+        return false;
+    };
+    engine == route.runtime.as_str()
+        && model == recipe_model
+        && profile_type == recipe_type
+        && tier == recipe_tier
 }
 
 #[cfg(test)]
