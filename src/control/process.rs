@@ -33,6 +33,16 @@ const POLL_QUANTUM: Duration = Duration::from_millis(25);
 const POST_EXIT_DRAIN: Duration = Duration::from_millis(200);
 const IO_CHUNK_BYTES: usize = 16 * 1024;
 
+// Parallel fixture writers must not overlap this runner's fork/exec window:
+// a fork can inherit another thread's writable script descriptor until exec,
+// making an otherwise closed fixture executable fail with ETXTBSY.
+#[cfg(test)]
+pub(crate) fn executable_fixture_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// The strongest conclusion this executor can make after an attempted run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProcessFailureDisposition {
@@ -407,7 +417,12 @@ mod linux {
             ));
         }
 
-        let mut child = command.spawn().map_err(|_| {
+        #[cfg(test)]
+        let fixture_guard = executable_fixture_guard();
+        let spawned = command.spawn();
+        #[cfg(test)]
+        drop(fixture_guard);
+        let mut child = spawned.map_err(|_| {
             ProcessFailure::new(
                 ProcessFailureDisposition::NoChildSpawned,
                 ProcessFailureKind::SpawnFailed,
@@ -1043,6 +1058,41 @@ mod tests {
     use std::thread;
 
     use super::super::runtime::{Cancellation, NeverCancel};
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn parallel_fresh_executable_fixtures_do_not_race_fork_exec() {
+        use std::os::unix::fs::PermissionsExt;
+        thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    let directory = tempfile::tempdir().unwrap();
+                    for index in 0..50 {
+                        let path = directory.path().join(format!("fixture-{index}"));
+                        {
+                            let _guard = executable_fixture_guard();
+                            std::fs::write(&path, "#!/bin/sh\nprintf fixture\n").unwrap();
+                            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+                                .unwrap();
+                        }
+                        let context = OperationContext::new(
+                            Instant::now() + Duration::from_secs(5),
+                            &NeverCancel,
+                        );
+                        let output = execute(
+                            Command::new(path),
+                            None,
+                            limits(0, 64),
+                            &context,
+                            recovery(),
+                        )
+                        .unwrap();
+                        assert_eq!(output.stdout(), b"fixture");
+                    }
+                });
+            }
+        });
+    }
 
     fn limits(stdin: usize, output: usize) -> ProcessLimits {
         ProcessLimits::new(stdin, output).unwrap()

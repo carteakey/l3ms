@@ -477,10 +477,12 @@ mod tests {
             apps = shell_quote(apps),
             gpu_delay = gpu_delay,
         );
+        let fixture_guard = super::super::process::executable_fixture_guard();
         fs::write(&executable, script).unwrap();
         let mut permissions = fs::metadata(&executable).unwrap().permissions();
         permissions.set_mode(0o700);
         fs::set_permissions(&executable, permissions).unwrap();
+        drop(fixture_guard);
         let config = GpuProbeConfig::new(UUID, 0, 64).unwrap();
         let probe = NvidiaSmiGpuProbe::with_program(config, &executable);
         FakeProbe { directory, probe }

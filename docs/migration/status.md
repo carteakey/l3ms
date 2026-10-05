@@ -255,6 +255,15 @@ Clippy, formatting and whitespace checks pass. No live manager/GPU or inference
 operation occurred. Native dispatch/event production, result retention policy,
 intent retirement, concrete lifecycle/admission and deployment remain incomplete.
 
+Repeat-run follow-up: the all-targets suite subsequently exposed intermittent
+fake-manager `SpawnFailed` errors. Captured errno 26 (`ETXTBSY`) identified
+parallel fixture writes overlapping fork/exec, not a runtime-binding or deadline
+failure. Test-only executable-write/spawn serialization corrected the race;
+100 parallel managed-service suite repetitions passed. A new four-thread fresh
+executable regression reproduced the failure with its write guard removed.
+With the guard restored, the full suite passed 531 tests, 1 ignored.
+Production spawn behavior and failure disposition are unchanged.
+
 - Choose the host admission mode for direct llama-swap/ComfyUI requests before
   claiming automatic cross-engine switching. The plan allows coordination
   only where the runtime can block and drain new direct work, or where callers

@@ -11,8 +11,10 @@ existing Linear migration issues rather than replacing their acceptance criteria
 ## Monorepo: next work
 
 Latest offline checkpoint: native results IPC/CLI and runtime-bound launch
-intents on `feature/l3ms-monorepo`; 530 root tests passed,
+intents on `feature/l3ms-monorepo`; 531 root tests passed,
 1 ignored. This is offline implementation evidence, not live cutover acceptance.
+The repeat-run fixture `ETXTBSY` race is corrected with test-only fork/write
+serialization; production launch failures remain fail-closed without retries.
 See the [migration status](docs/migration/status.md),
 [plan](docs/monorepo-consolidation-plan.md), and
 [execution contracts](docs/migration/execution-contracts.md).

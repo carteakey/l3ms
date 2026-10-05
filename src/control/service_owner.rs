@@ -445,6 +445,7 @@ sys.exit(23)
 "#
             );
             for name in ["fake-run", "fake-ctl"] {
+                let _guard = super::super::process::executable_fixture_guard();
                 let path = result.root.path().join(name);
                 fs::write(&path, &script).unwrap();
                 fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();

@@ -1320,6 +1320,7 @@ exit 1
     }
 
     fn write_executable(path: &Path, contents: &str) {
+        let _guard = process::executable_fixture_guard();
         fs::write(path, contents).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
     }
