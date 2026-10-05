@@ -15,12 +15,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{ensure, Context, Result};
 
-use super::catalog::{Catalog, Lane, RuntimeIdentity};
+use super::catalog::{Catalog, Lane, ProfileKey, RuntimeIdentity};
 use super::ipc::{
     self, AcceptedOperation, ClientRequest, RequestStatus, ResponseEnvelope, ResponseErrorCode,
     ResponseMessage,
 };
-use super::requests::InferenceRequest;
+use super::requests::{InferenceRequest, MediaInput};
 use super::routes::{resolve_profile_route, ResolvedProfileRoute};
 use super::runtime::{Cancellation, ResourceClaim};
 use crate::job_history::{CrossToolkitJobStart, CrossToolkitJobUpdate, JobHistory};
@@ -53,6 +53,10 @@ impl RequestCancellation {
     }
     pub fn cancel(&self) {
         self.0.store(true, Ordering::Release);
+    }
+
+    fn same_token_as(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
     }
 }
 
@@ -100,6 +104,11 @@ struct Pending {
 }
 
 struct Active {
+    request_id: String,
+    request: InferenceRequest,
+    profile: ProfileKey,
+    task: String,
+    route: ResolvedProfileRoute,
     resource: ResourceClaim,
     cancellation: RequestCancellation,
     deadline: Instant,
@@ -127,6 +136,47 @@ pub struct RequestTiming {
     pub cold_start: Duration,
     pub execution: Duration,
 }
+
+/// Fixed, redacted refusal categories for the final pre-dispatch gate.
+///
+/// These errors deliberately contain no manifest paths, request payloads, or
+/// underlying filesystem/catalog diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DispatchBeginError {
+    AdmissionUnavailable,
+    ReservationUnavailable,
+    TicketMismatch,
+    AlreadyStarted,
+    Cancelled,
+    DeadlineExceeded,
+    CatalogUnavailable,
+    InvalidRequest,
+    RouteChanged,
+    BindingChanged,
+    JobAssociationMismatch,
+    PersistenceFailed,
+}
+
+impl std::fmt::Display for DispatchBeginError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::AdmissionUnavailable => "coordinator admission is unavailable",
+            Self::ReservationUnavailable => "dispatch reservation is unavailable",
+            Self::TicketMismatch => "dispatch ticket does not match its reservation",
+            Self::AlreadyStarted => "dispatch ticket was already started",
+            Self::Cancelled => "dispatch ticket was cancelled",
+            Self::DeadlineExceeded => "dispatch ticket deadline expired",
+            Self::CatalogUnavailable => "current runtime catalog is unavailable",
+            Self::InvalidRequest => "dispatch request is invalid for the current catalog",
+            Self::RouteChanged => "dispatch route changed after acceptance",
+            Self::BindingChanged => "dispatch resource binding changed after acceptance",
+            Self::JobAssociationMismatch => "dispatch history association is invalid",
+            Self::PersistenceFailed => "dispatch start state could not be persisted",
+        })
+    }
+}
+
+impl std::error::Error for DispatchBeginError {}
 
 /// One coordinator's bounded queue. Only the future daemon may own this core
 /// and write its history; multiple CLI/TUI processes must use IPC rather than
@@ -388,12 +438,7 @@ impl CoordinatorCore {
         let mut candidate = self.history.clone();
         let job_id = candidate
             .begin_cross_toolkit(CrossToolkitJobStart {
-                toolkit: match profile.key.lane {
-                    Lane::Language => "l3ms",
-                    Lane::Media => "l2m2",
-                    Lane::Decisions => "l3ds",
-                }
-                .into(),
+                toolkit: toolkit_for_lane(profile.key.lane).into(),
                 profile: Some(profile.key.profile_id.to_string()),
                 task: Some(request.task().into()),
                 request_id: Some(request_id.clone()),
@@ -481,46 +526,204 @@ impl CoordinatorCore {
             .pending
             .remove(index)
             .expect("selected queue index exists");
-        let queue_wait = now.saturating_duration_since(pending.submitted);
+        let Pending {
+            job_id,
+            request_id,
+            request,
+            route,
+            resource,
+            submitted,
+            deadline,
+            cancellation,
+        } = pending;
+        let queue_wait = now.saturating_duration_since(submitted);
+        let accepted_request = request.clone();
+        let profile = request.profile().clone();
+        let task = request.task().to_owned();
         self.active.insert(
-            pending.job_id,
+            job_id,
             Active {
-                resource: pending.resource,
-                cancellation: pending.cancellation.clone(),
-                deadline: pending.deadline,
+                request_id: request_id.clone(),
+                request: accepted_request,
+                profile,
+                task,
+                route: route.clone(),
+                resource,
+                cancellation: cancellation.clone(),
+                deadline,
                 reserved: now,
                 started: None,
                 queue_wait,
             },
         );
         Ok(Some(DispatchTicket {
-            job_id: pending.job_id,
-            request_id: pending.request_id,
-            request: pending.request,
-            route: pending.route,
-            resource: pending.resource,
-            deadline: pending.deadline,
-            cancellation: pending.cancellation,
+            job_id,
+            request_id,
+            request,
+            route,
+            resource,
+            deadline,
+            cancellation,
             queue_wait,
         }))
     }
 
-    /// Persist running state immediately before native inference begins.
-    pub fn mark_running(&mut self, job_id: u64, now: Instant) -> Result<()> {
-        ensure!(
-            self.admission == AdmissionState::Ready,
-            "runtime reconciliation is required"
-        );
-        let active = self
+    /// Revalidate the accepted request and native route immediately before
+    /// recording the durable running transition. Any stale or inconsistent
+    /// association closes admission and leaves the active resource reservation
+    /// in place for reconciliation; this method never dispatches native work.
+    pub fn begin_dispatch(
+        &mut self,
+        ticket: &DispatchTicket,
+        now: Instant,
+    ) -> std::result::Result<(), DispatchBeginError> {
+        if self.admission != AdmissionState::Ready {
+            return Err(DispatchBeginError::AdmissionUnavailable);
+        }
+
+        let Some(active) = self.active.get(&ticket.job_id) else {
+            self.quarantine();
+            return Err(DispatchBeginError::ReservationUnavailable);
+        };
+        if active.started.is_some() {
+            return Err(DispatchBeginError::AlreadyStarted);
+        }
+        if active.cancellation.is_cancelled() {
+            return Err(DispatchBeginError::Cancelled);
+        }
+        if now >= active.deadline {
+            return Err(DispatchBeginError::DeadlineExceeded);
+        }
+
+        let ticket_matches_reservation = ticket.request_id == active.request_id
+            && same_request(&ticket.request, &active.request)
+            && ticket.request.profile() == &active.profile
+            && ticket.request.task() == active.task
+            && ticket.route == active.route
+            && ticket.resource == active.resource
+            && ticket.deadline == active.deadline
+            && ticket.queue_wait == active.queue_wait
+            && ticket.cancellation.same_token_as(&active.cancellation);
+        if !ticket_matches_reservation {
+            self.quarantine();
+            return Err(DispatchBeginError::TicketMismatch);
+        }
+
+        let refreshed = match self.catalog.refresh() {
+            Ok(catalog) => catalog,
+            Err(_) => {
+                self.quarantine();
+                return Err(DispatchBeginError::CatalogUnavailable);
+            }
+        };
+        // Retain the latest valid catalog even when this ticket is stale, so
+        // later submissions cannot continue using an older manifest snapshot.
+        self.catalog = refreshed;
+
+        if ticket.request.validate(&self.catalog).is_err() {
+            self.quarantine();
+            return Err(DispatchBeginError::InvalidRequest);
+        }
+        let current_route = match resolve_profile_route(&self.catalog, ticket.request.profile()) {
+            Ok(route) => route,
+            Err(_) => {
+                self.quarantine();
+                return Err(DispatchBeginError::RouteChanged);
+            }
+        };
+        let accepted_route = self
             .active
-            .get(&job_id)
-            .context("unknown dispatch reservation")?;
-        ensure!(active.started.is_none(), "request was already dispatched");
-        ensure!(
-            now < active.deadline && !active.cancellation.is_cancelled(),
-            "request cancelled or deadline expired before dispatch"
-        );
-        self.persist_update(job_id, "running", None, None)?;
+            .get(&ticket.job_id)
+            .map(|active| active.route.clone())
+            .ok_or_else(|| {
+                self.quarantine();
+                DispatchBeginError::ReservationUnavailable
+            })?;
+        if current_route != accepted_route || current_route != ticket.route {
+            self.quarantine();
+            return Err(DispatchBeginError::RouteChanged);
+        }
+
+        let binding_matches = self
+            .bindings
+            .get(&current_route.runtime)
+            .is_some_and(|resource| *resource == ticket.resource);
+        let active_resource_matches = self
+            .active
+            .get(&ticket.job_id)
+            .is_some_and(|active| active.resource == ticket.resource);
+        if !binding_matches || !active_resource_matches {
+            self.quarantine();
+            return Err(DispatchBeginError::BindingChanged);
+        }
+
+        let expected_toolkit = toolkit_for_lane(ticket.request.lane());
+        let profile_id = ticket.request.profile().profile_id.as_str();
+        let request_id = ticket.request_id.as_str();
+        let task = ticket.request.task();
+        let association_matches = self
+            .history
+            .records()
+            .iter()
+            .find(|job| job.id == ticket.job_id)
+            .is_some_and(|job| {
+                job.kind == "cross-toolkit"
+                    && job.status == "queued"
+                    && job.metadata.toolkit.as_deref() == Some(expected_toolkit)
+                    && job.metadata.profile.as_deref() == Some(profile_id)
+                    && job.metadata.task.as_deref() == Some(task)
+                    && job.metadata.request_id.as_deref() == Some(request_id)
+                    && job.metadata.result_state.as_deref() == Some("queued")
+            });
+        if !association_matches {
+            self.quarantine();
+            return Err(DispatchBeginError::JobAssociationMismatch);
+        }
+
+        // Keep the caller-supplied timestamp for deterministic admission checks,
+        // but never let catalog IO make that timestamp stale at the commit.
+        let commit_time = now.max(Instant::now());
+        match self.mark_running_checked(ticket.job_id, commit_time) {
+            Ok(()) => Ok(()),
+            Err(DispatchBeginError::PersistenceFailed) => {
+                self.quarantine();
+                Err(DispatchBeginError::PersistenceFailed)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Persist running state immediately before native inference begins.
+    /// Kept for compatibility with existing core fixtures; native executors
+    /// must use [`Self::begin_dispatch`] for current-route validation.
+    pub fn mark_running(&mut self, job_id: u64, now: Instant) -> Result<()> {
+        self.mark_running_checked(job_id, now)
+            .map_err(|error| anyhow::anyhow!(error))
+    }
+
+    fn mark_running_checked(
+        &mut self,
+        job_id: u64,
+        now: Instant,
+    ) -> std::result::Result<(), DispatchBeginError> {
+        if self.admission != AdmissionState::Ready {
+            return Err(DispatchBeginError::AdmissionUnavailable);
+        }
+        let Some(active) = self.active.get(&job_id) else {
+            return Err(DispatchBeginError::ReservationUnavailable);
+        };
+        if active.started.is_some() {
+            return Err(DispatchBeginError::AlreadyStarted);
+        }
+        if active.cancellation.is_cancelled() {
+            return Err(DispatchBeginError::Cancelled);
+        }
+        if now >= active.deadline {
+            return Err(DispatchBeginError::DeadlineExceeded);
+        }
+        if self.persist_update(job_id, "running", None, None).is_err() {
+            return Err(DispatchBeginError::PersistenceFailed);
+        }
         self.active
             .get_mut(&job_id)
             .expect("active reservation exists")
@@ -612,6 +815,100 @@ fn wire_error(request_id: String, code: ResponseErrorCode) -> ResponseMessage {
     }
 }
 
+fn toolkit_for_lane(lane: Lane) -> &'static str {
+    match lane {
+        Lane::Language => "l3ms",
+        Lane::Media => "l2m2",
+        Lane::Decisions => "l3ds",
+    }
+}
+
+fn same_request(left: &InferenceRequest, right: &InferenceRequest) -> bool {
+    use InferenceRequest::{Chat, Decision, Media};
+
+    match (left, right) {
+        (
+            Chat {
+                profile: left_profile,
+                turns: left_turns,
+                max_tokens: left_max_tokens,
+            },
+            Chat {
+                profile: right_profile,
+                turns: right_turns,
+                max_tokens: right_max_tokens,
+            },
+        ) => {
+            left_profile == right_profile
+                && left_max_tokens == right_max_tokens
+                && left_turns.len() == right_turns.len()
+                && left_turns
+                    .iter()
+                    .zip(right_turns)
+                    .all(|(left, right)| left.role == right.role && left.content == right.content)
+        }
+        (
+            Media {
+                profile: left_profile,
+                input: left_input,
+            },
+            Media {
+                profile: right_profile,
+                input: right_input,
+            },
+        ) => {
+            left_profile == right_profile
+                && match (left_input, right_input) {
+                    (
+                        MediaInput::Workflow {
+                            task: left_task,
+                            graph: left_graph,
+                        },
+                        MediaInput::Workflow {
+                            task: right_task,
+                            graph: right_graph,
+                        },
+                    ) => left_task == right_task && left_graph == right_graph,
+                    (
+                        MediaInput::Script {
+                            task: left_task,
+                            args: left_args,
+                        },
+                        MediaInput::Script {
+                            task: right_task,
+                            args: right_args,
+                        },
+                    ) => left_task == right_task && left_args == right_args,
+                    (MediaInput::Speech(left), MediaInput::Speech(right)) => {
+                        left.text == right.text
+                            && left.mode == right.mode
+                            && left.instruction == right.instruction
+                            && left.voice_reference == right.voice_reference
+                            && left.reference_text == right.reference_text
+                    }
+                    _ => false,
+                }
+        }
+        (
+            Decision {
+                profile: left_profile,
+                state: left_state,
+                questions: left_questions,
+            },
+            Decision {
+                profile: right_profile,
+                state: right_state,
+                questions: right_questions,
+            },
+        ) => {
+            left_profile == right_profile
+                && left_state == right_state
+                && left_questions == right_questions
+        }
+        _ => false,
+    }
+}
+
 fn resources_conflict(left: ResourceClaim, right: ResourceClaim) -> bool {
     matches!((left, right), (ResourceClaim::ExclusiveGpu(a), ResourceClaim::ExclusiveGpu(b)) if a == b)
 }
@@ -668,6 +965,461 @@ mod tests {
             profile: ProfileKey::new(Lane::Decisions, "jev-api").unwrap(), state: serde_json::json!({}),
             questions: serde_json::json!({"route":{"type":"choice","criteria":{"yes":"Accept","no":"Reject"}}}).as_object().unwrap().clone(),
         }
+    }
+
+    struct DispatchFixture {
+        root: TempDir,
+        media_manifest: PathBuf,
+    }
+
+    impl DispatchFixture {
+        fn new() -> Self {
+            let root = TempDir::new().unwrap();
+            let language_root = root.path().join("language");
+            let media_root = root.path().join("media");
+            let decisions_root = root.path().join("decisions");
+            std::fs::create_dir_all(&language_root).unwrap();
+            std::fs::create_dir_all(&media_root).unwrap();
+            std::fs::create_dir_all(&decisions_root).unwrap();
+            std::fs::write(
+                language_root.join("llama-swap.yaml"),
+                "models:\n  fixture-model:\n    cmd: model\n",
+            )
+            .unwrap();
+            let media_manifest = media_root.join("media-runtimes.json");
+            std::fs::write(
+                &media_manifest,
+                serde_json::json!({
+                    "schema_version": 1,
+                    "profiles": [{
+                        "id": "fixture-profile",
+                        "name": "Fixture media profile",
+                        "runtime": "fixture-runtime",
+                        "tasks": ["tts"],
+                        "script": "scripts/runner.py"
+                    }]
+                })
+                .to_string(),
+            )
+            .unwrap();
+            std::fs::write(
+                decisions_root.join("decision-runtimes.json"),
+                r#"{"version":"1.0","profiles":[]}"#,
+            )
+            .unwrap();
+            Self {
+                root,
+                media_manifest,
+            }
+        }
+
+        fn coordinator(&self) -> CoordinatorCore {
+            let language_root = self.root.path().join("language");
+            let media_root = self.root.path().join("media");
+            let decisions_root = self.root.path().join("decisions");
+            let catalog =
+                Catalog::load_from_roots(language_root, media_root, decisions_root).unwrap();
+            let bindings = BTreeMap::from([(
+                RuntimeIdentity::new(Lane::Media, "fixture-runtime").unwrap(),
+                ResourceClaim::ExclusiveGpu(0),
+            )]);
+            CoordinatorCore::load(catalog, bindings, self.root.path(), self.root.path(), 8).unwrap()
+        }
+
+        fn rewrite_media(&self, runtime: &str, script: &str) {
+            std::fs::write(
+                &self.media_manifest,
+                serde_json::json!({
+                    "schema_version": 1,
+                    "profiles": [{
+                        "id": "fixture-profile",
+                        "name": "Fixture media profile",
+                        "runtime": runtime,
+                        "tasks": ["tts"],
+                        "script": script
+                    }]
+                })
+                .to_string(),
+            )
+            .unwrap();
+        }
+
+        fn request() -> InferenceRequest {
+            InferenceRequest::Media {
+                profile: ProfileKey::new(Lane::Media, "fixture-profile").unwrap(),
+                input: MediaInput::Script {
+                    task: Task::new("tts").unwrap(),
+                    args: vec!["--text".into(), "fixture input".into()],
+                },
+            }
+        }
+
+        fn reserve(
+            &self,
+            coordinator: &mut CoordinatorCore,
+            now: Instant,
+        ) -> (u64, DispatchTicket) {
+            coordinator.confirm_reconciled().unwrap();
+            let id = coordinator
+                .submit(
+                    "dispatch-fixture".into(),
+                    Self::request(),
+                    Duration::from_secs(30),
+                    now,
+                )
+                .unwrap();
+            let ticket = coordinator.reserve_next(now).unwrap().unwrap();
+            (id, ticket)
+        }
+    }
+
+    fn persisted_state(data_root: &Path, request_id: &str) -> Option<String> {
+        let jobs: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(data_root.join("jobs.json")).unwrap()).unwrap();
+        jobs.as_array()?
+            .iter()
+            .find(|job| job["request_id"] == request_id)
+            .and_then(|job| job["result_state"].as_str())
+            .map(str::to_owned)
+    }
+
+    #[test]
+    fn begin_dispatch_revalidates_and_durably_marks_the_stable_route_running() {
+        let fixture = DispatchFixture::new();
+        let mut coordinator = fixture.coordinator();
+        let now = Instant::now();
+        let (job_id, ticket) = fixture.reserve(&mut coordinator, now);
+
+        coordinator
+            .begin_dispatch(&ticket, now + Duration::from_secs(1))
+            .unwrap();
+
+        assert_eq!(coordinator.admission(), AdmissionState::Ready);
+        assert_eq!(coordinator.active_count(), 1);
+        assert_eq!(
+            persisted_state(fixture.root.path(), "dispatch-fixture").as_deref(),
+            Some("running")
+        );
+        assert!(
+            coordinator
+                .history()
+                .records()
+                .iter()
+                .any(|job| job.id == job_id
+                    && job.metadata.result_state.as_deref() == Some("running"))
+        );
+    }
+
+    #[test]
+    fn changed_manifest_runtime_or_native_path_quarantines_and_retains_ticket() {
+        for (runtime, script) in [
+            ("changed-runtime", "scripts/runner.py"),
+            ("fixture-runtime", "scripts/changed-private-route.py"),
+        ] {
+            let fixture = DispatchFixture::new();
+            let mut coordinator = fixture.coordinator();
+            let now = Instant::now();
+            let (job_id, ticket) = fixture.reserve(&mut coordinator, now);
+            fixture.rewrite_media(runtime, script);
+
+            let error = coordinator
+                .begin_dispatch(&ticket, now + Duration::from_secs(1))
+                .unwrap_err();
+
+            assert_eq!(error, DispatchBeginError::RouteChanged);
+            assert_eq!(
+                coordinator.admission(),
+                AdmissionState::ReconciliationRequired
+            );
+            assert_eq!(coordinator.active_count(), 1);
+            assert!(coordinator
+                .history()
+                .records()
+                .iter()
+                .any(|job| job.id == job_id
+                    && job.metadata.result_state.as_deref() == Some("queued")));
+            assert_eq!(
+                persisted_state(fixture.root.path(), "dispatch-fixture").as_deref(),
+                Some("queued")
+            );
+            assert!(!error.to_string().contains("changed-private-route.py"));
+            assert!(!format!("{error:?}").contains("changed-private-route.py"));
+        }
+    }
+
+    #[test]
+    fn catalog_refresh_failure_is_redacted_quarantines_and_retains_ticket() {
+        let fixture = DispatchFixture::new();
+        let mut coordinator = fixture.coordinator();
+        let now = Instant::now();
+        let (job_id, ticket) = fixture.reserve(&mut coordinator, now);
+        std::fs::write(&fixture.media_manifest, "malformed-private-manifest").unwrap();
+
+        let error = coordinator
+            .begin_dispatch(&ticket, now + Duration::from_secs(1))
+            .unwrap_err();
+
+        assert_eq!(error, DispatchBeginError::CatalogUnavailable);
+        assert_eq!(
+            coordinator.admission(),
+            AdmissionState::ReconciliationRequired
+        );
+        assert_eq!(coordinator.active_count(), 1);
+        assert_eq!(
+            coordinator
+                .history()
+                .records()
+                .iter()
+                .find(|job| job.id == job_id)
+                .unwrap()
+                .metadata
+                .result_state
+                .as_deref(),
+            Some("queued")
+        );
+        assert!(!error.to_string().contains("malformed-private-manifest"));
+        assert!(!format!("{error:?}").contains("malformed-private-manifest"));
+    }
+
+    #[test]
+    fn changed_runtime_binding_quarantines_and_keeps_the_reservation() {
+        let fixture = DispatchFixture::new();
+        let mut coordinator = fixture.coordinator();
+        let now = Instant::now();
+        let (job_id, ticket) = fixture.reserve(&mut coordinator, now);
+        coordinator.bindings.insert(
+            RuntimeIdentity::new(Lane::Media, "fixture-runtime").unwrap(),
+            ResourceClaim::None,
+        );
+
+        let error = coordinator
+            .begin_dispatch(&ticket, now + Duration::from_secs(1))
+            .unwrap_err();
+
+        assert_eq!(error, DispatchBeginError::BindingChanged);
+        assert_eq!(
+            coordinator.admission(),
+            AdmissionState::ReconciliationRequired
+        );
+        assert_eq!(coordinator.active_count(), 1);
+        assert!(coordinator
+            .history()
+            .records()
+            .iter()
+            .any(|job| job.id == job_id && job.metadata.result_state.as_deref() == Some("queued")));
+    }
+
+    #[test]
+    fn invalid_ticket_request_quarantines_without_starting_or_releasing_work() {
+        let fixture = DispatchFixture::new();
+        let mut coordinator = fixture.coordinator();
+        let now = Instant::now();
+        let (job_id, mut ticket) = fixture.reserve(&mut coordinator, now);
+        if let InferenceRequest::Media {
+            input: MediaInput::Script { args, .. },
+            ..
+        } = &mut ticket.request
+        {
+            *args = vec!["oversized".into(); 129];
+        }
+
+        let error = coordinator
+            .begin_dispatch(&ticket, now + Duration::from_secs(1))
+            .unwrap_err();
+
+        assert_eq!(error, DispatchBeginError::TicketMismatch);
+        assert_eq!(
+            coordinator.admission(),
+            AdmissionState::ReconciliationRequired
+        );
+        assert_eq!(coordinator.active_count(), 1);
+        assert!(coordinator
+            .history()
+            .records()
+            .iter()
+            .any(|job| job.id == job_id && job.metadata.result_state.as_deref() == Some("queued")));
+    }
+
+    #[test]
+    fn valid_payload_mutation_is_rejected_as_a_ticket_mismatch() {
+        let fixture = DispatchFixture::new();
+        let mut coordinator = fixture.coordinator();
+        let now = Instant::now();
+        let (job_id, mut ticket) = fixture.reserve(&mut coordinator, now);
+        if let InferenceRequest::Media {
+            input: MediaInput::Script { args, .. },
+            ..
+        } = &mut ticket.request
+        {
+            args[1] = "different but still valid input".into();
+        }
+
+        let error = coordinator
+            .begin_dispatch(&ticket, now + Duration::from_secs(1))
+            .unwrap_err();
+
+        assert_eq!(error, DispatchBeginError::TicketMismatch);
+        assert_eq!(
+            coordinator.admission(),
+            AdmissionState::ReconciliationRequired
+        );
+        assert_eq!(coordinator.active_count(), 1);
+        assert!(coordinator
+            .history()
+            .records()
+            .iter()
+            .any(|job| job.id == job_id && job.metadata.result_state.as_deref() == Some("queued")));
+        assert!(!error
+            .to_string()
+            .contains("different but still valid input"));
+        assert!(!format!("{error:?}").contains("different but still valid input"));
+    }
+
+    #[test]
+    fn mismatched_history_association_quarantines_without_releasing_work() {
+        let fixture = DispatchFixture::new();
+        let mut coordinator = fixture.coordinator();
+        let now = Instant::now();
+        let (job_id, ticket) = fixture.reserve(&mut coordinator, now);
+        coordinator
+            .history
+            .update_cross_toolkit(
+                job_id,
+                CrossToolkitJobUpdate {
+                    result_state: Some("failed".into()),
+                    ..CrossToolkitJobUpdate::default()
+                },
+            )
+            .unwrap();
+
+        let error = coordinator
+            .begin_dispatch(&ticket, now + Duration::from_secs(1))
+            .unwrap_err();
+
+        assert_eq!(error, DispatchBeginError::JobAssociationMismatch);
+        assert_eq!(
+            coordinator.admission(),
+            AdmissionState::ReconciliationRequired
+        );
+        assert_eq!(coordinator.active_count(), 1);
+    }
+
+    #[test]
+    fn running_persistence_failure_quarantines_and_retains_queued_reservation() {
+        let fixture = DispatchFixture::new();
+        let mut coordinator = fixture.coordinator();
+        let now = Instant::now();
+        let (job_id, ticket) = fixture.reserve(&mut coordinator, now);
+        let blocked = fixture.root.path().join("not-a-directory");
+        std::fs::write(&blocked, "private persistence failure").unwrap();
+        coordinator.data_root = blocked;
+
+        let error = coordinator
+            .begin_dispatch(&ticket, now + Duration::from_secs(1))
+            .unwrap_err();
+
+        assert_eq!(error, DispatchBeginError::PersistenceFailed);
+        assert_eq!(
+            coordinator.admission(),
+            AdmissionState::ReconciliationRequired
+        );
+        assert_eq!(coordinator.active_count(), 1);
+        assert!(coordinator
+            .history()
+            .records()
+            .iter()
+            .any(|job| job.id == job_id && job.metadata.result_state.as_deref() == Some("queued")));
+    }
+
+    #[test]
+    fn begin_dispatch_refuses_cancelled_and_expired_reservations() {
+        let fixture = DispatchFixture::new();
+        let mut coordinator = fixture.coordinator();
+        let now = Instant::now();
+        let (cancelled_id, cancelled_ticket) = fixture.reserve(&mut coordinator, now);
+        coordinator.cancel(cancelled_id).unwrap();
+        assert_eq!(
+            coordinator.begin_dispatch(&cancelled_ticket, now + Duration::from_secs(1)),
+            Err(DispatchBeginError::Cancelled)
+        );
+        assert_eq!(coordinator.admission(), AdmissionState::Ready);
+        assert_eq!(coordinator.active_count(), 1);
+        assert_eq!(
+            persisted_state(fixture.root.path(), "dispatch-fixture").as_deref(),
+            Some("queued")
+        );
+
+        let expired_fixture = DispatchFixture::new();
+        let mut expired = expired_fixture.coordinator();
+        let now = Instant::now();
+        let (expired_id, expired_ticket) = expired_fixture.reserve(&mut expired, now);
+        assert_eq!(
+            expired.begin_dispatch(&expired_ticket, expired_ticket.deadline),
+            Err(DispatchBeginError::DeadlineExceeded)
+        );
+        assert_eq!(expired.admission(), AdmissionState::Ready);
+        assert_eq!(expired.active_count(), 1);
+        assert_eq!(
+            persisted_state(expired_fixture.root.path(), "dispatch-fixture").as_deref(),
+            Some("queued")
+        );
+        assert!(expired
+            .history()
+            .records()
+            .iter()
+            .any(|job| job.id == expired_id
+                && job.metadata.result_state.as_deref() == Some("queued")));
+    }
+
+    #[test]
+    fn begin_dispatch_rechecks_real_deadline_after_catalog_io() {
+        let fixture = DispatchFixture::new();
+        let mut coordinator = fixture.coordinator();
+        coordinator.confirm_reconciled().unwrap();
+        let submitted_at = Instant::now();
+        let job_id = coordinator
+            .submit(
+                "short-deadline".into(),
+                DispatchFixture::request(),
+                Duration::from_millis(80),
+                submitted_at,
+            )
+            .unwrap();
+        let ticket = coordinator.reserve_next(submitted_at).unwrap().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+
+        assert_eq!(
+            coordinator.begin_dispatch(&ticket, submitted_at),
+            Err(DispatchBeginError::DeadlineExceeded)
+        );
+        assert_eq!(coordinator.admission(), AdmissionState::Ready);
+        assert_eq!(coordinator.active_count(), 1);
+        assert!(coordinator
+            .history()
+            .records()
+            .iter()
+            .any(|job| job.id == job_id && job.metadata.result_state.as_deref() == Some("queued")));
+    }
+
+    #[test]
+    fn repeated_begin_dispatch_is_rejected_without_releasing_the_reservation() {
+        let fixture = DispatchFixture::new();
+        let mut coordinator = fixture.coordinator();
+        let now = Instant::now();
+        let (_job_id, ticket) = fixture.reserve(&mut coordinator, now);
+
+        coordinator
+            .begin_dispatch(&ticket, now + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(
+            coordinator.begin_dispatch(&ticket, now + Duration::from_secs(2)),
+            Err(DispatchBeginError::AlreadyStarted)
+        );
+        assert_eq!(coordinator.active_count(), 1);
+        assert_eq!(
+            persisted_state(fixture.root.path(), "dispatch-fixture").as_deref(),
+            Some("running")
+        );
     }
 
     #[test]

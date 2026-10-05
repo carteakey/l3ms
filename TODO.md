@@ -10,8 +10,8 @@ existing Linear migration issues rather than replacing their acceptance criteria
 
 ## Monorepo: next work
 
-Latest offline checkpoint: durable transient-service launch ownership on
-`feature/l3ms-monorepo`; 474 root tests passed,
+Latest offline checkpoint: owned stop/cgroup observation and pre-dispatch
+revalidation on `feature/l3ms-monorepo`; 499 root tests passed,
 1 ignored. This is offline implementation evidence, not live cutover acceptance.
 See the [migration status](docs/migration/status.md),
 [plan](docs/monorepo-consolidation-plan.md), and
@@ -28,6 +28,10 @@ See the [migration status](docs/migration/status.md),
   Transient-service launch now persists its intent before dispatch under host
   ownership. Add proven cgroup cleanup and explicit retirement of retained
   intents before opening admission; adapter/daemon wiring is still pending.
+  A generation-bound stop receipt and fixed-root cgroup-v2 observer are now
+  implemented on the branch; empty/removed observations alone do not prove GPU
+  release or fence direct clients. Owner composition retains receipts after
+  observation failure so reconciliation does not repeat the stop operation.
 - [x] Connect Breeze speech recipes to bounded execution and per-job WAV/chunk
   artifact validation. Real-model tests and coordinator dispatch remain gated.
 - [ ] Add explicit artifact contracts for other native media scripts; do not
@@ -56,6 +60,9 @@ See the [migration status](docs/migration/status.md),
   and supervised dispatch; keep dispatch closed until those checks are integrated.
   Startup now rejects history aliases; installation must supply the actual
   standalone store path. Verify concurrent workflows without lost history.
+  The pre-dispatch gate now refreshes the native catalog and verifies the
+  accepted route, resource binding, ticket association, and durable running
+  transition. Native executors must use this gate, not legacy `mark_running`.
 - [ ] Integrate CLI and keyboard-first UI run/observe/cancel with the same
   coordinator, settings, routing, and request IDs; preserve standalone commands.
   Linux CLI request status/cancel is implemented; submit/results and UI remain.

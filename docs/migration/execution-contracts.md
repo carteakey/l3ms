@@ -31,6 +31,22 @@ a defense against concurrent malicious filesystem replacement.
 
 ## Managed transient-service ownership
 
+The manager's generation-matched stop acknowledgment now produces an opaque,
+non-cloneable `StoppedService` receipt. A read-only `CgroupReleaseProbe` can
+observe only that receipt's original cgroup, rooted at the fixed, filesystem-
+verified `/sys/fs/cgroup`. Descriptor-relative no-symlink traversal and bounded
+`cgroup.events` reads require hierarchical `populated 0`; populated, malformed,
+missing events, unsafe paths, cancellation, and timeout fail closed. An absent
+owned directory produces only a `Removed` observation after acknowledged stop.
+The privately constructed observation matches its receipt's unit, generation,
+and cgroup; it cannot be applied to another receipt accidentally.
+
+Neither observation fences new ingress or proves GPU release. It assumes a
+trusted executable tree that cannot escape its cgroup and no concurrent
+same-user operator replacing/restarting the unique transient unit. The host
+guard excludes cooperating coordinators, not those operators. Retained intents
+remain intact: these observations do not authorize retirement or dispatch.
+
 The internal Linux controller prepares a unique transient-unit intent before
 dispatch; callers must persist that record under the retained coordinator lock.
 Dispatch consumes its token once. Fixed, root-owned systemd client binaries use
@@ -67,6 +83,10 @@ Only bounded ownership metadata is stored, never argv, environment or payloads.
 Restart observation composes the stored records with live controller checks;
 it does not recreate recipes or replay launches. Stop first verifies the retained
 record and then the live handle, retaining the record even on success. There is
+also a composed `stop_and_observe` operation under the owner's retained guard:
+success privately bundles the receipt and its matching cgroup observation;
+failure after stop preserves a transferable receipt for read-only re-observation
+without repeating the manager stop. Stop failure produces no receipt. There is
 no intent retirement operation yet; reaching the cap refuses new launches.
 Caller lifecycle logic must reconcile unresolved records and prove admission and
 resource authority before starting an engine. The wrapper is not wired to the

@@ -215,6 +215,20 @@ Clippy/all-targets, formatting and whitespace checks pass. No live manager/GPU
 operation occurred; only installed `systemd-run --help` was read. Records remain
 retained, with no retirement/release/admission proof or daemon dispatch wiring.
 
+2026-10-05 owned-stop/dispatch checkpoint: generation-matched stop now returns
+an opaque receipt; ten cgroup fixtures verify bounded fixed-root traversal,
+empty/removed observations and fail-closed populated, unsafe, malformed,
+missing-event and cancelled/expired cases. Four new owner fixtures compose
+stop and observation while retaining durable intents and transferable receipts
+after observation failure, without repeating stop. The dispatch gate snapshots
+the accepted payload, refreshes native routes and rechecks binding, history,
+cancellation and actual deadline before persisting running. Tampered/stale
+tickets quarantine without dropping reservations; start is not replayable.
+Root: 499 passed, 1 ignored; locked/offline all-targets tests, Clippy with denied
+warnings, formatting and whitespace checks pass. No live manager/GPU operation
+occurred. Result retention/delivery, concrete lifecycle/admission adapters,
+intent retirement and end-to-end dispatch remain incomplete.
+
 - Choose the host admission mode for direct llama-swap/ComfyUI requests before
   claiming automatic cross-engine switching. The plan allows coordination
   only where the runtime can block and drain new direct work, or where callers

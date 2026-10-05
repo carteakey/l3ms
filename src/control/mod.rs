@@ -3,6 +3,8 @@
 
 pub mod catalog;
 #[cfg(target_os = "linux")]
+pub mod cgroup_release;
+#[cfg(target_os = "linux")]
 pub mod client;
 pub mod comfy;
 #[cfg(target_os = "linux")]

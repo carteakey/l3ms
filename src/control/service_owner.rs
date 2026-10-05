@@ -11,9 +11,10 @@
 use std::fmt;
 use std::time::Duration;
 
+use super::cgroup_release::{CgroupObservation, CgroupReleaseErrorKind, CgroupReleaseProbe};
 use super::managed_service::{
     LaunchRecipe, ManagedServiceController, ManagedServiceErrorKind, OwnedService, ReconcileResult,
-    ServiceIntentRecord, StartDisposition, StartFailure,
+    ServiceIntentRecord, StartDisposition, StartFailure, StoppedService,
 };
 use super::ownership::CoordinatorLock;
 use super::runtime::OperationContext;
@@ -87,6 +88,86 @@ pub struct RetainedServiceObservation {
     pub intent: ServiceIntentRecord,
     pub observation: ReconcileResult,
 }
+
+/// Fixed failure phase and category for the stop-plus-observation operation.
+/// The contained kinds are themselves fixed and redacted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StopAndObserveErrorKind {
+    Stop(ManagedServiceErrorKind),
+    Observation(CgroupReleaseErrorKind),
+}
+
+/// The generation-bound cgroup observation returned together with the exact
+/// stop receipt it inspected. Neither item proves GPU release or admission
+/// safety.
+#[derive(Eq, PartialEq)]
+pub struct StoppedServiceObservation {
+    receipt: StoppedService,
+    observation: CgroupObservation,
+}
+
+impl StoppedServiceObservation {
+    pub fn receipt(&self) -> &StoppedService {
+        &self.receipt
+    }
+
+    pub fn observation(&self) -> &CgroupObservation {
+        &self.observation
+    }
+}
+
+impl fmt::Debug for StoppedServiceObservation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StoppedServiceObservation")
+            .field("receipt", &"<redacted>")
+            .field("observation", &self.observation)
+            .finish()
+    }
+}
+
+/// Stop errors carry no receipt. If stop succeeded but cgroup observation
+/// failed, the receipt is retained so callers can re-observe without issuing
+/// another stop command.
+pub struct StopAndObserveError {
+    kind: StopAndObserveErrorKind,
+    receipt: Option<StoppedService>,
+}
+
+impl StopAndObserveError {
+    pub fn kind(&self) -> StopAndObserveErrorKind {
+        self.kind
+    }
+
+    pub fn receipt(&self) -> Option<&StoppedService> {
+        self.receipt.as_ref()
+    }
+
+    pub fn into_receipt(self) -> Option<StoppedService> {
+        self.receipt
+    }
+}
+
+impl fmt::Debug for StopAndObserveError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StopAndObserveError")
+            .field("kind", &self.kind)
+            .field("receipt", &"<retained privately>")
+            .finish()
+    }
+}
+
+impl fmt::Display for StopAndObserveError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self.kind {
+            StopAndObserveErrorKind::Stop(_) => "service stop failed",
+            StopAndObserveErrorKind::Observation(_) => "stopped service observation failed",
+        })
+    }
+}
+
+impl std::error::Error for StopAndObserveError {}
 
 /// Borrowing the guard prevents normal callers from dropping host exclusion
 /// while this owner is in use. The caller must use the same configured host
@@ -184,7 +265,7 @@ impl<'host> ManagedRuntimeOwner<'host> {
         &mut self,
         service: &OwnedService,
         context: &OperationContext<'_>,
-    ) -> Result<(), ManagedServiceErrorKind> {
+    ) -> Result<StoppedService, ManagedServiceErrorKind> {
         check_context(context)?;
         let records = self
             .store
@@ -198,6 +279,44 @@ impl<'host> ManagedRuntimeOwner<'host> {
         }
         check_context(context)?;
         self.controller.stop(service, context)
+    }
+
+    /// Stop the exact owned generation, then inspect only the cgroup bound to
+    /// the returned stop receipt. The durable intent remains retained on all
+    /// outcomes. If observation fails after stop acknowledgment, the error
+    /// carries the receipt so the caller can retry only the read-only probe.
+    /// This does not release GPU ownership or open runtime admission.
+    pub fn stop_and_observe(
+        &mut self,
+        service: &OwnedService,
+        probe: &CgroupReleaseProbe,
+        context: &OperationContext<'_>,
+    ) -> Result<StoppedServiceObservation, StopAndObserveError> {
+        let receipt = self
+            .stop(service, context)
+            .map_err(|kind| StopAndObserveError {
+                kind: StopAndObserveErrorKind::Stop(kind),
+                receipt: None,
+            })?;
+        let observation = match probe.observe(&receipt, context) {
+            Ok(observation) => observation,
+            Err(kind) => {
+                return Err(StopAndObserveError {
+                    kind: StopAndObserveErrorKind::Observation(kind),
+                    receipt: Some(receipt),
+                });
+            }
+        };
+        if !observation.matches(&receipt) {
+            return Err(StopAndObserveError {
+                kind: StopAndObserveErrorKind::Observation(CgroupReleaseErrorKind::InvalidReceipt),
+                receipt: Some(receipt),
+            });
+        }
+        Ok(StoppedServiceObservation {
+            receipt,
+            observation,
+        })
     }
 }
 
@@ -219,7 +338,8 @@ fn observation_context(context: &OperationContext<'_>) -> Result<(), OwnerObserv
 
 #[cfg(test)]
 mod tests {
-    use super::super::runtime::NeverCancel;
+    use super::super::cgroup_release::CgroupObservationKind;
+    use super::super::runtime::{Cancellation, NeverCancel};
     use super::*;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -230,6 +350,7 @@ mod tests {
         root: tempfile::TempDir,
         intents: tempfile::TempDir,
         locks: tempfile::TempDir,
+        cgroups: tempfile::TempDir,
     }
     impl Fixture {
         fn new() -> Self {
@@ -237,11 +358,13 @@ mod tests {
                 root: tempfile::tempdir().unwrap(),
                 intents: tempfile::tempdir().unwrap(),
                 locks: tempfile::tempdir().unwrap(),
+                cgroups: tempfile::tempdir().unwrap(),
             };
             for directory in [
                 result.root.path(),
                 result.intents.path(),
                 result.locks.path(),
+                result.cgroups.path(),
             ] {
                 fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
             }
@@ -316,6 +439,19 @@ sys.exit(23)
         }
         fn context(&self) -> OperationContext<'static> {
             OperationContext::new(Instant::now() + Duration::from_secs(3), &NeverCancel)
+        }
+
+        fn cgroup_probe(&self, service: &OwnedService, events: Option<&str>) -> CgroupReleaseProbe {
+            let leaf = self
+                .cgroups
+                .path()
+                .join("user.slice")
+                .join(service.unit_name());
+            fs::create_dir_all(&leaf).unwrap();
+            if let Some(events) = events {
+                fs::write(leaf.join("cgroup.events"), events).unwrap();
+            }
+            CgroupReleaseProbe::with_test_root(self.cgroups.path()).unwrap()
         }
     }
 
@@ -491,5 +627,110 @@ sys.exit(23)
         assert!(!fixture.root.path().join("stops").exists());
         assert!(!foreign.root.path().join("stops").exists());
         assert!(foreign.root.path().join("manager-state.json").exists());
+    }
+
+    #[test]
+    fn stop_and_observe_returns_receipt_bound_empty_observation_and_retains_ledger() {
+        let fixture = Fixture::new();
+        let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+        let mut owner = fixture.owner(&guard);
+        let handle = owner
+            .start(fixture.recipe(), Duration::from_secs(1), &fixture.context())
+            .unwrap();
+        let probe = fixture.cgroup_probe(&handle, Some("populated 0\nfrozen 0\n"));
+
+        let result = owner
+            .stop_and_observe(&handle, &probe, &fixture.context())
+            .unwrap();
+        assert_eq!(result.observation().kind(), CgroupObservationKind::Empty);
+        assert!(result.observation().matches(result.receipt()));
+        assert!(fixture.root.path().join("stops").exists());
+        assert_eq!(owner.store.list().unwrap().len(), 1);
+        assert!(!format!("{result:?}").contains(handle.unit_name()));
+    }
+
+    #[test]
+    fn observation_failure_retains_transferable_receipt_without_repeating_stop() {
+        let fixture = Fixture::new();
+        let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+        let mut owner = fixture.owner(&guard);
+        let handle = owner
+            .start(fixture.recipe(), Duration::from_secs(1), &fixture.context())
+            .unwrap();
+        let probe = fixture.cgroup_probe(&handle, Some("populated 1\nfrozen 0\n"));
+
+        let error = owner
+            .stop_and_observe(&handle, &probe, &fixture.context())
+            .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            StopAndObserveErrorKind::Observation(CgroupReleaseErrorKind::CgroupNotEmpty)
+        );
+        assert!(error.receipt().is_some());
+        assert!(!format!("{error:?}").contains(handle.unit_name()));
+        let receipt = error.into_receipt().unwrap();
+        assert_eq!(
+            probe.observe(&receipt, &fixture.context()).unwrap_err(),
+            CgroupReleaseErrorKind::CgroupNotEmpty
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.root.path().join("stops")).unwrap(),
+            "stop\n"
+        );
+        assert_eq!(owner.store.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn missing_events_is_observation_failure_with_receipt_but_not_removal() {
+        let fixture = Fixture::new();
+        let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+        let mut owner = fixture.owner(&guard);
+        let handle = owner
+            .start(fixture.recipe(), Duration::from_secs(1), &fixture.context())
+            .unwrap();
+        let probe = fixture.cgroup_probe(&handle, None);
+
+        let error = owner
+            .stop_and_observe(&handle, &probe, &fixture.context())
+            .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            StopAndObserveErrorKind::Observation(CgroupReleaseErrorKind::MissingEvents)
+        );
+        assert!(error.receipt().is_some());
+        assert_eq!(owner.store.list().unwrap().len(), 1);
+        assert_eq!(
+            fs::read_to_string(fixture.root.path().join("stops")).unwrap(),
+            "stop\n"
+        );
+    }
+
+    #[test]
+    fn cancelled_stop_has_no_receipt_and_does_not_dispatch_manager_stop() {
+        struct Cancel;
+        impl Cancellation for Cancel {
+            fn is_cancelled(&self) -> bool {
+                true
+            }
+        }
+        let fixture = Fixture::new();
+        let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+        let mut owner = fixture.owner(&guard);
+        let handle = owner
+            .start(fixture.recipe(), Duration::from_secs(1), &fixture.context())
+            .unwrap();
+        let probe = fixture.cgroup_probe(&handle, Some("populated 0\n"));
+        let cancelled = OperationContext::new(Instant::now() + Duration::from_secs(2), &Cancel);
+
+        let error = owner
+            .stop_and_observe(&handle, &probe, &cancelled)
+            .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            StopAndObserveErrorKind::Stop(ManagedServiceErrorKind::Cancelled)
+        );
+        assert!(error.receipt().is_none());
+        assert!(!fixture.root.path().join("stops").exists());
+        assert_eq!(owner.store.list().unwrap().len(), 1);
     }
 }

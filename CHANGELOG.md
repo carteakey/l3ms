@@ -10,6 +10,14 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Added a generation-bound stop receipt and fixed-root cgroup-v2 observation
+  with bounded, no-symlink reads. An empty or removed cgroup is only a
+  point-in-time observation; live GPU switching and admission remain gated.
+- Connected owned stop and cgroup observation, retaining the receipt after an
+  observation failure so reconciliation can inspect without repeating stop.
+- Revalidate the full accepted inference request, native route, resource binding,
+  history association and deadline before the durable running transition.
+  Inconsistent tickets close admission without releasing their reservation.
 - Connected transient-service launch to a durable, private write-ahead intent
   store under retained host ownership. Restart observes without replay; failed
   persistence refuses launch and preserves records for reconciliation.

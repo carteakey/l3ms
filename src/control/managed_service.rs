@@ -384,6 +384,64 @@ impl fmt::Debug for OwnedService {
     }
 }
 
+/// Evidence that the manager acknowledged stopping this exact owned
+/// generation. This is not evidence that its cgroup is empty or a resource
+/// has been released. The private fields prevent callers from manufacturing a
+/// receipt from a unit name or an arbitrary cgroup path.
+#[derive(Eq, PartialEq)]
+pub struct StoppedService {
+    unit_name: String,
+    invocation_id: String,
+    cgroup: String,
+}
+
+impl StoppedService {
+    /// The generation-bound path is consumed only by the cgroup observation
+    /// module. It is deliberately not part of this receipt's Debug output.
+    pub(crate) fn cgroup_path(&self) -> &str {
+        &self.cgroup
+    }
+
+    pub(crate) fn unit_name(&self) -> &str {
+        &self.unit_name
+    }
+
+    pub(crate) fn invocation_id(&self) -> &str {
+        &self.invocation_id
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        unit_name: String,
+        invocation_id: String,
+        cgroup: String,
+    ) -> Option<Self> {
+        if unit_name.len() <= 96
+            && unit_name.starts_with("l3ms-")
+            && unit_name.ends_with(".service")
+            && unit_name.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"-.".contains(&byte)
+            })
+            && valid_invocation_id(&invocation_id)
+            && valid_cgroup(&cgroup, &unit_name)
+        {
+            Some(Self {
+                unit_name,
+                invocation_id,
+                cgroup,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+impl fmt::Debug for StoppedService {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("StoppedService(<redacted>)")
+    }
+}
+
 /// Coordinates only transient user services created from validated recipes.
 pub struct ManagedServiceController {
     coordinator_id: String,
@@ -587,7 +645,7 @@ impl ManagedServiceController {
         &self,
         service: &OwnedService,
         context: &OperationContext<'_>,
-    ) -> Result<(), ManagedServiceErrorKind> {
+    ) -> Result<StoppedService, ManagedServiceErrorKind> {
         self.validate_handle(service)?;
         context_error(context)?;
         let Some(snapshot) = self.show_unit(&service.intent, context)? else {
@@ -615,7 +673,10 @@ impl ManagedServiceController {
         let Some(after) = self.show_unit(&service.intent, context)? else {
             // A successful stop followed by transient-unit unloading confirms
             // that no unit is currently addressable under this generated name.
-            return Ok(());
+            // The matching pre-stop generation and successful systemctl
+            // acknowledgment are required before issuing the receipt.
+            context_error(context)?;
+            return Ok(stopped_receipt(service));
         };
         match owned_snapshot(
             &service.intent,
@@ -624,7 +685,10 @@ impl ManagedServiceController {
         )
         .unwrap_or(ManagedServiceState::Unknown)
         {
-            ManagedServiceState::Stopped => Ok(()),
+            ManagedServiceState::Stopped => {
+                context_error(context)?;
+                Ok(stopped_receipt(service))
+            }
             ManagedServiceState::Running | ManagedServiceState::Unknown => {
                 Err(ManagedServiceErrorKind::StopUnconfirmed)
             }
@@ -720,6 +784,14 @@ impl ManagedServiceController {
             systemd_run,
             systemctl,
         })
+    }
+}
+
+fn stopped_receipt(service: &OwnedService) -> StoppedService {
+    StoppedService {
+        unit_name: service.intent.unit_name.clone(),
+        invocation_id: service.invocation_id.clone(),
+        cgroup: service.cgroup.clone(),
     }
 }
 
@@ -1261,7 +1333,10 @@ exit 1
             fixture.controller.state(&handle, &context).unwrap(),
             ManagedServiceState::Running
         );
-        fixture.controller.stop(&handle, &context).unwrap();
+        let stopped = fixture.controller.stop(&handle, &context).unwrap();
+        assert_eq!(stopped.cgroup_path(), handle.cgroup);
+        assert!(!format!("{stopped:?}").contains(&handle.cgroup));
+        assert!(!format!("{stopped:?}").contains(INVOCATION));
         assert_eq!(
             fixture.controller.state(&handle, &context).unwrap(),
             ManagedServiceState::Stopped
