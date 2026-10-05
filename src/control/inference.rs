@@ -246,6 +246,43 @@ impl CoordinatorCore {
             .and_then(|job| job.metadata.result_state.as_deref())
     }
 
+    /// Typed authoritative status from retained durable history. Result-buffer
+    /// availability is deliberately not consulted: an empty or restarted
+    /// cache cannot turn a retained request into `not_found`.
+    pub(crate) fn authoritative_request_status(&self, request_id: &str) -> Option<RequestStatus> {
+        self.wire_state(request_id)
+    }
+
+    /// Test-only durable fixture; it does not open admission or create an
+    /// executor reservation. Used to exercise read-only IPC against retained
+    /// history states that a real executor would persist.
+    #[cfg(test)]
+    pub(crate) fn seed_test_request_status(&mut self, request_id: &str, state: &str) -> Result<()> {
+        ensure!(
+            matches!(state, "queued" | "succeeded"),
+            "test history state is unsupported"
+        );
+        let mut candidate = self.history.clone();
+        let job_id = candidate.begin_cross_toolkit(CrossToolkitJobStart {
+            toolkit: "l3ms".into(),
+            profile: Some("test-profile".into()),
+            task: Some("test-task".into()),
+            request_id: Some(request_id.into()),
+        })?;
+        if state != "queued" {
+            candidate.update_cross_toolkit(
+                job_id,
+                CrossToolkitJobUpdate {
+                    result_state: Some(state.into()),
+                    ..CrossToolkitJobUpdate::default()
+                },
+            )?;
+        }
+        candidate.persist_in(&self.data_root)?;
+        self.history = candidate;
+        Ok(())
+    }
+
     /// Cancels only retained, nonterminal work. A terminal row is not rewritten
     /// as cancelled, and an unknown request cannot target another numeric job.
     pub fn cancel_request(&mut self, request_id: &str) -> Result<()> {

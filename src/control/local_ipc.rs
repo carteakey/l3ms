@@ -1,4 +1,4 @@
-//! Linux-only private Unix-socket transport for IPC v1, not an installed daemon.
+//! Linux-only private Unix-socket transport for IPC v1/v2, not an installed daemon.
 //!
 //! The caller supplies pre-existing private local directories and acquires this
 //! listener before loading/writing coordinator history. The host guard lives
@@ -6,8 +6,8 @@
 //! effective-UID peer checks are not isolation from other programs of that user.
 //! Trusted directories/ancestors must not be maliciously replaced concurrently.
 //!
-//! One connection carries one request/reply; v1 has no result stream. Deadlines
-//! apply across each whole read/write, not separately to each byte. A transport
+//! One connection carries one request/reply; v2 results are bounded pages, not
+//! a stream. Deadlines apply across each whole read/write, not separately to each byte. A transport
 //! failure after starting a request write is uncertain; clients must reconnect
 //! by request ID rather than resubmit. No retry or runtime operation occurs here.
 
@@ -21,7 +21,9 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::ipc::{self, ClientRequest, ProtocolError, RequestEnvelope, ResponseEnvelope};
+use super::ipc::{
+    self, ClientRequest, IncomingRequest, ProtocolError, RequestEnvelope, ResponseEnvelope,
+};
 use super::ownership::CoordinatorLock;
 use super::runtime::OperationContext;
 
@@ -126,6 +128,8 @@ pub struct LocalConnection {
     stream: UnixStream,
     phase: Phase,
     request_id: Option<String>,
+    request_version: Option<u16>,
+    result_query: Option<(u64, u32)>,
 }
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Phase {
@@ -149,6 +153,8 @@ impl LocalConnection {
             stream,
             phase,
             request_id: None,
+            request_version: None,
+            result_query: None,
         })
     }
 
@@ -243,6 +249,26 @@ impl LocalConnection {
         });
         let request = checked(result, context)?;
         self.request_id = Some(request.request_id().to_owned());
+        self.request_version = Some(ipc::PROTOCOL_VERSION);
+        self.phase = Phase::ServerResponse;
+        Ok(request)
+    }
+    pub fn read_incoming_request(
+        &mut self,
+        context: &OperationContext<'_>,
+    ) -> Result<IncomingRequest, LocalIpcError> {
+        self.start(Phase::ServerRequest)?;
+        let result = ipc::read_incoming_request(&mut BoundedIo {
+            stream: &mut self.stream,
+            context,
+        });
+        let request = checked(result, context)?;
+        self.request_id = Some(request.request_id().to_owned());
+        self.request_version = Some(request.version());
+        self.result_query = match &request {
+            IncomingRequest::Results(query) => Some((query.after_cursor, query.byte_budget)),
+            IncomingRequest::Control(_) => None,
+        };
         self.phase = Phase::ServerResponse;
         Ok(request)
     }
@@ -255,7 +281,8 @@ impl LocalConnection {
         let id = match &request.message {
             ipc::WireRequestMessage::Submit { request_id, .. }
             | ipc::WireRequestMessage::Status { request_id }
-            | ipc::WireRequestMessage::Cancel { request_id } => request_id,
+            | ipc::WireRequestMessage::Cancel { request_id }
+            | ipc::WireRequestMessage::Results { request_id, .. } => request_id,
         };
         let result = ipc::write_request(
             &mut BoundedIo {
@@ -266,6 +293,15 @@ impl LocalConnection {
         );
         checked(result, context)?;
         self.request_id = Some(id.clone());
+        self.request_version = Some(request.version);
+        self.result_query = match &request.message {
+            ipc::WireRequestMessage::Results {
+                after_cursor,
+                byte_budget,
+                ..
+            } => Some((*after_cursor, *byte_budget)),
+            _ => None,
+        };
         self.phase = Phase::ClientResponse;
         Ok(())
     }
@@ -310,9 +346,34 @@ impl LocalConnection {
         let id = match &response.message {
             ipc::ResponseMessage::Accepted { request_id, .. }
             | ipc::ResponseMessage::Status { request_id, .. } => Some(request_id.as_str()),
+            ipc::ResponseMessage::Results { request_id, .. } => Some(request_id.as_str()),
             ipc::ResponseMessage::Error { request_id, .. } => request_id.as_deref(),
         };
-        if id.is_some() && id != self.request_id.as_deref() {
+        if self.request_version != Some(response.version)
+            || (id.is_some() && id != self.request_id.as_deref())
+            || (self.request_version == Some(ipc::RESULTS_PROTOCOL_VERSION)
+                && matches!(
+                    &response.message,
+                    ipc::ResponseMessage::Error {
+                        request_id: None,
+                        ..
+                    }
+                ))
+        {
+            return Err(LocalIpcError::ResponseMismatch);
+        }
+        if let ipc::ResponseMessage::Results {
+            after_cursor,
+            byte_budget,
+            ..
+        } = &response.message
+        {
+            if self.result_query != Some((*after_cursor, *byte_budget)) {
+                return Err(LocalIpcError::ResponseMismatch);
+            }
+        } else if self.result_query.is_some()
+            && !matches!(response.message, ipc::ResponseMessage::Error { .. })
+        {
             return Err(LocalIpcError::ResponseMismatch);
         }
         Ok(())

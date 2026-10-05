@@ -58,12 +58,13 @@ enum Phase {
     Read,
 }
 
-/// Sends one v1 request over the caller-selected private socket directory.
+/// Sends one v1 control request or one v2 results query over the caller-selected
+/// private socket directory.
 ///
 /// `context` bounds the entire connect/write/read sequence. Request IDs are
-/// checked before connecting; the response must correlate to that ID and use
-/// the operation-specific v1 response shape. The function does not retry after
-/// a write or start any inference/runtime work itself.
+/// checked before connecting; the response must correlate to the request and
+/// use its versioned operation-specific shape. The function does not retry
+/// after a write or start any inference/runtime work itself.
 pub fn exchange(
     socket_directory: &Path,
     request: RequestEnvelope,
@@ -71,25 +72,32 @@ pub fn exchange(
 ) -> Result<ResponseMessage, ClientError> {
     let request_id = request_id(&request.message);
     ipc::validate_request_id(request_id).map_err(|_| ClientError::InvalidRequestId)?;
+    ipc::validate_request_envelope(&request).map_err(|error| match error {
+        ipc::ProtocolError::InvalidRequestId => ClientError::InvalidRequestId,
+        _ => ClientError::InvalidRequest,
+    })?;
 
     let mut connection = LocalConnection::connect(socket_directory, context)
         .map_err(|error| fixed_transport_error(error, Phase::Connect))?;
     connection
         .write_request(&request, context)
         .map_err(|error| fixed_transport_error(error, Phase::Write))?;
-    let response = connection
+    let response_envelope = connection
         .read_response(context)
-        .map_err(|error| fixed_transport_error(error, Phase::Read))?
-        .message;
+        .map_err(|error| fixed_transport_error(error, Phase::Read))?;
+    if response_envelope.version != request.version {
+        return Err(ClientError::InvalidResponse);
+    }
 
-    validate_response(&request.message, request_id, response)
+    validate_response(&request.message, request_id, response_envelope.message)
 }
 
 fn request_id(message: &WireRequestMessage) -> &str {
     match message {
         WireRequestMessage::Submit { request_id, .. }
         | WireRequestMessage::Cancel { request_id }
-        | WireRequestMessage::Status { request_id } => request_id,
+        | WireRequestMessage::Status { request_id }
+        | WireRequestMessage::Results { request_id, .. } => request_id,
     }
 }
 
@@ -101,38 +109,65 @@ fn validate_response(
     let response_id = match &response {
         ResponseMessage::Accepted { request_id, .. }
         | ResponseMessage::Status { request_id, .. } => Some(request_id.as_str()),
+        ResponseMessage::Results { request_id, .. } => Some(request_id.as_str()),
         ResponseMessage::Error { request_id, .. } => request_id.as_deref(),
     };
     if response_id.is_some_and(|response_id| response_id != request_id) {
         return Err(ClientError::InvalidResponse);
     }
+    if matches!(request, WireRequestMessage::Results { .. })
+        && matches!(
+            &response,
+            ResponseMessage::Error {
+                request_id: None,
+                ..
+            }
+        )
+    {
+        return Err(ClientError::InvalidResponse);
+    }
 
-    let matches_request = matches!(
-        (request, &response),
-        (_, ResponseMessage::Error { .. })
-            | (
-                WireRequestMessage::Submit { .. },
-                ResponseMessage::Accepted {
-                    operation: AcceptedOperation::Submit,
-                    state: RequestStatus::Queued,
-                    ..
-                }
-            )
-            | (
-                WireRequestMessage::Status { .. },
-                ResponseMessage::Status { .. }
-            )
-            | (
-                WireRequestMessage::Cancel { .. },
-                ResponseMessage::Accepted {
-                    operation: AcceptedOperation::Cancel,
-                    state: RequestStatus::Queued
-                        | RequestStatus::Running
-                        | RequestStatus::Cancelled,
-                    ..
-                }
-            )
-    );
+    let matches_request = match (request, &response) {
+        (_, ResponseMessage::Error { .. }) => true,
+        (
+            WireRequestMessage::Submit { .. },
+            ResponseMessage::Accepted {
+                operation: AcceptedOperation::Submit,
+                state: RequestStatus::Queued,
+                ..
+            },
+        ) => true,
+        (WireRequestMessage::Status { .. }, ResponseMessage::Status { .. }) => true,
+        (
+            WireRequestMessage::Cancel { .. },
+            ResponseMessage::Accepted {
+                operation: AcceptedOperation::Cancel,
+                state: RequestStatus::Queued | RequestStatus::Running | RequestStatus::Cancelled,
+                ..
+            },
+        ) => true,
+        (
+            WireRequestMessage::Results {
+                after_cursor,
+                byte_budget,
+                ..
+            },
+            ResponseMessage::Results {
+                request_id: page_request_id,
+                after_cursor: response_cursor,
+                byte_budget: response_budget,
+                page,
+                ..
+            },
+        ) => {
+            page_request_id == request_id
+                && response_cursor == after_cursor
+                && response_budget == byte_budget
+                && page.request_id == request_id
+                && ipc::validate_result_page(*after_cursor, *byte_budget, page).is_ok()
+        }
+        _ => false,
+    };
     if matches_request {
         Ok(response)
     } else {
@@ -176,9 +211,13 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use crate::control::{
+        catalog::Lane,
         ipc::{
             ClientRequest, RequestEnvelope, ResponseEnvelope, ResponseErrorCode, WireChatRole,
             WireChatTurn, WireInferenceRequest,
+        },
+        result_buffer::{
+            ResultBuffer, ResultEvent, ResultTerminal, MAX_PAGE_BYTES, MIN_PAGE_BYTES,
         },
         runtime::NeverCancel,
     };
@@ -198,6 +237,18 @@ mod tests {
 
     fn context(cancellation: &NeverCancel) -> OperationContext<'_> {
         OperationContext::new(Instant::now() + Duration::from_secs(3), cancellation)
+    }
+
+    fn result_page(request_id: &str) -> super::super::result_buffer::ResultPage {
+        let mut buffer = ResultBuffer::new();
+        buffer.begin(request_id, Lane::Language).unwrap();
+        buffer
+            .append(request_id, ResultEvent::ChatContent("result body".into()))
+            .unwrap();
+        buffer
+            .terminal(request_id, ResultTerminal::Succeeded)
+            .unwrap();
+        buffer.page(request_id, 0, MAX_PAGE_BYTES).unwrap()
     }
 
     fn request(operation: ClientRequestKind) -> RequestEnvelope {
@@ -278,6 +329,106 @@ mod tests {
                 exchange(directory.path(), request(kind), &context(&never_cancel)).unwrap();
             server.join().unwrap();
             assert_eq!(actual, expected_response);
+        }
+    }
+
+    #[test]
+    fn one_shot_results_exchange_validates_query_echo_and_bounded_page() {
+        let directory = private_directory();
+        let listener = listener(directory.path());
+        let expected_page = result_page("request:results");
+        let server_page = expected_page.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = ipc::read_incoming_request(&mut stream).unwrap();
+            assert!(matches!(
+                request,
+                ipc::IncomingRequest::Results(ref query)
+                    if query.request_id == "request:results"
+                        && query.after_cursor == 0
+                        && query.byte_budget == MIN_PAGE_BYTES as u32
+            ));
+            ipc::write_response(
+                &mut stream,
+                &ResponseEnvelope::v2_results(ResponseMessage::Results {
+                    request_id: "request:results".into(),
+                    after_cursor: 0,
+                    byte_budget: MIN_PAGE_BYTES as u32,
+                    state: RequestStatus::Succeeded,
+                    page: server_page,
+                }),
+            )
+            .unwrap();
+        });
+        let never_cancel = NeverCancel;
+        let response = exchange(
+            directory.path(),
+            RequestEnvelope::v2_results("request:results", 0, MIN_PAGE_BYTES as u32),
+            &context(&never_cancel),
+        )
+        .unwrap();
+        server.join().unwrap();
+        assert!(matches!(
+            response,
+            ResponseMessage::Results {
+                state: RequestStatus::Succeeded,
+                page,
+                ..
+            } if page == expected_page
+        ));
+    }
+
+    #[test]
+    fn results_exchange_rejects_mismatched_cursor_or_budget_echo() {
+        for mismatch_budget in [false, true] {
+            let directory = private_directory();
+            let listener = listener(directory.path());
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _request = ipc::read_incoming_request(&mut stream).unwrap();
+                let mut buffer = ResultBuffer::new();
+                buffer.begin("request:results", Lane::Language).unwrap();
+                buffer
+                    .append(
+                        "request:results",
+                        ResultEvent::ChatContent("result body".into()),
+                    )
+                    .unwrap();
+                buffer
+                    .terminal("request:results", ResultTerminal::Succeeded)
+                    .unwrap();
+                let page = buffer
+                    .page(
+                        "request:results",
+                        if mismatch_budget { 0 } else { 1 },
+                        MAX_PAGE_BYTES,
+                    )
+                    .unwrap();
+                ipc::write_response(
+                    &mut stream,
+                    &ResponseEnvelope::v2_results(ResponseMessage::Results {
+                        request_id: "request:results".into(),
+                        after_cursor: if mismatch_budget { 0 } else { 1 },
+                        byte_budget: if mismatch_budget {
+                            (MIN_PAGE_BYTES + 1) as u32
+                        } else {
+                            MIN_PAGE_BYTES as u32
+                        },
+                        state: RequestStatus::Succeeded,
+                        page,
+                    }),
+                )
+                .unwrap();
+            });
+            let never_cancel = NeverCancel;
+            let error = exchange(
+                directory.path(),
+                RequestEnvelope::v2_results("request:results", 0, MIN_PAGE_BYTES as u32),
+                &context(&never_cancel),
+            )
+            .unwrap_err();
+            server.join().unwrap();
+            assert_eq!(error, ClientError::InvalidResponse);
         }
     }
 

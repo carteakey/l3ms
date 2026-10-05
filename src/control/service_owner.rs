@@ -11,6 +11,7 @@
 use std::fmt;
 use std::time::Duration;
 
+use super::catalog::RuntimeIdentity;
 use super::cgroup_release::{CgroupObservation, CgroupReleaseErrorKind, CgroupReleaseProbe};
 use super::managed_service::{
     LaunchRecipe, ManagedServiceController, ManagedServiceErrorKind, OwnedService, ReconcileResult,
@@ -207,11 +208,37 @@ impl<'host> ManagedRuntimeOwner<'host> {
         stop_timeout: Duration,
         context: &OperationContext<'_>,
     ) -> Result<OwnedService, OwnerStartError> {
+        self.start_inner(None, recipe, stop_timeout, context)
+    }
+
+    /// Persist and dispatch a start intent bound to the selected catalog
+    /// runtime. This shares the exact write-ahead path with generic starts.
+    pub fn start_for_runtime(
+        &mut self,
+        runtime_identity: RuntimeIdentity,
+        recipe: LaunchRecipe,
+        stop_timeout: Duration,
+        context: &OperationContext<'_>,
+    ) -> Result<OwnedService, OwnerStartError> {
+        self.start_inner(Some(runtime_identity), recipe, stop_timeout, context)
+    }
+
+    fn start_inner(
+        &mut self,
+        runtime_identity: Option<RuntimeIdentity>,
+        recipe: LaunchRecipe,
+        stop_timeout: Duration,
+        context: &OperationContext<'_>,
+    ) -> Result<OwnedService, OwnerStartError> {
         check_context(context).map_err(OwnerStartError::Preparation)?;
-        let prepared = self
-            .controller
-            .prepare_start(recipe, stop_timeout)
-            .map_err(OwnerStartError::Preparation)?;
+        let prepared = match runtime_identity {
+            Some(identity) => {
+                self.controller
+                    .prepare_start_for_runtime(identity, recipe, stop_timeout)
+            }
+            None => self.controller.prepare_start(recipe, stop_timeout),
+        }
+        .map_err(OwnerStartError::Preparation)?;
         let intent = prepared.intent_record().clone();
         self.store
             .record(&intent)
@@ -338,6 +365,7 @@ fn observation_context(context: &OperationContext<'_>) -> Result<(), OwnerObserv
 
 #[cfg(test)]
 mod tests {
+    use super::super::catalog::{Lane, RuntimeIdentity};
     use super::super::cgroup_release::CgroupObservationKind;
     use super::super::runtime::{Cancellation, NeverCancel};
     use super::*;
@@ -383,6 +411,10 @@ if pathlib.Path(sys.argv[0]).name == 'fake-run':
     description = next(a.split('=', 1)[1] for a in args if a.startswith('--description='))
     record = json.loads((intents / (unit + '.json')).read_text())
     assert record['unit_name'] == unit
+    if (root / 'require-runtime').exists():
+        assert record['schema'] == 2
+        assert record['runtime_lane'] == 'media'
+        assert record['runtime_name'] == 'comfyui'
     with (root / 'starts').open('a') as log:
         log.write('start\n')
     state.write_text(json.dumps(dict(unit=unit, description=description)))
@@ -496,6 +528,45 @@ sys.exit(23)
                 .unwrap()
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn runtime_bound_start_is_persisted_before_dispatch_and_restored_without_replay() {
+        let fixture = Fixture::new();
+        fs::write(fixture.root.path().join("require-runtime"), "").unwrap();
+        let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+        let runtime = RuntimeIdentity::new(Lane::Media, "comfyui").unwrap();
+        let mut owner = fixture.owner(&guard);
+        let handle = owner
+            .start_for_runtime(
+                runtime.clone(),
+                fixture.recipe(),
+                Duration::from_secs(1),
+                &fixture.context(),
+            )
+            .unwrap();
+
+        let stored = ServiceIntentStore::open(fixture.intents.path())
+            .unwrap()
+            .list()
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].runtime_identity(), Some(&runtime));
+        assert_eq!(handle.intent_record().runtime_identity(), Some(&runtime));
+
+        drop(owner);
+        let mut restarted_owner = fixture.owner(&guard);
+        let observations = restarted_owner.reconcile(&fixture.context()).unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].intent.runtime_identity(), Some(&runtime));
+        assert!(matches!(
+            &observations[0].observation,
+            ReconcileResult::Owned(_)
+        ));
+        assert_eq!(
+            fs::read_to_string(fixture.root.path().join("starts")).unwrap(),
+            "start\n"
         );
     }
 

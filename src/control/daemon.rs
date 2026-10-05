@@ -17,7 +17,11 @@ use std::time::{Duration, Instant};
 
 use super::catalog::{Catalog, RuntimeIdentity};
 use super::inference::CoordinatorCore;
+use super::ipc::{
+    IncomingRequest, ResponseEnvelope, ResponseErrorCode, ResponseMessage, ResultsQuery,
+};
 use super::local_ipc::{private_directory, LocalIpcError, LocalListener};
+use super::result_buffer::{ResultBuffer, ResultBufferError};
 use super::runtime::{OperationContext, ResourceClaim};
 
 /// Explicit paths: no directory creation, default live store, or stale reclaim.
@@ -68,6 +72,9 @@ pub struct RunReport {
 pub struct ControlDaemon {
     // Drop history/payload ownership before removing the socket and host guard.
     core: CoordinatorCore,
+    // Result bodies are intentionally process-local; durable history in core
+    // remains authoritative after buffer loss or daemon restart.
+    results: ResultBuffer,
     listener: LocalListener,
     peer_timeout: Duration,
     max_connections: usize,
@@ -108,6 +115,7 @@ impl ControlDaemon {
         .map_err(|_| DaemonError::HistoryUnavailable)?;
         Ok(Self {
             core,
+            results: ResultBuffer::new(),
             listener,
             peer_timeout: config.peer_timeout,
             max_connections: config.max_connections,
@@ -147,7 +155,7 @@ impl ControlDaemon {
             let deadline = (Instant::now() + self.peer_timeout).min(context.deadline());
             let cancellation = ForwardCancellation(context);
             let peer_context = OperationContext::new(deadline, &cancellation);
-            if self.core.serve_connection(&mut peer, &peer_context).is_ok() {
+            if self.serve_connection(&mut peer, &peer_context).is_ok() {
                 report.completed_exchanges += 1;
             } else {
                 report.failed_connections += 1;
@@ -159,6 +167,64 @@ impl ControlDaemon {
         }
         Ok(report)
     }
+
+    fn serve_connection(
+        &mut self,
+        connection: &mut super::local_ipc::LocalConnection,
+        context: &OperationContext<'_>,
+    ) -> Result<(), LocalIpcError> {
+        let request = connection.read_incoming_request(context)?;
+        if context.is_cancelled() {
+            return Err(LocalIpcError::Cancelled);
+        }
+        if context.remaining().is_zero() {
+            return Err(LocalIpcError::Deadline);
+        }
+        let response = match request {
+            IncomingRequest::Control(request) => {
+                self.core.handle_client_request(request, Instant::now())
+            }
+            IncomingRequest::Results(query) => self.handle_results_query(query),
+        };
+        connection.write_response(&response, context)
+    }
+
+    fn handle_results_query(&self, query: ResultsQuery) -> ResponseEnvelope {
+        let Some(state) = self.core.authoritative_request_status(&query.request_id) else {
+            return results_error(query.request_id, ResponseErrorCode::Internal);
+        };
+        let page = match self.results.page(
+            &query.request_id,
+            query.after_cursor,
+            query.byte_budget as usize,
+        ) {
+            Ok(page) => page,
+            Err(error) => {
+                let code = match error {
+                    ResultBufferError::InvalidRequestId
+                    | ResultBufferError::InvalidCursor
+                    | ResultBufferError::InvalidPageBudget
+                    | ResultBufferError::PageBudgetTooSmall => ResponseErrorCode::InvalidRequest,
+                    _ => ResponseErrorCode::Internal,
+                };
+                return results_error(query.request_id, code);
+            }
+        };
+        ResponseEnvelope::v2_results(ResponseMessage::Results {
+            request_id: query.request_id,
+            after_cursor: query.after_cursor,
+            byte_budget: query.byte_budget,
+            state,
+            page,
+        })
+    }
+}
+
+fn results_error(request_id: String, code: ResponseErrorCode) -> ResponseEnvelope {
+    ResponseEnvelope::v2_results(ResponseMessage::Error {
+        request_id: Some(request_id),
+        code,
+    })
 }
 
 /// Check before binding or loading history. Callers must pass the same legacy
@@ -226,11 +292,14 @@ fn stop_reason(context: &OperationContext<'_>) -> Option<StopReason> {
 mod tests {
     use super::*;
     use crate::control::ipc::{
-        RequestEnvelope, RequestStatus, ResponseErrorCode, ResponseMessage, WireChatRole,
-        WireChatTurn, WireInferenceRequest, WireRequestMessage,
+        RequestEnvelope, RequestStatus, ResponseEnvelope, ResponseErrorCode, ResponseMessage,
+        WireChatRole, WireChatTurn, WireInferenceRequest, WireRequestMessage,
     };
     use crate::control::local_ipc::LocalConnection;
     use crate::control::ownership::CoordinatorLock;
+    use crate::control::result_buffer::{
+        Availability, ResultEvent, ResultTerminal, MIN_PAGE_BYTES,
+    };
     use crate::control::runtime::{Cancellation, NeverCancel};
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
@@ -290,6 +359,13 @@ mod tests {
         peer.read_response(&context).unwrap().message
     }
 
+    fn exchange_envelope(directory: &Path, request: RequestEnvelope) -> ResponseEnvelope {
+        let context = OperationContext::new(Instant::now() + Duration::from_secs(3), &NeverCancel);
+        let mut peer = LocalConnection::connect(directory, &context).unwrap();
+        peer.write_request(&request, &context).unwrap();
+        peer.read_response(&context).unwrap()
+    }
+
     #[test]
     fn status_is_served_but_submission_stays_closed_and_owner_is_released() {
         let fixture = Fixture::new();
@@ -342,6 +418,172 @@ mod tests {
             }
         );
         assert!(!fixture.data.path().join("jobs.json").exists());
+        fixture.released();
+    }
+
+    #[test]
+    fn results_keep_authoritative_queued_and_not_found_separate_from_empty_cache() {
+        let fixture = Fixture::new();
+        let mut daemon = fixture.bind(fixture.config(2)).unwrap();
+        daemon
+            .core
+            .seed_test_request_status("retained-queued", "queued")
+            .unwrap();
+        assert_eq!(daemon.core.queued_count(), 0);
+        assert_eq!(daemon.core.active_count(), 0);
+        let directory = fixture.socket.path().to_owned();
+        let client = std::thread::spawn(move || {
+            let queued = exchange_envelope(
+                &directory,
+                RequestEnvelope::v2_results("retained-queued", 0, MIN_PAGE_BYTES as u32),
+            );
+            let missing = exchange_envelope(
+                &directory,
+                RequestEnvelope::v2_results("not-retained", 0, MIN_PAGE_BYTES as u32),
+            );
+            (queued, missing)
+        });
+        let context = OperationContext::new(Instant::now() + Duration::from_secs(3), &NeverCancel);
+        let report = daemon.run(&context).unwrap();
+        let (queued, missing) = client.join().unwrap();
+        assert_eq!(report.completed_exchanges, 2);
+        assert!(matches!(
+            queued.message,
+            ResponseMessage::Results {
+                state: RequestStatus::Queued,
+                page,
+                ..
+            } if page.availability == Availability::Unknown
+                && page.events.is_empty()
+        ));
+        assert!(matches!(
+            missing.message,
+            ResponseMessage::Results {
+                state: RequestStatus::NotFound,
+                page,
+                ..
+            } if page.availability == Availability::Unknown
+        ));
+        fixture.released();
+    }
+
+    #[test]
+    fn completed_result_pages_are_bounded_repeatable_after_lost_response() {
+        let fixture = Fixture::new();
+        let mut daemon = fixture.bind(fixture.config(2)).unwrap();
+        daemon
+            .core
+            .seed_test_request_status("completed-result", "succeeded")
+            .unwrap();
+        daemon
+            .results
+            .begin("completed-result", crate::control::catalog::Lane::Language)
+            .unwrap();
+        daemon
+            .results
+            .append(
+                "completed-result",
+                ResultEvent::ChatContent("private completed body".into()),
+            )
+            .unwrap();
+        daemon
+            .results
+            .terminal("completed-result", ResultTerminal::Succeeded)
+            .unwrap();
+        assert_eq!(daemon.core.queued_count(), 0);
+        assert_eq!(daemon.core.active_count(), 0);
+
+        let directory = fixture.socket.path().to_owned();
+        let client = std::thread::spawn(move || {
+            let context =
+                OperationContext::new(Instant::now() + Duration::from_secs(3), &NeverCancel);
+            let mut lost = LocalConnection::connect(&directory, &context).unwrap();
+            lost.write_request(
+                &RequestEnvelope::v2_results("completed-result", 0, MIN_PAGE_BYTES as u32),
+                &context,
+            )
+            .unwrap();
+            drop(lost); // Simulate losing the first acknowledgement.
+
+            exchange_envelope(
+                &directory,
+                RequestEnvelope::v2_results("completed-result", 0, MIN_PAGE_BYTES as u32),
+            )
+        });
+        let context = OperationContext::new(Instant::now() + Duration::from_secs(3), &NeverCancel);
+        let report = daemon.run(&context).unwrap();
+        let response = client.join().unwrap();
+        assert_eq!(report.completed_exchanges + report.failed_connections, 2);
+        assert!(matches!(
+            response.message,
+            ResponseMessage::Results {
+                state: RequestStatus::Succeeded,
+                byte_budget,
+                page,
+                ..
+            } if byte_budget == MIN_PAGE_BYTES as u32
+                && page.availability == Availability::Available
+                && page.events.len() == 1
+                && page.events[0].cursor == 1
+                && page.next_cursor == 1
+                && serde_json::to_vec(&page).unwrap().len() <= byte_budget as usize
+        ));
+        fixture.released();
+    }
+
+    #[test]
+    fn restart_preserves_terminal_history_but_not_result_bodies_or_execution() {
+        let fixture = Fixture::new();
+        let mut first = fixture.bind(fixture.config(1)).unwrap();
+        first
+            .core
+            .seed_test_request_status("restart-results", "succeeded")
+            .unwrap();
+        first
+            .results
+            .begin("restart-results", crate::control::catalog::Lane::Language)
+            .unwrap();
+        first
+            .results
+            .append(
+                "restart-results",
+                ResultEvent::ChatContent("body disappears on restart".into()),
+            )
+            .unwrap();
+        first
+            .results
+            .terminal("restart-results", ResultTerminal::Succeeded)
+            .unwrap();
+        drop(first);
+
+        let restarted = fixture.bind(fixture.config(1)).unwrap();
+        assert_eq!(
+            restarted.core.request_state("restart-results"),
+            Some("succeeded")
+        );
+        assert_eq!(restarted.core.queued_count(), 0);
+        assert_eq!(restarted.core.active_count(), 0);
+        let directory = fixture.socket.path().to_owned();
+        let client = std::thread::spawn(move || {
+            exchange_envelope(
+                &directory,
+                RequestEnvelope::v2_results("restart-results", 0, MIN_PAGE_BYTES as u32),
+            )
+        });
+        let context = OperationContext::new(Instant::now() + Duration::from_secs(3), &NeverCancel);
+        let report = restarted.run(&context).unwrap();
+        let response = client.join().unwrap();
+        assert_eq!(report.completed_exchanges, 1);
+        assert!(matches!(
+            response.message,
+            ResponseMessage::Results {
+                state: RequestStatus::Succeeded,
+                page,
+                ..
+            } if page.availability == Availability::Unknown
+                && page.events.is_empty()
+                && page.terminal.is_none()
+        ));
         fixture.released();
     }
 

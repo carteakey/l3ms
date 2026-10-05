@@ -21,7 +21,7 @@ CAR-220 Phase 9, and CAR-221 Phase 10.
 | 3. Runtime cutover | In progress | Bounded L2M2 GPU-mode pilot, real branch L3MS language request, and a Qwen Image 2.1 branch-script generation passed; original ComfyUI service was restored after language use. L3DS now fails closed instead of synthesizing answers, but real decision weights and full deployed-path reconciliation remain pending. |
 | 4. Shared contracts | In development | Read-only catalog and offline `l3ms --list stack`, layered settings, existing-store job metadata, and typed lane request/result validation are on the branch. Adapter contracts and full compatibility/live release gates remain; release stays gated by Phase 3. |
 | 5. Runtime adapters | In development | Concrete bounded language execution, ComfyUI job handling, local decision supervision, Breeze speech execution/artifact validation, and inert generic media command recipes pass fixtures. Lifecycle/admission adapters, GPU release verification, real TTS/decision pilots, and a user-facing switch remain pending; no public inference action is enabled. |
-| 6. Local coordinator | In development | Durable queue, ownership locks, v1 IPC/transport, control handling, bounded serial owner and Linux CLI status/cancel exist offline. Lifecycle reconciliation, adapter dispatch, installation, result/stream delivery, and cross-client inference remain pending. |
+| 6. Local coordinator | In development | Durable queue, ownership locks, v1 control/v2 result-page IPC, bounded serial owner and Linux CLI status/cancel/results exist offline. Lifecycle reconciliation, native event production/dispatch, installation, server-pushed streaming, and cross-client inference remain pending. |
 | 7. HTTP ingress | Pending | Gateway to the same coordinator. |
 | 8. Unified workbench | In development | Read-only three-lane Stack Catalog tab and palette navigation share CLI toolkit-root resolution. Coordinated run/observe/cancel and task-form parity remain pending. |
 | 9. Public site | In development | Local static site now has separate language, media/TTS, and decision views generated from native manifests; six generator/site checks pass. Visual/browser review and all publication gates remain pending. |
@@ -237,6 +237,23 @@ Dashboard CI now runs both checks; no remote CI or publication was triggered.
 The browser inventory is empty and the in-app browser is unavailable, so the
 loopback preview was stopped without claiming visual/mobile/browser acceptance.
 The fixture deliberately does not emulate layout or an accessibility tree.
+
+2026-10-05 results/runtime-binding checkpoint: twelve result-buffer fixtures
+verify native lane separation, bounded transactional retention, exact pagination,
+UTF-8/escaping, explicit terminal eviction and strict decoded-page validation.
+V2-only result queries preserve v1 behavior, correlate ID/version/cursor/budget,
+and keep durable status independent from output-cache loss. Real private-socket
+fixtures cover queued/not-found lookup, lost-response retry and restart with
+retained succeeded history but unavailable output. CLI results uses shared
+settings/explicit socket precedence, compact bounded JSON and no runtime startup.
+Runtime-bound service intents retain lane/name in strict schema 2; unbound
+schema-1 records remain compatible. Manager description/recipe checks preserve
+the association through dispatch/restart, without replay or process-name guesses.
+Review corrected explicit-null deserialization and mixed-lane page acceptance.
+Root: 530 passed, 1 ignored; locked/offline all-targets tests, denied-warning
+Clippy, formatting and whitespace checks pass. No live manager/GPU or inference
+operation occurred. Native dispatch/event production, result retention policy,
+intent retirement, concrete lifecycle/admission and deployment remain incomplete.
 
 - Choose the host admission mode for direct llama-swap/ComfyUI requests before
   claiming automatic cross-engine switching. The plan allows coordination

@@ -15,9 +15,9 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
-use super::managed_service::ServiceIntentRecord;
+use super::managed_service::{runtime_identity_from_persisted_parts, ServiceIntentRecord};
 
 const MAX_INTENTS: usize = 128;
 const MAX_RECORD_BYTES: usize = 4 * 1024;
@@ -278,35 +278,71 @@ struct PersistedIntent {
     unit_name: String,
     launch_identity: String,
     stop_timeout_millis: u64,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_binding_field",
+        skip_serializing_if = "Option::is_none"
+    )]
+    runtime_lane: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_binding_field",
+        skip_serializing_if = "Option::is_none"
+    )]
+    runtime_name: Option<Option<String>>,
+}
+
+// Distinguish an absent schema-1 field from an explicitly supplied null.
+// Ordinary nested Option deserialization collapses both to None.
+fn deserialize_binding_field<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 impl PersistedIntent {
     fn from_record(record: &ServiceIntentRecord) -> Result<Self, ServiceIntentStoreError> {
-        ServiceIntentRecord::from_persisted_parts(
+        ServiceIntentRecord::from_persisted_parts_with_runtime(
             record.coordinator_id().to_owned(),
             record.unit_name().to_owned(),
             record.launch_identity().to_owned(),
             record.stop_timeout_millis(),
+            record.runtime_identity().cloned(),
         )
         .map_err(|_| ServiceIntentStoreError::InvalidRecord)?;
+        let runtime_lane = record
+            .runtime_identity()
+            .map(|identity| Some(identity.lane.as_str().to_owned()));
+        let runtime_name = record
+            .runtime_identity()
+            .map(|identity| Some(identity.as_str().to_owned()));
         Ok(Self {
-            schema: 1,
+            schema: if runtime_lane.is_some() { 2 } else { 1 },
             coordinator_id: record.coordinator_id().to_owned(),
             unit_name: record.unit_name().to_owned(),
             launch_identity: record.launch_identity().to_owned(),
             stop_timeout_millis: record.stop_timeout_millis(),
+            runtime_lane,
+            runtime_name,
         })
     }
 
     fn into_record(self) -> Result<ServiceIntentRecord, ServiceIntentStoreError> {
-        if self.schema != 1 {
-            return Err(ServiceIntentStoreError::CorruptStore);
-        }
-        ServiceIntentRecord::from_persisted_parts(
+        let runtime_identity = match (self.schema, self.runtime_lane, self.runtime_name) {
+            (1, None, None) => None,
+            (2, Some(Some(lane)), Some(Some(name))) => Some(
+                runtime_identity_from_persisted_parts(&lane, name)
+                    .map_err(|_| ServiceIntentStoreError::CorruptStore)?,
+            ),
+            _ => return Err(ServiceIntentStoreError::CorruptStore),
+        };
+        ServiceIntentRecord::from_persisted_parts_with_runtime(
             self.coordinator_id,
             self.unit_name,
             self.launch_identity,
             self.stop_timeout_millis,
+            runtime_identity,
         )
         .map_err(|_| ServiceIntentStoreError::CorruptStore)
     }
@@ -418,6 +454,7 @@ fn valid_file_metadata(metadata: &std::fs::Metadata, uid: libc::uid_t) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::catalog::{Lane, RuntimeIdentity};
     use super::*;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{symlink, PermissionsExt};
@@ -443,6 +480,18 @@ mod tests {
         .unwrap()
     }
 
+    fn runtime_intent(suffix: u128) -> ServiceIntentRecord {
+        let random = format!("{suffix:032x}");
+        ServiceIntentRecord::from_persisted_parts_with_runtime(
+            "coordinator".to_owned(),
+            format!("l3ms-coordinator-{random}.service"),
+            "c".repeat(64),
+            45_000,
+            Some(RuntimeIdentity::new(Lane::Media, "comfyui").unwrap()),
+        )
+        .unwrap()
+    }
+
     fn filename(record: &ServiceIntentRecord) -> String {
         format!("{}{}", record.unit_name(), JSON_SUFFIX)
     }
@@ -464,6 +513,14 @@ mod tests {
 
         store.record(&original).unwrap();
 
+        let persisted: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(directory.path().join(filename(&original))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted["schema"], 1);
+        assert!(persisted.get("runtime_lane").is_none());
+        assert!(persisted.get("runtime_name").is_none());
+
         assert_eq!(store.list().unwrap(), vec![original.clone()]);
         let restored = store.list().unwrap().pop().unwrap();
         assert_eq!(
@@ -475,6 +532,32 @@ mod tests {
             )
             .unwrap(),
             original
+        );
+    }
+
+    #[test]
+    fn bound_record_round_trips_only_bounded_runtime_metadata() {
+        let directory = private_directory();
+        let store = ServiceIntentStore::open(directory.path()).unwrap();
+        let original = runtime_intent(15);
+        store.record(&original).unwrap();
+
+        let persisted: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(directory.path().join(filename(&original))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted["schema"], 2);
+        assert_eq!(persisted["runtime_lane"], "media");
+        assert_eq!(persisted["runtime_name"], "comfyui");
+        assert_eq!(persisted.as_object().unwrap().len(), 7);
+        assert!(persisted.get("argv").is_none());
+        assert!(persisted.get("env").is_none());
+
+        let restored = store.list().unwrap().pop().unwrap();
+        assert_eq!(restored, original);
+        assert_eq!(
+            restored.runtime_identity(),
+            Some(&RuntimeIdentity::new(Lane::Media, "comfyui").unwrap())
         );
     }
 
@@ -505,6 +588,56 @@ mod tests {
         ];
 
         for bytes in malformed {
+            let directory = private_directory();
+            write_private_file(&directory.path().join(&filename), &bytes, FILE_MODE);
+            let store = ServiceIntentStore::open(directory.path()).unwrap();
+            assert_eq!(store.list(), Err(ServiceIntentStoreError::CorruptStore));
+        }
+    }
+
+    #[test]
+    fn invalid_runtime_binding_unknown_fields_and_corruption_fail_closed() {
+        let record = runtime_intent(16);
+        let filename = filename(&record);
+        let valid = serde_json::to_value(PersistedIntent::from_record(&record).unwrap()).unwrap();
+        let mut cases = Vec::new();
+
+        let mut invalid_lane = valid.clone();
+        invalid_lane["runtime_lane"] = serde_json::Value::String("unknown".to_owned());
+        cases.push(serde_json::to_vec(&invalid_lane).unwrap());
+
+        let mut invalid_name = valid.clone();
+        invalid_name["runtime_name"] = serde_json::Value::String("bad/name".to_owned());
+        cases.push(serde_json::to_vec(&invalid_name).unwrap());
+
+        let mut oversized_name = valid.clone();
+        oversized_name["runtime_name"] = serde_json::Value::String("x".repeat(129));
+        cases.push(serde_json::to_vec(&oversized_name).unwrap());
+
+        let mut missing_lane = valid.clone();
+        missing_lane.as_object_mut().unwrap().remove("runtime_lane");
+        cases.push(serde_json::to_vec(&missing_lane).unwrap());
+
+        let mut explicit_null = valid.clone();
+        explicit_null["runtime_lane"] = serde_json::Value::Null;
+        cases.push(serde_json::to_vec(&explicit_null).unwrap());
+
+        let mut unbound_with_nulls = valid.clone();
+        unbound_with_nulls["schema"] = serde_json::Value::from(1);
+        unbound_with_nulls["runtime_lane"] = serde_json::Value::Null;
+        unbound_with_nulls["runtime_name"] = serde_json::Value::Null;
+        cases.push(serde_json::to_vec(&unbound_with_nulls).unwrap());
+
+        let mut wrong_schema = valid.clone();
+        wrong_schema["schema"] = serde_json::Value::from(1);
+        cases.push(serde_json::to_vec(&wrong_schema).unwrap());
+
+        let mut unknown_field = valid;
+        unknown_field["argv"] = serde_json::json!(["must-not-be-persisted"]);
+        cases.push(serde_json::to_vec(&unknown_field).unwrap());
+        cases.push(b"{truncated".to_vec());
+
+        for bytes in cases {
             let directory = private_directory();
             write_private_file(&directory.path().join(&filename), &bytes, FILE_MODE);
             let store = ServiceIntentStore::open(directory.path()).unwrap();

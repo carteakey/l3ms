@@ -33,12 +33,14 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
+use super::catalog::{Lane, RuntimeIdentity};
 use super::process::{self, ProcessLimits};
 use super::runtime::{OperationContext, RecoveryPolicy};
 
 const SYSTEMD_RUN: &str = "/usr/bin/systemd-run";
 const SYSTEMCTL: &str = "/usr/bin/systemctl";
 const MAX_COORDINATOR_ID_BYTES: usize = 32;
+const MAX_RUNTIME_ID_BYTES: usize = 128;
 const MAX_WORKING_DIRECTORY_BYTES: usize = 4096;
 const MAX_ARGUMENT_BYTES: usize = 64 * 1024;
 const MAX_ARGUMENTS: usize = 4096;
@@ -53,6 +55,7 @@ const POLL_QUANTUM: Duration = Duration::from_millis(25);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ManagedServiceErrorKind {
     InvalidCoordinatorId,
+    InvalidRuntimeIdentity,
     InvalidRecipe,
     InvalidStopTimeout,
     RandomnessUnavailable,
@@ -71,6 +74,7 @@ impl fmt::Display for ManagedServiceErrorKind {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::InvalidCoordinatorId => "invalid coordinator identity",
+            Self::InvalidRuntimeIdentity => "invalid runtime identity",
             Self::InvalidRecipe => "invalid service launch recipe",
             Self::InvalidStopTimeout => "invalid service stop timeout",
             Self::RandomnessUnavailable => "unique service identity is unavailable",
@@ -195,6 +199,7 @@ pub struct ServiceIntentRecord {
     unit_name: String,
     launch_identity: String,
     stop_timeout_millis: u64,
+    runtime_identity: Option<RuntimeIdentity>,
 }
 
 impl ServiceIntentRecord {
@@ -205,6 +210,22 @@ impl ServiceIntentRecord {
         unit_name: String,
         launch_identity: String,
         stop_timeout_millis: u64,
+    ) -> Result<Self, ManagedServiceErrorKind> {
+        Self::from_persisted_parts_with_runtime(
+            coordinator_id,
+            unit_name,
+            launch_identity,
+            stop_timeout_millis,
+            None,
+        )
+    }
+
+    pub(super) fn from_persisted_parts_with_runtime(
+        coordinator_id: String,
+        unit_name: String,
+        launch_identity: String,
+        stop_timeout_millis: u64,
+        runtime_identity: Option<RuntimeIdentity>,
     ) -> Result<Self, ManagedServiceErrorKind> {
         if coordinator_id.len() > MAX_COORDINATOR_ID_BYTES
             || unit_name.len() > 96
@@ -219,6 +240,7 @@ impl ServiceIntentRecord {
             unit_name,
             launch_identity,
             stop_timeout_millis,
+            runtime_identity,
         };
         if !valid_intent(&record) {
             return Err(ManagedServiceErrorKind::OwnershipMismatch);
@@ -244,6 +266,13 @@ impl ServiceIntentRecord {
     pub fn stop_timeout_millis(&self) -> u64 {
         self.stop_timeout_millis
     }
+
+    /// Optional catalog identity this intent was prepared to own. An absent
+    /// binding denotes a legacy/generic intent and must not be inferred from
+    /// its executable, unit name, or runtime observations.
+    pub fn runtime_identity(&self) -> Option<&RuntimeIdentity> {
+        self.runtime_identity.as_ref()
+    }
 }
 
 impl fmt::Debug for ServiceIntentRecord {
@@ -252,6 +281,7 @@ impl fmt::Debug for ServiceIntentRecord {
             .debug_struct("ServiceIntentRecord")
             .field("coordinator_id", &self.coordinator_id)
             .field("unit_name", &self.unit_name)
+            .field("runtime_identity", &self.runtime_identity)
             .field("launch_identity", &"<redacted>")
             .field("stop_timeout_millis", &self.stop_timeout_millis)
             .finish()
@@ -471,8 +501,35 @@ impl ManagedServiceController {
         recipe: LaunchRecipe,
         stop_timeout: Duration,
     ) -> Result<PreparedServiceStart, ManagedServiceErrorKind> {
+        self.prepare_start_inner(recipe, stop_timeout, None)
+    }
+
+    /// Prepare an intent bound to a catalog runtime identity. The binding is
+    /// persisted with the start intent and included in manager reconciliation;
+    /// it is metadata, not standalone RuntimeAdapter ownership proof.
+    pub fn prepare_start_for_runtime(
+        &self,
+        runtime_identity: RuntimeIdentity,
+        recipe: LaunchRecipe,
+        stop_timeout: Duration,
+    ) -> Result<PreparedServiceStart, ManagedServiceErrorKind> {
+        self.prepare_start_inner(recipe, stop_timeout, Some(runtime_identity))
+    }
+
+    fn prepare_start_inner(
+        &self,
+        recipe: LaunchRecipe,
+        stop_timeout: Duration,
+        runtime_identity: Option<RuntimeIdentity>,
+    ) -> Result<PreparedServiceStart, ManagedServiceErrorKind> {
         if stop_timeout.is_zero() || stop_timeout > MAX_STOP_TIMEOUT {
             return Err(ManagedServiceErrorKind::InvalidStopTimeout);
+        }
+        if runtime_identity
+            .as_ref()
+            .is_some_and(|identity| !valid_runtime_identity(identity))
+        {
+            return Err(ManagedServiceErrorKind::InvalidRuntimeIdentity);
         }
         let suffix = random_unit_suffix()?;
         let unit_name = format!("l3ms-{}-{suffix}.service", self.coordinator_id);
@@ -484,6 +541,7 @@ impl ManagedServiceController {
                 unit_name,
                 launch_identity,
                 stop_timeout_millis,
+                runtime_identity,
             },
             recipe,
         })
@@ -502,7 +560,10 @@ impl ManagedServiceController {
             disposition,
             kind,
         };
-        if intent.coordinator_id != self.coordinator_id || !valid_intent(&intent) {
+        if intent.coordinator_id != self.coordinator_id
+            || !valid_intent(&intent)
+            || intent.launch_identity != prepared.recipe.launch_identity()
+        {
             return Err(fail(
                 StartDisposition::NotDispatched,
                 ManagedServiceErrorKind::OwnershipMismatch,
@@ -517,7 +578,7 @@ impl ManagedServiceController {
                 return Err(fail(
                     StartDisposition::NotDispatched,
                     ManagedServiceErrorKind::UnitAlreadyExists,
-                ))
+                ));
             }
             Err(kind) => return Err(fail(StartDisposition::NotDispatched, kind)),
         }
@@ -575,7 +636,7 @@ impl ManagedServiceController {
                         return Err(fail(
                             StartDisposition::OwnershipUncertain,
                             ManagedServiceErrorKind::OwnershipMismatch,
-                        ))
+                        ));
                     }
                 }
             }
@@ -658,7 +719,7 @@ impl ManagedServiceController {
         )? {
             ManagedServiceState::Running => {}
             ManagedServiceState::Stopped | ManagedServiceState::Unknown => {
-                return Err(ManagedServiceErrorKind::ServiceNotActive)
+                return Err(ManagedServiceErrorKind::ServiceNotActive);
             }
         }
 
@@ -957,6 +1018,13 @@ fn valid_intent(intent: &ServiceIntentRecord) -> bool {
     {
         return false;
     }
+    if intent
+        .runtime_identity
+        .as_ref()
+        .is_some_and(|identity| !valid_runtime_identity(identity))
+    {
+        return false;
+    }
     let prefix = format!("l3ms-{}-", intent.coordinator_id);
     let Some(random) = intent
         .unit_name
@@ -972,10 +1040,46 @@ fn valid_intent(intent: &ServiceIntentRecord) -> bool {
 }
 
 fn description_for(intent: &ServiceIntentRecord) -> String {
-    format!(
+    let description = format!(
         "l3ms-managed:{}:{}:{}:{}",
         intent.coordinator_id, intent.unit_name, intent.launch_identity, intent.stop_timeout_millis
-    )
+    );
+    match &intent.runtime_identity {
+        Some(identity) => format!(
+            "{description}:runtime={}:{}",
+            identity.lane,
+            identity.as_str()
+        ),
+        None => description,
+    }
+}
+
+fn valid_runtime_identity(identity: &RuntimeIdentity) -> bool {
+    let name = identity.as_str();
+    !name.is_empty()
+        && name.len() <= MAX_RUNTIME_ID_BYTES
+        && name.as_bytes()[0].is_ascii_alphanumeric()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+}
+
+pub(super) fn runtime_identity_from_persisted_parts(
+    lane: &str,
+    name: String,
+) -> Result<RuntimeIdentity, ManagedServiceErrorKind> {
+    let lane = match lane {
+        "language" => Lane::Language,
+        "media" => Lane::Media,
+        "decisions" => Lane::Decisions,
+        _ => return Err(ManagedServiceErrorKind::InvalidRuntimeIdentity),
+    };
+    let identity = RuntimeIdentity::new(lane, name)
+        .map_err(|_| ManagedServiceErrorKind::InvalidRuntimeIdentity)?;
+    if !valid_runtime_identity(&identity) {
+        return Err(ManagedServiceErrorKind::InvalidRuntimeIdentity);
+    }
+    Ok(identity)
 }
 
 fn valid_invocation_id(value: &str) -> bool {
@@ -1190,12 +1294,12 @@ case "$verb" in
     active=$(cat '{state}' 2>/dev/null || printf active)
     printf 'LoadState=loaded\n'
     printf 'ActiveState=%s\n' "$active"
-    printf 'InvocationID={invocation}\n'
-    {cgroup_output}
-    printf 'FragmentPath=/run/user/1000/systemd/transient/{unit_name}\n'
-    printf 'Transient=yes\n'
-    printf 'Description=l3ms-managed:{coordinator}:{unit_name}:{identity}:{timeout}\n'
-    printf 'Restart=no\nKillMode=control-group\n'
+            printf 'InvocationID={invocation}\n'
+            {cgroup_output}
+            printf 'FragmentPath=/run/user/1000/systemd/transient/{unit_name}\n'
+            printf 'Transient=yes\n'
+            printf 'Description={description}\n'
+            printf 'Restart=no\nKillMode=control-group\n'
     exit 0
     ;;
 esac
@@ -1203,10 +1307,8 @@ exit 1
 "#,
                 state = self.state.display(),
                 invocation = INVOCATION,
-                coordinator = intent.coordinator_id,
+                description = description_for(intent),
                 unit_name = intent.unit_name,
-                identity = intent.launch_identity,
-                timeout = intent.stop_timeout_millis,
                 cgroup_output = cgroup_output,
             );
             write_executable(&systemctl, &script);
@@ -1246,6 +1348,58 @@ exit 1
             first.intent_record().launch_identity(),
             fixture.recipe().launch_identity()
         );
+        assert!(!fixture.state.exists());
+    }
+
+    #[test]
+    fn prepared_runtime_intent_is_bound_and_validated() {
+        let fixture = Fixture::new();
+        let runtime = RuntimeIdentity::new(Lane::Media, "comfyui").unwrap();
+        let prepared = fixture
+            .controller
+            .prepare_start_for_runtime(runtime.clone(), fixture.recipe(), Duration::from_secs(10))
+            .unwrap();
+        assert_eq!(prepared.intent_record().runtime_identity(), Some(&runtime));
+        assert!(description_for(prepared.intent_record()).ends_with(":runtime=media:comfyui"));
+
+        let invalid = RuntimeIdentity::new(Lane::Language, "bad/name").unwrap();
+        assert_eq!(
+            fixture
+                .controller
+                .prepare_start_for_runtime(invalid, fixture.recipe(), Duration::from_secs(10))
+                .err(),
+            Some(ManagedServiceErrorKind::InvalidRuntimeIdentity)
+        );
+    }
+
+    #[test]
+    fn dispatch_refuses_a_recipe_that_differs_from_the_prepared_intent() {
+        let fixture = Fixture::new();
+        let prepared = fixture
+            .controller
+            .prepare_start_for_runtime(
+                RuntimeIdentity::new(Lane::Media, "comfyui").unwrap(),
+                fixture.recipe(),
+                Duration::from_secs(10),
+            )
+            .unwrap();
+        let alternate_directory = tempfile::tempdir().unwrap();
+        let changed_recipe = LaunchRecipe::new(
+            &fixture.recipe_executable,
+            alternate_directory.path(),
+            [OsString::from("fixture-arg")],
+        )
+        .unwrap();
+        let forged = PreparedServiceStart {
+            intent: prepared.intent,
+            recipe: changed_recipe,
+        };
+        let failure = fixture
+            .controller
+            .dispatch(forged, &fixture.context(Duration::from_secs(2)))
+            .unwrap_err();
+        assert_eq!(failure.disposition(), StartDisposition::NotDispatched);
+        assert_eq!(failure.kind(), ManagedServiceErrorKind::OwnershipMismatch);
         assert!(!fixture.state.exists());
     }
 
@@ -1475,6 +1629,50 @@ exit 1
             fixture.controller.state(&handle, &context).unwrap(),
             ManagedServiceState::Running
         );
+    }
+
+    #[test]
+    fn restored_runtime_binding_must_match_the_manager_generation() {
+        let fixture = Fixture::new();
+        let runtime = RuntimeIdentity::new(Lane::Language, "llama-swap").unwrap();
+        let prepared = fixture
+            .controller
+            .prepare_start_for_runtime(runtime.clone(), fixture.recipe(), Duration::from_secs(10))
+            .unwrap();
+        let intent = prepared.intent_record().clone();
+        fixture.install_scripts(&intent, "0");
+        let context = fixture.context(Duration::from_secs(2));
+        let _handle = fixture.controller.dispatch(prepared, &context).unwrap();
+
+        let restored = ServiceIntentRecord::from_persisted_parts_with_runtime(
+            intent.coordinator_id().to_owned(),
+            intent.unit_name().to_owned(),
+            intent.launch_identity().to_owned(),
+            intent.stop_timeout_millis(),
+            Some(runtime.clone()),
+        )
+        .unwrap();
+        assert_eq!(restored.runtime_identity(), Some(&runtime));
+        assert!(matches!(
+            fixture.controller.reconcile(&restored, &context).unwrap(),
+            ReconcileResult::Owned(_)
+        ));
+
+        let changed_binding = ServiceIntentRecord::from_persisted_parts_with_runtime(
+            intent.coordinator_id().to_owned(),
+            intent.unit_name().to_owned(),
+            intent.launch_identity().to_owned(),
+            intent.stop_timeout_millis(),
+            Some(RuntimeIdentity::new(Lane::Media, "comfyui").unwrap()),
+        )
+        .unwrap();
+        assert!(matches!(
+            fixture
+                .controller
+                .reconcile(&changed_binding, &context)
+                .unwrap(),
+            ReconcileResult::Unknown
+        ));
     }
 
     #[test]

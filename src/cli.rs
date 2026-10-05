@@ -25,6 +25,7 @@ use crate::{
 #[cfg(target_os = "linux")]
 const COORDINATOR_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_COORDINATOR_RESPONSE_BYTES: usize = 2 * 1024;
+const MAX_COORDINATOR_RESULTS_ENVELOPE_BYTES: usize = 4 * 1024;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -33,7 +34,7 @@ const MAX_COORDINATOR_RESPONSE_BYTES: usize = 2 * 1024;
     about = "L3MS launcher (TUI + interactive model and bench CLI)",
     group(
         ArgGroup::new("action")
-            .args(["run", "bench", "list", "quickstart", "settings", "export_profile", "import_profile", "compare_results", "coordinator_status", "coordinator_cancel"])
+            .args(["run", "bench", "list", "quickstart", "settings", "export_profile", "import_profile", "compare_results", "coordinator_status", "coordinator_cancel", "request_results"])
             .multiple(false)
     )
 )]
@@ -88,6 +89,18 @@ struct Cli {
     #[arg(long, value_name = "ID")]
     coordinator_cancel: Option<String>,
 
+    /// Read one bounded retained-results page by caller-owned request ID.
+    #[arg(long, value_name = "ID")]
+    request_results: Option<String>,
+
+    /// Results cursor to read after; defaults to 0 and requires --request-results.
+    #[arg(long, value_name = "CURSOR")]
+    after_cursor: Option<u64>,
+
+    /// Maximum serialized result-page bytes; defaults to 131072 and requires --request-results.
+    #[arg(long, value_name = "BYTES")]
+    result_page_bytes: Option<u32>,
+
     /// Private directory containing coordinator.sock; overrides shared settings.
     #[arg(long, value_name = "DIRECTORY")]
     coordinator_socket_dir: Option<PathBuf>,
@@ -120,7 +133,8 @@ pub fn run() -> Result<u8> {
 
 fn dispatch(cli: Cli) -> Result<u8> {
     let configured_socket_dir = if (cli.coordinator_status.is_some()
-        || cli.coordinator_cancel.is_some())
+        || cli.coordinator_cancel.is_some()
+        || cli.request_results.is_some())
         && cli.coordinator_socket_dir.is_none()
         && cli.extra.is_none()
     {
@@ -215,23 +229,36 @@ fn coordinator_action(
     cli: &Cli,
     configured_socket_dir: Option<PathBuf>,
 ) -> Result<Option<(crate::control::ipc::RequestEnvelope, PathBuf)>> {
-    let message = match (
+    let is_results_action = cli.request_results.is_some();
+    if !is_results_action && (cli.after_cursor.is_some() || cli.result_page_bytes.is_some()) {
+        bail!("--after-cursor and --result-page-bytes require --request-results");
+    }
+    let action_count = [
+        cli.coordinator_status.is_some(),
+        cli.coordinator_cancel.is_some(),
+        cli.request_results.is_some(),
+    ]
+    .into_iter()
+    .filter(|present| *present)
+    .count();
+    if action_count > 1 {
+        bail!("choose only one coordinator operation");
+    }
+    let action = match (
         cli.coordinator_status.as_deref(),
         cli.coordinator_cancel.as_deref(),
+        cli.request_results.as_deref(),
     ) {
-        (Some(_), Some(_)) => bail!("choose only one coordinator operation"),
-        (Some(request_id), None) => Some(crate::control::ipc::WireRequestMessage::Status {
-            request_id: request_id.to_owned(),
-        }),
-        (None, Some(request_id)) => Some(crate::control::ipc::WireRequestMessage::Cancel {
-            request_id: request_id.to_owned(),
-        }),
-        (None, None) => None,
+        (Some(request_id), None, None) => Some((request_id.to_owned(), false)),
+        (None, Some(request_id), None) => Some((request_id.to_owned(), false)),
+        (None, None, Some(request_id)) => Some((request_id.to_owned(), true)),
+        (None, None, None) => None,
+        _ => bail!("choose only one coordinator operation"),
     };
 
-    let Some(message) = message else {
+    let Some((request_id, is_results)) = action else {
         if cli.coordinator_socket_dir.is_some() {
-            bail!("--coordinator-socket-dir requires --coordinator-status or --coordinator-cancel");
+            bail!("--coordinator-socket-dir requires --coordinator-status, --coordinator-cancel or --request-results");
         }
         return Ok(None);
     };
@@ -248,10 +275,30 @@ fn coordinator_action(
                 "coordinator operations require --coordinator-socket-dir or a configured coordinator socket directory"
             )
         })?;
-    Ok(Some((
-        crate::control::ipc::RequestEnvelope::v1(message),
-        socket_directory,
-    )))
+    let request = if is_results {
+        let byte_budget = cli
+            .result_page_bytes
+            .unwrap_or(crate::control::result_buffer::MAX_PAGE_BYTES as u32);
+        if !(crate::control::result_buffer::MIN_PAGE_BYTES as u32
+            ..=crate::control::result_buffer::MAX_PAGE_BYTES as u32)
+            .contains(&byte_budget)
+        {
+            bail!("--result-page-bytes must be between 1024 and 131072");
+        }
+        crate::control::ipc::RequestEnvelope::v2_results(
+            request_id,
+            cli.after_cursor.unwrap_or(0),
+            byte_budget,
+        )
+    } else {
+        let message = if cli.coordinator_status.is_some() {
+            crate::control::ipc::WireRequestMessage::Status { request_id }
+        } else {
+            crate::control::ipc::WireRequestMessage::Cancel { request_id }
+        };
+        crate::control::ipc::RequestEnvelope::v1(message)
+    };
+    Ok(Some((request, socket_directory)))
 }
 
 fn configured_coordinator_socket_dir() -> Result<Option<PathBuf>> {
@@ -290,12 +337,30 @@ fn coordinator_exchange(
 }
 
 fn coordinator_response_json(response: &crate::control::ipc::ResponseMessage) -> Result<String> {
-    let json = serde_json::to_string(response)
+    let encoded = serde_json::to_vec(response)
         .map_err(|_| anyhow::anyhow!("coordinator response could not be encoded"))?;
-    if json.len() > MAX_COORDINATOR_RESPONSE_BYTES {
-        bail!("coordinator response exceeded the output limit");
+    match response {
+        crate::control::ipc::ResponseMessage::Results {
+            byte_budget, page, ..
+        } => {
+            let page_bytes = serde_json::to_vec(page)
+                .map_err(|_| anyhow::anyhow!("coordinator results page is invalid"))?;
+            if page.validate().is_err()
+                || page_bytes.len() > crate::control::result_buffer::MAX_PAGE_BYTES
+                || page_bytes.len() > *byte_budget as usize
+                || encoded.len().saturating_sub(page_bytes.len())
+                    > MAX_COORDINATOR_RESULTS_ENVELOPE_BYTES
+            {
+                bail!("coordinator results response exceeded the output limit");
+            }
+        }
+        _ if encoded.len() > MAX_COORDINATOR_RESPONSE_BYTES => {
+            bail!("coordinator response exceeded the output limit");
+        }
+        _ => {}
     }
-    Ok(json)
+    String::from_utf8(encoded)
+        .map_err(|_| anyhow::anyhow!("coordinator response could not be encoded"))
 }
 
 fn print_quickstart() {
@@ -814,6 +879,32 @@ mod tests {
             "/run/user/1000/l3ms",
         ])
         .is_err());
+
+        let cli = Cli::try_parse_from([
+            "l3ms",
+            "--request-results",
+            "request-1",
+            "--after-cursor",
+            "42",
+            "--result-page-bytes",
+            "4096",
+        ])
+        .unwrap();
+        assert_eq!(cli.request_results.as_deref(), Some("request-1"));
+        assert_eq!(cli.after_cursor, Some(42));
+        assert_eq!(cli.result_page_bytes, Some(4096));
+        assert!(Cli::try_parse_from([
+            "l3ms",
+            "--request-results",
+            "request-1",
+            "--coordinator-cancel",
+            "request-1",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from(
+            ["l3ms", "--request-results", "request-1", "--list", "stack",]
+        )
+        .is_err());
         let cli = Cli::try_parse_from(["l3ms", "--coordinator-status", "request-1"]).unwrap();
         assert!(coordinator_action(&cli, None).is_err());
         assert!(Cli::try_parse_from([
@@ -841,6 +932,11 @@ mod tests {
     fn coordinator_options_require_action_and_reject_any_extra_argument() {
         let cli = Cli::try_parse_from(["l3ms", "--coordinator-socket-dir", "/run/user/1000/l3ms"])
             .unwrap();
+        assert!(coordinator_action(&cli, None).is_err());
+
+        let cli = Cli::try_parse_from(["l3ms", "--after-cursor", "2"]).unwrap();
+        assert!(coordinator_action(&cli, None).is_err());
+        let cli = Cli::try_parse_from(["l3ms", "--result-page-bytes", "4096"]).unwrap();
         assert!(coordinator_action(&cli, None).is_err());
 
         let cli = Cli::try_parse_from([
@@ -872,6 +968,43 @@ mod tests {
             crate::control::ipc::WireRequestMessage::Cancel { request_id }
                 if request_id == "request-1"
         ));
+
+        let cli = Cli::try_parse_from([
+            "l3ms",
+            "--request-results",
+            "request-3",
+            "--coordinator-socket-dir",
+            "/run/user/1000/l3ms",
+            "--extra",
+            "",
+        ])
+        .unwrap();
+        assert!(coordinator_action(&cli, None).is_err());
+
+        let cli = Cli::try_parse_from([
+            "l3ms",
+            "--request-results",
+            "request-3",
+            "--coordinator-socket-dir",
+            "/run/user/1000/l3ms",
+        ])
+        .unwrap();
+        let Some((request, _)) = coordinator_action(&cli, None).unwrap() else {
+            panic!("results action should be present");
+        };
+        assert_eq!(
+            request.version,
+            crate::control::ipc::RESULTS_PROTOCOL_VERSION
+        );
+        assert!(matches!(
+            request.message,
+            crate::control::ipc::WireRequestMessage::Results {
+                request_id,
+                after_cursor: 0,
+                byte_budget,
+            } if request_id == "request-3"
+                && byte_budget == crate::control::result_buffer::MAX_PAGE_BYTES as u32
+        ));
     }
 
     #[test]
@@ -900,7 +1033,8 @@ mod tests {
             "/run/user/1000/explicit-l3ms",
         ])
         .unwrap();
-        let Some((request, directory)) = coordinator_action(&cli, Some(from_settings)).unwrap()
+        let Some((request, directory)) =
+            coordinator_action(&cli, Some(from_settings.clone())).unwrap()
         else {
             panic!("explicit coordinator action should be present");
         };
@@ -910,6 +1044,90 @@ mod tests {
             crate::control::ipc::WireRequestMessage::Cancel { request_id }
                 if request_id == "request-2"
         ));
+
+        let cli = Cli::try_parse_from(["l3ms", "--request-results", "request-4"]).unwrap();
+        let Some((request, directory)) =
+            coordinator_action(&cli, Some(from_settings.clone())).unwrap()
+        else {
+            panic!("configured results action should be present");
+        };
+        assert_eq!(directory, from_settings);
+        assert!(matches!(
+            request.message,
+            crate::control::ipc::WireRequestMessage::Results {
+                request_id,
+                after_cursor: 0,
+                byte_budget,
+            } if request_id == "request-4"
+                && byte_budget == crate::control::result_buffer::MAX_PAGE_BYTES as u32
+        ));
+
+        let explicit = PathBuf::from("/run/user/1000/explicit-results");
+        let cli = Cli::try_parse_from([
+            "l3ms",
+            "--request-results",
+            "request-5",
+            "--coordinator-socket-dir",
+            "/run/user/1000/explicit-results",
+            "--after-cursor",
+            "9",
+            "--result-page-bytes",
+            "2048",
+        ])
+        .unwrap();
+        let Some((request, directory)) = coordinator_action(&cli, Some(from_settings)).unwrap()
+        else {
+            panic!("explicit results action should be present");
+        };
+        assert_eq!(directory, explicit);
+        assert!(matches!(
+            request.message,
+            crate::control::ipc::WireRequestMessage::Results {
+                request_id,
+                after_cursor: 9,
+                byte_budget: 2048,
+            } if request_id == "request-5"
+        ));
+    }
+
+    #[test]
+    fn results_budget_is_bounded_and_rejected_before_socket_connect() {
+        let directory = tempfile::tempdir().unwrap();
+        for budget in [
+            crate::control::result_buffer::MIN_PAGE_BYTES as u32,
+            crate::control::result_buffer::MAX_PAGE_BYTES as u32,
+        ] {
+            let cli = Cli::try_parse_from([
+                "l3ms",
+                "--request-results",
+                "request-1",
+                "--coordinator-socket-dir",
+                directory.path().to_str().unwrap(),
+                "--result-page-bytes",
+                &budget.to_string(),
+            ])
+            .unwrap();
+            assert!(coordinator_action(&cli, None).is_ok());
+        }
+
+        for budget in [
+            crate::control::result_buffer::MIN_PAGE_BYTES as u32 - 1,
+            crate::control::result_buffer::MAX_PAGE_BYTES as u32 + 1,
+        ] {
+            let cli = Cli::try_parse_from([
+                "l3ms",
+                "--request-results",
+                "request-1",
+                "--coordinator-socket-dir",
+                directory.path().to_str().unwrap(),
+                "--result-page-bytes",
+                &budget.to_string(),
+            ])
+            .unwrap();
+            let error = dispatch(cli).unwrap_err();
+            assert!(error.to_string().contains("between 1024 and 131072"));
+            assert!(!directory.path().join("coordinator.sock").exists());
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -954,6 +1172,52 @@ mod tests {
         server.join().unwrap();
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn coordinator_results_error_is_fixed_and_exits_nonzero() {
+        use crate::control::ipc::{
+            IncomingRequest, ResponseEnvelope, ResponseErrorCode, ResponseMessage,
+        };
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket_path = directory.path().join("coordinator.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            assert!(matches!(
+                crate::control::ipc::read_incoming_request(&mut stream).unwrap(),
+                IncomingRequest::Results(ref query)
+                    if query.request_id == "request-1"
+                        && query.after_cursor == 0
+                        && query.byte_budget
+                            == crate::control::result_buffer::MAX_PAGE_BYTES as u32
+            ));
+            crate::control::ipc::write_response(
+                &mut stream,
+                &ResponseEnvelope::v2_results(ResponseMessage::Error {
+                    request_id: Some("request-1".into()),
+                    code: ResponseErrorCode::Unavailable,
+                }),
+            )
+            .unwrap();
+        });
+
+        let cli = Cli::try_parse_from([
+            "l3ms",
+            "--request-results",
+            "request-1",
+            "--coordinator-socket-dir",
+            directory.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(dispatch(cli).unwrap(), 1);
+        server.join().unwrap();
+    }
+
     #[test]
     fn coordinator_response_json_is_compact_and_bounded() {
         use crate::control::ipc::{RequestStatus, ResponseMessage};
@@ -971,6 +1235,54 @@ mod tests {
             state: RequestStatus::Queued,
         })
         .is_err());
+    }
+
+    #[test]
+    fn result_response_json_is_compact_escaped_and_has_its_own_bound() {
+        use crate::control::catalog::Lane;
+        use crate::control::ipc::{RequestStatus, ResponseMessage};
+        use crate::control::result_buffer::{
+            ResultBuffer, ResultEvent, ResultTerminal, MAX_PAGE_BYTES, MIN_PAGE_BYTES,
+        };
+
+        let mut buffer = ResultBuffer::new();
+        buffer.begin("result:cli-json", Lane::Language).unwrap();
+        buffer
+            .append(
+                "result:cli-json",
+                ResultEvent::ChatContent("line\u{1}break".into()),
+            )
+            .unwrap();
+        for _ in 0..20 {
+            buffer
+                .append("result:cli-json", ResultEvent::ChatContent("x".repeat(64)))
+                .unwrap();
+        }
+        buffer
+            .terminal("result:cli-json", ResultTerminal::Succeeded)
+            .unwrap();
+        let page = buffer.page("result:cli-json", 0, MAX_PAGE_BYTES).unwrap();
+        let json = coordinator_response_json(&ResponseMessage::Results {
+            request_id: "result:cli-json".into(),
+            after_cursor: 0,
+            byte_budget: MAX_PAGE_BYTES as u32,
+            state: RequestStatus::Succeeded,
+            page: page.clone(),
+        })
+        .unwrap();
+        assert!(!json.contains('\n'));
+        assert!(json.contains("\\u0001"));
+        assert!(!json.chars().any(char::is_control));
+        assert!(json.len() <= MAX_PAGE_BYTES + MAX_COORDINATOR_RESULTS_ENVELOPE_BYTES);
+
+        let too_small_json = coordinator_response_json(&ResponseMessage::Results {
+            request_id: "result:cli-json".into(),
+            after_cursor: 0,
+            byte_budget: MIN_PAGE_BYTES as u32,
+            state: RequestStatus::Succeeded,
+            page,
+        });
+        assert!(too_small_json.is_err());
     }
 
     #[test]

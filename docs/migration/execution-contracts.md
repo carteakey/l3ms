@@ -29,6 +29,13 @@ of an earlier reservation. Internal symlinks are allowed; escaping ones are not.
 Path verification assumes trusted toolkit directories and is not a sandbox or
 a defense against concurrent malicious filesystem replacement.
 
+The final `begin_dispatch` gate privately retains the accepted request, refreshes
+the catalog, compares the complete payload and route, verifies its runtime
+resource binding and queued history association, then rechecks cancellation and
+the actual deadline before durably marking running. Tampered/stale tickets or
+persistence failures close admission while retaining their reservation. Native
+executors must use this gate rather than the compatibility `mark_running` method.
+
 ## Managed transient-service ownership
 
 The manager's generation-matched stop acknowledgment now produces an opaque,
@@ -79,6 +86,11 @@ file and parent before acknowledgment; duplicate, corrupt, unexpected or unsafe
 entries fail closed. FIFO/special-file entries are rejected before reading.
 Failure can retain a partial record: no delete, repair or automatic retry occurs.
 Only bounded ownership metadata is stored, never argv, environment or payloads.
+Generic unbound records remain schema 1. Managed runtime starts use schema 2,
+adding only the runtime lane/name; reconciliation compares that binding against
+the manager description. Explicit nulls, partial bindings, invalid lane/name,
+unknown fields and incompatible schemas fail closed. Restored unbound intents
+must not be assigned a runtime by guessing from ports, commands or process names.
 
 Restart observation composes the stored records with live controller checks;
 it does not recreate recipes or replay launches. Stop first verifies the retained
@@ -266,12 +278,48 @@ backlog returns EAGAIN without a pending connection, even when SO_ERROR is zero;
 only connection establishment is retried, never a request frame. The connection
 enforces one request/reply and poisons itself after partial/failed IO. Explicit
 reply IDs must match; generic v1 errors may omit an ID on that single exchange.
+Version 2 errors require the queried ID, and response versions must match their
+request. V1 retains submit/status/cancel; v2 permits only results queries.
 Failures expose fixed categories, not socket paths or payloads.
 
 The caller supplies operation contexts and must bound active peers and handler
 work. This transport is not a daemon/event loop, result stream, installation,
 coordinator dispatch, or proof of runtime admission. Two independent test clients
 exercise socket/status framing only; they do not satisfy the live inference gate.
+
+## Bounded native result retrieval
+
+The internal daemon now owns an in-memory `ResultBuffer` alongside durable
+history. Protocol v2 fetches a page by request ID, an exclusive `after_cursor`
+and a 1–128 KiB serialized-page budget. Chat content/reasoning remain separate;
+decision outputs are explicit canonical-JSON parts, and media outputs are typed
+local-job/backend relative artifact references. Bodies, paths and answers are
+redacted in Debug and are never persisted in job history. This is authenticated
+single-exchange pagination, not server-pushed streaming or artifact-file transfer.
+
+Append is transactional, capped at 8 MiB serialized events per job and 64 MiB
+total, with 64 payload slots. Native chat combines content/reasoning under its
+1 MiB raw cap; decision JSON is also bounded to 1 MiB. Only explicit terminal
+eviction removes a payload; active jobs are never silently evicted. A bounded
+256-entry tombstone window reports expired results, while durable acceptance
+retains its separate replay-prevention responsibility. The dispatch integration
+must establish an explicit retention policy and reserve result capacity before
+native execution; the cache itself neither admits nor replays requests.
+
+The page carries authoritative retained-history status separately from cache
+availability. Restart can therefore report `succeeded` with `Unknown` cached
+output, not turn a retained request into `not_found`. Reads do not consume data
+or advance a stored cursor. A too-small first-page budget returns a fixed error
+without skipping its event; retry with a larger budget, not another inference.
+Clients validate request/version/cursor/budget correlation, contiguous cursors,
+bounded native parts, relative paths and single-lane pages before consuming them.
+Paging uses exact incremental serialized lengths plus a final check, rather
+than repeatedly serializing the growing page.
+
+Production native dispatch is still absent: tests seed private daemon fixtures
+to exercise completed output, lost-reply reconnect and restart loss. Delivering
+real executor events, cancellation cleanup and result retention across clients
+remains a separate integration gate.
 
 ## Coordinator control RPC
 
@@ -338,7 +386,7 @@ runtime lifecycle owner or enabled inference scheduler.
 
 ## Release gates
 
-The Linux CLI can query/cancel one retained request through an explicitly supplied
+The Linux CLI can query/cancel or fetch one results page through an explicitly supplied
 private socket directory or an opt-in shared socket setting, with a single
 three-second exchange. The explicit flag wins; absent configuration is an error,
 not an inferred socket or automatic startup. Settings are read only for control
@@ -347,12 +395,18 @@ request IDs and reply operation, prints bounded JSON, and returns nonzero for a
 typed error. It never starts the daemon, submits inference, retries a frame or
 falls back to an engine. A cancelled active request retains its lease until
 cleanup is acknowledged; the CLI does not claim otherwise. This is control
-integration, not full run/result/stream or keyboard-workbench parity.
+integration, not full run/stream or keyboard-workbench parity. `--request-results
+ID` uses v2 with optional `--after-cursor` (default 0) and `--result-page-bytes`
+(default 131072; allowed 1024–131072). Results print compact JSON bounded to the
+page limit plus 4 KiB envelope; status/cancel retain their 2 KiB ceiling. Cursor
+and page-budget flags without the results action are rejected. Fetch never
+reruns inference, retries a frame, interprets native JSON parts or writes files.
 
 No adapter is connected to a public run/switch command yet. IPC currently defines
 messages, framing, authenticated bounded Linux transport, control handling and
 a bounded internal control loop, not an installed dispatching daemon or
-result/stream delivery. Concrete lifecycle/admission adapters, backend ID and
+native result production or server-pushed streams. Read-only v2 page retrieval
+is implemented internally, but concrete lifecycle/admission adapters, backend ID and
 artifact propagation, coordinated client integration, and real TTS/local decision acceptance
 must all be verified before enabling coordinated inference. The public export
 remains blocked by the separate publication audit; no endpoint cutover is implied.

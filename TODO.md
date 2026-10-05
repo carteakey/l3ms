@@ -10,8 +10,8 @@ existing Linear migration issues rather than replacing their acceptance criteria
 
 ## Monorepo: next work
 
-Latest offline checkpoint: owned stop/cgroup observation and pre-dispatch
-revalidation on `feature/l3ms-monorepo`; 499 root tests passed,
+Latest offline checkpoint: native results IPC/CLI and runtime-bound launch
+intents on `feature/l3ms-monorepo`; 530 root tests passed,
 1 ignored. This is offline implementation evidence, not live cutover acceptance.
 See the [migration status](docs/migration/status.md),
 [plan](docs/monorepo-consolidation-plan.md), and
@@ -32,6 +32,8 @@ See the [migration status](docs/migration/status.md),
   implemented on the branch; empty/removed observations alone do not prove GPU
   release or fence direct clients. Owner composition retains receipts after
   observation failure so reconciliation does not repeat the stop operation.
+  Runtime-bound intents now persist lane/name and match that binding during
+  restart observation; never infer it from ports or process names.
 - [x] Connect Breeze speech recipes to bounded execution and per-job WAV/chunk
   artifact validation. Real-model tests and coordinator dispatch remain gated.
 - [ ] Add explicit artifact contracts for other native media scripts; do not
@@ -63,9 +65,13 @@ See the [migration status](docs/migration/status.md),
   The pre-dispatch gate now refreshes the native catalog and verifies the
   accepted route, resource binding, ticket association, and durable running
   transition. Native executors must use this gate, not legacy `mark_running`.
+  Bounded native result retention and v2 page queries are integrated with the
+  internal daemon and shared client; reconnect/restart fixtures pass. Native
+  event production, explicit terminal retention and supervised dispatch remain.
 - [ ] Integrate CLI and keyboard-first UI run/observe/cancel with the same
   coordinator, settings, routing, and request IDs; preserve standalone commands.
-  Linux CLI request status/cancel is implemented; submit/results and UI remain.
+  Linux CLI request status/cancel/results is implemented; submit, output
+  reassembly and keyboard-first coordinated UI actions remain.
 - [ ] Add HTTP ingress to that coordinator only after local operation is proven;
   verify authentication and cancellation/reconnect behavior across clients.
 

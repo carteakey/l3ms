@@ -8,8 +8,8 @@
 //! outside this module. Requests intentionally have no `Debug` output so prompts,
 //! workflow graphs, speech text, and native arguments are not dumped
 //! accidentally by diagnostic logging. Version 1 returns acceptance and
-//! lifecycle status only; result bodies, artifact retrieval, and streaming
-//! require an explicit versioned protocol extension.
+//! lifecycle status only. Version 2 adds a read-only bounded results-page
+//! query; neither version starts runtimes or streams data across a connection.
 
 use std::error::Error;
 use std::fmt;
@@ -22,9 +22,15 @@ use serde_json::{Map, Value};
 
 use super::catalog::{Lane, ProfileKey, Task};
 use super::requests::{ChatRole, ChatTurn, InferenceRequest, MediaInput, SpeechInput, SpeechMode};
+use super::result_buffer::{
+    Availability, ResultBufferError, ResultPage, MAX_PAGE_BYTES, MIN_PAGE_BYTES,
+};
 use crate::state_store::{validate_job_metadata, JobMetadata};
 
 pub const PROTOCOL_VERSION: u16 = 1;
+/// Result retrieval is deliberately additive: v1 submit/status/cancel remain
+/// unchanged and are never interpreted as v2 operations.
+pub const RESULTS_PROTOCOL_VERSION: u16 = 2;
 /// One native request is limited to 1 MiB; this small allowance covers its
 /// versioned envelope and JSON field names without permitting unbounded reads.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024 + 16 * 1024;
@@ -82,6 +88,17 @@ impl RequestEnvelope {
         }
     }
 
+    pub fn v2_results(request_id: impl Into<String>, after_cursor: u64, byte_budget: u32) -> Self {
+        Self {
+            version: RESULTS_PROTOCOL_VERSION,
+            message: WireRequestMessage::Results {
+                request_id: request_id.into(),
+                after_cursor,
+                byte_budget,
+            },
+        }
+    }
+
     /// Convert the wire contract to the existing lane-specific in-memory
     /// request. Catalog ownership, declared tasks, and all runtime readiness
     /// checks remain the coordinator's responsibility.
@@ -113,6 +130,32 @@ impl RequestEnvelope {
                 validate_request_id(&request_id)?;
                 Ok(ClientRequest::Status { request_id })
             }
+            WireRequestMessage::Results { .. } => Err(ProtocolError::InvalidRequest),
+        }
+    }
+
+    /// Decode a protocol-versioned operation without changing the v1 client
+    /// request interface used by existing submit/status/cancel callers.
+    pub fn into_incoming_request(self) -> Result<IncomingRequest, ProtocolError> {
+        match self.version {
+            PROTOCOL_VERSION => self.into_client_request().map(IncomingRequest::Control),
+            RESULTS_PROTOCOL_VERSION => match self.message {
+                WireRequestMessage::Results {
+                    request_id,
+                    after_cursor,
+                    byte_budget,
+                } => {
+                    validate_request_id(&request_id)?;
+                    validate_page_budget(byte_budget)?;
+                    Ok(IncomingRequest::Results(ResultsQuery {
+                        request_id,
+                        after_cursor,
+                        byte_budget,
+                    }))
+                }
+                _ => Err(ProtocolError::InvalidRequest),
+            },
+            version => Err(ProtocolError::UnsupportedVersion(version)),
         }
     }
 }
@@ -134,6 +177,43 @@ pub enum WireRequestMessage {
     Status {
         request_id: String,
     },
+    /// Bounded, repeatable result lookup. Valid only in protocol v2.
+    Results {
+        request_id: String,
+        after_cursor: u64,
+        byte_budget: u32,
+    },
+}
+
+/// A checked result lookup decoded from a v2 envelope.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ResultsQuery {
+    pub request_id: String,
+    pub after_cursor: u64,
+    pub byte_budget: u32,
+}
+
+/// Versioned incoming requests for the coordinator. Existing v1 request
+/// handlers continue to receive `ClientRequest` unchanged.
+pub enum IncomingRequest {
+    Control(ClientRequest),
+    Results(ResultsQuery),
+}
+
+impl IncomingRequest {
+    pub fn request_id(&self) -> &str {
+        match self {
+            Self::Control(request) => request.request_id(),
+            Self::Results(query) => &query.request_id,
+        }
+    }
+
+    pub fn version(&self) -> u16 {
+        match self {
+            Self::Control(_) => PROTOCOL_VERSION,
+            Self::Results(_) => RESULTS_PROTOCOL_VERSION,
+        }
+    }
 }
 
 /// Native inference inputs remain explicitly lane-qualified on the wire.
@@ -345,9 +425,16 @@ impl ResponseEnvelope {
             message,
         }
     }
+
+    pub fn v2_results(message: ResponseMessage) -> Self {
+        Self {
+            version: RESULTS_PROTOCOL_VERSION,
+            message,
+        }
+    }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResponseMessage {
     /// A submit may be acknowledged only after queued acceptance is durable.
@@ -362,11 +449,57 @@ pub enum ResponseMessage {
         request_id: String,
         state: RequestStatus,
     },
+    /// Bounded result page plus authoritative durable lifecycle state.
+    Results {
+        request_id: String,
+        after_cursor: u64,
+        byte_budget: u32,
+        state: RequestStatus,
+        page: ResultPage,
+    },
     Error {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
         code: ResponseErrorCode,
     },
+}
+
+impl fmt::Debug for ResponseMessage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Accepted {
+                operation, state, ..
+            } => formatter
+                .debug_struct("Accepted")
+                .field("request_id", &"<redacted>")
+                .field("operation", operation)
+                .field("state", state)
+                .finish(),
+            Self::Status { state, .. } => formatter
+                .debug_struct("Status")
+                .field("request_id", &"<redacted>")
+                .field("state", state)
+                .finish(),
+            Self::Results {
+                after_cursor,
+                byte_budget,
+                state,
+                ..
+            } => formatter
+                .debug_struct("Results")
+                .field("request_id", &"<redacted>")
+                .field("after_cursor", after_cursor)
+                .field("byte_budget", byte_budget)
+                .field("state", state)
+                .field("page", &"<redacted>")
+                .finish(),
+            Self::Error { code, .. } => formatter
+                .debug_struct("Error")
+                .field("request_id", &"<redacted>")
+                .field("code", code)
+                .finish(),
+        }
+    }
 }
 
 /// Read exactly one bounded length-prefixed JSON frame and decode a request.
@@ -377,6 +510,13 @@ pub fn read_request<R: Read>(reader: &mut R) -> Result<ClientRequest, ProtocolEr
     envelope.into_client_request()
 }
 
+/// Read one bounded frame as a protocol-versioned coordinator operation.
+pub fn read_incoming_request<R: Read>(reader: &mut R) -> Result<IncomingRequest, ProtocolError> {
+    let payload = read_payload(reader)?;
+    let envelope: RequestEnvelope = decode_json(&payload)?;
+    envelope.into_incoming_request()
+}
+
 /// Serialize and write one request frame. Version, request ID, and timeout are
 /// checked before any bytes are written; full catalog validation belongs to
 /// the coordinator after decoding.
@@ -384,8 +524,7 @@ pub fn write_request<W: Write>(
     writer: &mut W,
     envelope: &RequestEnvelope,
 ) -> Result<(), ProtocolError> {
-    validate_version(envelope.version)?;
-    validate_wire_request_headers(&envelope.message)?;
+    validate_request_envelope(envelope)?;
     let payload = encode_json(envelope)?;
     write_payload(writer, &payload)
 }
@@ -393,8 +532,7 @@ pub fn write_request<W: Write>(
 pub fn read_response<R: Read>(reader: &mut R) -> Result<ResponseEnvelope, ProtocolError> {
     let payload = read_payload(reader)?;
     let envelope: ResponseEnvelope = decode_json(&payload)?;
-    validate_version(envelope.version)?;
-    validate_response_ids(&envelope.message)?;
+    validate_response_envelope(&envelope)?;
     Ok(envelope)
 }
 
@@ -402,14 +540,57 @@ pub fn write_response<W: Write>(
     writer: &mut W,
     envelope: &ResponseEnvelope,
 ) -> Result<(), ProtocolError> {
-    validate_version(envelope.version)?;
-    validate_response_ids(&envelope.message)?;
+    validate_response_envelope(envelope)?;
     let payload = encode_json(envelope)?;
     write_payload(writer, &payload)
 }
 
+pub(crate) fn validate_request_envelope(envelope: &RequestEnvelope) -> Result<(), ProtocolError> {
+    validate_version(envelope.version)?;
+    match (envelope.version, &envelope.message) {
+        (PROTOCOL_VERSION, WireRequestMessage::Submit { .. })
+        | (PROTOCOL_VERSION, WireRequestMessage::Cancel { .. })
+        | (PROTOCOL_VERSION, WireRequestMessage::Status { .. }) => {
+            validate_wire_request_headers(&envelope.message)
+        }
+        (
+            RESULTS_PROTOCOL_VERSION,
+            WireRequestMessage::Results {
+                request_id,
+                byte_budget,
+                ..
+            },
+        ) => {
+            validate_request_id(request_id)?;
+            validate_page_budget(*byte_budget)
+        }
+        _ => Err(ProtocolError::InvalidRequest),
+    }
+}
+
+fn validate_response_envelope(envelope: &ResponseEnvelope) -> Result<(), ProtocolError> {
+    validate_version(envelope.version)?;
+    validate_response_ids(&envelope.message)?;
+    match (envelope.version, &envelope.message) {
+        (PROTOCOL_VERSION, ResponseMessage::Accepted { .. })
+        | (PROTOCOL_VERSION, ResponseMessage::Status { .. })
+        | (PROTOCOL_VERSION, ResponseMessage::Error { .. }) => Ok(()),
+        (
+            RESULTS_PROTOCOL_VERSION,
+            ResponseMessage::Results {
+                after_cursor,
+                byte_budget,
+                page,
+                ..
+            },
+        ) => validate_result_page(*after_cursor, *byte_budget, page),
+        (RESULTS_PROTOCOL_VERSION, ResponseMessage::Error { .. }) => Ok(()),
+        _ => Err(ProtocolError::InvalidRequest),
+    }
+}
+
 fn validate_version(version: u16) -> Result<(), ProtocolError> {
-    if version == PROTOCOL_VERSION {
+    if version == PROTOCOL_VERSION || version == RESULTS_PROTOCOL_VERSION {
         Ok(())
     } else {
         Err(ProtocolError::UnsupportedVersion(version))
@@ -431,6 +612,7 @@ fn validate_wire_request_headers(message: &WireRequestMessage) -> Result<(), Pro
         WireRequestMessage::Cancel { request_id } | WireRequestMessage::Status { request_id } => {
             validate_request_id(request_id)?;
         }
+        WireRequestMessage::Results { .. } => return Err(ProtocolError::InvalidRequest),
     }
     Ok(())
 }
@@ -439,6 +621,15 @@ fn validate_response_ids(message: &ResponseMessage) -> Result<(), ProtocolError>
     match message {
         ResponseMessage::Accepted { request_id, .. }
         | ResponseMessage::Status { request_id, .. } => validate_request_id(request_id),
+        ResponseMessage::Results {
+            request_id, page, ..
+        } => {
+            validate_request_id(request_id)?;
+            if page.request_id != *request_id {
+                return Err(ProtocolError::InvalidRequest);
+            }
+            Ok(())
+        }
         ResponseMessage::Error { request_id, .. } => {
             if let Some(request_id) = request_id {
                 validate_request_id(request_id)?;
@@ -446,6 +637,75 @@ fn validate_response_ids(message: &ResponseMessage) -> Result<(), ProtocolError>
             Ok(())
         }
     }
+}
+
+fn validate_page_budget(byte_budget: u32) -> Result<(), ProtocolError> {
+    if (MIN_PAGE_BYTES..=MAX_PAGE_BYTES).contains(&(byte_budget as usize)) {
+        Ok(())
+    } else {
+        Err(ProtocolError::InvalidRequest)
+    }
+}
+
+pub(crate) fn validate_result_page(
+    after_cursor: u64,
+    byte_budget: u32,
+    page: &ResultPage,
+) -> Result<(), ProtocolError> {
+    validate_page_budget(byte_budget)?;
+    let page_bytes = serde_json::to_vec(page).map_err(|_| ProtocolError::InvalidRequest)?;
+    if page_bytes.len() > byte_budget as usize {
+        return Err(ProtocolError::InvalidRequest);
+    }
+    let cursor_validation = match page.availability {
+        Availability::Unknown => Ok(()),
+        Availability::Expired => {
+            if after_cursor <= page.latest_cursor && page.next_cursor == page.latest_cursor {
+                Ok(())
+            } else {
+                Err(ProtocolError::InvalidRequest)
+            }
+        }
+        Availability::Available => {
+            if after_cursor > page.latest_cursor {
+                Err(ProtocolError::InvalidRequest)
+            } else if page.events.is_empty() {
+                if page.next_cursor == after_cursor && page.latest_cursor == after_cursor {
+                    Ok(())
+                } else {
+                    Err(ProtocolError::InvalidRequest)
+                }
+            } else {
+                let mut expected = after_cursor
+                    .checked_add(1)
+                    .ok_or(ProtocolError::InvalidRequest)?;
+                for (index, event) in page.events.iter().enumerate() {
+                    if event.cursor != expected {
+                        return Err(ProtocolError::InvalidRequest);
+                    }
+                    if index + 1 < page.events.len() {
+                        expected = expected
+                            .checked_add(1)
+                            .ok_or(ProtocolError::InvalidRequest)?;
+                    }
+                }
+                if page.events.last().map(|event| event.cursor) == Some(page.next_cursor) {
+                    Ok(())
+                } else {
+                    Err(ProtocolError::InvalidRequest)
+                }
+            }
+        }
+    };
+    cursor_validation?;
+    // Validate lane-specific event details only after query-relative cursor
+    // checks. This also keeps malformed max-u64 sequences from overflowing
+    // the page validator's adjacent-cursor check.
+    page.validate().map_err(map_result_page_error)
+}
+
+fn map_result_page_error(_: ResultBufferError) -> ProtocolError {
+    ProtocolError::InvalidRequest
 }
 
 pub(crate) fn validate_request_id(value: &str) -> Result<(), ProtocolError> {
@@ -569,6 +829,291 @@ mod tests {
                 request_id: "caller:item-17".into(),
             },
         }
+    }
+
+    fn result_page(request_id: &str) -> ResultPage {
+        use super::super::result_buffer::{ResultBuffer, ResultEvent, ResultTerminal};
+        let mut buffer = ResultBuffer::new();
+        buffer.begin(request_id, Lane::Language).unwrap();
+        buffer
+            .append(
+                request_id,
+                ResultEvent::ChatContent("PRIVATE_RESULT_BODY".into()),
+            )
+            .unwrap();
+        buffer
+            .terminal(request_id, ResultTerminal::Succeeded)
+            .unwrap();
+        buffer.page(request_id, 0, MAX_PAGE_BYTES).unwrap()
+    }
+
+    #[test]
+    fn v2_results_round_trip_and_v1_wire_contract_stays_operation_scoped() {
+        let request = RequestEnvelope::v2_results("caller:result-1", 0, MIN_PAGE_BYTES as u32);
+        let mut request_bytes = Vec::new();
+        write_request(&mut request_bytes, &request).unwrap();
+        assert!(matches!(
+            read_incoming_request(&mut Cursor::new(request_bytes)).unwrap(),
+            IncomingRequest::Results(ResultsQuery {
+                request_id,
+                after_cursor: 0,
+                byte_budget,
+            }) if request_id == "caller:result-1" && byte_budget == MIN_PAGE_BYTES as u32
+        ));
+        assert_eq!(
+            read_request(&mut Cursor::new({
+                let mut bytes = Vec::new();
+                write_request(&mut bytes, &request).unwrap();
+                bytes
+            }))
+            .err(),
+            Some(ProtocolError::UnsupportedVersion(RESULTS_PROTOCOL_VERSION))
+        );
+
+        let mut v1_results = RequestEnvelope::v1(WireRequestMessage::Results {
+            request_id: "caller:result-1".into(),
+            after_cursor: 0,
+            byte_budget: MIN_PAGE_BYTES as u32,
+        });
+        assert_eq!(
+            write_request(&mut Vec::new(), &v1_results),
+            Err(ProtocolError::InvalidRequest)
+        );
+        v1_results.version = RESULTS_PROTOCOL_VERSION;
+        v1_results.message = WireRequestMessage::Status {
+            request_id: "caller:result-1".into(),
+        };
+        assert_eq!(
+            write_request(&mut Vec::new(), &v1_results),
+            Err(ProtocolError::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn results_budget_cursor_and_response_version_pairing_are_strict() {
+        for byte_budget in [(MIN_PAGE_BYTES - 1) as u32, (MAX_PAGE_BYTES + 1) as u32] {
+            let request = RequestEnvelope::v2_results("caller:result-1", 0, byte_budget);
+            assert_eq!(
+                write_request(&mut Vec::new(), &request),
+                Err(ProtocolError::InvalidRequest)
+            );
+        }
+
+        let page = result_page("caller:result-1");
+        let response = ResponseEnvelope::v2_results(ResponseMessage::Results {
+            request_id: "caller:result-1".into(),
+            after_cursor: 0,
+            byte_budget: MIN_PAGE_BYTES as u32,
+            state: RequestStatus::Succeeded,
+            page: page.clone(),
+        });
+        let mut bytes = Vec::new();
+        write_response(&mut bytes, &response).unwrap();
+        let decoded = read_response(&mut Cursor::new(bytes)).unwrap();
+        assert_eq!(decoded.version, response.version);
+        assert_eq!(decoded.message, response.message);
+
+        let mut gap = page.clone();
+        gap.events[0].cursor = 2;
+        gap.next_cursor = 2;
+        gap.latest_cursor = 2;
+        assert_eq!(
+            write_response(
+                &mut Vec::new(),
+                &ResponseEnvelope::v2_results(ResponseMessage::Results {
+                    request_id: "caller:result-1".into(),
+                    after_cursor: 0,
+                    byte_budget: MIN_PAGE_BYTES as u32,
+                    state: RequestStatus::Succeeded,
+                    page: gap,
+                }),
+            ),
+            Err(ProtocolError::InvalidRequest)
+        );
+
+        let wrong_version = ResponseEnvelope::v1(ResponseMessage::Results {
+            request_id: "caller:result-1".into(),
+            after_cursor: 0,
+            byte_budget: MIN_PAGE_BYTES as u32,
+            state: RequestStatus::Succeeded,
+            page,
+        });
+        assert_eq!(
+            write_response(&mut Vec::new(), &wrong_version),
+            Err(ProtocolError::InvalidRequest)
+        );
+
+        use super::super::result_buffer::{ResultBuffer, ResultEvent, ResultTerminal};
+        let mut large_buffer = ResultBuffer::new();
+        large_buffer
+            .begin("caller:large-page", Lane::Language)
+            .unwrap();
+        for _ in 0..20 {
+            large_buffer
+                .append(
+                    "caller:large-page",
+                    ResultEvent::ChatContent("x".repeat(64)),
+                )
+                .unwrap();
+        }
+        large_buffer
+            .terminal("caller:large-page", ResultTerminal::Succeeded)
+            .unwrap();
+        let large_page = large_buffer
+            .page("caller:large-page", 0, MAX_PAGE_BYTES)
+            .unwrap();
+        assert!(serde_json::to_vec(&large_page).unwrap().len() > MIN_PAGE_BYTES);
+        assert_eq!(
+            write_response(
+                &mut Vec::new(),
+                &ResponseEnvelope::v2_results(ResponseMessage::Results {
+                    request_id: "caller:large-page".into(),
+                    after_cursor: 0,
+                    byte_budget: MIN_PAGE_BYTES as u32,
+                    state: RequestStatus::Succeeded,
+                    page: large_page,
+                }),
+            ),
+            Err(ProtocolError::InvalidRequest)
+        );
+
+        let mut expiring = ResultBuffer::new();
+        expiring.begin("caller:expired", Lane::Language).unwrap();
+        expiring
+            .append("caller:expired", ResultEvent::ChatContent("gone".into()))
+            .unwrap();
+        expiring
+            .terminal("caller:expired", ResultTerminal::Succeeded)
+            .unwrap();
+        expiring.evict_terminal("caller:expired").unwrap();
+        let expired = expiring.page("caller:expired", 0, MIN_PAGE_BYTES).unwrap();
+        assert_eq!(expired.availability, Availability::Expired);
+        assert_eq!(expired.next_cursor, 1); // Tombstones can safely skip lost bodies.
+        let expired_response = ResponseEnvelope::v2_results(ResponseMessage::Results {
+            request_id: "caller:expired".into(),
+            after_cursor: 0,
+            byte_budget: MIN_PAGE_BYTES as u32,
+            state: RequestStatus::Succeeded,
+            page: expired,
+        });
+        write_response(&mut Vec::new(), &expired_response).unwrap();
+    }
+
+    #[test]
+    fn decoded_envelopes_reject_version_operation_and_budget_mismatches() {
+        let invalid_requests = [
+            RequestEnvelope::v1(WireRequestMessage::Results {
+                request_id: "caller:result-1".into(),
+                after_cursor: 0,
+                byte_budget: MIN_PAGE_BYTES as u32,
+            }),
+            RequestEnvelope {
+                version: RESULTS_PROTOCOL_VERSION,
+                message: WireRequestMessage::Status {
+                    request_id: "caller:result-1".into(),
+                },
+            },
+            RequestEnvelope::v2_results("caller:result-1", 0, 0),
+        ];
+        for request in invalid_requests {
+            let bytes = frame(&serde_json::to_vec(&request).unwrap());
+            assert_eq!(
+                read_incoming_request(&mut Cursor::new(bytes)).err(),
+                Some(ProtocolError::InvalidRequest)
+            );
+        }
+
+        let wrong_version_response = serde_json::json!({
+            "version": PROTOCOL_VERSION,
+            "message": {
+                "type": "results",
+                "request_id": "caller:result-1",
+                "after_cursor": 0,
+                "byte_budget": MIN_PAGE_BYTES,
+                "state": "succeeded",
+                "page": result_page("caller:result-1")
+            }
+        });
+        let bytes = frame(&serde_json::to_vec(&wrong_version_response).unwrap());
+        assert_eq!(
+            read_response(&mut Cursor::new(bytes)).err(),
+            Some(ProtocolError::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn result_cursor_overflow_is_rejected_without_panicking() {
+        use super::super::result_buffer::{CursorEvent, PageEvent};
+        let page = ResultPage {
+            request_id: "caller:cursor-overflow".into(),
+            availability: Availability::Available,
+            events: vec![
+                CursorEvent {
+                    cursor: u64::MAX,
+                    event: PageEvent::ChatContent {
+                        text: "last".into(),
+                    },
+                },
+                CursorEvent {
+                    cursor: 1,
+                    event: PageEvent::ChatContent {
+                        text: "invalid".into(),
+                    },
+                },
+            ],
+            next_cursor: 1,
+            latest_cursor: u64::MAX,
+            terminal: None,
+        };
+        assert_eq!(
+            validate_result_page(u64::MAX - 1, MIN_PAGE_BYTES as u32, &page),
+            Err(ProtocolError::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn results_debug_redacts_text_and_artifact_paths() {
+        use super::super::result_buffer::{ArtifactKind, CursorEvent, MediaArtifact, PageEvent};
+        let page = ResultPage {
+            request_id: "caller:private".into(),
+            availability: Availability::Available,
+            events: vec![
+                CursorEvent {
+                    cursor: 1,
+                    event: PageEvent::ChatContent {
+                        text: "PRIVATE_RESULT_BODY".into(),
+                    },
+                },
+                CursorEvent {
+                    cursor: 2,
+                    event: PageEvent::MediaArtifactBatch {
+                        result_id: 2,
+                        batch_index: 0,
+                        batch_count: 1,
+                        artifacts: vec![MediaArtifact::new(
+                            ArtifactKind::LocalJob,
+                            "private/output-file.wav",
+                        )
+                        .unwrap()],
+                    },
+                },
+            ],
+            next_cursor: 2,
+            latest_cursor: 2,
+            terminal: None,
+        };
+        let response = ResponseMessage::Results {
+            request_id: "caller:private".into(),
+            after_cursor: 0,
+            byte_budget: MAX_PAGE_BYTES as u32,
+            state: RequestStatus::Running,
+            page,
+        };
+        let debug = format!("{response:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("PRIVATE_RESULT_BODY"));
+        assert!(!debug.contains("private/output-file.wav"));
+        assert!(!debug.contains("caller:private"));
     }
 
     #[test]

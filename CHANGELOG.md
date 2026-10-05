@@ -10,6 +10,13 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Added bounded, reconnectable native result pages over IPC v2 while preserving
+  v1 control operations. Output cache availability is separate from durable job
+  status; restart never replays inference. Native dispatch remains gated.
+- Added read-only `--request-results` with cursor/page-budget options, shared
+  socket settings, bounded compact JSON and fixed errors; no runtime is started.
+- Persist managed runtime lane/name with owned launch intents and verify the
+  binding during reconciliation, retaining compatibility with unbound records.
 - Added dashboard JavaScript behavior fixtures and CI coverage for native data
   contracts, lane rendering, tab clicks, arrow/Home/End navigation, focus and
   HTML escaping. Browser visual/mobile acceptance remains a separate gate.
