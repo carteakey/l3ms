@@ -16,6 +16,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Test native dashboard data contracts
+        run: python3 -m unittest docs/test_generate_dashboard_data.py
+      - name: Test dashboard JavaScript behavior
+        run: node docs/test_dashboard.cjs
       - name: Regenerate dashboard payload
         run: python3 docs/generate_dashboard_data.py
       - name: Check committed payload

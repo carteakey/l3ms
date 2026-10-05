@@ -10,6 +10,9 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Added dashboard JavaScript behavior fixtures and CI coverage for native data
+  contracts, lane rendering, tab clicks, arrow/Home/End navigation, focus and
+  HTML escaping. Browser visual/mobile acceptance remains a separate gate.
 - Added a generation-bound stop receipt and fixed-root cgroup-v2 observation
   with bounded, no-symlink reads. An empty or removed cgroup is only a
   point-in-time observation; live GPU switching and admission remain gated.

@@ -80,6 +80,9 @@ See the [migration status](docs/migration/status.md),
   restart, timeout, contention, and rollback paths before enabling public actions.
 - [ ] Complete visual/keyboard/mobile review of the three-lane site and verify
   generated data against native manifests; do not publish before the audit gate.
+  Six data-contract tests and shipped-JavaScript DOM fixtures pass locally;
+  CI now runs both. No browser is available in this session, so real rendering,
+  mobile layout and browser accessibility/keyboard acceptance remain pending.
 - [x] Replace the confirmed documentation-only key-like example in the current
   tree with a clear placeholder; historical blobs remain unaudited/unchanged.
 - [ ] Sanitize the exact outgoing history/export and re-audit endpoints, host paths, secrets, and large

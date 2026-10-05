@@ -229,6 +229,15 @@ warnings, formatting and whitespace checks pass. No live manager/GPU operation
 occurred. Result retention/delivery, concrete lifecycle/admission adapters,
 intent retirement and end-to-end dispatch remain incomplete.
 
+2026-10-05 dashboard behavior checkpoint: six Python generator/data-contract
+tests pass. The shipped generated payload and inline dashboard JavaScript also
+pass a Node DOM fixture for native lane card rendering, click selection,
+Left/Right wrapping, Home/End, roving focus/ARIA selection and HTML escaping.
+Dashboard CI now runs both checks; no remote CI or publication was triggered.
+The browser inventory is empty and the in-app browser is unavailable, so the
+loopback preview was stopped without claiming visual/mobile/browser acceptance.
+The fixture deliberately does not emulate layout or an accessibility tree.
+
 - Choose the host admission mode for direct llama-swap/ComfyUI requests before
   claiming automatic cross-engine switching. The plan allows coordination
   only where the runtime can block and drain new direct work, or where callers
