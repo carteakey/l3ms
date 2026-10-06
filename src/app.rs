@@ -17,6 +17,12 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
+#[cfg(target_os = "linux")]
+use crate::control::coordinator_workbench::{
+    self as coordinator_workbench, CancelOutcome, CoordinatorWorkbench, ObserveFailure,
+    PreparationError, SubmitOutcome, WorkbenchEvent,
+};
+use crate::control::result_consumer::NativeOutput;
 use crate::{
     chat::{
         detect_chat_server, detected_servers, terminate_detected_server, ChatClient,
@@ -88,6 +94,9 @@ const MODEL_PAGE_SIZE: usize = 50;
 const DOWNLOAD_PAGE_SIZE: usize = 50;
 const DOWNLOAD_ESTIMATE_TIMEOUT: Duration = Duration::from_secs(180);
 const DOWNLOAD_DISK_TIMEOUT: Duration = Duration::from_secs(3);
+const MAX_STACK_INPUT_BYTES: usize = 4096;
+const MAX_STACK_ID_INPUT_BYTES: usize = 128;
+const MAX_STACK_OUTPUT_PREVIEW_CHARS: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct DownloadProgressSnapshot {
@@ -209,6 +218,14 @@ enum InputMode {
     ChatMessage,
     ChatEndpoint,
     ChatSystemPrompt,
+    CoordinatorInput,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CoordinatorInputAction {
+    SubmitFile,
+    ObserveId,
+    CancelId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -378,6 +395,18 @@ struct App {
     stack_catalog: Option<Catalog>,
     stack_catalog_error: Option<String>,
     stack_catalog_state: TableState,
+    stack_coordinator_socket_dir: Option<PathBuf>,
+    coordinator_request_id: Option<String>,
+    coordinator_request_lane: Option<Lane>,
+    coordinator_request_terminal: bool,
+    coordinator_action_pending: bool,
+    coordinator_input: String,
+    coordinator_input_action: Option<CoordinatorInputAction>,
+    coordinator_output: Option<NativeOutput>,
+    coordinator_output_complete: bool,
+    coordinator_results_available: bool,
+    #[cfg(target_os = "linux")]
+    coordinator_workbench: Option<CoordinatorWorkbench>,
 
     download: DownloadUiState,
     download_page: usize,
@@ -529,6 +558,18 @@ impl App {
             stack_catalog: None,
             stack_catalog_error: None,
             stack_catalog_state: TableState::default().with_selected(Some(0)),
+            stack_coordinator_socket_dir: None,
+            coordinator_request_id: None,
+            coordinator_request_lane: None,
+            coordinator_request_terminal: false,
+            coordinator_action_pending: false,
+            coordinator_input: String::new(),
+            coordinator_input_action: None,
+            coordinator_output: None,
+            coordinator_output_complete: false,
+            coordinator_results_available: false,
+            #[cfg(target_os = "linux")]
+            coordinator_workbench: None,
             download,
             download_page: 0,
             download_state: TableState::default().with_selected(Some(0)),
@@ -1120,6 +1161,97 @@ impl App {
                 }
             }
         }
+        #[cfg(target_os = "linux")]
+        self.drain_coordinator_events();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn drain_coordinator_events(&mut self) {
+        let mut events = Vec::new();
+        if let Some(workbench) = self.coordinator_workbench.as_mut() {
+            while let Some(event) = workbench.try_next_event() {
+                events.push(event);
+            }
+        }
+        for event in events {
+            if self.coordinator_request_id.as_deref() != Some(event.request_id()) {
+                continue;
+            }
+            self.coordinator_action_pending = false;
+            match event {
+                WorkbenchEvent::Submitted { outcome, .. } => match outcome {
+                    SubmitOutcome::Accepted => {
+                        self.status = "Submit accepted; press o to observe this caller ID".into();
+                    }
+                    SubmitOutcome::Rejected(_) => {
+                        self.status =
+                            "Submit was rejected; retained ID is available for observation".into();
+                    }
+                    SubmitOutcome::Unconfirmed(_) => {
+                        self.status = "Submit acknowledgment unavailable; ID retained. Press o to observe; do not resubmit".into();
+                    }
+                },
+                WorkbenchEvent::Observed { outcome, .. } => match outcome {
+                    Ok(observation) => {
+                        self.coordinator_request_terminal = matches!(
+                            observation.status,
+                            crate::control::ipc::RequestStatus::Succeeded
+                                | crate::control::ipc::RequestStatus::Failed
+                                | crate::control::ipc::RequestStatus::Cancelled
+                                | crate::control::ipc::RequestStatus::Interrupted
+                        );
+                        self.coordinator_output = observation.output;
+                        self.coordinator_output_complete = observation.output_complete;
+                        self.coordinator_results_available = observation.results_available;
+                        self.status = match observation.results_state {
+                            coordinator_workbench::ResultReadState::Unknown => "Coordinator has no retained native result row for this ID".into(),
+                            coordinator_workbench::ResultReadState::Expired => "Native result pages have expired; coordinator status remains available".into(),
+                            coordinator_workbench::ResultReadState::Unavailable => match observation.status {
+                            crate::control::ipc::RequestStatus::NotFound => {
+                                "Coordinator has no retained row for this ID; do not resubmit automatically".into()
+                            }
+                            state => format!("Request {state:?} · native results not currently available"),
+                            },
+                            coordinator_workbench::ResultReadState::Available => {
+                                format!("Request {:?} · native results refreshed{}", observation.status, if observation.output_complete { " (complete)" } else { " (more may arrive)" })
+                            }
+                        };
+                    }
+                    Err(ObserveFailure::Exchange(_)) => {
+                        self.status = "Coordinator observation failed; caller ID retained".into();
+                    }
+                    Err(ObserveFailure::Rejected(_)) => {
+                        self.status =
+                            "Coordinator rejected the observation; caller ID retained".into();
+                    }
+                    Err(ObserveFailure::InvalidResponse) => {
+                        self.status =
+                            "Coordinator returned an invalid observation; caller ID retained"
+                                .into();
+                    }
+                },
+                WorkbenchEvent::Cancelled { outcome, .. } => match outcome {
+                    CancelOutcome::Accepted(state) => {
+                        self.coordinator_request_terminal =
+                            state == crate::control::ipc::RequestStatus::Cancelled;
+                        self.status =
+                            format!("Cancel acknowledged · request {state:?}; press o to observe");
+                    }
+                    CancelOutcome::Rejected(_) => {
+                        self.status =
+                            "Cancel was rejected; caller ID retained for observation".into();
+                    }
+                    CancelOutcome::Unconfirmed(_) => {
+                        self.status = "Cancel acknowledgment unavailable; ID retained. Press o to observe; do not retry automatically".into();
+                    }
+                },
+                WorkbenchEvent::WorkerFailed { .. } => {
+                    self.status =
+                        "Coordinator worker failed; caller ID retained for explicit observation"
+                            .into();
+                }
+            }
+        }
     }
 
     fn refresh_telemetry_if_due(&mut self) {
@@ -1526,11 +1658,16 @@ impl App {
                 if self.tab == Tab::Chat && self.cancel_chat_request() {
                     return Ok(());
                 }
+                if self.input_mode == InputMode::CoordinatorInput {
+                    self.coordinator_input.clear();
+                    self.coordinator_input_action = None;
+                }
                 self.input_mode = InputMode::Normal;
             }
             KeyCode::Enter => match self.input_mode {
                 InputMode::ChatMessage => self.send_chat_message(),
                 InputMode::ChatEndpoint => self.start_chat_connect(),
+                InputMode::CoordinatorInput => self.finish_coordinator_input(),
                 InputMode::BrowserPath => {
                     self.input_mode = InputMode::Normal;
                     self.scan_browser();
@@ -1568,6 +1705,9 @@ impl App {
                 InputMode::ChatEndpoint => {
                     self.chat_endpoint_draft.pop();
                 }
+                InputMode::CoordinatorInput => {
+                    self.coordinator_input.pop();
+                }
                 InputMode::Normal => {}
             },
             KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1591,6 +1731,21 @@ impl App {
                     InputMode::ChatMessage => self.chat_input.push(character),
                     InputMode::ChatSystemPrompt => self.chat_system_prompt.push(character),
                     InputMode::ChatEndpoint => self.chat_endpoint_draft.push(character),
+                    InputMode::CoordinatorInput => {
+                        let max_bytes = if matches!(
+                            self.coordinator_input_action,
+                            Some(CoordinatorInputAction::SubmitFile)
+                        ) {
+                            MAX_STACK_INPUT_BYTES
+                        } else {
+                            MAX_STACK_ID_INPUT_BYTES
+                        };
+                        if self.coordinator_input.len() + character.len_utf8() <= max_bytes
+                            && !character.is_control()
+                        {
+                            self.coordinator_input.push(character);
+                        }
+                    }
                     InputMode::Normal => {}
                 }
             }
@@ -2161,6 +2316,9 @@ impl App {
                 select_next_table(&mut self.stack_catalog_state, count);
             }
             StackCatalogRefresh => self.refresh_stack_catalog(),
+            StackCatalogSubmit => self.begin_coordinator_input(CoordinatorInputAction::SubmitFile),
+            StackCatalogObserve => self.begin_coordinator_observe(),
+            StackCatalogCancel => self.begin_coordinator_cancel(),
             PreviousTab => {
                 self.tab =
                     Tab::from_index((self.tab.index() + TAB_NAMES.len() - 1) % TAB_NAMES.len());
@@ -3357,14 +3515,21 @@ impl App {
     }
 
     fn refresh_stack_catalog(&mut self) {
-        let catalog = crate::settings::load_current_stack_settings_in(&self.root, &self.data_root)
-            .and_then(|settings| {
+        let settings = crate::settings::load_current_stack_settings_in(&self.root, &self.data_root);
+        let catalog = match settings {
+            Ok(settings) => {
+                self.stack_coordinator_socket_dir = settings.coordinator_socket_dir;
                 Catalog::load_from_roots(
                     &self.root,
                     settings.media_toolkit_root,
                     settings.decisions_toolkit_root,
                 )
-            });
+            }
+            Err(error) => {
+                self.stack_coordinator_socket_dir = None;
+                Err(error)
+            }
+        };
         match catalog {
             Ok(catalog) => {
                 let count = catalog.list().len();
@@ -3390,6 +3555,9 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => Some(CommandId::StackCatalogSelectPrevious),
             KeyCode::Down | KeyCode::Char('j') => Some(CommandId::StackCatalogSelectNext),
             KeyCode::Char('r') => Some(CommandId::StackCatalogRefresh),
+            KeyCode::Char('s') => Some(CommandId::StackCatalogSubmit),
+            KeyCode::Char('o') => Some(CommandId::StackCatalogObserve),
+            KeyCode::Char('c') => Some(CommandId::StackCatalogCancel),
             _ => None,
         };
         if let Some(command) = command {
@@ -3397,6 +3565,314 @@ impl App {
                 self.status = format!("Stack Catalog: {error:#}");
             }
         }
+    }
+
+    fn begin_coordinator_input(&mut self, action: CoordinatorInputAction) {
+        if self.coordinator_action_pending {
+            self.status = "A coordinator action is already pending".into();
+            return;
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = action;
+            self.status = "The private coordinator workbench is available on Linux only".into();
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if self.stack_coordinator_socket_dir.is_none() {
+                self.status =
+                    "No explicit private coordinator socket is configured in shared settings"
+                        .into();
+                return;
+            }
+            if action == CoordinatorInputAction::SubmitFile
+                && self.coordinator_request_id.is_some()
+                && !self.coordinator_request_terminal
+            {
+                self.status = "Caller ID remains ambiguous or nonterminal; observe or cancel it before another Submit".into();
+                return;
+            }
+            self.coordinator_input.clear();
+            self.coordinator_input_action = Some(action);
+            self.input_mode = InputMode::CoordinatorInput;
+            self.status = match action {
+                CoordinatorInputAction::SubmitFile => {
+                    "Enter an explicit v1 Submit JSON file path".into()
+                }
+                CoordinatorInputAction::ObserveId => {
+                    "Enter the caller-supplied request ID to observe".into()
+                }
+                CoordinatorInputAction::CancelId => {
+                    "Enter the caller-supplied request ID to cancel once".into()
+                }
+            };
+        }
+    }
+
+    fn begin_coordinator_observe(&mut self) {
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.status = "The private coordinator workbench is available on Linux only".into();
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if self.coordinator_request_id.is_some() {
+                self.enqueue_coordinator_observe();
+            } else {
+                self.begin_coordinator_input(CoordinatorInputAction::ObserveId);
+            }
+        }
+    }
+
+    fn begin_coordinator_cancel(&mut self) {
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.status = "The private coordinator workbench is available on Linux only".into();
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if self.coordinator_request_id.is_some() {
+                self.enqueue_coordinator_cancel();
+            } else {
+                self.begin_coordinator_input(CoordinatorInputAction::CancelId);
+            }
+        }
+    }
+
+    fn finish_coordinator_input(&mut self) {
+        let action = self.coordinator_input_action.take();
+        let value = std::mem::take(&mut self.coordinator_input);
+        self.input_mode = InputMode::Normal;
+        let Some(action) = action else {
+            return;
+        };
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (action, value);
+            self.status = "The private coordinator workbench is available on Linux only".into();
+        }
+        #[cfg(target_os = "linux")]
+        match action {
+            CoordinatorInputAction::SubmitFile => self.submit_coordinator_file(&value),
+            CoordinatorInputAction::ObserveId => self.enqueue_coordinator_observe_for(&value),
+            CoordinatorInputAction::CancelId => self.enqueue_coordinator_cancel_for(&value),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn submit_coordinator_file(&mut self, raw_path: &str) {
+        if self.coordinator_action_pending
+            || (self.coordinator_request_id.is_some() && !self.coordinator_request_terminal)
+        {
+            self.status =
+                "Caller ID remains ambiguous or nonterminal; observe or cancel it before another Submit".into();
+            return;
+        }
+        let Some(socket_directory) = self.stack_coordinator_socket_dir.clone() else {
+            self.status =
+                "No explicit private coordinator socket is configured in shared settings".into();
+            return;
+        };
+        let Some(catalog) = self.stack_catalog.as_ref() else {
+            self.status = "Refresh the Stack Catalog before submitting".into();
+            return;
+        };
+        let Some(profile) = self
+            .stack_catalog_state
+            .selected()
+            .and_then(|index| catalog.list().get(index))
+            .map(|profile| profile.key.clone())
+        else {
+            self.status = "Select a manifest profile before submitting".into();
+            return;
+        };
+        let path = PathBuf::from(expand_tilde(raw_path.trim()));
+        let prepared = match coordinator_workbench::prepare_submission(&path, catalog, &profile) {
+            Ok(prepared) => prepared,
+            Err(PreparationError::SelectedProfileMismatch) => {
+                self.status =
+                    "Submit profile does not match the selected Stack Catalog profile".into();
+                return;
+            }
+            Err(_) => {
+                self.status = "Submit file is invalid, unavailable, or does not satisfy the strict request contract".into();
+                return;
+            }
+        };
+        if self.coordinator_request_id.as_deref() == Some(prepared.request_id()) {
+            self.status = "Use a new caller-supplied ID after a terminal request; this ID will not be replayed".into();
+            return;
+        }
+        if !self.ensure_coordinator_worker() {
+            return;
+        }
+        let request_id = prepared.request_id().to_owned();
+        let lane = prepared.lane();
+        let previous_request = (
+            self.coordinator_request_id.clone(),
+            self.coordinator_request_lane,
+            self.coordinator_request_terminal,
+        );
+        // Retain caller identity in the UI before handing the opaque request
+        // to the worker, which may dispatch immediately after enqueue.
+        self.coordinator_request_id = Some(request_id.clone());
+        self.coordinator_request_lane = Some(lane);
+        self.coordinator_request_terminal = false;
+        let result = self
+            .coordinator_workbench
+            .as_mut()
+            .expect("worker initialized")
+            .submit(socket_directory, prepared);
+        match result {
+            Ok(_) => {
+                self.coordinator_output = None;
+                self.coordinator_output_complete = false;
+                self.coordinator_results_available = false;
+                self.coordinator_action_pending = true;
+                self.status =
+                    "Caller ID retained; submitting once to the configured private coordinator"
+                        .into();
+            }
+            Err(_) => {
+                self.coordinator_request_id = previous_request.0;
+                self.coordinator_request_lane = previous_request.1;
+                self.coordinator_request_terminal = previous_request.2;
+                self.status =
+                    "Coordinator worker did not accept the request; nothing was dispatched".into();
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn ensure_coordinator_worker(&mut self) -> bool {
+        if self.stack_coordinator_socket_dir.is_none() {
+            self.status =
+                "No explicit private coordinator socket is configured in shared settings".into();
+            return false;
+        }
+        if self.coordinator_workbench.is_none() {
+            match CoordinatorWorkbench::start() {
+                Ok(worker) => self.coordinator_workbench = Some(worker),
+                Err(_) => {
+                    self.status = "Could not start the bounded coordinator action worker".into();
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    #[cfg(target_os = "linux")]
+    fn enqueue_coordinator_observe(&mut self) {
+        let Some(request_id) = self.coordinator_request_id.clone() else {
+            return;
+        };
+        self.enqueue_coordinator_observe_for(&request_id);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn enqueue_coordinator_observe_for(&mut self, raw_id: &str) {
+        if self.coordinator_action_pending {
+            self.status = "A coordinator action is already pending".into();
+            return;
+        }
+        let Some(socket_directory) = self.stack_coordinator_socket_dir.clone() else {
+            self.status =
+                "No explicit private coordinator socket is configured in shared settings".into();
+            return;
+        };
+        let (request_id, lane) = if let (Some(request_id), Some(lane)) = (
+            self.coordinator_request_id.clone(),
+            self.coordinator_request_lane,
+        ) {
+            (request_id, lane)
+        } else {
+            let Some(lane) = self
+                .selected_stack_profile()
+                .map(|profile| profile.key.lane)
+            else {
+                self.status = "Select a manifest profile to choose the request lane".into();
+                return;
+            };
+            (raw_id.trim().to_owned(), lane)
+        };
+        if !self.ensure_coordinator_worker() {
+            return;
+        }
+        let result = self.coordinator_workbench.as_mut().unwrap().observe(
+            socket_directory,
+            request_id.clone(),
+            lane,
+        );
+        match result {
+            Ok(()) => {
+                if self.coordinator_request_id.is_none() {
+                    self.coordinator_request_id = Some(request_id);
+                    self.coordinator_request_lane = Some(lane);
+                }
+                self.coordinator_action_pending = true;
+                self.status =
+                    "Querying coordinator status and native results for the retained caller ID"
+                        .into();
+            }
+            Err(_) => {
+                self.status =
+                    "Could not enqueue coordinator observation; caller ID was not replayed".into()
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn enqueue_coordinator_cancel(&mut self) {
+        let Some(request_id) = self.coordinator_request_id.clone() else {
+            return;
+        };
+        self.enqueue_coordinator_cancel_for(&request_id);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn enqueue_coordinator_cancel_for(&mut self, raw_id: &str) {
+        if self.coordinator_action_pending {
+            self.status = "A coordinator action is already pending".into();
+            return;
+        }
+        let Some(socket_directory) = self.stack_coordinator_socket_dir.clone() else {
+            self.status =
+                "No explicit private coordinator socket is configured in shared settings".into();
+            return;
+        };
+        let request_id = self
+            .coordinator_request_id
+            .clone()
+            .unwrap_or_else(|| raw_id.trim().to_owned());
+        if !self.ensure_coordinator_worker() {
+            return;
+        }
+        let result = self
+            .coordinator_workbench
+            .as_mut()
+            .unwrap()
+            .cancel(socket_directory, request_id.clone());
+        match result {
+            Ok(()) => {
+                if self.coordinator_request_id.is_none() {
+                    self.coordinator_request_id = Some(request_id);
+                    self.coordinator_request_lane = self
+                        .selected_stack_profile()
+                        .map(|profile| profile.key.lane);
+                }
+                self.coordinator_action_pending = true;
+                self.status = "Sending one cancel request for the retained caller ID".into();
+            }
+            Err(_) => self.status = "Could not enqueue cancellation; caller ID retained".into(),
+        }
+    }
+
+    fn selected_stack_profile(&self) -> Option<&CatalogProfile> {
+        self.stack_catalog
+            .as_ref()?
+            .list()
+            .get(self.stack_catalog_state.selected()?)
     }
 
     fn scan_browser(&mut self) {
@@ -4952,7 +5428,11 @@ impl App {
     fn draw_stack_catalog(&mut self, frame: &mut Frame, area: Rect) {
         let sections = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+            .constraints([
+                Constraint::Percentage(48),
+                Constraint::Percentage(24),
+                Constraint::Percentage(28),
+            ])
             .split(area);
 
         let Some(catalog) = self.stack_catalog.as_ref() else {
@@ -4964,7 +5444,7 @@ impl App {
                     .style(theme::warning())
                     .block(
                         theme::block()
-                            .title("Stack Catalog · read-only manifest view")
+                            .title("Stack Catalog · manifest view")
                             .borders(Borders::ALL),
                     )
                     .wrap(Wrap { trim: false }),
@@ -4981,7 +5461,7 @@ impl App {
                 .count()
         };
         let title = format!(
-            "{} profile(s) · language {} · media {} · decisions {} · r refresh",
+            "{} profile(s) · language {} · media {} · decisions {} · r refresh · s submit · o observe · c cancel",
             profiles.len(),
             count_for(Lane::Language),
             count_for(Lane::Media),
@@ -5019,16 +5499,90 @@ impl App {
                 || Text::from("No manifest profiles are available."),
                 stack_profile_details,
             );
+        let info = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+            .split(sections[1]);
         frame.render_widget(
             Paragraph::new(details)
                 .style(theme::text())
                 .block(
                     theme::block()
-                        .title("Selected profile · ↑/↓ or j/k select · r refresh")
+                        .title("Selected profile · ↑/↓ or j/k select")
                         .borders(Borders::ALL),
                 )
                 .wrap(Wrap { trim: false }),
-            sections[1],
+            info[0],
+        );
+        let retained = self.coordinator_request_id.as_deref().unwrap_or("none");
+        let lane = self.coordinator_request_lane.map_or("—", Lane::as_str);
+        let lifecycle = if self.coordinator_request_id.is_none() {
+            "no caller ID retained"
+        } else if self.coordinator_request_terminal {
+            "terminal observed · next Submit requires a different caller ID"
+        } else {
+            "ambiguous or nonterminal · observe/cancel before another Submit"
+        };
+        let socket = if self.stack_coordinator_socket_dir.is_some() {
+            "explicit socket configured"
+        } else {
+            "no explicit socket configured"
+        };
+        let action_text = if self.input_mode == InputMode::CoordinatorInput {
+            format!(
+                "{}\n> {}",
+                coordinator_prompt(self.coordinator_input_action),
+                self.coordinator_input
+            )
+        } else {
+            format!(
+                "{socket}\nretained ID: {retained}\nlane: {lane}\n{lifecycle}\n{}",
+                if self.coordinator_action_pending {
+                    "action pending…"
+                } else {
+                    "idle · s/o/c"
+                }
+            )
+        };
+        frame.render_widget(
+            Paragraph::new(action_text)
+                .style(theme::text())
+                .block(
+                    theme::block()
+                        .title("Coordinator · opt-in only")
+                        .borders(Borders::ALL),
+                )
+                .wrap(Wrap { trim: false }),
+            info[1],
+        );
+        if self.input_mode == InputMode::CoordinatorInput {
+            frame.set_cursor_position((
+                info[1].x.saturating_add(
+                    3 + coordinator_prompt(self.coordinator_input_action).len() as u16,
+                ),
+                info[1].y.saturating_add(2),
+            ));
+        }
+        let output_text = self.coordinator_output.as_ref().map_or_else(
+            || {
+                if self.coordinator_results_available {
+                    "No native output in the latest page.".to_owned()
+                } else {
+                    "Native results are shown here only after pressing o. No result body is copied to logs or history.".to_owned()
+                }
+            },
+            |output| native_output_preview(output, self.coordinator_output_complete),
+        );
+        frame.render_widget(
+            Paragraph::new(output_text)
+                .style(theme::text())
+                .block(
+                    theme::block()
+                        .title("Private native result panel · explicit observation only")
+                        .borders(Borders::ALL),
+                )
+                .wrap(Wrap { trim: false }),
+            sections[2],
         );
     }
 
@@ -5363,6 +5917,7 @@ impl App {
                 InputMode::ChatMessage => "  CHAT INPUT",
                 InputMode::ChatEndpoint => "  CHAT ENDPOINT",
                 InputMode::ChatSystemPrompt => "  SYSTEM PROMPT INPUT",
+                InputMode::CoordinatorInput => "  COORDINATOR INPUT",
             }
         };
         let controls = if self.script_input_target.is_some() {
@@ -5565,6 +6120,55 @@ fn readiness_label(readiness: Readiness) -> &'static str {
         Readiness::Installed => "installed",
         Readiness::Healthy => "healthy",
     }
+}
+
+fn coordinator_prompt(action: Option<CoordinatorInputAction>) -> &'static str {
+    match action {
+        Some(CoordinatorInputAction::SubmitFile) => "Submit file path",
+        Some(CoordinatorInputAction::ObserveId) => "Caller request ID to observe",
+        Some(CoordinatorInputAction::CancelId) => "Caller request ID to cancel",
+        None => "Coordinator input",
+    }
+}
+
+fn native_output_preview(output: &NativeOutput, complete: bool) -> String {
+    let mut rendered = match output {
+        NativeOutput::Language { content, reasoning } => {
+            if reasoning.is_empty() {
+                content.clone()
+            } else {
+                format!("Content:\n{content}\n\nReasoning:\n{reasoning}")
+            }
+        }
+        NativeOutput::Decisions { answers } => serde_json::to_string_pretty(answers)
+            .unwrap_or_else(|_| "Decision output could not be rendered".into()),
+        NativeOutput::Media { artifacts } => artifacts
+            .iter()
+            .map(|artifact| format!("{:?}: {}", artifact.kind, artifact.relative_path))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    rendered = rendered
+        .chars()
+        .map(|character| {
+            if character.is_control() && character != '\n' && character != '\t' {
+                '�'
+            } else {
+                character
+            }
+        })
+        .collect();
+    let mut preview = rendered
+        .chars()
+        .take(MAX_STACK_OUTPUT_PREVIEW_CHARS)
+        .collect::<String>();
+    if rendered.chars().count() > MAX_STACK_OUTPUT_PREVIEW_CHARS {
+        preview.push_str("\n… [native output preview truncated]");
+    }
+    if !complete {
+        preview.push_str("\n[more native output may be available; press o to refresh]");
+    }
+    preview
 }
 
 fn stack_profile_details(profile: &CatalogProfile) -> Text<'static> {
@@ -6892,8 +7496,308 @@ mod tests {
             .contains("media-runtimes.json"));
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
-        assert!(terminal_text(&terminal).contains("read-only manifest view"));
+        assert!(terminal_text(&terminal).contains("Stack Catalog · manifest view"));
         assert!(app.running_process.is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stack_catalog_keyboard_submit_observe_cancel_keeps_native_output_private() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+
+        use crate::control::ipc::{
+            self, AcceptedOperation, ClientRequest, RequestEnvelope, RequestStatus,
+            ResponseEnvelope, ResponseMessage, WireChatRole, WireChatTurn, WireInferenceRequest,
+            WireRequestMessage,
+        };
+        use crate::control::result_buffer::{
+            ResultBuffer, ResultEvent, ResultTerminal, MAX_PAGE_BYTES,
+        };
+
+        const REQUEST_ID: &str = "caller:keyboard-workbench";
+        const SECRET_RESULT: &str = "native output stays in the private result panel";
+
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        let socket_directory = tempfile::tempdir().unwrap();
+        fs::set_permissions(socket_directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let listener =
+            UnixListener::bind(socket_directory.path().join("coordinator.sock")).unwrap();
+        fs::set_permissions(
+            socket_directory.path().join("coordinator.sock"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let mut settings = crate::settings::Settings::default();
+        settings.stack.coordinator_socket_dir = Some(socket_directory.path().display().to_string());
+        crate::settings::save_settings_in(fixture.data.path(), &settings).unwrap();
+
+        let submit_path = fixture.root.join("explicit-submit.json");
+        let submit = RequestEnvelope::v1(WireRequestMessage::Submit {
+            request_id: REQUEST_ID.into(),
+            timeout_ms: 5_000,
+            request: WireInferenceRequest::Language {
+                profile_id: "local-chat".into(),
+                turns: vec![WireChatTurn {
+                    role: WireChatRole::User,
+                    content: "private user prompt".into(),
+                }],
+                max_tokens: 32,
+            },
+        });
+        fs::write(&submit_path, serde_json::to_vec(&submit).unwrap()).unwrap();
+        let next_submit_path = fixture.root.join("explicit-submit-next.json");
+        let next_submit = RequestEnvelope::v1(WireRequestMessage::Submit {
+            request_id: "caller:keyboard-workbench-next".into(),
+            timeout_ms: 5_000,
+            request: WireInferenceRequest::Language {
+                profile_id: "local-chat".into(),
+                turns: vec![WireChatTurn {
+                    role: WireChatRole::User,
+                    content: "second private prompt".into(),
+                }],
+                max_tokens: 32,
+            },
+        });
+        fs::write(&next_submit_path, serde_json::to_vec(&next_submit).unwrap()).unwrap();
+
+        let server = thread::spawn(move || {
+            let mut submitted = listener.accept().unwrap().0;
+            let ipc::IncomingRequest::Control(ClientRequest::Submit {
+                request_id,
+                request,
+                ..
+            }) = ipc::read_incoming_request(&mut submitted).unwrap()
+            else {
+                panic!("keyboard s should issue exactly one Submit")
+            };
+            assert_eq!(request_id, REQUEST_ID);
+            assert_eq!(request.profile().profile_id.as_str(), "local-chat");
+            drop(submitted); // Lost acknowledgment must not trigger a replay.
+
+            let mut status_stream = listener.accept().unwrap().0;
+            let ipc::IncomingRequest::Control(ClientRequest::Status { request_id }) =
+                ipc::read_incoming_request(&mut status_stream).unwrap()
+            else {
+                panic!("keyboard o should query status, never resubmit")
+            };
+            assert_eq!(request_id, REQUEST_ID);
+            ipc::write_response(
+                &mut status_stream,
+                &ResponseEnvelope::v1(ResponseMessage::Status {
+                    request_id: request_id.clone(),
+                    state: RequestStatus::Succeeded,
+                }),
+            )
+            .unwrap();
+
+            let mut results_stream = listener.accept().unwrap().0;
+            let ipc::IncomingRequest::Results(query) =
+                ipc::read_incoming_request(&mut results_stream).unwrap()
+            else {
+                panic!("observation should use native results paging")
+            };
+            assert_eq!(query.request_id, REQUEST_ID);
+            let mut buffer = ResultBuffer::new();
+            buffer.begin(&query.request_id, Lane::Language).unwrap();
+            buffer
+                .append(
+                    &query.request_id,
+                    ResultEvent::ChatContent(SECRET_RESULT.into()),
+                )
+                .unwrap();
+            buffer
+                .terminal(&query.request_id, ResultTerminal::Succeeded)
+                .unwrap();
+            let page = buffer
+                .page(&query.request_id, query.after_cursor, MAX_PAGE_BYTES)
+                .unwrap();
+            ipc::write_response(
+                &mut results_stream,
+                &ResponseEnvelope::v2_results(ResponseMessage::Results {
+                    request_id: query.request_id,
+                    state: RequestStatus::Succeeded,
+                    after_cursor: query.after_cursor,
+                    byte_budget: query.byte_budget,
+                    page,
+                }),
+            )
+            .unwrap();
+
+            let mut cancel_stream = listener.accept().unwrap().0;
+            let ipc::IncomingRequest::Control(ClientRequest::Cancel { request_id }) =
+                ipc::read_incoming_request(&mut cancel_stream).unwrap()
+            else {
+                panic!("keyboard c should issue exactly one Cancel")
+            };
+            assert_eq!(request_id, REQUEST_ID);
+            ipc::write_response(
+                &mut cancel_stream,
+                &ResponseEnvelope::v1(ResponseMessage::Accepted {
+                    request_id,
+                    operation: AcceptedOperation::Cancel,
+                    state: RequestStatus::Cancelled,
+                }),
+            )
+            .unwrap();
+
+            let mut next_submit_stream = listener.accept().unwrap().0;
+            let ipc::IncomingRequest::Control(ClientRequest::Submit { request_id, .. }) =
+                ipc::read_incoming_request(&mut next_submit_stream).unwrap()
+            else {
+                panic!("a new explicit Submit is allowed after observing terminal status")
+            };
+            assert_eq!(request_id, "caller:keyboard-workbench-next");
+            ipc::write_response(
+                &mut next_submit_stream,
+                &ResponseEnvelope::v1(ResponseMessage::Accepted {
+                    request_id,
+                    operation: AcceptedOperation::Submit,
+                    state: RequestStatus::Queued,
+                }),
+            )
+            .unwrap();
+        });
+
+        let mut app = fixture.app();
+        app.handle_key(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(
+            app.stack_coordinator_socket_dir,
+            Some(socket_directory.path().to_path_buf())
+        );
+        let selected = app
+            .stack_catalog
+            .as_ref()
+            .unwrap()
+            .list()
+            .iter()
+            .position(|profile| profile.key.profile_id.as_str() == "local-chat")
+            .unwrap();
+        app.stack_catalog_state.select(Some(selected));
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.input_mode, InputMode::CoordinatorInput);
+        for character in submit_path.display().to_string().chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.coordinator_request_id.as_deref(), Some(REQUEST_ID));
+        assert!(!app.status.contains("private user prompt"));
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while app.coordinator_action_pending && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+            app.drain_background_events();
+        }
+        assert!(!app.coordinator_action_pending);
+        assert!(app.status.contains("acknowledgment unavailable"));
+        assert_eq!(app.coordinator_request_id.as_deref(), Some(REQUEST_ID));
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.coordinator_request_id.as_deref(), Some(REQUEST_ID));
+        assert!(app.status.contains("ambiguous or nonterminal"));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while app.coordinator_action_pending && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+            app.drain_background_events();
+        }
+        assert!(!app.coordinator_action_pending);
+        assert!(app.coordinator_results_available);
+        assert!(app.coordinator_output_complete);
+        assert!(!app.status.contains(SECRET_RESULT));
+        assert!(!app.log.iter().any(|line| line.contains(SECRET_RESULT)));
+        assert!(app.job_history.records().is_empty());
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(terminal_text(&terminal).contains(SECRET_RESULT));
+        assert!(terminal_text(&terminal).contains("Private native result panel"));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while app.coordinator_action_pending && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+            app.drain_background_events();
+        }
+        assert!(!app.coordinator_action_pending);
+        assert!(app.status.contains("Cancel acknowledged"));
+        assert!(!app.status.contains(SECRET_RESULT));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.input_mode, InputMode::CoordinatorInput);
+        assert_eq!(app.coordinator_request_id.as_deref(), Some(REQUEST_ID));
+        for character in next_submit_path.display().to_string().chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(
+            app.coordinator_request_id.as_deref(),
+            Some("caller:keyboard-workbench-next")
+        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while app.coordinator_action_pending && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+            app.drain_background_events();
+        }
+        assert!(!app.coordinator_action_pending);
+        assert!(app.status.contains("Submit accepted"));
+        server.join().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn invalid_explicit_submit_file_uses_fixed_error_and_never_starts_a_worker() {
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        let socket_directory = tempfile::tempdir().unwrap();
+        let mut settings = crate::settings::Settings::default();
+        settings.stack.coordinator_socket_dir = Some(socket_directory.path().display().to_string());
+        crate::settings::save_settings_in(fixture.data.path(), &settings).unwrap();
+        let submit_path = fixture.root.join("invalid-submit.json");
+        fs::write(&submit_path, "private invalid file contents").unwrap();
+
+        let mut app = fixture.app();
+        app.handle_key(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE))
+            .unwrap();
+        let selected = app
+            .stack_catalog
+            .as_ref()
+            .unwrap()
+            .list()
+            .iter()
+            .position(|profile| profile.key.profile_id.as_str() == "local-chat")
+            .unwrap();
+        app.stack_catalog_state.select(Some(selected));
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+            .unwrap();
+        for character in submit_path.display().to_string().chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(app.status.contains("strict request contract"));
+        assert!(!app.status.contains("private invalid file contents"));
+        assert!(!app.status.contains(&submit_path.display().to_string()));
+        assert!(!app.log.iter().any(|line| {
+            line.contains("private invalid file contents")
+                || line.contains(&submit_path.display().to_string())
+        }));
+        assert!(app.coordinator_workbench.is_none());
+        assert!(app.coordinator_request_id.is_none());
     }
 
     #[test]

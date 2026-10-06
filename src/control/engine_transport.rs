@@ -37,7 +37,8 @@ use serde::{Deserialize, Serialize};
 
 use super::runtime::OperationContext;
 
-const SOCKET_NAME: &str = "engine.sock";
+pub const ENGINE_SOCKET_NAME: &str = "engine.sock";
+const SOCKET_NAME: &str = ENGINE_SOCKET_NAME;
 const MAX_DIRECTION_BYTES: u64 = 16 * 1024 * 1024;
 const BUFFER_BYTES: usize = 64 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(25);

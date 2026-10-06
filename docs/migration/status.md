@@ -20,10 +20,10 @@ CAR-220 Phase 9, and CAR-221 Phase 10.
 | 2. Independent operation | In progress | Imported child builds, tests, profile lists, and explicit old-root lists pass; CI added locally, pre-push validation pending. |
 | 3. Runtime cutover | In progress | Bounded L2M2 GPU-mode pilot, real branch L3MS language request, and a Qwen Image 2.1 branch-script generation passed; original ComfyUI service was restored after language use. L3DS now fails closed instead of synthesizing answers, but real decision weights and full deployed-path reconciliation remain pending. |
 | 4. Shared contracts | In development | Read-only catalog and offline `l3ms --list stack`, layered settings, existing-store job metadata, and typed lane request/result validation are on the branch. Adapter contracts and full compatibility/live release gates remain; release stays gated by Phase 3. |
-| 5. Runtime adapters | In development | Concrete bounded language execution, ComfyUI job handling, local decision supervision, Breeze speech execution/artifact validation, and inert generic media command recipes pass fixtures. Lifecycle/admission adapters, GPU release verification, real TTS/decision pilots, and a user-facing switch remain pending; no public inference action is enabled. |
-| 6. Local coordinator | In development | Durable queue, ownership locks, v1 control/v2 result-page IPC, bounded serial owner and Linux CLI status/cancel/results exist offline. Lifecycle reconciliation, native event production/dispatch, installation, server-pushed streaming, and cross-client inference remain pending. |
+| 5. Runtime adapters | In development | Concrete bounded language execution, ComfyUI job handling, CPU-local decision supervision, Breeze speech execution/artifact validation, and inert generic media recipes pass fixtures. Private language/Comfy Unix HTTP transport also passes native fixtures. General lifecycle/admission, GPU release, real TTS/decision pilots, and user-facing switching remain pending. |
+| 6. Local coordinator | In development | Durable queue, ownership locks, v1 control/v2 native result pages, one-shot CLI Submit and opt-in foreground CPU-local decision dispatch pass offline fixtures. Current CUDA profiles remain gated. General managed-engine/media dispatch, installation, server-pushed streaming and real cross-client acceptance remain pending. |
 | 7. HTTP ingress | Pending | Gateway to the same coordinator. |
-| 8. Unified workbench | In development | Read-only three-lane Stack Catalog tab and palette navigation share CLI toolkit-root resolution. Coordinated run/observe/cancel and task-form parity remain pending. |
+| 8. Unified workbench | In development | Three-lane Stack Catalog shares settings and has opt-in strict-file submit/observe/cancel with retained IDs and private native output. Full task-form parity and live managed routing remain pending. |
 | 9. Public site | In development | Local static site now has separate language, media/TTS, and decision views generated from native manifests; six generator/site checks pass. Visual/browser review and all publication gates remain pending. |
 | 10. Final acceptance | Pending | Live gates and old-path retirement review. |
 
@@ -303,3 +303,37 @@ live acceptance and publication remain incomplete. No goal-completion claim.
 - The opt-in fresh Nagi environment and multi-gigabyte model acquisition still
   await approval. No dependency environment or weights were acquired in this
   continuation; real local decision acceptance remains unsatisfied.
+
+### 2026-10-05 — foreground CPU dispatch and native client path
+
+Locked/offline all-targets verification passes 594 tests, with 1 ignored. The
+opt-in CPU loop has 21 focused daemon tests covering durable submit/lost replies,
+responsive status/cancel, result pages, timeout and active shutdown cleanup,
+output-quota preflight, GPU refusal and restart without replay. Explicit foreground
+startup reads a strict bounded private configuration and handles SIGINT/SIGTERM
+cooperatively. The normal control-only loop and standalone defaults are unchanged.
+See [foreground-coordinator.md](foreground-coordinator.md).
+
+One-shot CLI Submit uses a shared bounded nofollow reader and caller-owned IDs.
+Private language SSE and Comfy submission fixtures verify native HTTP over the
+selected Unix socket. Shared transactional result reassembly and multi-page
+private IPC reading preserve native fields and reject incomplete groups, stale
+cursors, wrong lanes and unavailable output. Output is not persisted or replayed.
+
+Strict denied-warning Clippy passes after narrowing managed-launch error storage,
+without lint suppressions. Managed engine integration is still unfinished.
+Keyboard-first strict-file submit/observe/cancel and the explicit reassembled-output
+CLI now pass fixtures; full native task forms remain pending. No
+model-serving manager unit, real engine/model, dependency environment or GPU was changed. A new
+browser availability check still returned no enabled apps or browsers, so actual
+site visual/mobile acceptance remains open. Full-port acceptance and publication
+are not complete.
+
+The subsequent [model-free manager namespace probe](private-engine-probe.md)
+disproved the proposed two-unit namespace-join topology on this installed user
+manager: declared join properties still left the bridge in the host namespace.
+Removing the join produced two genuinely isolated namespaces; a startup delay
+and manager-opened namespace descriptor did not correct joining. All probe units
+were generation-checked, stopped and collected. Managed launch is being reworked
+to one isolated service owning backend and bridge, with kernel checks retained.
+This is a discovered deployment gate, not real inference or GPU acceptance.

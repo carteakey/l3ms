@@ -106,6 +106,8 @@ pub struct ComfyAdapter {
     endpoint: String,
     api_key: Option<String>,
     owner: Arc<()>,
+    #[cfg(target_os = "linux")]
+    private_engine: Option<super::native_http::PinnedEngineSocket>,
 }
 impl ComfyAdapter {
     pub fn new(
@@ -127,7 +129,24 @@ impl ComfyAdapter {
             endpoint,
             api_key: api_key.map(str::to_owned),
             owner: Arc::new(()),
+            #[cfg(target_os = "linux")]
+            private_engine: None,
         })
+    }
+
+    /// Explicit private helper selection, not lifecycle/admission proof.
+    #[cfg(target_os = "linux")]
+    pub fn new_private_engine(
+        directory: &std::path::Path,
+        api_key: Option<&str>,
+        contract: ComfyContract,
+    ) -> Result<Self, ComfyFailure> {
+        let mut adapter = Self::new("http://127.0.0.1", api_key, contract)?;
+        adapter.private_engine = Some(
+            super::native_http::PinnedEngineSocket::open(directory)
+                .map_err(|_| no_dispatch(ComfyErrorKind::Configuration))?,
+        );
+        Ok(adapter)
     }
 
     pub fn prepare(
@@ -244,7 +263,7 @@ impl ComfyAdapter {
             .build()
             .map_err(|_| no_dispatch(ComfyErrorKind::Configuration))?;
         runtime.block_on(async {
-            let client = reqwest::Client::builder()
+            let builder = reqwest::Client::builder()
                 .retry(reqwest::retry::never())
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(context.remaining().min(Duration::from_secs(2)))
@@ -252,7 +271,15 @@ impl ComfyAdapter {
                 .default_headers(
                     auth_headers(self.api_key.as_deref())
                         .map_err(|_| no_dispatch(ComfyErrorKind::Configuration))?,
-                )
+                );
+            #[cfg(target_os = "linux")]
+            let builder = match &self.private_engine {
+                Some(socket) => socket
+                    .configure(builder)
+                    .map_err(|_| no_dispatch(ComfyErrorKind::Configuration))?,
+                None => builder,
+            };
+            let client = builder
                 .build()
                 .map_err(|_| no_dispatch(ComfyErrorKind::Configuration))?;
             let url = format!("{}{path}", self.endpoint);
@@ -569,6 +596,79 @@ mod tests {
     }
     fn reply(body: Value) -> (u16, String, Duration) {
         (200, body.to_string(), Duration::ZERO)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn private_socket_submission_keeps_owned_native_id_and_one_shot_semantics() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = directory
+            .path()
+            .join(super::super::engine_transport::ENGINE_SOCKET_NAME);
+        let listener = UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let adapter = ComfyAdapter::new_private_engine(
+            directory.path(),
+            None,
+            ComfyContract::CanonicalIdsAndAtomicScopedCancellation,
+        )
+        .unwrap();
+        let mut job = prepared(&adapter);
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "private submission not received");
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => panic!("private fixture accept failed"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut header = Vec::new();
+            let mut byte = [0];
+            while !header.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                header.push(byte[0]);
+                assert!(header.len() <= 16 * 1024);
+            }
+            let header = String::from_utf8(header).unwrap();
+            assert!(header.starts_with("POST /prompt HTTP/1.1\r\n"));
+            let length = header
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap();
+            assert!(length <= 1024 * 1024 + 256);
+            let mut body = vec![0; length];
+            stream.read_exact(&mut body).unwrap();
+            let payload: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(payload["prompt_id"], ID);
+            assert_eq!(payload["prompt"]["1"]["inputs"]["text"], "SENSITIVE_PROMPT");
+            let response = serde_json::json!({"prompt_id":ID}).to_string();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response).unwrap();
+        });
+        adapter.submit(&mut job, &context()).unwrap();
+        assert!(job.submission_attempted());
+        assert_eq!(
+            adapter.submit(&mut job, &context()).unwrap_err(),
+            no_dispatch(ComfyErrorKind::AlreadyAttempted)
+        );
+        server.join().unwrap();
     }
 
     #[test]

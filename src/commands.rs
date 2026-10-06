@@ -76,6 +76,9 @@ pub enum CommandId {
     StackCatalogSelectPrevious,
     StackCatalogSelectNext,
     StackCatalogRefresh,
+    StackCatalogSubmit,
+    StackCatalogObserve,
+    StackCatalogCancel,
     ParamBuilderToggleFocus,
     ParamBuilderNextParam,
     ParamBuilderPrevParam,
@@ -173,7 +176,7 @@ pub enum CommandId {
 impl CommandId {
     /// Every command identifier. Kept in declaration order for completeness
     /// checks and integrations which want to validate their dispatch table.
-    pub const ALL: [Self; 100] = [
+    pub const ALL: [Self; 103] = [
         Self::Quit,
         Self::ShowHelp,
         Self::ShowPalette,
@@ -189,6 +192,9 @@ impl CommandId {
         Self::StackCatalogSelectPrevious,
         Self::StackCatalogSelectNext,
         Self::StackCatalogRefresh,
+        Self::StackCatalogSubmit,
+        Self::StackCatalogObserve,
+        Self::StackCatalogCancel,
         Self::ParamBuilderToggleFocus,
         Self::ParamBuilderNextParam,
         Self::ParamBuilderPrevParam,
@@ -294,6 +300,9 @@ impl CommandId {
             Self::StackCatalogSelectPrevious => "stack-catalog.select-previous",
             Self::StackCatalogSelectNext => "stack-catalog.select-next",
             Self::StackCatalogRefresh => "stack-catalog.refresh",
+            Self::StackCatalogSubmit => "stack-catalog.submit",
+            Self::StackCatalogObserve => "stack-catalog.observe",
+            Self::StackCatalogCancel => "stack-catalog.cancel",
             Self::ParamBuilderToggleFocus => "param-builder.toggle-focus",
             Self::ParamBuilderNextParam => "param-builder.next-param",
             Self::ParamBuilderPrevParam => "param-builder.prev-param",
@@ -659,6 +668,33 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Stack Catalog: refresh manifests",
         true,
         ["reload"]
+    ),
+    command!(
+        StackCatalogSubmit,
+        StackCatalog,
+        "s",
+        "Submit request file",
+        "Stack Catalog: submit one explicit request file",
+        true,
+        ["coordinator", "request", "run", "inference"]
+    ),
+    command!(
+        StackCatalogObserve,
+        StackCatalog,
+        "o",
+        "Observe request",
+        "Stack Catalog: query retained status and native results",
+        true,
+        ["coordinator", "status", "results", "native output"]
+    ),
+    command!(
+        StackCatalogCancel,
+        StackCatalog,
+        "c",
+        "Cancel request",
+        "Stack Catalog: cancel a retained caller request ID",
+        true,
+        ["coordinator", "stop", "request"]
     ),
     command!(
         PreviousTab,

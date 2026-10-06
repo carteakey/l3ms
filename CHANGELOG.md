@@ -10,6 +10,22 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Add explicit foreground `--coordinator-cpu-daemon` startup from a strict,
+  private, bounded configuration file, with cooperative SIGINT/SIGTERM cleanup.
+  Only native profiles explicitly declaring CPU-local Nagi/Laya execution are
+  admitted; normal startup, CUDA profiles and standalone services are unchanged.
+- Connect opt-in serial CPU dispatch to durable acceptance, responsive private
+  status/cancel/result queries, quota-before-acknowledgment and bounded shutdown.
+  Lost acknowledgments and restart never replay inference.
+- Add one-shot `--request-submit` from a bounded strict native request envelope;
+  share the nofollow file reader between clients and preserve caller-owned IDs.
+- Add bounded transactional native result reassembly for clients, preserving
+  chat reasoning separately, canonical decision answers and relative media refs.
+- Add explicit `--request-output` with lane selection and bounded native page
+  assembly, plus Stack Catalog keyboard submit/observe/cancel actions with
+  retained caller IDs and a private output panel; no automatic inference replay.
+- Add explicitly selected private Unix HTTP transport to language and Comfy
+  adapters, checking socket replacement/ownership and refusing TCP/proxy fallback.
 - Add an explicit retained-intent retirement operation that freshly verifies
   stopped generation/cgroup state, deletes only the matching secure record and
   syncs the directory; failures retain metadata and distinguish uncertain durability.
@@ -18,7 +34,8 @@
   managed launch, admission/drain and GPU switching remain gated.
 - Add a bounded CPU-only local-decision worker with checked accepted routes,
   offline/CUDA-disabled execution, cancellation and typed cleanup outcomes.
-  Default profiles are unchanged; public daemon/CLI dispatch is not enabled.
+  Default profiles are unchanged; execution requires explicit opt-in foreground
+  startup with a native CPU profile and no-GPU binding.
 - Reserve result-output quota before execution so other jobs cannot consume a
   dispatching job's allowance; terminal results retain their actual quota use.
 - Explicitly disable HTTP client retry policies in language and Comfy adapters.

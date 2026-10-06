@@ -26,6 +26,7 @@ use crate::{
 const COORDINATOR_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_COORDINATOR_RESPONSE_BYTES: usize = 2 * 1024;
 const MAX_COORDINATOR_RESULTS_ENVELOPE_BYTES: usize = 4 * 1024;
+const MAX_COORDINATOR_NATIVE_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -34,7 +35,7 @@ const MAX_COORDINATOR_RESULTS_ENVELOPE_BYTES: usize = 4 * 1024;
     about = "L3MS launcher (TUI + interactive model and bench CLI)",
     group(
         ArgGroup::new("action")
-            .args(["run", "bench", "list", "quickstart", "settings", "export_profile", "import_profile", "compare_results", "coordinator_status", "coordinator_cancel", "request_results"])
+            .args(["run", "bench", "list", "quickstart", "settings", "export_profile", "import_profile", "compare_results", "coordinator_status", "coordinator_cancel", "request_results", "request_submit", "request_output", "coordinator_cpu_daemon"])
             .multiple(false)
     )
 )]
@@ -93,6 +94,22 @@ struct Cli {
     #[arg(long, value_name = "ID")]
     request_results: Option<String>,
 
+    /// Submit one strict v1 request envelope from a bounded JSON file.
+    #[arg(long, value_name = "PATH")]
+    request_submit: Option<PathBuf>,
+
+    /// Read currently retained and reassembled native output for one request.
+    #[arg(long, value_name = "ID")]
+    request_output: Option<String>,
+
+    /// Native output lane required by --request-output.
+    #[arg(long, value_enum, value_name = "LANE")]
+    request_lane: Option<RequestOutputLane>,
+
+    /// Run an explicitly configured foreground CPU-local coordinator session.
+    #[arg(long, value_name = "CONFIG")]
+    coordinator_cpu_daemon: Option<PathBuf>,
+
     /// Results cursor to read after; defaults to 0 and requires --request-results.
     #[arg(long, value_name = "CURSOR")]
     after_cursor: Option<u64>,
@@ -120,6 +137,23 @@ enum ListMode {
     All,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum RequestOutputLane {
+    Language,
+    Media,
+    Decisions,
+}
+
+impl RequestOutputLane {
+    fn lane(self) -> crate::control::catalog::Lane {
+        match self {
+            Self::Language => crate::control::catalog::Lane::Language,
+            Self::Media => crate::control::catalog::Lane::Media,
+            Self::Decisions => crate::control::catalog::Lane::Decisions,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct CommandSpec {
     program: OsString,
@@ -132,9 +166,16 @@ pub fn run() -> Result<u8> {
 }
 
 fn dispatch(cli: Cli) -> Result<u8> {
+    if let Some(config_path) = coordinator_cpu_daemon_action(&cli)? {
+        return run_cpu_coordinator_action(config_path);
+    }
+    let output_spec = coordinator_output_spec(&cli)?;
+
     let configured_socket_dir = if (cli.coordinator_status.is_some()
         || cli.coordinator_cancel.is_some()
-        || cli.request_results.is_some())
+        || cli.request_results.is_some()
+        || cli.request_submit.is_some()
+        || cli.request_output.is_some())
         && cli.coordinator_socket_dir.is_none()
         && cli.extra.is_none()
     {
@@ -142,6 +183,13 @@ fn dispatch(cli: Cli) -> Result<u8> {
     } else {
         None
     };
+    if let Some((request_id, lane)) = output_spec {
+        let socket_directory = coordinator_socket_directory(&cli, configured_socket_dir)?;
+        let consumer = coordinator_native_results_exchange(&socket_directory, request_id, lane)?;
+        let json = coordinator_native_output_json(request_id, &consumer)?;
+        println!("{json}");
+        return Ok(0);
+    }
     if let Some((request, socket_directory)) = coordinator_action(&cli, configured_socket_dir)? {
         let response = coordinator_exchange(&socket_directory, request)?;
         let json = coordinator_response_json(&response)?;
@@ -225,6 +273,84 @@ fn dispatch(cli: Cli) -> Result<u8> {
     Ok(0)
 }
 
+fn coordinator_cpu_daemon_action(cli: &Cli) -> Result<Option<&Path>> {
+    let Some(config_path) = cli.coordinator_cpu_daemon.as_deref() else {
+        return Ok(None);
+    };
+    if cli.coordinator_socket_dir.is_some()
+        || cli.coordinator_status.is_some()
+        || cli.coordinator_cancel.is_some()
+        || cli.request_results.is_some()
+        || cli.request_submit.is_some()
+        || cli.request_output.is_some()
+        || cli.request_lane.is_some()
+        || cli.after_cursor.is_some()
+        || cli.result_page_bytes.is_some()
+        || cli.extra.is_some()
+    {
+        bail!("--coordinator-cpu-daemon cannot be combined with other coordinator options");
+    }
+    Ok(Some(config_path))
+}
+
+fn coordinator_output_spec(cli: &Cli) -> Result<Option<(&str, crate::control::catalog::Lane)>> {
+    match (cli.request_output.as_deref(), cli.request_lane) {
+        (None, None) => Ok(None),
+        (None, Some(_)) => bail!("--request-lane requires --request-output"),
+        (Some(_), None) => bail!("--request-output requires --request-lane"),
+        (Some(request_id), Some(lane)) => {
+            if cli.coordinator_status.is_some()
+                || cli.coordinator_cancel.is_some()
+                || cli.request_results.is_some()
+                || cli.request_submit.is_some()
+            {
+                bail!("--request-output must be the only coordinator operation");
+            }
+            if cli.after_cursor.is_some() || cli.result_page_bytes.is_some() {
+                bail!("result cursors and page budgets cannot be used with --request-output");
+            }
+            if cli.extra.is_some() {
+                bail!("--extra cannot be used with coordinator operations");
+            }
+            Ok(Some((request_id, lane.lane())))
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_cpu_coordinator_action(config_path: &Path) -> Result<u8> {
+    let report = run_cpu_coordinator(config_path)?;
+    println!("{}", cpu_coordinator_report_json(report));
+    Ok(u8::from(
+        report.stopped == crate::control::daemon::StopReason::WorkerUncertain,
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_cpu_coordinator_action(_: &Path) -> Result<u8> {
+    bail!("CPU coordinator is supported only on Linux");
+}
+
+#[cfg(target_os = "linux")]
+fn run_cpu_coordinator(config_path: &Path) -> Result<crate::control::daemon::RunReport> {
+    crate::control::coordinator_launch::run(config_path)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))
+}
+
+#[cfg(target_os = "linux")]
+fn cpu_coordinator_report_json(report: crate::control::daemon::RunReport) -> String {
+    let stopped = match report.stopped {
+        crate::control::daemon::StopReason::Cancelled => "cancelled",
+        crate::control::daemon::StopReason::Deadline => "deadline",
+        crate::control::daemon::StopReason::ConnectionLimit => "connection_limit",
+        crate::control::daemon::StopReason::WorkerUncertain => "worker_uncertain",
+    };
+    format!(
+        "{{\"completed_exchanges\":{},\"failed_connections\":{},\"stopped\":\"{stopped}\"}}",
+        report.completed_exchanges, report.failed_connections
+    )
+}
+
 fn coordinator_action(
     cli: &Cli,
     configured_socket_dir: Option<PathBuf>,
@@ -237,6 +363,7 @@ fn coordinator_action(
         cli.coordinator_status.is_some(),
         cli.coordinator_cancel.is_some(),
         cli.request_results.is_some(),
+        cli.request_submit.is_some(),
     ]
     .into_iter()
     .filter(|present| *present)
@@ -248,17 +375,19 @@ fn coordinator_action(
         cli.coordinator_status.as_deref(),
         cli.coordinator_cancel.as_deref(),
         cli.request_results.as_deref(),
+        cli.request_submit.as_deref(),
     ) {
-        (Some(request_id), None, None) => Some((request_id.to_owned(), false)),
-        (None, Some(request_id), None) => Some((request_id.to_owned(), false)),
-        (None, None, Some(request_id)) => Some((request_id.to_owned(), true)),
-        (None, None, None) => None,
+        (Some(request_id), None, None, None) => Some(ParsedCoordinatorAction::Status(request_id)),
+        (None, Some(request_id), None, None) => Some(ParsedCoordinatorAction::Cancel(request_id)),
+        (None, None, Some(request_id), None) => Some(ParsedCoordinatorAction::Results(request_id)),
+        (None, None, None, Some(path)) => Some(ParsedCoordinatorAction::Submit(path)),
+        (None, None, None, None) => None,
         _ => bail!("choose only one coordinator operation"),
     };
 
-    let Some((request_id, is_results)) = action else {
+    let Some(action) = action else {
         if cli.coordinator_socket_dir.is_some() {
-            bail!("--coordinator-socket-dir requires --coordinator-status, --coordinator-cancel or --request-results");
+            bail!("--coordinator-socket-dir requires a coordinator operation");
         }
         return Ok(None);
     };
@@ -266,39 +395,74 @@ fn coordinator_action(
     if cli.extra.is_some() {
         bail!("--extra cannot be used with coordinator operations");
     }
-    let socket_directory = cli
-        .coordinator_socket_dir
+    let socket_directory = coordinator_socket_directory(cli, configured_socket_dir)?;
+    let request = match action {
+        ParsedCoordinatorAction::Status(request_id) => crate::control::ipc::RequestEnvelope::v1(
+            crate::control::ipc::WireRequestMessage::Status {
+                request_id: request_id.to_owned(),
+            },
+        ),
+        ParsedCoordinatorAction::Cancel(request_id) => crate::control::ipc::RequestEnvelope::v1(
+            crate::control::ipc::WireRequestMessage::Cancel {
+                request_id: request_id.to_owned(),
+            },
+        ),
+        ParsedCoordinatorAction::Results(request_id) => {
+            let byte_budget = cli
+                .result_page_bytes
+                .unwrap_or(crate::control::result_buffer::MAX_PAGE_BYTES as u32);
+            if !(crate::control::result_buffer::MIN_PAGE_BYTES as u32
+                ..=crate::control::result_buffer::MAX_PAGE_BYTES as u32)
+                .contains(&byte_budget)
+            {
+                bail!("--result-page-bytes must be between 1024 and 131072");
+            }
+            crate::control::ipc::RequestEnvelope::v2_results(
+                request_id,
+                cli.after_cursor.unwrap_or(0),
+                byte_budget,
+            )
+        }
+        ParsedCoordinatorAction::Submit(path) => read_submit_envelope(path)?,
+    };
+    Ok(Some((request, socket_directory)))
+}
+
+fn coordinator_socket_directory(
+    cli: &Cli,
+    configured_socket_dir: Option<PathBuf>,
+) -> Result<PathBuf> {
+    cli.coordinator_socket_dir
         .clone()
         .or(configured_socket_dir)
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "coordinator operations require --coordinator-socket-dir or a configured coordinator socket directory"
             )
-        })?;
-    let request = if is_results {
-        let byte_budget = cli
-            .result_page_bytes
-            .unwrap_or(crate::control::result_buffer::MAX_PAGE_BYTES as u32);
-        if !(crate::control::result_buffer::MIN_PAGE_BYTES as u32
-            ..=crate::control::result_buffer::MAX_PAGE_BYTES as u32)
-            .contains(&byte_budget)
-        {
-            bail!("--result-page-bytes must be between 1024 and 131072");
-        }
-        crate::control::ipc::RequestEnvelope::v2_results(
-            request_id,
-            cli.after_cursor.unwrap_or(0),
-            byte_budget,
-        )
-    } else {
-        let message = if cli.coordinator_status.is_some() {
-            crate::control::ipc::WireRequestMessage::Status { request_id }
-        } else {
-            crate::control::ipc::WireRequestMessage::Cancel { request_id }
-        };
-        crate::control::ipc::RequestEnvelope::v1(message)
-    };
-    Ok(Some((request, socket_directory)))
+        })
+}
+
+enum ParsedCoordinatorAction<'a> {
+    Status(&'a str),
+    Cancel(&'a str),
+    Results(&'a str),
+    Submit(&'a Path),
+}
+
+fn read_submit_envelope(path: &Path) -> Result<crate::control::ipc::RequestEnvelope> {
+    let root = repository_root().map_err(|_| anyhow::anyhow!("submit request file is invalid"))?;
+    let data_root = crate::state_store::data_root()
+        .map_err(|_| anyhow::anyhow!("submit request file is invalid"))?;
+    let resolved = load_current_stack_settings_in(&root, &data_root)
+        .map_err(|_| anyhow::anyhow!("submit request file is invalid"))?;
+    let catalog = Catalog::load_from_roots(
+        &root,
+        &resolved.media_toolkit_root,
+        &resolved.decisions_toolkit_root,
+    )
+    .map_err(|_| anyhow::anyhow!("submit request file is invalid"))?;
+    crate::control::submission_file::read(path, &catalog)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
 
 fn configured_coordinator_socket_dir() -> Result<Option<PathBuf>> {
@@ -334,6 +498,97 @@ fn coordinator_exchange(
         let _ = (socket_directory, request);
         bail!("coordinator IPC is supported only on Linux");
     }
+}
+
+#[cfg(target_os = "linux")]
+fn coordinator_native_results_exchange(
+    socket_directory: &Path,
+    request_id: &str,
+    lane: crate::control::catalog::Lane,
+) -> Result<crate::control::result_consumer::ResultConsumer> {
+    let never_cancel = crate::control::runtime::NeverCancel;
+    let context = crate::control::runtime::OperationContext::new(
+        Instant::now() + COORDINATOR_TIMEOUT,
+        &never_cancel,
+    );
+    crate::control::client::read_native_results(socket_directory, request_id, lane, &context)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn coordinator_native_results_exchange(
+    _: &Path,
+    _: &str,
+    _: crate::control::catalog::Lane,
+) -> Result<crate::control::result_consumer::ResultConsumer> {
+    bail!("coordinator IPC is supported only on Linux");
+}
+
+#[derive(serde::Serialize)]
+struct NativeOutputResponse<'a> {
+    request_id: &'a str,
+    cursor: u64,
+    latest_cursor: u64,
+    terminal: Option<crate::control::result_buffer::ResultTerminal>,
+    complete: bool,
+    output: &'a crate::control::result_consumer::NativeOutput,
+}
+
+struct BoundedJsonWriter {
+    bytes: Vec<u8>,
+    limit: usize,
+    exceeded: bool,
+}
+
+impl BoundedJsonWriter {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            limit,
+            exceeded: false,
+        }
+    }
+}
+
+impl Write for BoundedJsonWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
+            self.exceeded = true;
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "bounded coordinator output",
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn coordinator_native_output_json(
+    request_id: &str,
+    consumer: &crate::control::result_consumer::ResultConsumer,
+) -> Result<String> {
+    let response = NativeOutputResponse {
+        request_id,
+        cursor: consumer.cursor(),
+        latest_cursor: consumer.latest_cursor(),
+        terminal: consumer.terminal(),
+        complete: consumer.is_complete(),
+        output: consumer.output(),
+    };
+    let mut writer = BoundedJsonWriter::new(MAX_COORDINATOR_NATIVE_OUTPUT_BYTES);
+    if serde_json::to_writer(&mut writer, &response).is_err() {
+        if writer.exceeded {
+            bail!("coordinator native output exceeded the size limit");
+        }
+        bail!("coordinator native output could not be encoded");
+    }
+    String::from_utf8(writer.bytes)
+        .map_err(|_| anyhow::anyhow!("coordinator native output could not be encoded"))
 }
 
 fn coordinator_response_json(response: &crate::control::ipc::ResponseMessage) -> Result<String> {
@@ -880,6 +1135,65 @@ mod tests {
         ])
         .is_err());
 
+        let cli = Cli::try_parse_from(["l3ms", "--request-submit", "request.json"]).unwrap();
+        assert_eq!(
+            cli.request_submit.as_deref(),
+            Some(Path::new("request.json"))
+        );
+        assert!(Cli::try_parse_from([
+            "l3ms",
+            "--request-submit",
+            "request.json",
+            "--request-results",
+            "request-1",
+        ])
+        .is_err());
+        let cli = Cli::try_parse_from(["l3ms", "--coordinator-cpu-daemon", "daemon.json"]).unwrap();
+        assert_eq!(
+            cli.coordinator_cpu_daemon.as_deref(),
+            Some(Path::new("daemon.json"))
+        );
+        assert!(Cli::try_parse_from([
+            "l3ms",
+            "--coordinator-cpu-daemon",
+            "daemon.json",
+            "--request-submit",
+            "request.json",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "l3ms",
+            "--coordinator-cpu-daemon",
+            "daemon.json",
+            "--coordinator-status",
+            "request-1",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "l3ms",
+            "--coordinator-cpu-daemon",
+            "daemon.json",
+            "--request-results",
+            "request-1",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "l3ms",
+            "--coordinator-cpu-daemon",
+            "daemon.json",
+            "--list",
+            "stack",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "l3ms",
+            "--request-submit",
+            "request.json",
+            "--list",
+            "stack",
+        ])
+        .is_err());
+
         let cli = Cli::try_parse_from([
             "l3ms",
             "--request-results",
@@ -906,6 +1220,8 @@ mod tests {
         )
         .is_err());
         let cli = Cli::try_parse_from(["l3ms", "--coordinator-status", "request-1"]).unwrap();
+        assert!(coordinator_action(&cli, None).is_err());
+        let cli = Cli::try_parse_from(["l3ms", "--request-submit", "request.json"]).unwrap();
         assert!(coordinator_action(&cli, None).is_err());
         assert!(Cli::try_parse_from([
             "l3ms",
@@ -1088,6 +1404,526 @@ mod tests {
                 byte_budget: 2048,
             } if request_id == "request-5"
         ));
+    }
+
+    #[test]
+    fn request_output_requires_lane_and_rejects_modifiers() {
+        let cli = Cli::try_parse_from([
+            "l3ms",
+            "--request-output",
+            "caller:output-1",
+            "--request-lane",
+            "language",
+        ])
+        .unwrap();
+        assert_eq!(
+            coordinator_output_spec(&cli).unwrap(),
+            Some(("caller:output-1", crate::control::catalog::Lane::Language))
+        );
+        assert!(Cli::try_parse_from([
+            "l3ms",
+            "--request-output",
+            "caller:output-1",
+            "--request-lane",
+            "unknown",
+        ])
+        .is_err());
+
+        let lane_without_output = Cli::try_parse_from(["l3ms", "--request-lane", "media"]).unwrap();
+        assert!(coordinator_output_spec(&lane_without_output).is_err());
+        let output_without_lane =
+            Cli::try_parse_from(["l3ms", "--request-output", "caller:output-1"]).unwrap();
+        assert!(coordinator_output_spec(&output_without_lane).is_err());
+
+        for args in [
+            vec![
+                "l3ms",
+                "--request-output",
+                "caller:output-1",
+                "--request-lane",
+                "decisions",
+                "--after-cursor",
+                "4",
+            ],
+            vec![
+                "l3ms",
+                "--request-output",
+                "caller:output-1",
+                "--request-lane",
+                "media",
+                "--result-page-bytes",
+                "4096",
+            ],
+            vec![
+                "l3ms",
+                "--request-output",
+                "caller:output-1",
+                "--request-lane",
+                "language",
+                "--extra",
+                "",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(coordinator_output_spec(&cli).is_err());
+        }
+
+        assert!(Cli::try_parse_from([
+            "l3ms",
+            "--request-output",
+            "caller:output-1",
+            "--request-lane",
+            "language",
+            "--coordinator-status",
+            "caller:status-1",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "l3ms",
+            "--request-output",
+            "caller:output-1",
+            "--request-lane",
+            "language",
+            "unexpected",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn request_output_socket_directory_uses_explicit_then_shared_config() {
+        let shared = PathBuf::from("/private/shared-coordinator");
+        let cli = Cli::try_parse_from([
+            "l3ms",
+            "--request-output",
+            "caller:output-1",
+            "--request-lane",
+            "language",
+        ])
+        .unwrap();
+        assert_eq!(
+            coordinator_socket_directory(&cli, Some(shared.clone())).unwrap(),
+            shared
+        );
+        let error = coordinator_socket_directory(&cli, None).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("configured coordinator socket directory"));
+        assert!(!error.to_string().contains("caller:output-1"));
+        assert!(!error.to_string().contains("/private"));
+
+        let explicit = PathBuf::from("/private/explicit-coordinator");
+        let cli = Cli::try_parse_from([
+            "l3ms",
+            "--request-output",
+            "caller:output-2",
+            "--request-lane",
+            "decisions",
+            "--coordinator-socket-dir",
+            explicit.to_str().unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(
+            coordinator_socket_directory(&cli, Some(shared)).unwrap(),
+            explicit
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cpu_coordinator_launcher_rejects_modifiers_and_maps_fixed_errors() {
+        let normal = Cli::try_parse_from(["l3ms"]).unwrap();
+        assert!(coordinator_cpu_daemon_action(&normal).unwrap().is_none());
+
+        let config = Path::new("/private/daemon-secret.json");
+        let cli =
+            Cli::try_parse_from(["l3ms", "--coordinator-cpu-daemon", config.to_str().unwrap()])
+                .unwrap();
+        assert_eq!(coordinator_cpu_daemon_action(&cli).unwrap(), Some(config));
+
+        for args in [
+            vec![
+                "l3ms",
+                "--coordinator-cpu-daemon",
+                "/private/daemon.json",
+                "--coordinator-socket-dir",
+                "/private/socket",
+            ],
+            vec![
+                "l3ms",
+                "--coordinator-cpu-daemon",
+                "/private/daemon.json",
+                "--after-cursor",
+                "1",
+            ],
+            vec![
+                "l3ms",
+                "--coordinator-cpu-daemon",
+                "/private/daemon.json",
+                "--result-page-bytes",
+                "2048",
+            ],
+            vec![
+                "l3ms",
+                "--coordinator-cpu-daemon",
+                "/private/daemon.json",
+                "--extra",
+                "",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(coordinator_cpu_daemon_action(&cli).is_err());
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("secret-config.json");
+        let error = run_cpu_coordinator(&missing).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("CPU coordinator configuration is unavailable"));
+        assert!(!error.to_string().contains(missing.to_str().unwrap()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cpu_coordinator_report_contains_only_compact_counts_and_stop_reason() {
+        let report = crate::control::daemon::RunReport {
+            completed_exchanges: 7,
+            failed_connections: 2,
+            stopped: crate::control::daemon::StopReason::Deadline,
+        };
+        assert_eq!(
+            cpu_coordinator_report_json(report),
+            r#"{"completed_exchanges":7,"failed_connections":2,"stopped":"deadline"}"#
+        );
+    }
+
+    fn valid_submit_envelope() -> crate::control::ipc::RequestEnvelope {
+        use crate::control::ipc::{
+            RequestEnvelope, WireChatRole, WireChatTurn, WireInferenceRequest, WireRequestMessage,
+        };
+
+        RequestEnvelope::v1(WireRequestMessage::Submit {
+            request_id: "caller:cli-submit-1".into(),
+            timeout_ms: 15_000,
+            request: WireInferenceRequest::Language {
+                profile_id: "gemma-4-26b-qat-mtp".into(),
+                turns: vec![WireChatTurn {
+                    role: WireChatRole::User,
+                    content: "private submit prompt".into(),
+                }],
+                max_tokens: 32,
+            },
+        })
+    }
+
+    fn write_submit_envelope(path: &Path, envelope: &crate::control::ipc::RequestEnvelope) {
+        let bytes = serde_json::to_vec(envelope).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn submit_selection_resolves_explicit_or_shared_socket_and_preserves_envelope() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("submit.json");
+        write_submit_envelope(&file, &valid_submit_envelope());
+        let shared_socket = PathBuf::from("/run/user/1000/shared-l3ms");
+        let cli =
+            Cli::try_parse_from(["l3ms", "--request-submit", file.to_str().unwrap()]).unwrap();
+        let Some((request, directory)) =
+            coordinator_action(&cli, Some(shared_socket.clone())).unwrap()
+        else {
+            panic!("submit action should be present");
+        };
+        assert_eq!(directory, shared_socket);
+        assert_eq!(request.version, crate::control::ipc::PROTOCOL_VERSION);
+        let crate::control::ipc::WireRequestMessage::Submit {
+            request_id,
+            timeout_ms,
+            request:
+                crate::control::ipc::WireInferenceRequest::Language {
+                    profile_id,
+                    turns,
+                    max_tokens,
+                },
+        } = request.message
+        else {
+            panic!("submit envelope should be preserved");
+        };
+        assert!(request_id == "caller:cli-submit-1");
+        assert!(timeout_ms == 15_000);
+        assert!(profile_id == "gemma-4-26b-qat-mtp");
+        assert!(turns.len() == 1 && turns[0].content == "private submit prompt");
+        assert!(max_tokens == 32);
+
+        for args in [
+            vec![
+                "l3ms",
+                "--request-submit",
+                file.to_str().unwrap(),
+                "--after-cursor",
+                "1",
+                "--coordinator-socket-dir",
+                "/run/user/1000/explicit-l3ms",
+            ],
+            vec![
+                "l3ms",
+                "--request-submit",
+                file.to_str().unwrap(),
+                "--result-page-bytes",
+                "2048",
+                "--coordinator-socket-dir",
+                "/run/user/1000/explicit-l3ms",
+            ],
+            vec![
+                "l3ms",
+                "--request-submit",
+                file.to_str().unwrap(),
+                "--extra",
+                "",
+                "--coordinator-socket-dir",
+                "/run/user/1000/explicit-l3ms",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(coordinator_action(&cli, None).is_err());
+        }
+
+        let explicit_socket = PathBuf::from("/run/user/1000/explicit-l3ms");
+        let cli = Cli::try_parse_from([
+            "l3ms",
+            "--request-submit",
+            file.to_str().unwrap(),
+            "--coordinator-socket-dir",
+            explicit_socket.to_str().unwrap(),
+        ])
+        .unwrap();
+        let Some((_, directory)) =
+            coordinator_action(&cli, Some(PathBuf::from("/run/user/1000/shared-l3ms"))).unwrap()
+        else {
+            panic!("explicit submit action should be present");
+        };
+        assert_eq!(directory, explicit_socket);
+    }
+
+    #[test]
+    fn submit_rejects_invalid_version_operation_and_native_payload_before_connect() {
+        use crate::control::ipc::{RequestEnvelope, WireInferenceRequest, WireRequestMessage};
+
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("request.json");
+        let invalid_envelopes = [
+            RequestEnvelope {
+                version: crate::control::ipc::RESULTS_PROTOCOL_VERSION,
+                message: valid_submit_envelope().message,
+            },
+            RequestEnvelope::v1(WireRequestMessage::Status {
+                request_id: "caller:submit-status".into(),
+            }),
+            RequestEnvelope::v1(WireRequestMessage::Submit {
+                request_id: "caller:invalid-native".into(),
+                timeout_ms: 5_000,
+                request: WireInferenceRequest::Language {
+                    profile_id: "gemma-4-26b-qat-mtp".into(),
+                    turns: Vec::new(),
+                    max_tokens: 0,
+                },
+            }),
+        ];
+
+        for envelope in invalid_envelopes {
+            write_submit_envelope(&file, &envelope);
+            let cli = Cli::try_parse_from([
+                "l3ms",
+                "--request-submit",
+                file.to_str().unwrap(),
+                "--coordinator-socket-dir",
+                directory.path().to_str().unwrap(),
+            ])
+            .unwrap();
+            let error = dispatch(cli).unwrap_err();
+            assert!(error.to_string().contains("submit request file"));
+            assert!(!error.to_string().contains("private submit prompt"));
+            assert!(!directory.path().join("coordinator.sock").exists());
+        }
+
+        let invalid_role_shape = serde_json::json!({
+            "version": 1,
+            "message": {
+                "type": "submit",
+                "request_id": "caller:strict-json",
+                "timeout_ms": 5000,
+                "request": {
+                    "lane": "language",
+                    "profile_id": "gemma-4-26b-qat-mtp",
+                    "turns": [{ "role": "user", "content": "secret" }],
+                    "max_tokens": 16,
+                    "unknown": true
+                }
+            }
+        });
+        std::fs::write(&file, serde_json::to_vec(&invalid_role_shape).unwrap()).unwrap();
+        let cli = Cli::try_parse_from([
+            "l3ms",
+            "--request-submit",
+            file.to_str().unwrap(),
+            "--coordinator-socket-dir",
+            directory.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        let error = dispatch(cli).unwrap_err();
+        assert!(error.to_string().contains("submit request file is invalid"));
+        assert!(!error.to_string().contains("secret"));
+        assert!(!directory.path().join("coordinator.sock").exists());
+    }
+
+    #[test]
+    fn submit_file_must_be_regular_nonsymlink_and_bounded() {
+        use crate::control::ipc::MAX_FRAME_BYTES;
+
+        let directory = tempfile::tempdir().unwrap();
+        let regular = directory.path().join("regular.json");
+        write_submit_envelope(&regular, &valid_submit_envelope());
+        let oversized = directory.path().join("oversized.json");
+        std::fs::write(&oversized, vec![b'x'; MAX_FRAME_BYTES + 1]).unwrap();
+
+        let oversized_error = read_submit_envelope(&oversized).err().unwrap();
+        assert!(oversized_error
+            .to_string()
+            .contains("submit request file exceeds the size limit"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let symbolic = directory.path().join("symbolic.json");
+            symlink(&regular, &symbolic).unwrap();
+            assert_eq!(
+                read_submit_envelope(&symbolic).err().unwrap().to_string(),
+                "submit request file is unavailable or unsafe"
+            );
+
+            let fifo = directory.path().join("request.fifo");
+            let fifo_c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+            // SAFETY: fifo_c is a valid nul-terminated path and the FIFO lives
+            // inside this test's private temporary directory.
+            assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+            assert_eq!(
+                read_submit_envelope(&fifo).err().unwrap().to_string(),
+                "submit request file is unavailable or unsafe"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn submit_cli_delegates_exact_request_to_the_shared_client() {
+        use crate::control::ipc::{
+            AcceptedOperation, ClientRequest, RequestStatus, ResponseEnvelope, ResponseMessage,
+        };
+        use crate::control::requests::InferenceRequest;
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket_path = directory.path().join("coordinator.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let ClientRequest::Submit {
+                request_id,
+                request,
+                timeout,
+            } = crate::control::ipc::read_request(&mut stream).unwrap()
+            else {
+                panic!("server should receive a submit");
+            };
+            assert!(request_id == "caller:cli-submit-1");
+            assert!(timeout == std::time::Duration::from_millis(15_000));
+            let InferenceRequest::Chat {
+                turns, max_tokens, ..
+            } = request
+            else {
+                panic!("server should receive the language request");
+            };
+            assert!(turns.len() == 1 && turns[0].content == "private submit prompt");
+            assert!(max_tokens == 32);
+            crate::control::ipc::write_response(
+                &mut stream,
+                &ResponseEnvelope::v1(ResponseMessage::Accepted {
+                    request_id: "caller:cli-submit-1".into(),
+                    operation: AcceptedOperation::Submit,
+                    state: RequestStatus::Queued,
+                }),
+            )
+            .unwrap();
+        });
+
+        let file = directory.path().join("submit.json");
+        write_submit_envelope(&file, &valid_submit_envelope());
+        let cli = Cli::try_parse_from([
+            "l3ms",
+            "--request-submit",
+            file.to_str().unwrap(),
+            "--coordinator-socket-dir",
+            directory.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(dispatch(cli).unwrap(), 0);
+        server.join().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn submit_lost_ack_is_not_retried() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket_path = directory.path().join("coordinator.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = crate::control::ipc::read_request(&mut stream).unwrap();
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            drop(stream);
+            listener.set_nonblocking(true).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
+            let mut extra_connections = 0;
+            while std::time::Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        extra_connections += 1;
+                        drop(stream);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+            extra_connections
+        });
+
+        let file = directory.path().join("submit.json");
+        write_submit_envelope(&file, &valid_submit_envelope());
+        let cli = Cli::try_parse_from([
+            "l3ms",
+            "--request-submit",
+            file.to_str().unwrap(),
+            "--coordinator-socket-dir",
+            directory.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        let error = dispatch(cli).unwrap_err();
+        assert!(!error.to_string().contains("private submit prompt"));
+        assert!(!error.to_string().contains(file.to_str().unwrap()));
+        assert_eq!(server.join().unwrap(), 0);
     }
 
     #[test]
@@ -1283,6 +2119,131 @@ mod tests {
             page,
         });
         assert!(too_small_json.is_err());
+    }
+
+    #[test]
+    fn native_output_json_is_compact_escaped_and_preserves_completion_metadata() {
+        use crate::control::catalog::Lane;
+        use crate::control::result_buffer::{
+            ResultBuffer, ResultEvent, ResultTerminal, MAX_PAGE_BYTES,
+        };
+        use crate::control::result_consumer::{NativeOutput, ResultConsumer};
+
+        let request_id = "caller:native-output";
+        let mut buffer = ResultBuffer::new();
+        buffer.begin(request_id, Lane::Language).unwrap();
+        buffer
+            .append(
+                request_id,
+                ResultEvent::ChatContent("visible\ntext\u{1}".into()),
+            )
+            .unwrap();
+        buffer
+            .append(
+                request_id,
+                ResultEvent::ChatReasoning("kept separate".into()),
+            )
+            .unwrap();
+        buffer
+            .terminal(request_id, ResultTerminal::Succeeded)
+            .unwrap();
+
+        let page = buffer.page(request_id, 0, MAX_PAGE_BYTES).unwrap();
+        let mut consumer = ResultConsumer::new(request_id, Lane::Language).unwrap();
+        consumer.consume(&page).unwrap();
+        let json = coordinator_native_output_json(request_id, &consumer).unwrap();
+        assert!(!json.contains('\n'));
+        assert!(json.contains("visible\\ntext\\u0001"));
+        assert!(json.contains("\"terminal\":{\"status\":\"succeeded\"}"));
+        assert!(json.contains("\"complete\":true"));
+        assert!(json.contains("\"reasoning\":\"kept separate\""));
+        assert!(json.len() <= MAX_COORDINATOR_NATIVE_OUTPUT_BYTES);
+        assert!(!json.chars().any(char::is_control));
+        assert!(matches!(
+            consumer.output(),
+            NativeOutput::Language { content, reasoning }
+                if content == "visible\ntext\u{1}" && reasoning == "kept separate"
+        ));
+
+        let mut writer = BoundedJsonWriter::new(3);
+        assert!(writer.write_all(b"four").is_err());
+        assert!(writer.exceeded);
+        assert_eq!(writer.bytes, b"");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn request_output_cli_delegates_one_v2_read_and_prints_reassembled_native_output() {
+        use crate::control::catalog::Lane;
+        use crate::control::ipc::{
+            IncomingRequest, RequestStatus, ResponseEnvelope, ResponseMessage,
+        };
+        use crate::control::result_buffer::{
+            ResultBuffer, ResultEvent, ResultTerminal, MAX_PAGE_BYTES,
+        };
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket_path = directory.path().join("coordinator.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let IncomingRequest::Results(query) =
+                crate::control::ipc::read_incoming_request(&mut stream).unwrap()
+            else {
+                panic!("native output must only request results");
+            };
+            assert_eq!(query.request_id, "caller:native-output-cli");
+            assert_eq!(query.after_cursor, 0);
+            assert_eq!(query.byte_budget, MAX_PAGE_BYTES as u32);
+
+            let mut buffer = ResultBuffer::new();
+            buffer.begin(&query.request_id, Lane::Language).unwrap();
+            buffer
+                .append(
+                    &query.request_id,
+                    ResultEvent::ChatContent("cli result\nvisible".into()),
+                )
+                .unwrap();
+            buffer
+                .terminal(&query.request_id, ResultTerminal::Succeeded)
+                .unwrap();
+            let page = buffer
+                .page(
+                    &query.request_id,
+                    query.after_cursor,
+                    query.byte_budget as usize,
+                )
+                .unwrap();
+            crate::control::ipc::write_response(
+                &mut stream,
+                &ResponseEnvelope::v2_results(ResponseMessage::Results {
+                    request_id: query.request_id,
+                    after_cursor: query.after_cursor,
+                    byte_budget: query.byte_budget,
+                    state: RequestStatus::Succeeded,
+                    page,
+                }),
+            )
+            .unwrap();
+        });
+
+        let cli = Cli::try_parse_from([
+            "l3ms",
+            "--request-output",
+            "caller:native-output-cli",
+            "--request-lane",
+            "language",
+            "--coordinator-socket-dir",
+            directory.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(dispatch(cli).unwrap(), 0);
+        server.join().unwrap();
     }
 
     #[test]

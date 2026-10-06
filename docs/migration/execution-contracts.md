@@ -3,6 +3,42 @@
 These are branch-local implementation contracts, not a deployed coordinator or
 live acceptance record. See [status.md](status.md) for phase gates and evidence.
 
+## Explicit foreground CPU operation
+
+`--coordinator-cpu-daemon CONFIG` is the opt-in public path to the serial CPU
+decision loop, not a service installer or general engine switch. Its strict
+0600 single-link local JSON configuration supplies all private directories,
+standalone history exclusion, CPU runtime names and session/recovery bounds.
+The native catalog must explicitly declare an enabled CPU-local Nagi/Laya route;
+a CUDA profile's CPU fallback is not admitted as CPU. No directories,
+dependencies or models are created automatically, and stale endpoints are not
+adopted. Fresh socket/history files are part of the explicit daemon operation. SIGINT/SIGTERM
+request cooperative cleanup while the listener/host owner remains held through
+the bounded attempt. Unknown cleanup records interruption and closes admission.
+See [foreground-coordinator.md](foreground-coordinator.md) for operator setup.
+
+Submit clients share `submission_file::read`: bounded regular nofollow input,
+strict v1 Submit, native validation against refreshed caller catalog, exact
+caller ID, fixed errors and no IO beyond reading. The daemon remains the durable
+acceptance authority. A lost acknowledgment never authorizes client replay.
+
+`ResultConsumer` reconstructs from cursor zero transactionally under the 8 MiB
+serialized-event cap, with contiguous request-correlated cursors, selected-lane
+checks and ordered cross-page decision/media groups. Chat content/reasoning
+stay separate; decision JSON must be a canonical object; artifact references
+remain relative. A rejected page leaves state unchanged. The shared native
+reader performs at most 128 read-only exchanges under one absolute deadline,
+stopping at currently available output instead of automatically polling,
+retrying, submitting or starting engines. A running snapshot is not completion;
+unknown/expired output is not empty success.
+
+Language and Comfy adapters support explicitly selected private Unix HTTP.
+Their shared internal socket module pins the private directory and socket inode,
+owner and permissions, revalidates before client construction and disables
+proxy/TCP fallback. It does not prove the helper's engine namespace, lifecycle,
+admission or GPU release; the owning managed launch must establish those facts.
+Ordinary HTTP constructors and standalone endpoints are unchanged.
+
 ## Ownership and dispatch
 
 Shared stack settings now resolve optional `coordinator_socket_dir` and
@@ -72,11 +108,14 @@ and byte receipts are not native completion, async-job drain or GPU proof.
 The trusted coordinator must retain its original network namespace.
 
 Real isolated-child fixtures verify retained-FD handoff, loopback backend relay,
-early response, backpressure and post-dispatch uncertainty. No live engines or
-user-manager units were launched. A candidate manager launch uses `OpenFile`
-to open the coordinator namespace before service isolation; systemd documents
-manager-opened named descriptors, but actual launch/property/descriptor-name
-validation is not yet wired or accepted. See the
+early response, backpressure and post-dispatch uncertainty. No live engines were
+launched. Subsequent bounded model-free user-manager probes verified manager
+`OpenFile` handoff but disproved two-unit namespace joining on this host:
+declared join properties left the bridge in the host namespace. All probe units
+were generation-checked and stopped. The replacement is one isolated supervisor
+owning backend and bridge; its actual kernel isolation, descriptor names and
+lifecycle still require acceptance. See the
+[private-engine probe record](private-engine-probe.md) and the
 [systemd 262 service documentation](https://raw.githubusercontent.com/systemd/systemd/v262/man/systemd.service.xml).
 
 The manager's generation-matched stop acknowledgment now produces an opaque,

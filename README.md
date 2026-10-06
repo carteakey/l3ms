@@ -109,19 +109,27 @@ and `toolkits/l3ds`; layered settings can override them with
 `L3MS_HOST_SETTINGS_DIR` selects a host settings directory before user
 settings are applied.
 
-On Linux, observe or cancel a retained coordinator request using an explicitly
+On Linux, submit, observe or cancel a coordinator request using an explicitly
 configured private socket directory:
 
 ```bash
+l3ms --request-submit /path/to/request.json --coordinator-socket-dir /path/to/private/socket-dir
 l3ms --coordinator-status request-123 --coordinator-socket-dir /path/to/private/socket-dir
 l3ms --coordinator-cancel request-123 --coordinator-socket-dir /path/to/private/socket-dir
+l3ms --request-output request-123 --request-lane decisions --coordinator-socket-dir /path/to/private/socket-dir
 ```
 
 These commands use a three-second IPC deadline and return compact JSON. They do
-not start a daemon, submit inference, or fall back to a direct engine. A missing
+not start a daemon or fall back to a direct engine. Submit requires a strict
+native request file with a caller-owned ID; a lost reply means query that ID,
+not resubmit. A missing
 coordinator fails explicitly. Cancellation acceptance is not proof that active
 work has finished; query the same request ID for its terminal status. Service
-installation and coordinated inference remain gated by migration acceptance.
+installation and general GPU/media dispatch remain gated by migration acceptance.
+An opt-in foreground CPU coordinator and Stack Catalog keyboard actions (`s`
+submit file, `o` observe/output, `c` cancel) are described in the
+[foreground coordinator guide](docs/migration/foreground-coordinator.md).
+Native output is sensitive and should not enter shared logs.
 
 Show quick-start instructions without opening TUI:
 

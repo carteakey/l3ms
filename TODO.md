@@ -10,10 +10,12 @@ existing Linear migration issues rather than replacing their acceptance criteria
 
 ## Monorepo: next work
 
-Latest offline checkpoint: native results IPC/CLI and runtime-bound launch
-intents, verified private engine transport and bounded CPU worker on
-`feature/l3ms-monorepo`; 556 root tests passed,
+Latest offline checkpoint: opt-in CPU daemon dispatch and foreground launch,
+one-shot Submit, private native HTTP and shared result reassembly on
+`feature/l3ms-monorepo`; 594 root tests passed,
 1 ignored. This is offline implementation evidence, not live cutover acceptance.
+Strict denied-warning Clippy, formatting and whitespace checks pass. Managed
+engine supervisor/lifecycle integration is still unfinished.
 The repeat-run fixture `ETXTBSY` race is corrected with test-only fork/write
 serialization; production launch failures remain fail-closed without retries.
 See the [migration status](docs/migration/status.md),
@@ -53,7 +55,7 @@ See the [migration status](docs/migration/status.md),
 
 - [x] Build and fixture-test Linux private socket transport, peer UID checks,
   retained host/device locks, bounded IO, and single-exchange request IDs.
-  This is transport only; no installed daemon or inference dispatch yet.
+  No daemon is installed; CPU-local dispatch requires explicit foreground opt-in.
 - [x] Connect IPC submit/status/cancel to the durable queue with fixed rejection
   codes, persistence-before-acknowledgment, lost-ack reconnect tests, and active
   cancellation that retains reservations until cleanup is acknowledged.
@@ -74,16 +76,21 @@ See the [migration status](docs/migration/status.md),
   transition. Native executors must use this gate, not legacy `mark_running`.
   Bounded native result retention and v2 page queries are integrated with the
   internal daemon and shared client; reconnect/restart fixtures pass. Native
-  event production, explicit terminal retention and supervised dispatch remain.
-  CPU-only worker and restricted core admission are implemented and tested;
-  next dispatch slice: connect them to the opt-in daemon loop,
-  preserving responsive status/cancel/result polling. Require an explicit CPU
-  profile and no-GPU resource binding; current CUDA profiles stay gated. Never
-  reinterpret a configured CPU fallback as CPU admission.
+  event production and terminal retention are connected for CPU decisions;
+  general managed-engine/media dispatch remains pending.
+  CPU-only worker and restricted core admission are now connected to an opt-in
+  foreground daemon with responsive private status/cancel/result queries,
+  quota-before-acknowledgment, cancellation and bounded shutdown fixtures.
+  See [foreground setup](docs/migration/foreground-coordinator.md). Require an
+  explicit CPU profile and no-GPU binding; current CUDA profiles stay gated.
+  Never reinterpret a configured CPU fallback as CPU admission. General managed
+  engine/media dispatch and real-model CPU acceptance remain outstanding.
 - [ ] Integrate CLI and keyboard-first UI run/observe/cancel with the same
   coordinator, settings, routing, and request IDs; preserve standalone commands.
-  Linux CLI request status/cancel/results is implemented; submit, output
-  reassembly and keyboard-first coordinated UI actions remain.
+  Linux CLI request status/cancel/results and one-shot Submit are implemented.
+  Shared bounded output reassembly, explicit CLI output and keyboard-first
+  strict-file submit/observe/cancel UI pass fixtures. Full native task forms,
+  managed engine/media routing and live acceptance remain unfinished.
 - [ ] Add HTTP ingress to that coordinator only after local operation is proven;
   verify authentication and cancellation/reconnect behavior across clients.
 

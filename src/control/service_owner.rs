@@ -28,11 +28,11 @@ use super::service_intents::{
 pub enum OwnerStartError {
     Preparation(ManagedServiceErrorKind),
     Persistence {
-        intent: ServiceIntentRecord,
+        intent: Box<ServiceIntentRecord>,
         kind: ServiceIntentStoreError,
     },
     NotDispatched {
-        intent: ServiceIntentRecord,
+        intent: Box<ServiceIntentRecord>,
         kind: ManagedServiceErrorKind,
     },
     Dispatch(StartFailure),
@@ -42,7 +42,9 @@ impl OwnerStartError {
     pub fn intent_record(&self) -> Option<&ServiceIntentRecord> {
         match self {
             Self::Preparation(_) => None,
-            Self::Persistence { intent, .. } | Self::NotDispatched { intent, .. } => Some(intent),
+            Self::Persistence { intent, .. } | Self::NotDispatched { intent, .. } => {
+                Some(intent.as_ref())
+            }
             Self::Dispatch(failure) => Some(failure.intent_record()),
         }
     }
@@ -296,6 +298,63 @@ impl<'host> ManagedRuntimeOwner<'host> {
         self.start_inner(Some(runtime_identity), recipe, stop_timeout, context)
     }
 
+    /// Start a fresh backend owner in a manager-created private network
+    /// namespace. This generated role is the only path that asks systemd for
+    /// PrivateNetwork=yes; generic and external runtime flows are unchanged.
+    pub fn start_private_network_engine(
+        &mut self,
+        runtime_identity: RuntimeIdentity,
+        recipe: LaunchRecipe,
+        stop_timeout: Duration,
+        context: &OperationContext<'_>,
+    ) -> Result<OwnedService, OwnerStartError> {
+        check_context(context).map_err(OwnerStartError::Preparation)?;
+        let prepared = self
+            .controller
+            .prepare_private_network_engine(runtime_identity, recipe, stop_timeout)
+            .map_err(OwnerStartError::Preparation)?;
+        self.persist_and_dispatch(prepared, context)
+    }
+
+    /// Start the typed byte-bridge only for a currently active owned engine
+    /// whose exact durable intent is present. The controller captures and
+    /// rechecks the manager generation/MainPID before persisting bridge
+    /// ownership; a later helper confirms the manager-opened namespace FDs
+    /// match actual kernel namespaces before readiness.
+    pub fn start_engine_namespace_bridge(
+        &mut self,
+        engine: &OwnedService,
+        recipe: LaunchRecipe,
+        stop_timeout: Duration,
+        context: &OperationContext<'_>,
+    ) -> Result<OwnedService, OwnerStartError> {
+        check_context(context).map_err(OwnerStartError::Preparation)?;
+        let records = self
+            .store
+            .list()
+            .map_err(|kind| OwnerStartError::Persistence {
+                intent: Box::new(engine.intent_record().clone()),
+                kind,
+            })?;
+        if !records
+            .iter()
+            .any(|record| record == engine.intent_record())
+        {
+            return Err(OwnerStartError::Preparation(
+                ManagedServiceErrorKind::OwnershipMismatch,
+            ));
+        }
+        let namespace = self
+            .controller
+            .capture_engine_namespace_identity(engine, context)
+            .map_err(OwnerStartError::Preparation)?;
+        let prepared = self
+            .controller
+            .prepare_engine_namespace_bridge(recipe, stop_timeout, namespace)
+            .map_err(OwnerStartError::Preparation)?;
+        self.persist_and_dispatch(prepared, context)
+    }
+
     fn start_inner(
         &mut self,
         runtime_identity: Option<RuntimeIdentity>,
@@ -312,14 +371,25 @@ impl<'host> ManagedRuntimeOwner<'host> {
             None => self.controller.prepare_start(recipe, stop_timeout),
         }
         .map_err(OwnerStartError::Preparation)?;
+        self.persist_and_dispatch(prepared, context)
+    }
+
+    fn persist_and_dispatch(
+        &mut self,
+        prepared: super::managed_service::PreparedServiceStart,
+        context: &OperationContext<'_>,
+    ) -> Result<OwnedService, OwnerStartError> {
         let intent = prepared.intent_record().clone();
         self.store
             .record(&intent)
             .map_err(|kind| OwnerStartError::Persistence {
-                intent: intent.clone(),
+                intent: Box::new(intent.clone()),
                 kind,
             })?;
-        check_context(context).map_err(|kind| OwnerStartError::NotDispatched { intent, kind })?;
+        check_context(context).map_err(|kind| OwnerStartError::NotDispatched {
+            intent: Box::new(intent),
+            kind,
+        })?;
         self.controller
             .dispatch(prepared, context)
             .map_err(OwnerStartError::Dispatch)
@@ -616,12 +686,15 @@ if 'show' in args:
     if args[-1] != data['unit']:
         print('LoadState=not-found')
         sys.exit(0)
-    print('LoadState=loaded\nActiveState=' + data.get('active', 'active') + '\nTransient=yes')
+    active = data.get('active', 'active')
+    main_pid = '1234' if active == 'active' else '0'
+    print('LoadState=loaded\nActiveState=' + active + '\nMainPID=' + main_pid + '\nTransient=yes')
     print('InvocationID=' + data.get('invocation', 'a' * 32))
     print('ControlGroup=' + data.get('cgroup', '/user.slice/' + data['unit']))
     print('FragmentPath=/run/user/1000/systemd/transient/' + data['unit'])
     print('Description=' + data['description'])
     print('Restart=no\nKillMode=control-group')
+    print('Type=exec\nPrivateNetwork=no\nJoinsNamespaceOf=')
     sys.exit(0)
 sys.exit(23)
 "#

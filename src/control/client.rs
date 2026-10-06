@@ -51,6 +51,55 @@ impl fmt::Display for ClientError {
 
 impl Error for ClientError {}
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeReadError {
+    Exchange(ClientError),
+    Assembly(super::result_consumer::ConsumeError),
+    Rejected,
+    PageLimit,
+}
+
+impl fmt::Display for NativeReadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "native coordinator results: {self:?}")
+    }
+}
+impl Error for NativeReadError {}
+
+/// Read and reassemble currently available output from cursor zero. Each page
+/// is a fresh read-only query, never an inference retry. The same absolute
+/// context bounds every exchange and all pages. Stops when caught up, even if
+/// the job is still running; callers explicitly poll again if desired. A
+/// hostile server cannot force more than 128 exchanges in this invocation.
+/// Unknown/expired, malformed groups, or a failure on a later page returns a
+/// fixed error, never a misleading partial success or a new Submit.
+pub fn read_native_results(
+    socket_directory: &Path,
+    request_id: &str,
+    lane: super::catalog::Lane,
+    context: &OperationContext<'_>,
+) -> Result<super::result_consumer::ResultConsumer, NativeReadError> {
+    let mut consumer = super::result_consumer::ResultConsumer::new(request_id, lane)
+        .map_err(NativeReadError::Assembly)?;
+    for _ in 0..128 {
+        let request = RequestEnvelope::v2_results(
+            request_id,
+            consumer.cursor(),
+            super::result_buffer::MAX_PAGE_BYTES as u32,
+        );
+        let response =
+            exchange(socket_directory, request, context).map_err(NativeReadError::Exchange)?;
+        let ResponseMessage::Results { page, .. } = response else {
+            return Err(NativeReadError::Rejected);
+        };
+        consumer.consume(&page).map_err(NativeReadError::Assembly)?;
+        if consumer.cursor() == consumer.latest_cursor() {
+            return Ok(consumer);
+        }
+    }
+    Err(NativeReadError::PageLimit)
+}
+
 #[derive(Clone, Copy)]
 enum Phase {
     Connect,
@@ -249,6 +298,153 @@ mod tests {
             .terminal(request_id, ResultTerminal::Succeeded)
             .unwrap();
         buffer.page(request_id, 0, MAX_PAGE_BYTES).unwrap()
+    }
+
+    #[test]
+    fn native_reader_reassembles_multiple_private_ipc_pages_without_submit() {
+        let directory = private_directory();
+        let listener = listener(directory.path());
+        listener.set_nonblocking(true).unwrap();
+        let text = "secret-native-output".repeat(10_000);
+        let expected = text.clone();
+        let server = thread::spawn(move || {
+            let mut buffer = ResultBuffer::new();
+            buffer.begin("native-read", Lane::Language).unwrap();
+            buffer
+                .append("native-read", ResultEvent::ChatContent(text))
+                .unwrap();
+            buffer
+                .terminal("native-read", ResultTerminal::Succeeded)
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut after = 0;
+            let mut count = 0;
+            loop {
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline, "result query not received");
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(_) => panic!("fixture accept failed"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let ipc::IncomingRequest::Results(query) =
+                    ipc::read_incoming_request(&mut stream).unwrap()
+                else {
+                    panic!("native reader attempted a mutating request")
+                };
+                assert_eq!(query.request_id, "native-read");
+                assert_eq!(query.after_cursor, after);
+                assert_eq!(query.byte_budget, MAX_PAGE_BYTES as u32);
+                let page = buffer
+                    .page(&query.request_id, after, MAX_PAGE_BYTES)
+                    .unwrap();
+                after = page.next_cursor;
+                let done = after == page.latest_cursor;
+                ipc::write_response(
+                    &mut stream,
+                    &ResponseEnvelope::v2_results(ResponseMessage::Results {
+                        request_id: query.request_id,
+                        state: RequestStatus::Succeeded,
+                        after_cursor: query.after_cursor,
+                        byte_budget: query.byte_budget,
+                        page,
+                    }),
+                )
+                .unwrap();
+                count += 1;
+                if done {
+                    return count;
+                }
+            }
+        });
+        let output = read_native_results(
+            directory.path(),
+            "native-read",
+            Lane::Language,
+            &context(&NeverCancel),
+        )
+        .unwrap();
+        assert!(output.is_complete());
+        let super::super::result_consumer::NativeOutput::Language { content, reasoning } =
+            output.output()
+        else {
+            panic!("wrong native lane")
+        };
+        assert_eq!(content, &expected);
+        assert!(reasoning.is_empty());
+        assert!(server.join().unwrap() > 1);
+    }
+
+    #[test]
+    fn native_reader_unknown_response_is_not_replayed_or_reported_as_empty_success() {
+        let directory = private_directory();
+        let listener = listener(directory.path());
+        listener.set_nonblocking(true).unwrap();
+        let server = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline);
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => panic!("fixture accept failed"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let ipc::IncomingRequest::Results(query) =
+                ipc::read_incoming_request(&mut stream).unwrap()
+            else {
+                panic!("unexpected mutation")
+            };
+            let page = ResultBuffer::new()
+                .page(&query.request_id, 0, MAX_PAGE_BYTES)
+                .unwrap();
+            ipc::write_response(
+                &mut stream,
+                &ResponseEnvelope::v2_results(ResponseMessage::Results {
+                    request_id: query.request_id,
+                    state: RequestStatus::NotFound,
+                    after_cursor: query.after_cursor,
+                    byte_budget: query.byte_budget,
+                    page,
+                }),
+            )
+            .unwrap();
+            // No retry follows this read-only but unavailable response.
+            drop(stream);
+            thread::sleep(Duration::from_millis(25));
+            assert!(
+                matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+            );
+        });
+        assert!(matches!(
+            read_native_results(
+                directory.path(),
+                "unknown",
+                Lane::Decisions,
+                &context(&NeverCancel)
+            ),
+            Err(NativeReadError::Assembly(
+                super::super::result_consumer::ConsumeError::Unknown
+            ))
+        ));
+        server.join().unwrap();
     }
 
     fn request(operation: ClientRequestKind) -> RequestEnvelope {

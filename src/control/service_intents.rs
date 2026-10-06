@@ -19,7 +19,10 @@ use std::path::{Component, Path};
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use super::managed_service::{runtime_identity_from_persisted_parts, ServiceIntentRecord};
+use super::managed_service::{
+    runtime_identity_from_persisted_parts, EngineNamespaceIdentity, ServiceIntentRecord,
+    ServiceLaunchRole,
+};
 use super::runtime::OperationContext;
 
 const MAX_INTENTS: usize = 128;
@@ -474,6 +477,25 @@ struct PersistedIntent {
         skip_serializing_if = "Option::is_none"
     )]
     runtime_name: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    launch_role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    engine_namespace: Option<PersistedEngineNamespace>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedEngineNamespace {
+    engine_unit_name: String,
+    engine_invocation_id: String,
+    engine_main_pid: u32,
+    engine_namespace_device: u64,
+    engine_namespace_inode: u64,
+    coordinator_pid: u32,
+    coordinator_uid: u32,
+    coordinator_start_time_ticks: u64,
+    coordinator_namespace_device: u64,
+    coordinator_namespace_inode: u64,
 }
 
 // Distinguish an absent schema-1 field from an explicitly supplied null.
@@ -487,12 +509,13 @@ where
 
 impl PersistedIntent {
     fn from_record(record: &ServiceIntentRecord) -> Result<Self, ServiceIntentStoreError> {
-        ServiceIntentRecord::from_persisted_parts_with_runtime(
+        ServiceIntentRecord::from_persisted_parts_with_role(
             record.coordinator_id().to_owned(),
             record.unit_name().to_owned(),
             record.launch_identity().to_owned(),
             record.stop_timeout_millis(),
             record.runtime_identity().cloned(),
+            record.launch_role().clone(),
         )
         .map_err(|_| ServiceIntentStoreError::InvalidRecord)?;
         let runtime_lane = record
@@ -501,32 +524,107 @@ impl PersistedIntent {
         let runtime_name = record
             .runtime_identity()
             .map(|identity| Some(identity.as_str().to_owned()));
+        let (launch_role, engine_namespace) = match record.launch_role() {
+            ServiceLaunchRole::Ordinary => (None, None),
+            ServiceLaunchRole::PrivateNetworkEngine => {
+                (Some("private_network_engine".to_owned()), None)
+            }
+            ServiceLaunchRole::EngineNamespaceBridge(engine) => {
+                let coordinator = engine.coordinator_identity();
+                (
+                    Some("engine_namespace_bridge".to_owned()),
+                    Some(PersistedEngineNamespace {
+                        engine_unit_name: engine.unit_name().to_owned(),
+                        engine_invocation_id: engine.invocation_id().to_owned(),
+                        engine_main_pid: engine.main_pid(),
+                        engine_namespace_device: engine.namespace_device(),
+                        engine_namespace_inode: engine.namespace_inode(),
+                        coordinator_pid: coordinator.pid(),
+                        coordinator_uid: coordinator.uid(),
+                        coordinator_start_time_ticks: coordinator.start_time_ticks(),
+                        coordinator_namespace_device: coordinator.network_namespace_device(),
+                        coordinator_namespace_inode: coordinator.network_namespace_inode(),
+                    }),
+                )
+            }
+        };
         Ok(Self {
-            schema: if runtime_lane.is_some() { 2 } else { 1 },
+            schema: if launch_role.is_some() {
+                3
+            } else if runtime_lane.is_some() {
+                2
+            } else {
+                1
+            },
             coordinator_id: record.coordinator_id().to_owned(),
             unit_name: record.unit_name().to_owned(),
             launch_identity: record.launch_identity().to_owned(),
             stop_timeout_millis: record.stop_timeout_millis(),
             runtime_lane,
             runtime_name,
+            launch_role,
+            engine_namespace,
         })
     }
 
     fn into_record(self) -> Result<ServiceIntentRecord, ServiceIntentStoreError> {
-        let runtime_identity = match (self.schema, self.runtime_lane, self.runtime_name) {
-            (1, None, None) => None,
-            (2, Some(Some(lane)), Some(Some(name))) => Some(
+        let Self {
+            schema,
+            coordinator_id,
+            unit_name,
+            launch_identity,
+            stop_timeout_millis,
+            runtime_lane,
+            runtime_name,
+            launch_role,
+            engine_namespace,
+        } = self;
+        let runtime_identity = match (schema, runtime_lane, runtime_name) {
+            (1, None, None) | (3, None, None) => None,
+            (2 | 3, Some(Some(lane)), Some(Some(name))) => Some(
                 runtime_identity_from_persisted_parts(&lane, name)
                     .map_err(|_| ServiceIntentStoreError::CorruptStore)?,
             ),
             _ => return Err(ServiceIntentStoreError::CorruptStore),
         };
-        ServiceIntentRecord::from_persisted_parts_with_runtime(
-            self.coordinator_id,
-            self.unit_name,
-            self.launch_identity,
-            self.stop_timeout_millis,
+        let launch_role = match (schema, launch_role.as_deref(), engine_namespace) {
+            (1 | 2, None, None) => ServiceLaunchRole::Ordinary,
+            (3, Some("private_network_engine"), None) => ServiceLaunchRole::PrivateNetworkEngine,
+            (3, Some("engine_namespace_bridge"), Some(engine)) => {
+                let coordinator =
+                    super::engine_transport::CoordinatorIdentityDescriptor::from_parts(
+                        engine.coordinator_pid,
+                        engine.coordinator_uid,
+                        engine.coordinator_start_time_ticks,
+                        engine.coordinator_namespace_device,
+                        engine.coordinator_namespace_inode,
+                    )
+                    .map_err(|_| ServiceIntentStoreError::CorruptStore)?;
+                let runtime_identity = runtime_identity
+                    .clone()
+                    .ok_or(ServiceIntentStoreError::CorruptStore)?;
+                ServiceLaunchRole::EngineNamespaceBridge(Box::new(
+                    EngineNamespaceIdentity::from_parts(
+                        engine.engine_unit_name,
+                        engine.engine_invocation_id,
+                        engine.engine_main_pid,
+                        engine.engine_namespace_device,
+                        engine.engine_namespace_inode,
+                        runtime_identity,
+                        coordinator,
+                    )
+                    .map_err(|_| ServiceIntentStoreError::CorruptStore)?,
+                ))
+            }
+            _ => return Err(ServiceIntentStoreError::CorruptStore),
+        };
+        ServiceIntentRecord::from_persisted_parts_with_role(
+            coordinator_id,
+            unit_name,
+            launch_identity,
+            stop_timeout_millis,
             runtime_identity,
+            launch_role,
         )
         .map_err(|_| ServiceIntentStoreError::CorruptStore)
     }

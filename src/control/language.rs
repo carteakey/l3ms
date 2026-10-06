@@ -71,6 +71,8 @@ pub enum ChatDelta<'a> {
 pub struct LanguageAdapter {
     endpoint: String,
     api_key: Option<String>,
+    #[cfg(target_os = "linux")]
+    private_engine: Option<super::native_http::PinnedEngineSocket>,
 }
 
 impl LanguageAdapter {
@@ -88,7 +90,28 @@ impl LanguageAdapter {
         Ok(Self {
             endpoint,
             api_key: api_key.map(str::to_owned),
+            #[cfg(target_os = "linux")]
+            private_engine: None,
         })
+    }
+
+    /// Explicit owned-engine transport. The lifecycle owner must attest the
+    /// helper and admission before use; socket validation alone is not proof.
+    #[cfg(target_os = "linux")]
+    pub fn new_private_engine(
+        directory: &std::path::Path,
+        api_key: Option<&str>,
+    ) -> Result<Self, LanguageFailure> {
+        let mut adapter = Self::new("http://127.0.0.1", api_key)?;
+        adapter.private_engine = Some(
+            super::native_http::PinnedEngineSocket::open(directory).map_err(|_| {
+                failure(
+                    DispatchDisposition::NoDispatch,
+                    LanguageErrorKind::Configuration,
+                )
+            })?,
+        );
+        Ok(adapter)
     }
 
     /// Run on a blocking executor thread, not inside an entered Tokio runtime.
@@ -134,7 +157,7 @@ impl LanguageAdapter {
         on_delta: &mut impl FnMut(ChatDelta<'_>) -> bool,
     ) -> Result<InferenceResult, LanguageFailure> {
         check_context(context, DispatchDisposition::NoDispatch)?;
-        let client = reqwest::Client::builder()
+        let builder = reqwest::Client::builder()
             .retry(reqwest::retry::never())
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(context.remaining().min(Duration::from_secs(2)))
@@ -144,14 +167,23 @@ impl LanguageAdapter {
                     DispatchDisposition::NoDispatch,
                     LanguageErrorKind::Configuration,
                 )
-            })?)
-            .build()
-            .map_err(|_| {
+            })?);
+        #[cfg(target_os = "linux")]
+        let builder = match &self.private_engine {
+            Some(socket) => socket.configure(builder).map_err(|_| {
                 failure(
                     DispatchDisposition::NoDispatch,
                     LanguageErrorKind::Configuration,
                 )
-            })?;
+            })?,
+            None => builder,
+        };
+        let client = builder.build().map_err(|_| {
+            failure(
+                DispatchDisposition::NoDispatch,
+                LanguageErrorKind::Configuration,
+            )
+        })?;
         let http = client
             .post(format!("{}/v1/chat/completions", self.endpoint))
             .header(reqwest::header::ACCEPT, "text/event-stream")
@@ -596,9 +628,67 @@ mod tests {
                     .then(|| value.trim().parse::<usize>().unwrap())
             })
             .unwrap();
+        assert!(length <= 1024 * 1024);
         let mut body = vec![0; length];
         stream.read_exact(&mut body).unwrap();
         serde_json::from_slice(&body).unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn private_socket_adapter_preserves_native_http_and_streams_content() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = directory
+            .path()
+            .join(super::super::engine_transport::ENGINE_SOCKET_NAME);
+        let listener = UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let adapter = LanguageAdapter::new_private_engine(directory.path(), None).unwrap();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "private request not received");
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => panic!("private fixture accept failed"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let payload = read_request(&mut stream);
+            assert_eq!(payload["messages"][0]["content"], "  system exactly  ");
+            let body = "data: {\"choices\":[{\"delta\":{\"content\":\"socket-answer\"}}]}\n\ndata: [DONE]\n\n";
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+        });
+        let result = adapter
+            .execute(
+                &catalog(),
+                &request(),
+                &OperationContext::new(Instant::now() + Duration::from_secs(3), &NeverCancel),
+                |_| true,
+            )
+            .unwrap();
+        let InferenceResult::Chat {
+            content, reasoning, ..
+        } = result
+        else {
+            panic!("wrong result lane")
+        };
+        assert_eq!(content, "socket-answer");
+        assert!(reasoning.is_empty());
+        server.join().unwrap();
     }
 
     #[test]
