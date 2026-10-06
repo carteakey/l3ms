@@ -337,3 +337,35 @@ and manager-opened namespace descriptor did not correct joining. All probe units
 were generation-checked, stopped and collected. Managed launch is being reworked
 to one isolated service owning backend and bridge, with kernel checks retained.
 This is a discovered deployment gate, not real inference or GPU acceptance.
+
+### 2026-10-05 — resumed live-state read-only check
+
+The original ComfyUI unit is currently inactive and llama-swap is active; the
+RTX 4070 reports 44 MiB of 12,282 MiB in use. These are point-in-time observations,
+not ingress/drain or GPU ownership proof. Breeze `--check` still succeeds against
+the imported toolkit's existing audio.cpp executable, compiled loader, model and
+model spec. No synthesis, output creation, service stop/start, environment install
+or model download was performed. Recheck live state before any approved pilot;
+do not reuse the earlier Comfy-active baseline.
+
+Offline compatibility checks in this continuation also pass: 16 media Python
+tests, 14 decision safety Python tests, 14 imported downloader tests, six site
+data tests and shipped-JavaScript DOM fixtures. These do not load models or
+replace real browser visual/mobile/accessibility acceptance.
+
+### 2026-10-05 — authenticated loopback ingress checkpoint
+
+The explicit `--coordinator-http-gateway` action reads a strict private 0600
+configuration, binds only loopback, and forwards one native v1/v2 request per
+connection to private IPC. Fourteen gateway fixtures cover authentication,
+framing, bounded deadlines/attempts, native correlation and lost Submit replies
+without retry. The all-target suite passes 617 tests with one ignored; strict
+denied-warning Clippy passes. CPU startup and gateway sessions share scoped
+SIGINT/SIGTERM ownership without changing normal startup. See
+[http-gateway.md](http-gateway.md).
+
+The internal single-service supervisor entrypoint also compiles and passes five
+argument/descriptor-contract tests. Its process-cleanup regressions, typed manager
+role replacement, actual service/namespace/readiness and native engine health are
+still being implemented or awaiting acceptance. This checkpoint does not enable
+general managed GPU/media dispatch or certify full-port completion.

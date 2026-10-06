@@ -130,6 +130,9 @@ An opt-in foreground CPU coordinator and Stack Catalog keyboard actions (`s`
 submit file, `o` observe/output, `c` cancel) are described in the
 [foreground coordinator guide](docs/migration/foreground-coordinator.md).
 Native output is sensitive and should not enter shared logs.
+An opt-in [authenticated loopback HTTP gateway](docs/migration/http-gateway.md)
+forwards the same native envelopes to that coordinator; it never starts engines
+or retries inference automatically.
 
 Show quick-start instructions without opening TUI:
 

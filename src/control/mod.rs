@@ -18,9 +18,17 @@ pub mod decision;
 #[cfg(target_os = "linux")]
 pub mod decision_worker;
 #[cfg(target_os = "linux")]
+pub mod engine_helper;
+#[cfg(target_os = "linux")]
 pub mod engine_transport;
 #[cfg(target_os = "linux")]
+pub(crate) mod foreground_shutdown;
+#[cfg(target_os = "linux")]
 pub mod gpu_probe;
+#[cfg(target_os = "linux")]
+pub mod http_gateway;
+#[cfg(target_os = "linux")]
+pub mod http_launch;
 pub mod inference;
 pub mod ipc;
 pub mod language;

@@ -35,7 +35,7 @@ const MAX_COORDINATOR_NATIVE_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
     about = "L3MS launcher (TUI + interactive model and bench CLI)",
     group(
         ArgGroup::new("action")
-            .args(["run", "bench", "list", "quickstart", "settings", "export_profile", "import_profile", "compare_results", "coordinator_status", "coordinator_cancel", "request_results", "request_submit", "request_output", "coordinator_cpu_daemon"])
+            .args(["run", "bench", "list", "quickstart", "settings", "export_profile", "import_profile", "compare_results", "coordinator_status", "coordinator_cancel", "request_results", "request_submit", "request_output", "coordinator_cpu_daemon", "coordinator_http_gateway"])
             .multiple(false)
     )
 )]
@@ -110,6 +110,10 @@ struct Cli {
     #[arg(long, value_name = "CONFIG")]
     coordinator_cpu_daemon: Option<PathBuf>,
 
+    /// Run an authenticated loopback HTTP gateway to an existing coordinator.
+    #[arg(long, value_name = "CONFIG")]
+    coordinator_http_gateway: Option<PathBuf>,
+
     /// Results cursor to read after; defaults to 0 and requires --request-results.
     #[arg(long, value_name = "CURSOR")]
     after_cursor: Option<u64>,
@@ -162,10 +166,37 @@ struct CommandSpec {
 
 /// Parse process arguments and launch the requested mode.
 pub fn run() -> Result<u8> {
+    #[cfg(target_os = "linux")]
+    {
+        // The owned manager invokes this internal operation directly. Preserve
+        // OS-native backend argv and bypass ordinary settings/interactive startup.
+        let arguments: Vec<OsString> = std::env::args_os().skip(1).collect();
+        if let Some(result) = isolated_engine_action(arguments) {
+            return result;
+        }
+    }
     dispatch(Cli::parse())
 }
 
+#[cfg(target_os = "linux")]
+fn isolated_engine_action(arguments: Vec<OsString>) -> Option<Result<u8>> {
+    if !arguments
+        .first()
+        .is_some_and(|argument| crate::control::engine_helper::is_helper_entrypoint(argument))
+    {
+        return None;
+    }
+    Some(
+        crate::control::engine_helper::run_supervisor(arguments)
+            .map(|()| 0)
+            .map_err(anyhow::Error::new),
+    )
+}
+
 fn dispatch(cli: Cli) -> Result<u8> {
+    if let Some(config_path) = http_gateway_action(&cli)? {
+        return run_http_gateway_action(config_path);
+    }
     if let Some(config_path) = coordinator_cpu_daemon_action(&cli)? {
         return run_cpu_coordinator_action(config_path);
     }
@@ -271,6 +302,50 @@ fn dispatch(cli: Cli) -> Result<u8> {
 
     crate::app::run_tui()?;
     Ok(0)
+}
+
+fn http_gateway_action(cli: &Cli) -> Result<Option<&Path>> {
+    let Some(path) = cli.coordinator_http_gateway.as_deref() else {
+        return Ok(None);
+    };
+    if cli.request_lane.is_some()
+        || cli.coordinator_socket_dir.is_some()
+        || cli.after_cursor.is_some()
+        || cli.result_page_bytes.is_some()
+        || cli.extra.is_some()
+    {
+        bail!("HTTP gateway accepts only its explicit configuration file");
+    }
+    Ok(Some(path))
+}
+
+#[cfg(target_os = "linux")]
+fn run_http_gateway_action(path: &Path) -> Result<u8> {
+    let report = crate::control::http_launch::run(path).map_err(anyhow::Error::new)?;
+    let stopped = match report.stop {
+        crate::control::http_gateway::SessionStop::Cancelled => "cancelled",
+        crate::control::http_gateway::SessionStop::Deadline => "deadline",
+        crate::control::http_gateway::SessionStop::AttemptLimit => "attempt_limit",
+        crate::control::http_gateway::SessionStop::ListenerUnavailable => "listener_unavailable",
+    };
+    println!(
+        "{}",
+        serde_json::json!({
+            "accepted_attempts": report.accepted_attempts,
+            "completed_http_connections": report.completed_http_connections,
+            "denied_non_loopback_peers": report.denied_non_loopback_peers,
+            "denied_peer_limit": report.denied_peer_limit,
+            "stopped": stopped,
+        })
+    );
+    Ok(u8::from(
+        report.stop == crate::control::http_gateway::SessionStop::ListenerUnavailable,
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_http_gateway_action(_: &Path) -> Result<u8> {
+    bail!("HTTP gateway is supported only on Linux");
 }
 
 fn coordinator_cpu_daemon_action(cli: &Cli) -> Result<Option<&Path>> {
@@ -1063,6 +1138,53 @@ fn is_repository_root(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn hidden_engine_action_is_exact_and_malformed_launch_stays_redacted() {
+        assert!(isolated_engine_action(vec![OsString::from("--quickstart")]).is_none());
+        assert!(isolated_engine_action(Vec::new()).is_none());
+        let error =
+            isolated_engine_action(vec![OsString::from("--l3ms-isolated-engine-supervisor-v1")])
+                .unwrap()
+                .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "isolated engine helper: invalid launch arguments"
+        );
+    }
+
+    #[test]
+    fn http_gateway_is_exclusive_and_rejects_orphan_options_before_launch() {
+        let cli =
+            Cli::try_parse_from(["l3ms", "--coordinator-http-gateway", "private.json"]).unwrap();
+        assert_eq!(
+            http_gateway_action(&cli).unwrap(),
+            Some(Path::new("private.json"))
+        );
+        assert!(Cli::try_parse_from([
+            "l3ms",
+            "--coordinator-http-gateway",
+            "private.json",
+            "--quickstart"
+        ])
+        .is_err());
+        for options in [
+            vec!["--extra", ""],
+            vec!["--coordinator-socket-dir", "/private"],
+            vec!["--request-lane", "decisions"],
+            vec!["--after-cursor", "0"],
+            vec!["--result-page-bytes", "4096"],
+        ] {
+            let mut arguments = vec!["l3ms", "--coordinator-http-gateway", "private.json"];
+            arguments.extend(options);
+            let cli = Cli::try_parse_from(arguments).unwrap();
+            assert_eq!(
+                http_gateway_action(&cli).unwrap_err().to_string(),
+                "HTTP gateway accepts only its explicit configuration file"
+            );
+        }
+    }
 
     fn model(id: &str, name: &str, description: &str) -> SwapModel {
         SwapModel {

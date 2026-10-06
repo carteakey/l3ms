@@ -10,19 +10,16 @@ use std::fs::{self, OpenOptions};
 use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
 use super::catalog::{Catalog, Lane, RuntimeIdentity};
 use super::daemon::{ControlDaemon, DaemonConfig, RunReport};
-use super::runtime::{Cancellation, OperationContext, RecoveryPolicy, ResourceClaim};
+use super::foreground_shutdown::ShutdownSignals;
+use super::runtime::{OperationContext, RecoveryPolicy, ResourceClaim};
 
 const MAX_CONFIG_BYTES: usize = 16 * 1024;
-static SIGNAL_OWNER: Mutex<()> = Mutex::new(());
-static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LaunchError {
@@ -140,64 +137,6 @@ fn read_config(path: &Path) -> Result<Config, LaunchError> {
     Ok(config)
 }
 
-extern "C" fn request_stop(_: libc::c_int) {
-    // AtomicBool is lock-free on supported Linux targets; no allocation, IO,
-    // logging or locking is performed in a signal handler.
-    STOP_REQUESTED.store(true, Ordering::Relaxed);
-}
-
-struct ShutdownSignals {
-    _owner: MutexGuard<'static, ()>,
-    interrupt: libc::sigaction,
-    terminate: libc::sigaction,
-}
-
-impl ShutdownSignals {
-    fn install() -> Result<Self, LaunchError> {
-        let owner = SIGNAL_OWNER
-            .try_lock()
-            .map_err(|_| LaunchError::SignalUnavailable)?;
-        STOP_REQUESTED.store(false, Ordering::Relaxed);
-        // All members are initialized before use; sigemptyset supplies the
-        // platform-specific empty mask representation.
-        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
-        let mut interrupt: libc::sigaction = unsafe { std::mem::zeroed() };
-        let mut terminate: libc::sigaction = unsafe { std::mem::zeroed() };
-        action.sa_sigaction = request_stop as *const () as usize;
-        unsafe {
-            if libc::sigemptyset(&mut action.sa_mask) != 0
-                || libc::sigaction(libc::SIGINT, &action, &mut interrupt) != 0
-            {
-                return Err(LaunchError::SignalUnavailable);
-            }
-            if libc::sigaction(libc::SIGTERM, &action, &mut terminate) != 0 {
-                libc::sigaction(libc::SIGINT, &interrupt, std::ptr::null_mut());
-                return Err(LaunchError::SignalUnavailable);
-            }
-        }
-        Ok(Self {
-            _owner: owner,
-            interrupt,
-            terminate,
-        })
-    }
-}
-
-impl Cancellation for ShutdownSignals {
-    fn is_cancelled(&self) -> bool {
-        STOP_REQUESTED.load(Ordering::Relaxed)
-    }
-}
-
-impl Drop for ShutdownSignals {
-    fn drop(&mut self) {
-        unsafe {
-            libc::sigaction(libc::SIGINT, &self.interrupt, std::ptr::null_mut());
-            libc::sigaction(libc::SIGTERM, &self.terminate, std::ptr::null_mut());
-        }
-    }
-}
-
 /// Run a bounded foreground coordinator with CPU-local decision admission.
 /// All directories must already exist and satisfy the daemon's private-path
 /// checks. No GPU claim is acquired; CPU must be explicitly declared in native
@@ -217,7 +156,7 @@ pub fn run(config_path: &Path) -> Result<RunReport, LaunchError> {
             RuntimeIdentity::new(Lane::Decisions, name).map_err(|_| LaunchError::InvalidConfig)?;
         bindings.insert(identity, ResourceClaim::None);
     }
-    let signals = ShutdownSignals::install()?;
+    let signals = ShutdownSignals::install().map_err(|()| LaunchError::SignalUnavailable)?;
     let context = OperationContext::new(
         Instant::now() + Duration::from_secs(config.session_timeout_seconds),
         &signals,
@@ -338,20 +277,5 @@ mod tests {
         fs::write(&path, b"secret-config-body").unwrap();
         let error = read_config(&path).err().unwrap();
         assert!(!format!("{error:?} {error}").contains("secret-config-body"));
-    }
-
-    #[test]
-    fn signal_owner_is_exclusive_and_requests_cooperative_stop() {
-        let signals = ShutdownSignals::install().unwrap();
-        assert!(!signals.is_cancelled());
-        assert!(matches!(
-            ShutdownSignals::install(),
-            Err(LaunchError::SignalUnavailable)
-        ));
-        request_stop(libc::SIGTERM);
-        assert!(signals.is_cancelled());
-        drop(signals);
-        let signals = ShutdownSignals::install().unwrap();
-        assert!(!signals.is_cancelled());
     }
 }

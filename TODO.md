@@ -12,7 +12,7 @@ existing Linear migration issues rather than replacing their acceptance criteria
 
 Latest offline checkpoint: opt-in CPU daemon dispatch and foreground launch,
 one-shot Submit, private native HTTP and shared result reassembly on
-`feature/l3ms-monorepo`; 594 root tests passed,
+`feature/l3ms-monorepo`; 617 root tests passed,
 1 ignored. This is offline implementation evidence, not live cutover acceptance.
 Strict denied-warning Clippy, formatting and whitespace checks pass. Managed
 engine supervisor/lifecycle integration is still unfinished.
@@ -93,6 +93,9 @@ See the [migration status](docs/migration/status.md),
   managed engine/media routing and live acceptance remain unfinished.
 - [ ] Add HTTP ingress to that coordinator only after local operation is proven;
   verify authentication and cancellation/reconnect behavior across clients.
+  Explicit bounded loopback gateway and strict private foreground configuration
+  pass native v1/v2, authentication, framing, deadlines and lost-ack/no-retry
+  fixtures. Installed/live multi-client and managed-runtime acceptance remain.
 
 ### Live acceptance and publication — CAR-216 / CAR-220 / CAR-221
 

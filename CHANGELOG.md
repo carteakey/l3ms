@@ -10,6 +10,9 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Add explicit authenticated loopback HTTP gateway sessions with strict private
+  configuration, bounded framing/IO, shared scoped shutdown handlers and one IPC
+  exchange per request; failed/lost Submit replies never trigger automatic retry.
 - Add explicit foreground `--coordinator-cpu-daemon` startup from a strict,
   private, bounded configuration file, with cooperative SIGINT/SIGTERM cleanup.
   Only native profiles explicitly declaring CPU-local Nagi/Laya execution are
