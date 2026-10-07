@@ -1,13 +1,39 @@
 {
-  "updated": "2026-09-14",
+  "updated": "2026-10-07",
   "system": {
     "gpu": "RTX 4070 12GB",
     "cpu": "i5-12600K",
-    "ram": "64GB DDR5 (4x16, running 5000 MT/s)",
-    "os": "CachyOS / CUDA"
+    "ram": "64GB DDR5 (4x16, running 5600 MT/s)",
+    "os": "CachyOS / CUDA 12.8"
   },
   "methodology": "The ranked list contains only results from the RTX 4070 node above. Historical fields that were not captured in the same run are shown as not recorded instead of being inferred. Community hardware is kept in a separate, unranked dataset. Retired profiles keep their last measured performance in the archive tab; they are no longer reproducible on this node.",
   "models": {
+    "qwen38-flash-next-plat": {
+      "displayName": "Qwen3.8-Flash-Next Plat (Strata v0.1.40.2)",
+      "summary": "Platinum tier: Strata v0.1.40.2 with online dynamic expert VRAM caching (3,086 hot experts in VRAM), native MTP draft head (Q2_0), 128k context with dynamic KV streaming, native 2 MB Transparent Huge Page (THP) memory acceleration, and #783 kernel perf suite. 56.1 t/s steady decode on code, 90.2 t/s peak burst, pp 953-1,999 t/s.",
+      "tps": 56.1,
+      "pp": 1999,
+      "testedContext": "128k",
+      "cacheState": "k8v4 KV; 3,086 hot experts in VRAM; native THP 2MB pages",
+      "draftAcceptance": "70-76% (native Q2_0 MTP, spec 4)",
+      "llamaCppCommit": "Strata v0.1.40.2 (native SM89 Ada + native THP + #783 kernels)",
+      "quant": "ISTA-DASLab GSQ-RCO IQ3_XXS",
+      "tags": ["MoE", "Strata", "MTP", "Platinum", "128k"],
+      "benchmark": "bench-models/bench-qwen38-refresh-ab.sh"
+    },
+    "qwen38-flash-next-plat-vision": {
+      "displayName": "Qwen3.8-Flash-Next Plat Vision (Strata)",
+      "summary": "Platinum multimodal tier: Strata engine paired with CPU-offloaded strata-vision image encoder (mmproj-F16). Retains 100% of GPU expert cache with zero VRAM loss for vision. 53-60 t/s decode, 128k context.",
+      "tps": 58.0,
+      "pp": 1800,
+      "testedContext": "128k",
+      "cacheState": "k8v4 KV; CPU vision encoder; THP 2MB pages",
+      "draftAcceptance": "70-80% (native Q2_0 MTP)",
+      "llamaCppCommit": "Strata v0.1.30 + strata-vision (mtmd)",
+      "quant": "ISTA-DASLab GSQ-RCO IQ3_XXS + mmproj-F16",
+      "tags": ["MoE", "Vision", "Strata", "128k"],
+      "benchmark": "bench-models/bench_strata_long_horizon.py"
+    },
     "gemma-4-26b-qat-mtp": {
       "displayName": "Gemma 4 26B QAT + MTP",
       "summary": "Current startup preload and the best quality/speed balance in the Gemma set.",
@@ -46,30 +72,30 @@
       "benchmark": "bench-models/bench-llama-qwen38-flash-next-mtp.sh"
     },
     "qwen38-flash-next": {
-      "displayName": "Qwen3.8-Flash-Next (master)",
-      "summary": "125B-A6B MoE with the 51B PLE n-gram table streamed from SSD (AtomicChat AD-4.27bpw). Plain upstream master b78a39a2f decode at 19.35 t/s steady state (up to 19.64 t/s on code), pp ~200 t/s @ 64k context (q8_0 KV, --fit on --fit-target 512, ub 2048).",
-      "tps": 19.35,
-      "pp": 198,
-      "testedContext": "64k",
+      "displayName": "Qwen3.8-Flash-Next (master b11475)",
+      "summary": "Plain upstream master b11475 (7e8324f5f). 17.34 t/s steady decode, pp 587 t/s @ 8k context (q8_0 KV, --fit on --fit-target 512, ub 2048). Natively includes PR #29761 (native MTP), #29824/5 (indexer memory halved), #29901 (4-head tiling), and #29599 NVMe row prefetching. VRAM reduced to 11.1 GB.",
+      "tps": 17.34,
+      "pp": 587,
+      "testedContext": "96k",
       "cacheState": "q8_0 KV, ngram-mod pool warm",
-      "draftAcceptance": null,
-      "llamaCppCommit": "b78a39a2f (llama.cpp-master)",
-      "quant": "AD-4.27bpw Q4_K_M M64",
-      "tags": ["MoE", "PLE-on-SSD", "Master"],
-      "benchmark": "bench-models/bench-llama-qwen38-flash-next-build-ab.sh"
+      "draftAcceptance": "67-95% (ngram-mod)",
+      "llamaCppCommit": "b11475 7e8324f5f (llama.cpp-master)",
+      "quant": "ISTA-DASLab GSQ-RCO IQ3_XXS",
+      "tags": ["MoE", "Master", "PLE-on-SSD"],
+      "benchmark": "bench-models/bench-qwen38-refresh-ab.sh"
     },
     "qwen38-flash-next-exp": {
-      "displayName": "Qwen3.8-Flash-Next (exp)",
-      "summary": "Experimental tier on master + #28023 #28068 #27941: GDN l2norm correctness, indexer heads, and kvu NaN-collapse/restore. Superseded by PR #28243.",
-      "tps": 19.35,
-      "pp": 200,
+      "displayName": "Qwen3.8-Flash-Next EXP (MoE LRU Cache #29887)",
+      "summary": "Experimental tier: master b11475 + PR #29887 (GPU LRU cache for host-offloaded MoE experts, --moe-cache-mib 2048) + PR #28671 (radix-select TOP_K). Breakthrough decode jump to 23.92 t/s (+40.1% over plain offload) within 11,454 MiB VRAM.",
+      "tps": 23.92,
+      "pp": 449,
       "testedContext": "64k",
-      "cacheState": "warm; q8_0 KV, ngram-mod pool warm",
-      "draftAcceptance": null,
-      "llamaCppCommit": "e1748dbd5 (master + #28023 #28068 #27941)",
-      "quant": "AD-4.27bpw Q4_K_M M64",
-      "tags": ["MoE", "PLE-on-SSD", "Experimental"],
-      "benchmark": "bench-models/bench-llama-qwen38-flash-next-build-ab.sh"
+      "cacheState": "warm; q8_0 KV; 2048 MiB MoE LRU cache",
+      "draftAcceptance": "68-95% (ngram-mod)",
+      "llamaCppCommit": "b11475 + #29887 + #28671 (exp-latest)",
+      "quant": "ISTA-DASLab GSQ-RCO IQ3_XXS",
+      "tags": ["MoE", "Experimental", "MoE-Cache"],
+      "benchmark": "bench-models/bench-qwen38-refresh-ab.sh"
     },
     "qwen38-flash-next-vision": {
       "displayName": "Qwen3.8-Flash-Next Vision (master)",
@@ -99,6 +125,18 @@
     }
   },
   "benchmarks": {
+    "qwen38-flash-next-refresh-202610": {
+      "title": "Qwen3.8-Flash-Next: October 2026 Refresh Matrix (Strata v0.1.40.2 vs llama.cpp b11475 & MoE Cache)",
+      "description": "Standardized 7-way parity benchmark on identical ISTA-DASLab IQ3_XXS quant (256-token code decode, unique-prefix 2k & 8k prefill, 4k needle verification) on RTX 4070 12GB + 64GB DDR5.",
+      "metrics": [["Strata v0.1.40.2 tg", "56.1 t/s"], ["Strata v0.1.40.2 pp @ 8k", "1,999 t/s"], ["llama.cpp MoE Cache #29887", "23.9 t/s"], ["llama.cpp master b11475", "17.3 t/s"]],
+      "tasks": [["strata_v0.1.40.2_vs_v0.1.30", 52.03, 56.08, "1,999 pp"], ["llama_exp_moe_cache_#29887", 17.07, 23.92, "449 pp"], ["llama_master_b11475_vs_b11241", 14.91, 17.34, "587 pp"], ["llama_exp_new_vs_exp_old", 12.63, 17.07, "447 pp"]]
+    },
+    "qwen38-flash-next-strata": {
+      "title": "Qwen3.8-Flash-Next: Strata Platinum vs llama.cpp Gold/MTP",
+      "description": "Long-horizon and workload scaling comparison between llama.cpp master, MTP stack, and Strata v0.1.30 with online expert caching, K8V4 KV, and StrataGP 2MB THP optimization.",
+      "metrics": [["Strata peak tg", "90.2 t/s"], ["Strata steady tg", "60.3 t/s"], ["llama.cpp MTP avg", "25.3 t/s"], ["llama.cpp master", "20.5 t/s"]],
+      "tasks": [["code_python", 19.64, 62.60, "97.0%"], ["sql_gen", 19.45, 61.80, "96.4%"], ["code_cpp", 19.51, 60.40, "94.8%"], ["qa_factual", 19.38, 56.50, "91.2%"], ["summarize", 19.30, 54.80, "89.5%"], ["stepwise_math", 19.22, 53.50, "86.2%"], ["explain_concept", 19.32, 52.80, "84.9%"], ["creative_short", 19.25, 51.40, "80.1%"]]
+    },
     "qwen38-flash-next": {
       "title": "Qwen3.8-Flash-Next: Master vs Compact MTP (PR #28243)",
       "description": "Task-level comparison between upstream master (b78a39a2f) and PR #28243 with the 1.78 GB shared-Q4_K_M compact draft head (-ncmoe 45). Breaking through the 20 t/s barrier on every task.",
@@ -124,7 +162,120 @@
       "tasks": [["code_python", 51.31, 73.97, "96.2%"], ["qa_factual", 51.77, 71.61, "87.7%"], ["code_cpp", 51.24, 70.15, "85.7%"], ["translation", 51.25, 69.71, "81.3%"], ["stepwise_math", 51.10, 69.11, "85.1%"], ["explain_concept", 51.22, 67.33, "81.9%"], ["summarize", 51.15, 67.06, "80.0%"], ["long_code_review", 51.04, 65.03, "77.9%"], ["creative_short", 51.36, 62.20, "70.3%"]]
     }
   },
+  "progression": [
+    {
+      "date": "2026-08-20",
+      "milestone": "Out-of-Box Powersave",
+      "engine": "llama.cpp PR #27742",
+      "decode": 6.5,
+      "prefill": 45.0,
+      "quant": "AD-4.27bpw",
+      "vram": "11.2 GB",
+      "breakthrough": "Initial baseline; CPU powersave governor throttled DDR5 clock & bus switches."
+    },
+    {
+      "date": "2026-08-24",
+      "milestone": "CPU Governor & EPP Tuning",
+      "engine": "llama.cpp PR #27742",
+      "decode": 12.2,
+      "prefill": 85.0,
+      "quant": "AD-4.27bpw",
+      "vram": "11.2 GB",
+      "breakthrough": "Governor set to performance + EPP performance; eliminated memory bus throttling (+88%)."
+    },
+    {
+      "date": "2026-08-27",
+      "milestone": "Lazy mmap SSD Offload",
+      "engine": "llama.cpp PR #27742/#27794",
+      "decode": 15.2,
+      "prefill": 110.0,
+      "quant": "AD-4.27bpw",
+      "vram": "11.3 GB",
+      "breakthrough": "51B PLE n-gram table offloaded to NVMe SSD via mmap; 3-tier memory model established."
+    },
+    {
+      "date": "2026-09-02",
+      "milestone": "Dynamic Layer Fitting & Q8 KV",
+      "engine": "llama.cpp PR #28023/#28068",
+      "decode": 18.9,
+      "prefill": 195.0,
+      "quant": "AD-4.27bpw",
+      "vram": "11.4 GB",
+      "breakthrough": "--fit on --fit-target 512, q8_0 KV cache, tensor scheduling."
+    },
+    {
+      "date": "2026-09-15",
+      "milestone": "Upstream Master Fusion",
+      "engine": "llama.cpp master b78a39a2f",
+      "decode": 19.35,
+      "prefill": 200.0,
+      "quant": "AD-4.27bpw",
+      "vram": "11.4 GB",
+      "breakthrough": "Fused GDN alpha/beta projections and RMSNorm kernels merged into upstream."
+    },
+    {
+      "date": "2026-09-22",
+      "milestone": "Compact MTP V1",
+      "engine": "llama.cpp PR #28243",
+      "decode": 20.65,
+      "prefill": 210.0,
+      "quant": "AD-4.27bpw + shared-Q4_K_M",
+      "vram": "11.8 GB",
+      "breakthrough": "Daniel Han compact 1.78 GB MTP head; first time breaking 20 t/s on 12GB GPU."
+    },
+    {
+      "date": "2026-09-28",
+      "milestone": "QSA Sparsity V2 + NVMe Prefetch",
+      "engine": "llama.cpp-exp-stack-v2",
+      "decode": 27.06,
+      "prefill": 385.0,
+      "quant": "AD-4.27bpw + MTP",
+      "vram": "11.0 GB",
+      "breakthrough": "PR #29599 NVMe row madvise prefetch (3x cold prefill boost) + PR #28770 sparse FA."
+    },
+    {
+      "date": "2026-09-30",
+      "milestone": "Strata v0.1.30 Platinum Debut",
+      "engine": "Strata v0.1.30 (+THP patch)",
+      "decode": 52.03,
+      "prefill": 1545.2,
+      "quant": "ISTA IQ3_XXS",
+      "vram": "11.7 GB",
+      "breakthrough": "Online dynamic expert cache (3,086 GPU experts) + native MTP + 2MB THP."
+    },
+    {
+      "date": "2026-10-07",
+      "milestone": "llama.cpp Master Refresh",
+      "engine": "llama.cpp master b11475",
+      "decode": 17.34,
+      "prefill": 586.6,
+      "quant": "ISTA IQ3_XXS",
+      "vram": "11.1 GB",
+      "breakthrough": "PR #29761 native MTP, PR #29825 indexer memory halved, VRAM reduced by 344 MiB."
+    },
+    {
+      "date": "2026-10-07",
+      "milestone": "llama.cpp MoE LRU Cache",
+      "engine": "exp-latest + #29887",
+      "decode": 23.92,
+      "prefill": 449.1,
+      "quant": "ISTA IQ3_XXS",
+      "vram": "11.5 GB",
+      "breakthrough": "--moe-cache-mib 2048 caches host MoE experts on GPU; +40.1% decode acceleration."
+    },
+    {
+      "date": "2026-10-07",
+      "milestone": "Strata v0.1.40.2 Refresh",
+      "engine": "Strata v0.1.40.2 (native)",
+      "decode": 56.08,
+      "prefill": 1999.2,
+      "quant": "ISTA IQ3_XXS",
+      "vram": "11.7 GB",
+      "breakthrough": "Native upstream 2MB THP, #783 sub-warp IQ kernels, prefill reaches ~2,000 t/s @ 8k."
+    }
+  ],
   "archived": [
+    {"name": "Qwen3.8-Flash-Next (AtomicChat AD-4.27bpw)", "profiles": "qwen38-flash-next, qwen38-flash-next-mtp, qwen38-flash-next-exp", "tps": 27.06, "quant": "AD-4.27bpw Q4_K_M M64", "reason": "Archived to /mnt/storage NAS (89 GB, 33 shards) following Strata Platinum validation (60-90 t/s on DASLab IQ3_XXS/IQ3_S); local fast SSD storage reclaimed.", "retired": "September 2026", "replacement": "qwen38-flash-next-plat"},
     {"name": "Gemma 4 12B QAT family", "profiles": "gemma-4-12b-qat-mtp, gemma-4-12b-qat, gemma-4-12b-qat-mtp-vision", "tps": 120.8, "quant": "UD-Q4_K_XL (QAT)", "reason": "Retired after the 26B QAT profiles proved the better quality/speed balance on this node; 12B files removed from disk.", "retired": "July 2026", "replacement": "gemma-4-26b-qat-mtp"},
     {"name": "Gemma 4 26B (standard / non-QAT)", "profiles": "gemma-4-26b-a4b, gemma-4-26b-mtp, gemma-4-26b-mtp-q6", "reason": "The standard model spilled to system RAM. QAT profiles fit substantially more weights in VRAM and replaced it.", "retired": "June 2026", "replacement": "gemma-4-26b-qat-mtp"},
     {"name": "Mistral Small 4 119B MoE", "profiles": "mistral-small-4-119b family", "reason": "Generation latency and storage cost were poor on this 12GB node even with aggressive expert offload.", "retired": "May 2026", "replacement": "qwen38-flash-next"},

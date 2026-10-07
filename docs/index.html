@@ -274,8 +274,9 @@
     <nav class="tabs" aria-label="Dashboard views">
       <button class="tab active" data-tab="models">[1] Served profiles</button>
       <button class="tab" data-tab="benchmarks">[2] Benchmark runs</button>
-      <button class="tab" data-tab="community">[3] Community runs</button>
-      <button class="tab" data-tab="archive">[4] Retired profiles</button>
+      <button class="tab" data-tab="evolution">[3] Live evolution tracker</button>
+      <button class="tab" data-tab="community">[4] Community runs</button>
+      <button class="tab" data-tab="archive">[5] Retired profiles</button>
     </nav>
 
     <section class="tab-panel active" id="models-panel">
@@ -309,6 +310,19 @@
           <div class="chart" id="benchmark-chart"></div>
           <div class="metrics" id="benchmark-metrics"></div>
         </div>
+      </div>
+    </section>
+
+    <section class="tab-panel" id="evolution-panel">
+      <div class="archive-intro surface" style="border-left-color: var(--green);">
+        <span class="label">Live Inference Progression & History</span>
+        <p>Complete historical chronicle of every architectural leap, kernel optimization, and memory hierarchy upgrade for Qwen3.8-Flash-Next (qwen4exp) on this node (RTX 4070 12GB + 64GB DDR5) from August 2026 to present.</p>
+      </div>
+      <div class="table-shell surface">
+        <table>
+          <thead><tr><th>Date</th><th>Milestone</th><th>Engine / Stack</th><th>Quant</th><th>Decode (TG)</th><th>Prefill (PP)</th><th>VRAM</th><th>Key Breakthrough</th></tr></thead>
+          <tbody id="evolution-table-body"></tbody>
+        </table>
       </div>
     </section>
 
@@ -499,6 +513,24 @@
           <a href="${escapeHtml(run.sourceUrl)}" rel="noopener">Review source</a>
         </article>
       `).join("");
+    function renderEvolution() {
+      const container = document.getElementById("evolution-table-body");
+      if (!dashboard.progression || !dashboard.progression.length) {
+        container.innerHTML = '<tr><td colspan="8" class="empty">No progression history recorded.</td></tr>';
+        return;
+      }
+      container.innerHTML = dashboard.progression.map(item => `
+        <tr class="model-row">
+          <td><span class="label">${escapeHtml(item.date)}</span></td>
+          <td><span class="model-name">${escapeHtml(item.milestone)}</span></td>
+          <td><code>${escapeHtml(item.engine)}</code></td>
+          <td><span class="badge">${escapeHtml(item.quant)}</span></td>
+          <td class="throughput"><span class="throughput-value">${item.decode.toFixed(1)}</span> <span class="throughput-unit">t/s</span></td>
+          <td><span class="detail-value">${item.prefill ? item.prefill.toFixed(0) + ' t/s' : 'n/a'}</span></td>
+          <td><span class="label">${escapeHtml(item.vram || '')}</span></td>
+          <td><span class="model-description" style="max-width:45ch">${escapeHtml(item.breakthrough)}</span></td>
+        </tr>
+      `).join("");
     }
 
     document.addEventListener("click", event => {
@@ -531,6 +563,7 @@
     document.getElementById("generated-date").textContent = `Snapshot generated ${dashboard.generatedAt}`;
     renderModels();
     renderBenchmarks();
+    renderEvolution();
     renderCommunity();
     renderArchive();
   </script>

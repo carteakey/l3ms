@@ -171,6 +171,10 @@ def portable_command(model: dict) -> str:
         "${ik_server}": '"$IK_LLAMA_SERVER"',
         "${qwen_mtp_server}": '"$QWEN_MTP_SERVER"',
         "${sarvam_server}": '"$SARVAM_SERVER"',
+        "${strata_python}": '"$STRATA_PYTHON"',
+        "${strata_server}": '"$STRATA_SERVER"',
+        "${strata_iq3_config}": '"$STRATA_CONFIG"',
+        "${strata_vision_config}": '"$STRATA_CONFIG"',
         "${PORT}": '"$PORT"',
         "${chat_template}": '"$CHAT_TEMPLATE_PATH"',
     }
@@ -198,6 +202,10 @@ def portable_command(model: dict) -> str:
         preamble.append('QWEN_MTP_SERVER="${QWEN_MTP_SERVER:-./vendor/llama.cpp/build/bin/llama-server}"')
     if "$SARVAM_SERVER" in shell_command:
         preamble.append('SARVAM_SERVER="${SARVAM_SERVER:-./vendor/llama.cpp-pr-test-20275/build/bin/llama-server}"')
+    if "$STRATA_SERVER" in shell_command:
+        preamble.append('STRATA_PYTHON="${STRATA_PYTHON:-./vendor/strata/.venv/bin/python}"')
+        preamble.append('STRATA_SERVER="${STRATA_SERVER:-./vendor/strata/serve/server.py}"')
+        preamble.append('STRATA_CONFIG="${STRATA_CONFIG:-./vendor/strata/strata-iq3_xxs.json}"')
     if "$DRAFT_MODEL_PATH" in shell_command:
         preamble.append('DRAFT_MODEL_PATH="/path/to/draft-model.gguf"')
     if "$MMPROJ_PATH" in shell_command:
@@ -237,13 +245,16 @@ def main() -> None:
         source = parsed[model_id]
         if source.get("unlisted"):
             raise SystemExit(f"Dashboard model is marked unlisted: {model_id}")
+        context = context_from_command(source.get("cmd", ""))
+        if context == "Custom" and display.get("testedContext"):
+            context = display["testedContext"]
         public_models.append(
             {
                 **display,
                 "id": model_id,
                 "name": display.get("displayName", source.get("name", model_id)),
                 "description": display.get("summary", source.get("description", "")),
-                "context": context_from_command(source.get("cmd", "")),
+                "context": context,
                 "evidence": profile_evidence(display),
                 "command": portable_command(source),
                 "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/llama-swap.yaml",
@@ -258,6 +269,7 @@ def main() -> None:
         "methodology": meta["methodology"],
         "models": public_models,
         "benchmarks": meta["benchmarks"],
+        "progression": meta.get("progression", []),
         # Deliberately separate from models: community hardware must never
         # enter the local RTX 4070 ranking or its sort order.
         "communityRuns": community_runs,
