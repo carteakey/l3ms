@@ -30,6 +30,9 @@ pub enum TaskFields {
         turns: Vec<WireChatTurn>,
         max_tokens: u32,
     },
+    LanguageEmbeddings {
+        input: Vec<String>,
+    },
     MediaWorkflow {
         graph: Value,
     },
@@ -134,6 +137,9 @@ pub fn build_submit(
             turns,
             max_tokens,
         },
+        TaskFields::LanguageEmbeddings { input } => {
+            WireInferenceRequest::Embeddings { profile_id, input }
+        }
         TaskFields::MediaWorkflow { graph } => WireInferenceRequest::Media {
             profile_id,
             input: WireMediaInput::Workflow {
@@ -236,6 +242,7 @@ fn preflight_draft(draft: &TaskFormDraft) -> Result<(), TaskFormError> {
             add_json_size(&mut total, turns)?;
             add_json_size(&mut total, max_tokens)?;
         }
+        TaskFields::LanguageEmbeddings { input } => add_json_size(&mut total, input)?,
         TaskFields::MediaWorkflow { graph } => add_json_size(&mut total, graph)?,
         TaskFields::MediaScript { args } => add_json_size(&mut total, args)?,
         TaskFields::Speech {

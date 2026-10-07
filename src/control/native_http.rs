@@ -6,11 +6,31 @@
 //! Private directory ancestors and same-user writers must remain trusted.
 
 use std::fs::{self, File, OpenOptions};
+use std::io;
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use super::engine_transport::ENGINE_SOCKET_NAME;
 use super::local_ipc::private_directory;
+use super::runtime::OperationContext;
+
+const CONNECT_POLL: Duration = Duration::from_millis(25);
+
+/// Fixed failure categories for a single nonblocking connection to the pinned
+/// engine socket. These carry no endpoint, peer identity, or OS details.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum VerifiedConnectError {
+    InvalidPeer,
+    SocketUnavailable,
+    PeerMismatch,
+    Cancelled,
+    DeadlineExceeded,
+    Io,
+}
 
 pub(crate) struct PinnedEngineSocket {
     directory: File,
@@ -88,6 +108,142 @@ impl PinnedEngineSocket {
     ) -> Result<reqwest::ClientBuilder, ()> {
         self.check()?;
         Ok(client.no_proxy().unix_socket(self.socket_path.clone()))
+    }
+
+    /// Connect once to the pinned pathname and bind the actual connection to
+    /// the expected supervisor using SO_PEERCRED. The socket is nonblocking;
+    /// connection establishment, including a full listen backlog, shares the
+    /// caller's absolute deadline and cancellation token. No request retry or
+    /// alternate transport is attempted.
+    pub(crate) fn connect_verified(
+        &self,
+        expected_pid: u32,
+        expected_uid: u32,
+        context: &OperationContext<'_>,
+    ) -> Result<UnixStream, VerifiedConnectError> {
+        check_active(context)?;
+        if expected_pid <= 1 || expected_pid > i32::MAX as u32 {
+            return Err(VerifiedConnectError::InvalidPeer);
+        }
+        self.check()
+            .map_err(|_| VerifiedConnectError::SocketUnavailable)?;
+
+        let bytes = self.socket_path.as_os_str().as_bytes();
+        let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        if bytes.is_empty() || bytes.len() + 1 > std::mem::size_of_val(&address.sun_path) {
+            return Err(VerifiedConnectError::SocketUnavailable);
+        }
+        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        for (target, source) in address.sun_path.iter_mut().zip(bytes) {
+            *target = *source as libc::c_char;
+        }
+        let address_length = (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1)
+            as libc::socklen_t;
+
+        check_active(context)?;
+        let fd = unsafe {
+            libc::socket(
+                libc::AF_UNIX,
+                libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+                0,
+            )
+        };
+        if fd < 0 {
+            return Err(VerifiedConnectError::Io);
+        }
+        let stream = unsafe { UnixStream::from_raw_fd(fd) };
+        let result = unsafe {
+            libc::connect(
+                fd,
+                (&address as *const libc::sockaddr_un).cast(),
+                address_length,
+            )
+        };
+        if result != 0 {
+            let error = io::Error::last_os_error();
+            match error.raw_os_error() {
+                Some(libc::EINPROGRESS) => wait_for_connect(fd, &stream, context)?,
+                Some(libc::EAGAIN) => return Err(VerifiedConnectError::SocketUnavailable),
+                Some(libc::EINTR) => return Err(VerifiedConnectError::Io),
+                _ => return Err(VerifiedConnectError::SocketUnavailable),
+            }
+        }
+        check_active(context)?;
+        self.check()
+            .map_err(|_| VerifiedConnectError::SocketUnavailable)?;
+
+        let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut credentials_length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                (&mut credentials as *mut libc::ucred).cast(),
+                &mut credentials_length,
+            )
+        };
+        if result != 0
+            || credentials_length as usize != std::mem::size_of::<libc::ucred>()
+            || credentials.pid != expected_pid as libc::pid_t
+            || credentials.uid != expected_uid as libc::uid_t
+        {
+            return Err(VerifiedConnectError::PeerMismatch);
+        }
+        check_active(context)?;
+        Ok(stream)
+    }
+}
+
+fn check_active(context: &OperationContext<'_>) -> Result<(), VerifiedConnectError> {
+    if context.is_cancelled() {
+        Err(VerifiedConnectError::Cancelled)
+    } else if context.remaining().is_zero() {
+        Err(VerifiedConnectError::DeadlineExceeded)
+    } else {
+        Ok(())
+    }
+}
+
+fn wait_for_connect(
+    fd: libc::c_int,
+    stream: &UnixStream,
+    context: &OperationContext<'_>,
+) -> Result<(), VerifiedConnectError> {
+    loop {
+        check_active(context)?;
+        let timeout = context
+            .remaining()
+            .min(CONNECT_POLL)
+            .as_millis()
+            .clamp(1, i32::MAX as u128) as i32;
+        let mut descriptor = libc::pollfd {
+            fd,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        let ready = unsafe { libc::poll(&mut descriptor, 1, timeout) };
+        if ready < 0 {
+            if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(VerifiedConnectError::Io);
+        }
+        if ready == 0 {
+            continue;
+        }
+        if descriptor.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+            return Err(VerifiedConnectError::SocketUnavailable);
+        }
+        if stream
+            .take_error()
+            .map_err(|_| VerifiedConnectError::Io)?
+            .is_some()
+        {
+            return Err(VerifiedConnectError::SocketUnavailable);
+        }
+        check_active(context)?;
+        return Ok(());
     }
 }
 

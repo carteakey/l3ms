@@ -94,7 +94,9 @@ See the [migration status](docs/migration/status.md),
   managed engine/media routing and live acceptance remain unfinished.
   Preserve the full plan's language scope: add manifest-derived embedding task
   discovery (implemented from active command flags) and typed embedding request/result/adapter support (the shared
-  language contract currently supports chat only). Connect incremental language
+  language contract now preserves typed vectors/native usage and bounded pages;
+  keyboard batch forms and adapter fixtures pass, production dispatch pending).
+  Connect incremental language
   stream events, task-aware artifact access and visible runtime recovery/status;
   native envelope forwarding and JSON output panels alone are not full parity.
 - [ ] Add HTTP ingress to that coordinator only after local operation is proven;
@@ -105,11 +107,15 @@ See the [migration status](docs/migration/status.md),
 
 ### Live acceptance and publication — CAR-216 / CAR-220 / CAR-221
 
-- [ ] Obtain approval for the fresh Nagi environment and multi-GB weights;
-  complete real local-decision inference without synthetic fallback.
+- [ ] Complete real local-decision inference without synthetic fallback.
+  Isolated environment and required weights were approved on 2026-10-07;
+  pinned dependencies are installed and minimal model acquisition is underway.
 - [ ] Run real Breeze standard/design/clone/streaming TTS acceptance and a
   coordinated language → media → language pilot in an agreed maintenance window.
   Record before/after service/GPU state, artifacts, cancellation, and restoration.
+  Bounded maintenance/restoration was approved on 2026-10-07; permanent cutover
+  remains outside that approval. Follow the
+  [managed session contract](docs/migration/managed-session-contract.md).
 - [ ] Finish import/standalone compatibility and CI checks; exercise crash,
   restart, timeout, contention, and rollback paths before enabling public actions.
 - [ ] Complete visual/keyboard/mobile review of the three-lane site and verify

@@ -241,6 +241,7 @@ enum TaskFormField {
     DeclaredTask,
     MediaOperation,
     LanguageTurns,
+    EmbeddingInputs,
     MaxTokens,
     MediaWorkflowGraph,
     MediaScriptArgv,
@@ -262,6 +263,7 @@ impl TaskFormField {
             Self::DeclaredTask => "Declared task",
             Self::MediaOperation => "Media input kind",
             Self::LanguageTurns => "Chat turns JSON",
+            Self::EmbeddingInputs => "Embedding texts JSON array",
             Self::MaxTokens => "Max tokens",
             Self::MediaWorkflowGraph => "Workflow graph JSON",
             Self::MediaScriptArgv => "Script argv JSON array",
@@ -326,6 +328,7 @@ struct TaskFormValues {
     request_id: String,
     timeout: String,
     language_turns: String,
+    embedding_inputs: String,
     max_tokens: String,
     workflow_graph: String,
     script_argv: String,
@@ -343,6 +346,7 @@ impl TaskFormValues {
             self.request_id.len(),
             self.timeout.len(),
             self.language_turns.len(),
+            self.embedding_inputs.len(),
             self.max_tokens.len(),
             self.workflow_graph.len(),
             self.script_argv.len(),
@@ -412,7 +416,15 @@ impl TaskFormEditor {
         ];
         match self.profile.lane {
             Lane::Language => {
-                fields.extend([TaskFormField::LanguageTurns, TaskFormField::MaxTokens])
+                if self
+                    .selected_task
+                    .and_then(|index| self.declared_tasks.get(index))
+                    .is_some_and(|task| task == "embeddings")
+                {
+                    fields.push(TaskFormField::EmbeddingInputs);
+                } else {
+                    fields.extend([TaskFormField::LanguageTurns, TaskFormField::MaxTokens]);
+                }
             }
             Lane::Decisions => fields.extend([
                 TaskFormField::DecisionState,
@@ -461,6 +473,7 @@ impl TaskFormEditor {
             TaskFormField::RequestId => Some(&self.values.request_id),
             TaskFormField::Timeout => Some(&self.values.timeout),
             TaskFormField::LanguageTurns => Some(&self.values.language_turns),
+            TaskFormField::EmbeddingInputs => Some(&self.values.embedding_inputs),
             TaskFormField::MaxTokens => Some(&self.values.max_tokens),
             TaskFormField::MediaWorkflowGraph => Some(&self.values.workflow_graph),
             TaskFormField::MediaScriptArgv => Some(&self.values.script_argv),
@@ -482,6 +495,7 @@ impl TaskFormEditor {
             TaskFormField::RequestId => Some(&mut self.values.request_id),
             TaskFormField::Timeout => Some(&mut self.values.timeout),
             TaskFormField::LanguageTurns => Some(&mut self.values.language_turns),
+            TaskFormField::EmbeddingInputs => Some(&mut self.values.embedding_inputs),
             TaskFormField::MaxTokens => Some(&mut self.values.max_tokens),
             TaskFormField::MediaWorkflowGraph => Some(&mut self.values.workflow_graph),
             TaskFormField::MediaScriptArgv => Some(&mut self.values.script_argv),
@@ -552,6 +566,7 @@ impl TaskFormEditor {
                     return false;
                 };
                 self.selected_task = Some(index);
+                self.refresh_fields();
                 true
             }
             TaskFormField::MediaOperation => {
@@ -688,7 +703,11 @@ impl TaskFormEditor {
         let declared_task = crate::control::catalog::Task::new(selected_task.clone())
             .map_err(|_| TaskFormError::ProfileTaskMismatch)?;
         let fields = match self.profile.lane {
-            Lane::Language => TaskFields::Language {
+            Lane::Language if selected_task == "embeddings" => TaskFields::LanguageEmbeddings {
+                input: serde_json::from_str(&self.values.embedding_inputs)
+                    .map_err(|_| TaskFormError::InvalidNativeFields)?,
+            },
+            Lane::Language if selected_task == "chat" => TaskFields::Language {
                 turns: serde_json::from_str(&self.values.language_turns)
                     .map_err(|_| TaskFormError::InvalidNativeFields)?,
                 max_tokens: self
@@ -697,6 +716,7 @@ impl TaskFormEditor {
                     .parse::<u32>()
                     .map_err(|_| TaskFormError::InvalidNativeFields)?,
             },
+            Lane::Language => return Err(TaskFormError::ProfileTaskMismatch),
             Lane::Decisions => TaskFields::Decisions {
                 state: serde_json::from_str(&self.values.decision_state)
                     .map_err(|_| TaskFormError::InvalidNativeFields)?,
@@ -766,6 +786,53 @@ fn safe_form_preview(value: &str, max_chars: usize) -> String {
         rendered.push('…');
     }
     rendered
+}
+
+/// A bounded, control-safe single-line window around the byte cursor.
+/// Native JSON/newlines stay unchanged in memory; only their display is escaped.
+fn task_form_text_window(value: &str, cursor: usize, columns: usize) -> (String, usize) {
+    let Some(before) = value.get(..cursor) else {
+        return (String::new(), 0);
+    };
+    if columns == 0 {
+        return (String::new(), 0);
+    }
+    let display_char = |character: char| {
+        if character == '\n' {
+            '↵'
+        } else if character.is_control() {
+            ' '
+        } else {
+            character
+        }
+    };
+    let mut start = cursor;
+    let mut before_width = 0usize;
+    for (index, character) in before.char_indices().rev().take(512) {
+        let width = unicode_width::UnicodeWidthChar::width(display_char(character)).unwrap_or(0);
+        if before_width.saturating_add(width) > columns.saturating_sub(2) {
+            break;
+        }
+        start = index;
+        before_width += width;
+    }
+    let mut visible = String::new();
+    let mut width = 0usize;
+    if start > 0 {
+        visible.push('…');
+        width = 1;
+    }
+    let cursor_column = (width + before_width).min(columns.saturating_sub(1));
+    for character in value[start..].chars().take(512) {
+        let character = display_char(character);
+        let character_width = unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
+        if width.saturating_add(character_width) > columns {
+            break;
+        }
+        visible.push(character);
+        width += character_width;
+    }
+    (visible, cursor_column)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6378,6 +6445,18 @@ impl App {
                 let selected = index == editor.active;
                 let marker = if selected { "▶ " } else { "  " };
                 let label = format!("{}: ", field.label());
+                let value_display = if selected && !field.is_selector() {
+                    let value = editor.value(*field).map(String::as_str).unwrap_or("");
+                    if value.is_empty() {
+                        editor.field_display(*field)
+                    } else {
+                        let columns = (panes[1].width as usize)
+                            .saturating_sub(4 + UnicodeWidthStr::width(label.as_str()));
+                        task_form_text_window(value, editor.cursor_byte, columns).0
+                    }
+                } else {
+                    editor.field_display(*field)
+                };
                 let mut spans = vec![
                     Span::styled(
                         marker,
@@ -6395,7 +6474,7 @@ impl App {
                             theme::text()
                         },
                     ),
-                    Span::raw(editor.field_display(*field)),
+                    Span::raw(value_display),
                 ];
                 if selected && field.is_selector() {
                     spans.push(Span::styled("  ↑/↓ choose", theme::warning()));
@@ -6438,9 +6517,12 @@ impl App {
             let cursor_chars = editor
                 .current_text()
                 .map(|value| {
-                    UnicodeWidthStr::width(
-                        safe_form_preview(&value[..editor.cursor_byte], 88).as_str(),
+                    task_form_text_window(
+                        value,
+                        editor.cursor_byte,
+                        (panes[1].width as usize).saturating_sub(2 + label_width as usize),
                     )
+                    .1
                     .min(u16::MAX as usize) as u16
                 })
                 .unwrap_or(0);
@@ -7016,6 +7098,18 @@ fn native_output_preview(output: &NativeOutput, complete: bool) -> String {
             } else {
                 format!("Content:\n{content}\n\nReasoning:\n{reasoning}")
             }
+        }
+        NativeOutput::LanguageEmbeddings { vectors, usage } => {
+            let sample = vectors
+                .first()
+                .map(|vector| vector.iter().take(32).copied().collect::<Vec<_>>())
+                .unwrap_or_default();
+            format!(
+                "Embeddings: {} vectors · {} dimensions\nNative tokens: {} prompt / {} total\nFirst vector, up to 32 components: {}\nUse explicit CLI native output for complete vectors.",
+                vectors.len(), vectors.first().map_or(0, Vec::len),
+                usage.prompt_tokens, usage.total_tokens,
+                serde_json::to_string(&sample).unwrap_or_else(|_| "unavailable".into()),
+            )
         }
         NativeOutput::Decisions { answers } => serde_json::to_string_pretty(answers)
             .unwrap_or_else(|_| "Decision output could not be rendered".into()),
@@ -8408,6 +8502,52 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn embedding_form_uses_native_text_batch_and_never_chat_turns() {
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        fs::write(
+            fixture.root.join("llama-swap.yaml"),
+            "models:\n  vector-fixture:\n    cmd: server --embedding\n",
+        )
+        .unwrap();
+        let catalog = Catalog::load(&fixture.root).unwrap();
+        let profile = catalog
+            .list()
+            .iter()
+            .find(|profile| profile.key.profile_id.as_str() == "vector-fixture")
+            .unwrap();
+        let mut editor = TaskFormEditor::new(profile);
+        editor.values.request_id = "caller:vectors".into();
+        editor.values.timeout = "1000".into();
+        editor.active = 2;
+        assert!(editor.cycle_selector(1));
+        assert!(editor.fields.contains(&TaskFormField::EmbeddingInputs));
+        assert!(!editor.fields.contains(&TaskFormField::LanguageTurns));
+        assert!(!editor.fields.contains(&TaskFormField::MaxTokens));
+        editor.values.embedding_inputs = r#"["first private text","second private text"]"#.into();
+        let envelope =
+            crate::control::task_form::build_submit(&catalog, editor.to_draft().unwrap()).unwrap();
+        let json = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(json["message"]["request"]["lane"], "language");
+        assert_eq!(json["message"]["request"]["task"], "embeddings");
+        assert!(json["message"]["request"].get("turns").is_none());
+        let crate::control::ipc::ClientRequest::Submit { request, .. } =
+            envelope.into_client_request().unwrap()
+        else {
+            panic!("embedding form must be Submit")
+        };
+        let crate::control::requests::InferenceRequest::Embeddings { input, .. } = request else {
+            panic!("embedding form must retain its native task")
+        };
+        assert_eq!(input, ["first private text", "second private text"]);
+        editor.values.embedding_inputs = "[]".into();
+        assert!(
+            crate::control::task_form::build_submit(&catalog, editor.to_draft().unwrap()).is_err()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn native_task_form_render_keeps_unicode_cursor_and_small_terminals_bounded() {
         let fixture = AppFixture::new();
         write_stack_fixture(&fixture);
@@ -8434,6 +8574,25 @@ mod tests {
         }
         assert!(!app.log.iter().any(|line| line.contains('界')));
         assert!(!app.status.contains('界'));
+    }
+
+    #[test]
+    fn native_form_window_tracks_long_input_without_rendering_controls() {
+        let value = format!("{}界e\u{301}\n\u{1b}TAIL", "prefix".repeat(100));
+        let (visible, cursor) = task_form_text_window(&value, value.len(), 20);
+        assert!(visible.starts_with('…'));
+        assert!(visible.ends_with("TAIL"));
+        assert!(visible.contains('↵'));
+        assert!(!visible.contains('\n') && !visible.contains('\u{1b}'));
+        assert!(UnicodeWidthStr::width(visible.as_str()) <= 20);
+        assert!(cursor < 20);
+        let (beginning, cursor) = task_form_text_window(&value, 0, 20);
+        assert!(beginning.starts_with("prefix"));
+        assert_eq!(cursor, 0);
+        assert_eq!(task_form_text_window("界", 1, 20), (String::new(), 0));
+        assert_eq!(task_form_text_window("abc", 3, 0), (String::new(), 0));
+        let (bounded, _) = task_form_text_window(&"\u{301}".repeat(10_000), 20_000, 20);
+        assert!(bounded.chars().count() <= 513);
     }
 
     #[cfg(target_os = "linux")]

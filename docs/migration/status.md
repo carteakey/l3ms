@@ -11,14 +11,15 @@ runtime check.
 ## Current resumed checkpoint — 2026-10-07
 
 Original source HEAD moved from `5792522` to `ed7538a`; the migration branch
-remains separate at `4008dd5` with in-progress native forms and isolated-supervisor
-work. Original dirty files are preserved. Committed serving YAML is synchronized
+remains separate, with discovery/forms/supervisor/source-sync committed at
+`2bec24c` and the subsequent embedding/health/drain slice verified. Original
+dirty files are preserved. Committed serving YAML is synchronized
 without a live reload. See [source reconciliation](serving-baseline.md) for
 imported benchmark provenance and missing harnesses. Dashboard regeneration,
 nine Python data-contract tests and JavaScript DOM fixtures pass; browser/live
-acceptance and publication remain gated. Supervisor recovery is being tightened
-so a stale coordinator can authorize only exact-generation cleanup, not reuse or
-inference admission. This checkpoint is not a full-port completion claim.
+acceptance and publication remain gated. A stale coordinator can authorize only
+exact-generation stop-only cleanup, not reuse or inference admission. This
+checkpoint is not a full-port completion claim.
 
 The single-supervisor model-free live probe passed on 2026-10-07: named FD
 handoff, actual helper/backend namespace equality and host separation,
@@ -27,12 +28,26 @@ process birth-identity disappearance and empty/removed cgroup. Existing live
 services and GPU state were unchanged. See [measured launch gate](private-engine-probe.md).
 Real native health, model/TTS execution and coordinated GPU switching remain open.
 
-Combined verification after the discovery/forms/supervisor/source-sync slice:
-**648 passed, 1 ignored**, strict all-target Clippy, formatting and whitespace
-checks pass. Nine dashboard data tests, nine probe parser cases and shipped
-JavaScript DOM fixtures pass. Manifest-derived embedding discovery is present;
-typed embedding requests/results/execution and incremental language events are
-not yet wired. No existing service was stopped, and nothing was pushed or published.
+Combined verification after the embedding/health/drain slice:
+**683 passed, 1 ignored**, strict all-target Clippy, formatting and whitespace
+checks pass. Typed embedding request/vector/usage contracts, one-shot native
+adapter, transactional paged results and keyboard forms now pass fixtures;
+archived profiles and general managed dispatch remain disabled. Admission close
+tokens are core-instance/generation-bound and targeted drain reservations cannot
+select another runtime's pending work. Interrupted untracked history remains a
+conservative drain blocker. Owned-engine health checks bind fixed native routes
+to the exact supervisor peer and owner, not GPU readiness or release.
+
+The owner approved isolated Nagi dependencies/weights and bounded live service
+maintenance/restoration on 2026-10-07. Pinned dependencies are installed. The
+first staged installation exposed stale activation/console-wrapper paths after
+rename; supported relocatable venv creation and offline exact-pin reinstallation
+repaired the installed environment. Direct Python, activation and `hf --help`
+now work. Minimal revision/checksum-pinned model acquisition is underway; six
+offline acquisition safety tests pass. No real forward-pass claim yet. No
+existing service was stopped in this continuation; nothing was pushed/published.
+The [managed foreground integration contract](managed-session-contract.md)
+records the concrete remaining orchestration and ingress gates.
 
 Linear tracking: [CAR-215](https://linear.app/carteakey/issue/CAR-215/consolidate-l3ms-l2m2-and-l3ds-into-the-local-3-mode-model-stack)
 is the parent; [CAR-216](https://linear.app/carteakey/issue/CAR-216/import-l2m2-and-l3ds-into-the-l3ms-monorepo-with-verified-standalone)

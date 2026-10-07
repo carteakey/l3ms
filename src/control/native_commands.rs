@@ -264,7 +264,9 @@ fn prepare_native_command_inner(
         InferenceRequest::Decision {
             state, questions, ..
         } => decision_recipe(profile, &route, &verified, state, questions),
-        InferenceRequest::Chat { .. } => unreachable!("chat requests were rejected above"),
+        InferenceRequest::Chat { .. } | InferenceRequest::Embeddings { .. } => {
+            unreachable!("language requests were rejected above")
+        }
     }
 }
 

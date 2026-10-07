@@ -138,8 +138,17 @@ fn cmd_has_embedding_flag(body: &[&str], entry_indent: usize) -> bool {
                 if !next.trim().is_empty() && indentation(next) <= indent {
                     break;
                 }
-                if !next.trim().is_empty() && next.len() >= content_indent {
-                    command.push_str(&next[content_indent..]);
+                if !next.trim().is_empty() {
+                    // Malformed block indentation is not executable input.
+                    // Check indentation before slicing so a shorter prefix
+                    // followed by UTF-8 text cannot panic at a byte boundary.
+                    if indentation(next) < content_indent {
+                        return false;
+                    }
+                    let Some(content) = next.get(content_indent..) else {
+                        return false;
+                    };
+                    command.push_str(content);
                 }
                 command.push('\n');
                 index += 1;
@@ -668,6 +677,14 @@ on_startup:
         assert_eq!(entries[3].tasks, vec!["chat"]);
         assert_eq!(entries[4].tasks, vec!["embeddings"]);
         assert_eq!(entries[5].tasks, vec!["chat"]);
+    }
+
+    #[test]
+    fn malformed_unicode_block_indentation_does_not_panic_or_infer_a_task() {
+        let text = "models:\n  vector:\n    cmd: |\n        llama-server\n      界 --embedding\n";
+        let entries = parse_entries(text);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].tasks, vec!["chat"]);
     }
 
     #[test]

@@ -17,7 +17,9 @@ use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::de::{self, MapAccess, Visitor};
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
 use super::catalog::{Lane, ProfileKey, Task};
@@ -217,13 +219,16 @@ impl IncomingRequest {
 }
 
 /// Native inference inputs remain explicitly lane-qualified on the wire.
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(tag = "lane", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Clone)]
 pub enum WireInferenceRequest {
     Language {
         profile_id: String,
         turns: Vec<WireChatTurn>,
         max_tokens: u32,
+    },
+    Embeddings {
+        profile_id: String,
+        input: Vec<String>,
     },
     Media {
         profile_id: String,
@@ -235,6 +240,212 @@ pub enum WireInferenceRequest {
         questions: Map<String, Value>,
     },
 }
+
+impl Serialize for WireInferenceRequest {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Language {
+                profile_id,
+                turns,
+                max_tokens,
+            } => {
+                let mut state = serializer.serialize_struct("WireInferenceRequest", 4)?;
+                state.serialize_field("lane", "language")?;
+                state.serialize_field("profile_id", profile_id)?;
+                state.serialize_field("turns", turns)?;
+                state.serialize_field("max_tokens", max_tokens)?;
+                state.end()
+            }
+            Self::Embeddings { profile_id, input } => {
+                let mut state = serializer.serialize_struct("WireInferenceRequest", 4)?;
+                state.serialize_field("lane", "language")?;
+                state.serialize_field("task", "embeddings")?;
+                state.serialize_field("profile_id", profile_id)?;
+                state.serialize_field("input", input)?;
+                state.end()
+            }
+            Self::Media { profile_id, input } => {
+                let mut state = serializer.serialize_struct("WireInferenceRequest", 3)?;
+                state.serialize_field("lane", "media")?;
+                state.serialize_field("profile_id", profile_id)?;
+                state.serialize_field("input", input)?;
+                state.end()
+            }
+            Self::Decisions {
+                profile_id,
+                state: decision_state,
+                questions,
+            } => {
+                let mut state = serializer.serialize_struct("WireInferenceRequest", 4)?;
+                state.serialize_field("lane", "decisions")?;
+                state.serialize_field("profile_id", profile_id)?;
+                state.serialize_field("state", decision_state)?;
+                state.serialize_field("questions", questions)?;
+                state.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for WireInferenceRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(WireInferenceRequestVisitor)
+    }
+}
+
+struct WireInferenceRequestVisitor;
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum WireRequestInput {
+    Embeddings(Vec<String>),
+    Media(WireMediaInput),
+}
+
+impl<'de> Visitor<'de> for WireInferenceRequestVisitor {
+    type Value = WireInferenceRequest;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a strict lane-qualified inference request")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut lane: Option<String> = None;
+        let mut task: Option<String> = None;
+        let mut profile_id: Option<String> = None;
+        let mut turns: Option<Vec<WireChatTurn>> = None;
+        let mut max_tokens: Option<u32> = None;
+        let mut input: Option<WireRequestInput> = None;
+        let mut state: Option<Value> = None;
+        let mut questions: Option<Map<String, Value>> = None;
+
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "lane" => {
+                    if lane.is_some() {
+                        return Err(de::Error::duplicate_field("lane"));
+                    }
+                    lane = Some(map.next_value()?);
+                }
+                "task" => {
+                    if task.is_some() {
+                        return Err(de::Error::duplicate_field("task"));
+                    }
+                    task = Some(map.next_value()?);
+                }
+                "profile_id" => {
+                    if profile_id.is_some() {
+                        return Err(de::Error::duplicate_field("profile_id"));
+                    }
+                    profile_id = Some(map.next_value()?);
+                }
+                "turns" => {
+                    if turns.is_some() {
+                        return Err(de::Error::duplicate_field("turns"));
+                    }
+                    turns = Some(map.next_value()?);
+                }
+                "max_tokens" => {
+                    if max_tokens.is_some() {
+                        return Err(de::Error::duplicate_field("max_tokens"));
+                    }
+                    max_tokens = Some(map.next_value()?);
+                }
+                "input" => {
+                    if input.is_some() {
+                        return Err(de::Error::duplicate_field("input"));
+                    }
+                    input = Some(map.next_value()?);
+                }
+                "state" => {
+                    if state.is_some() {
+                        return Err(de::Error::duplicate_field("state"));
+                    }
+                    state = Some(map.next_value()?);
+                }
+                "questions" => {
+                    if questions.is_some() {
+                        return Err(de::Error::duplicate_field("questions"));
+                    }
+                    questions = Some(map.next_value()?);
+                }
+                _ => return Err(de::Error::unknown_field(&key, WIRE_INFERENCE_FIELDS)),
+            }
+        }
+
+        let lane = lane.ok_or_else(|| de::Error::missing_field("lane"))?;
+        let profile_id = profile_id.ok_or_else(|| de::Error::missing_field("profile_id"))?;
+        match lane.as_str() {
+            "language" if task.is_none() => {
+                if input.is_some() || state.is_some() || questions.is_some() {
+                    return Err(de::Error::custom("mixed language request fields"));
+                }
+                Ok(WireInferenceRequest::Language {
+                    profile_id,
+                    turns: turns.ok_or_else(|| de::Error::missing_field("turns"))?,
+                    max_tokens: max_tokens.ok_or_else(|| de::Error::missing_field("max_tokens"))?,
+                })
+            }
+            "language" if task.as_deref() == Some("embeddings") => {
+                if turns.is_some() || max_tokens.is_some() || state.is_some() || questions.is_some()
+                {
+                    return Err(de::Error::custom("mixed embeddings request fields"));
+                }
+                let Some(WireRequestInput::Embeddings(input)) = input else {
+                    return Err(de::Error::missing_field("input"));
+                };
+                Ok(WireInferenceRequest::Embeddings { profile_id, input })
+            }
+            "media" if task.is_none() => {
+                if turns.is_some() || max_tokens.is_some() || state.is_some() || questions.is_some()
+                {
+                    return Err(de::Error::custom("mixed media request fields"));
+                }
+                let Some(WireRequestInput::Media(input)) = input else {
+                    return Err(de::Error::missing_field("input"));
+                };
+                Ok(WireInferenceRequest::Media { profile_id, input })
+            }
+            "decisions" if task.is_none() => {
+                if turns.is_some() || max_tokens.is_some() || input.is_some() {
+                    return Err(de::Error::custom("mixed decision request fields"));
+                }
+                Ok(WireInferenceRequest::Decisions {
+                    profile_id,
+                    state: state.ok_or_else(|| de::Error::missing_field("state"))?,
+                    questions: questions.ok_or_else(|| de::Error::missing_field("questions"))?,
+                })
+            }
+            "language" | "media" | "decisions" => Err(de::Error::custom(
+                "invalid or mixed inference request fields",
+            )),
+            _ => Err(de::Error::unknown_variant(
+                &lane,
+                &["language", "media", "decisions"],
+            )),
+        }
+    }
+}
+
+const WIRE_INFERENCE_FIELDS: &[&str] = &[
+    "lane",
+    "task",
+    "profile_id",
+    "turns",
+    "max_tokens",
+    "input",
+    "state",
+    "questions",
+];
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -302,6 +513,10 @@ impl WireInferenceRequest {
                     })
                     .collect(),
                 max_tokens,
+            }),
+            Self::Embeddings { profile_id, input } => Ok(InferenceRequest::Embeddings {
+                profile: profile_key(Lane::Language, profile_id)?,
+                input,
             }),
             Self::Media { profile_id, input } => Ok(InferenceRequest::Media {
                 profile: profile_key(Lane::Media, profile_id)?,
@@ -1280,6 +1495,66 @@ mod tests {
         assert!(matches!(turns[1].role, ChatRole::User));
         assert!(matches!(turns[2].role, ChatRole::Assistant));
         assert_eq!(turns[0].content, "system prompt");
+    }
+
+    #[test]
+    fn legacy_chat_wire_bytes_are_unchanged_and_embeddings_use_explicit_task() {
+        let chat = WireInferenceRequest::Language {
+            profile_id: "model".into(),
+            turns: vec![WireChatTurn {
+                role: WireChatRole::User,
+                content: "hello".into(),
+            }],
+            max_tokens: 8,
+        };
+        assert_eq!(
+            serde_json::to_string(&chat).unwrap(),
+            r#"{"lane":"language","profile_id":"model","turns":[{"role":"user","content":"hello"}],"max_tokens":8}"#
+        );
+
+        let embedding = WireInferenceRequest::Embeddings {
+            profile_id: "nomic-fixture".into(),
+            input: vec!["first".into(), "second".into()],
+        };
+        assert_eq!(
+            serde_json::to_string(&embedding).unwrap(),
+            r#"{"lane":"language","task":"embeddings","profile_id":"nomic-fixture","input":["first","second"]}"#
+        );
+        assert!(matches!(
+            embedding.into_inference_request().unwrap(),
+            InferenceRequest::Embeddings { profile, input }
+                if profile.to_string() == "language:nomic-fixture"
+                    && input == vec!["first".to_owned(), "second".to_owned()]
+        ));
+    }
+
+    #[test]
+    fn embeddings_wire_requires_one_strict_explicit_shape() {
+        let valid: WireInferenceRequest = serde_json::from_str(
+            r#"{"lane":"language","task":"embeddings","profile_id":"nomic-fixture","input":["hello"]}"#,
+        )
+        .unwrap();
+        assert!(matches!(valid, WireInferenceRequest::Embeddings { .. }));
+
+        for invalid in [
+            r#"{"lane":"language","task":null,"profile_id":"model","input":["x"]}"#,
+            r#"{"lane":"language","task":"embeddings","profile_id":"model"}"#,
+            r#"{"lane":"language","task":"embeddings","profile_id":"model","input":null}"#,
+            r#"{"lane":"language","task":"embeddings","profile_id":"model","input":{"kind":"workflow","task":"image","graph":{}}}"#,
+            r#"{"lane":"language","task":"embeddings","profile_id":"model","input":["x"],"turns":[],"max_tokens":1}"#,
+            r#"{"lane":"language","task":"chat","profile_id":"model","turns":[],"max_tokens":1}"#,
+            r#"{"lane":"language","task":"embeddings","profile_id":"model","input":["x"],"extra":true}"#,
+            r#"{"lane":"media","profile_id":"model","input":["x"]}"#,
+            r#"{"lane":"language","profile_id":"model","turns":[],"max_tokens":1,"input":["x"]}"#,
+            r#"{"lane":"language","profile_id":"model","profile_id":"other","turns":[],"max_tokens":1}"#,
+            r#"{"lane":"language","lane":"media","profile_id":"model","turns":[],"max_tokens":1}"#,
+            r#"{"lane":"language","task":"embeddings","task":"chat","profile_id":"model","input":["x"]}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<WireInferenceRequest>(invalid).is_err(),
+                "accepted malformed wire request: {invalid}"
+            );
+        }
     }
 
     #[test]

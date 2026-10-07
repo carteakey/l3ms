@@ -19,8 +19,9 @@ use super::cgroup_release::{
 use super::engine_helper::{supervisor_arguments, BackendProcessSpec};
 use super::engine_transport::{BackendPort, CoordinatorIdentityDescriptor};
 use super::managed_service::{
-    LaunchRecipe, ManagedServiceController, ManagedServiceErrorKind, OwnedService, ReconcileResult,
-    ServiceIntentRecord, StartDisposition, StartFailure, StopOnlyService, StoppedService,
+    LaunchRecipe, ManagedServiceController, ManagedServiceErrorKind, ManagedServiceState,
+    OwnedService, ReconcileResult, ServiceIntentRecord, StartDisposition, StartFailure,
+    StopOnlyService, StoppedService,
 };
 use super::ownership::CoordinatorLock;
 use super::runtime::OperationContext;
@@ -468,6 +469,31 @@ impl<'host> ManagedRuntimeOwner<'host> {
         self.controller
             .dispatch(prepared, context)
             .map_err(OwnerStartError::Dispatch)
+    }
+
+    /// Observe only a handle whose exact durable intent is still retained.
+    /// The controller then checks the active manager generation, cgroup,
+    /// MainPID, and (for an isolated supervisor) network namespace. A
+    /// `StopOnlyService` intentionally has no corresponding health/state
+    /// operation.
+    pub fn state(
+        &self,
+        service: &OwnedService,
+        context: &OperationContext<'_>,
+    ) -> Result<ManagedServiceState, ManagedServiceErrorKind> {
+        check_context(context)?;
+        let records = self
+            .store
+            .list()
+            .map_err(|_| ManagedServiceErrorKind::UnitStateUnverifiable)?;
+        if !records
+            .iter()
+            .any(|record| record == service.intent_record())
+        {
+            return Err(ManagedServiceErrorKind::OwnershipMismatch);
+        }
+        check_context(context)?;
+        self.controller.state(service, context)
     }
 
     /// Observe every retained intent; never recreate a recipe or replay start.
@@ -936,6 +962,10 @@ sys.exit(23)
             .start(fixture.recipe(), Duration::from_secs(1), &fixture.context())
             .unwrap();
         assert_eq!(
+            owner.state(&handle, &fixture.context()),
+            Ok(ManagedServiceState::Running)
+        );
+        assert_eq!(
             ServiceIntentStore::open(fixture.intents.path())
                 .unwrap()
                 .list()
@@ -956,6 +986,10 @@ sys.exit(23)
             "start\n"
         );
         owner.stop(&handle, &fixture.context()).unwrap();
+        assert_eq!(
+            owner.state(&handle, &fixture.context()),
+            Ok(ManagedServiceState::Unknown)
+        );
         let observations = owner.reconcile(&fixture.context()).unwrap();
         assert!(matches!(
             &observations[0].observation,

@@ -6,6 +6,7 @@
 //! to launch an engine. Native payloads and prompts must not be written to job
 //! history; the persistent record stores bounded metadata instead.
 
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 use anyhow::{bail, ensure, Result};
@@ -17,6 +18,9 @@ const MAX_TURNS: usize = 128;
 const MAX_QUESTIONS: usize = 128;
 const MAX_SCRIPT_ARGS: usize = 128;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+pub const MAX_EMBEDDING_INPUTS: usize = 128;
+pub const MAX_EMBEDDING_DIMENSIONS: usize = 65_536;
+pub const MAX_EMBEDDING_JSON_BYTES: usize = 4 * 1024 * 1024;
 
 fn ensure_text_budget<'a>(values: impl IntoIterator<Item = &'a str>) -> Result<()> {
     let total = values
@@ -105,6 +109,11 @@ pub enum InferenceRequest {
         turns: Vec<ChatTurn>,
         max_tokens: u32,
     },
+    /// Bounded text batch for the native OpenAI-compatible embeddings endpoint.
+    Embeddings {
+        profile: ProfileKey,
+        input: Vec<String>,
+    },
     Media {
         profile: ProfileKey,
         input: MediaInput,
@@ -121,6 +130,7 @@ impl InferenceRequest {
     pub fn profile(&self) -> &ProfileKey {
         match self {
             Self::Chat { profile, .. }
+            | Self::Embeddings { profile, .. }
             | Self::Media { profile, .. }
             | Self::Decision { profile, .. } => profile,
         }
@@ -128,7 +138,7 @@ impl InferenceRequest {
 
     pub fn lane(&self) -> Lane {
         match self {
-            Self::Chat { .. } => Lane::Language,
+            Self::Chat { .. } | Self::Embeddings { .. } => Lane::Language,
             Self::Media { .. } => Lane::Media,
             Self::Decision { .. } => Lane::Decisions,
         }
@@ -137,6 +147,7 @@ impl InferenceRequest {
     pub fn task(&self) -> &str {
         match self {
             Self::Chat { .. } => "chat",
+            Self::Embeddings { .. } => "embeddings",
             Self::Media { input, .. } => input.task(),
             Self::Decision { .. } => "decision",
         }
@@ -178,6 +189,21 @@ impl InferenceRequest {
                     "chat turns must not be empty"
                 );
                 ensure_text_budget(turns.iter().map(|turn| turn.content.as_str()))?;
+            }
+            Self::Embeddings { input, .. } => {
+                ensure!(
+                    (1..=MAX_EMBEDDING_INPUTS).contains(&input.len()),
+                    "embedding input count is out of range"
+                );
+                ensure!(
+                    input.iter().all(|text| !text.trim().is_empty()),
+                    "embedding inputs must not be empty"
+                );
+                ensure!(
+                    input.iter().all(|text| !text.contains('\0')),
+                    "embedding input contains NUL"
+                );
+                ensure_text_budget(input.iter().map(String::as_str))?;
             }
             Self::Media { input, .. } => match input {
                 MediaInput::Workflow { graph, .. } => {
@@ -295,6 +321,10 @@ pub enum InferenceResult {
         reasoning: String,
         completion_tokens: Option<u64>,
     },
+    Embeddings {
+        vectors: Vec<Vec<f32>>,
+        usage: EmbeddingUsage,
+    },
     MediaPending {
         backend_job_id: String,
     },
@@ -312,6 +342,7 @@ impl InferenceResult {
         let matching_lane = matches!(
             (request, self),
             (InferenceRequest::Chat { .. }, Self::Chat { .. })
+                | (InferenceRequest::Embeddings { .. }, Self::Embeddings { .. })
                 | (InferenceRequest::Media { .. }, Self::MediaPending { .. })
                 | (InferenceRequest::Media { .. }, Self::MediaComplete { .. })
                 | (InferenceRequest::Decision { .. }, Self::Decision { .. })
@@ -379,8 +410,122 @@ impl InferenceResult {
                 );
                 ensure_text_budget([content.as_str(), reasoning.as_str()])?;
             }
+            Self::Embeddings { vectors, usage } => {
+                let InferenceRequest::Embeddings { input, .. } = request else {
+                    bail!("embedding result requires an embedding request");
+                };
+                ensure!(
+                    vectors.len() == input.len()
+                        && (1..=MAX_EMBEDDING_INPUTS).contains(&vectors.len()),
+                    "embedding vector count mismatch"
+                );
+                serialize_embedding_payload(vectors, usage)?;
+            }
             Self::MediaComplete { .. } => {}
         }
+        Ok(())
+    }
+}
+
+/// Native usage for `/v1/embeddings`. llama.cpp reports total and prompt token
+/// counts as the same quantity for this endpoint; zero is valid and is not
+/// replaced with an estimate.
+#[derive(Clone, Copy, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmbeddingUsage {
+    pub prompt_tokens: u64,
+    pub total_tokens: u64,
+}
+
+impl std::fmt::Debug for EmbeddingUsage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EmbeddingUsage")
+            .field("prompt_tokens", &self.prompt_tokens)
+            .field("total_tokens", &self.total_tokens)
+            .finish()
+    }
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EmbeddingPayload {
+    pub vectors: Vec<Vec<f32>>,
+    pub usage: EmbeddingUsage,
+}
+
+#[derive(serde::Serialize)]
+struct EmbeddingPayloadRef<'a> {
+    vectors: &'a [Vec<f32>],
+    usage: &'a EmbeddingUsage,
+}
+
+pub(crate) fn serialize_embedding_payload(
+    vectors: &[Vec<f32>],
+    usage: &EmbeddingUsage,
+) -> Result<Vec<u8>> {
+    ensure!(
+        (1..=MAX_EMBEDDING_INPUTS).contains(&vectors.len()),
+        "embedding vector count is out of range"
+    );
+    let dimensions = vectors.first().map(Vec::len).unwrap_or_default();
+    ensure!(
+        (1..=MAX_EMBEDDING_DIMENSIONS).contains(&dimensions),
+        "embedding dimensions are out of range"
+    );
+    ensure!(
+        vectors.iter().all(|vector| {
+            vector.len() == dimensions && vector.iter().all(|value| value.is_finite())
+        }),
+        "embedding vectors must have consistent finite dimensions"
+    );
+    ensure!(
+        usage.total_tokens == usage.prompt_tokens,
+        "embedding usage token totals are inconsistent"
+    );
+    let mut writer = LimitedEmbeddingWriter::default();
+    if serde_json::to_writer(&mut writer, &EmbeddingPayloadRef { vectors, usage }).is_err() {
+        if writer.exceeded_limit {
+            bail!("embedding result JSON exceeds 4 MiB");
+        }
+        bail!("embedding result serialization failed");
+    }
+    Ok(writer.bytes)
+}
+
+#[derive(Default)]
+struct LimitedEmbeddingWriter {
+    bytes: Vec<u8>,
+    exceeded_limit: bool,
+}
+
+impl Write for LimitedEmbeddingWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > MAX_EMBEDDING_JSON_BYTES.saturating_sub(self.bytes.len()) {
+            self.exceeded_limit = true;
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "bounded embedding JSON exceeded",
+            ));
+        }
+        let required = self.bytes.len() + bytes.len();
+        if self.bytes.capacity() < required {
+            let target_capacity = self
+                .bytes
+                .capacity()
+                .saturating_mul(2)
+                .max(4096)
+                .max(required)
+                .min(MAX_EMBEDDING_JSON_BYTES);
+            self.bytes
+                .try_reserve_exact(target_capacity.saturating_sub(self.bytes.len()))
+                .map_err(io::Error::other)?;
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
 }
@@ -388,9 +533,28 @@ impl InferenceResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::Path;
 
     fn catalog() -> Catalog {
         Catalog::load(env!("CARGO_MANIFEST_DIR")).unwrap()
+    }
+
+    fn embedding_catalog() -> (tempfile::TempDir, Catalog) {
+        let language_root = tempfile::tempdir().unwrap();
+        fs::write(
+            language_root.path().join("llama-swap.yaml"),
+            "models:\n  embedding-fixture:\n    cmd: |\n      llama-server --embedding\n  chat-fixture:\n    cmd: |\n      llama-server -m chat.gguf\n",
+        )
+        .unwrap();
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let catalog = Catalog::load_from_roots(
+            language_root.path(),
+            repo.join("toolkits/l2m2"),
+            repo.join("toolkits/l3ds"),
+        )
+        .unwrap();
+        (language_root, catalog)
     }
 
     fn key(lane: Lane, id: &str) -> ProfileKey {
@@ -609,5 +773,118 @@ mod tests {
             },
         };
         assert!(oversized.validate(&catalog).is_err());
+    }
+
+    #[test]
+    fn embedding_requests_are_explicit_language_tasks_and_bounded_batches() {
+        let (_root, catalog) = embedding_catalog();
+        let request = InferenceRequest::Embeddings {
+            profile: key(Lane::Language, "embedding-fixture"),
+            input: vec!["first text".into(), "second text".into()],
+        };
+        assert_eq!(request.lane(), Lane::Language);
+        assert_eq!(request.task(), "embeddings");
+        assert!(request.validate(&catalog).is_ok());
+
+        let mislabeled_profile = InferenceRequest::Embeddings {
+            profile: key(Lane::Language, "chat-fixture"),
+            input: vec!["text".into()],
+        };
+        assert!(mislabeled_profile.validate(&catalog).is_err());
+
+        for input in [
+            Vec::new(),
+            vec![String::new()],
+            vec![" \t".to_owned()],
+            vec!["bad\0text".to_owned()],
+            vec!["x".repeat(MAX_REQUEST_BYTES + 1)],
+            vec!["x".to_owned(); MAX_EMBEDDING_INPUTS + 1],
+        ] {
+            assert!(InferenceRequest::Embeddings {
+                profile: key(Lane::Language, "embedding-fixture"),
+                input,
+            }
+            .validate(&catalog)
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn embedding_results_require_matching_finite_vectors_consistent_usage_and_size() {
+        let (_root, catalog) = embedding_catalog();
+        let request = InferenceRequest::Embeddings {
+            profile: key(Lane::Language, "embedding-fixture"),
+            input: vec!["first".into(), "second".into()],
+        };
+        assert!(request.validate(&catalog).is_ok());
+        let valid = InferenceResult::Embeddings {
+            vectors: vec![vec![0.0, 0.25, -1.5], vec![1.0, 0.5, 2.0]],
+            usage: EmbeddingUsage {
+                prompt_tokens: 0,
+                total_tokens: 0,
+            },
+        };
+        assert!(valid.validate_for(&request).is_ok());
+
+        for invalid in [
+            InferenceResult::Embeddings {
+                vectors: vec![vec![1.0, 2.0]],
+                usage: EmbeddingUsage {
+                    prompt_tokens: 1,
+                    total_tokens: 1,
+                },
+            },
+            InferenceResult::Embeddings {
+                vectors: vec![vec![], vec![]],
+                usage: EmbeddingUsage {
+                    prompt_tokens: 1,
+                    total_tokens: 1,
+                },
+            },
+            InferenceResult::Embeddings {
+                vectors: vec![vec![1.0], vec![1.0, 2.0]],
+                usage: EmbeddingUsage {
+                    prompt_tokens: 1,
+                    total_tokens: 1,
+                },
+            },
+            InferenceResult::Embeddings {
+                vectors: vec![vec![f32::NAN], vec![f32::INFINITY]],
+                usage: EmbeddingUsage {
+                    prompt_tokens: 1,
+                    total_tokens: 1,
+                },
+            },
+            InferenceResult::Embeddings {
+                vectors: vec![vec![1.0; MAX_EMBEDDING_DIMENSIONS + 1]; 2],
+                usage: EmbeddingUsage {
+                    prompt_tokens: 1,
+                    total_tokens: 1,
+                },
+            },
+            InferenceResult::Embeddings {
+                vectors: vec![vec![1.0], vec![1.0]],
+                usage: EmbeddingUsage {
+                    prompt_tokens: 1,
+                    total_tokens: 2,
+                },
+            },
+        ] {
+            assert!(invalid.validate_for(&request).is_err());
+        }
+
+        let oversized = InferenceResult::Embeddings {
+            vectors: vec![vec![-f32::MAX; 4096]; MAX_EMBEDDING_INPUTS],
+            usage: EmbeddingUsage {
+                prompt_tokens: 1,
+                total_tokens: 1,
+            },
+        };
+        assert!(oversized
+            .validate_for(&InferenceRequest::Embeddings {
+                profile: key(Lane::Language, "embedding-fixture"),
+                input: vec!["x".into(); MAX_EMBEDDING_INPUTS],
+            })
+            .is_err());
     }
 }

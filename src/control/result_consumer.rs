@@ -3,11 +3,15 @@
 //! cursor zero; transport reconnects continue from `cursor()` using the same
 //! retained assembler. A fresh client must reconstruct from zero.
 
-use serde::Serialize;
+use serde::ser::SerializeStruct;
+use serde::{Serialize, Serializer};
 use serde_json::{Map, Value};
 
 use super::catalog::Lane;
 use super::ipc::validate_request_id;
+use super::requests::{
+    serialize_embedding_payload, EmbeddingPayload, EmbeddingUsage, MAX_EMBEDDING_JSON_BYTES,
+};
 use super::result_buffer::{
     Availability, MediaArtifact, PageEvent, ResultPage, ResultTerminal, MAX_JOB_EVENT_BYTES,
 };
@@ -33,12 +37,59 @@ impl std::error::Error for ConsumeError {}
 
 /// Explicit lane-native output; reasoning is never merged into visible chat.
 /// Media references stay relative to their declared root and are not resolved.
-#[derive(Clone, Serialize)]
-#[serde(tag = "lane", rename_all = "snake_case")]
+#[derive(Clone)]
 pub enum NativeOutput {
-    Language { content: String, reasoning: String },
-    Decisions { answers: Vec<Map<String, Value>> },
-    Media { artifacts: Vec<MediaArtifact> },
+    Language {
+        content: String,
+        reasoning: String,
+    },
+    LanguageEmbeddings {
+        vectors: Vec<Vec<f32>>,
+        usage: EmbeddingUsage,
+    },
+    Decisions {
+        answers: Vec<Map<String, Value>>,
+    },
+    Media {
+        artifacts: Vec<MediaArtifact>,
+    },
+}
+
+impl Serialize for NativeOutput {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Language { content, reasoning } => {
+                let mut state = serializer.serialize_struct("NativeOutput", 3)?;
+                state.serialize_field("lane", "language")?;
+                state.serialize_field("content", content)?;
+                state.serialize_field("reasoning", reasoning)?;
+                state.end()
+            }
+            Self::LanguageEmbeddings { vectors, usage } => {
+                let mut state = serializer.serialize_struct("NativeOutput", 4)?;
+                state.serialize_field("lane", "language")?;
+                state.serialize_field("task", "embeddings")?;
+                state.serialize_field("vectors", vectors)?;
+                state.serialize_field("usage", usage)?;
+                state.end()
+            }
+            Self::Decisions { answers } => {
+                let mut state = serializer.serialize_struct("NativeOutput", 2)?;
+                state.serialize_field("lane", "decisions")?;
+                state.serialize_field("answers", answers)?;
+                state.end()
+            }
+            Self::Media { artifacts } => {
+                let mut state = serializer.serialize_struct("NativeOutput", 2)?;
+                state.serialize_field("lane", "media")?;
+                state.serialize_field("artifacts", artifacts)?;
+                state.end()
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for NativeOutput {
@@ -48,6 +99,14 @@ impl std::fmt::Debug for NativeOutput {
                 .debug_struct("Language")
                 .field("content_bytes", &content.len())
                 .field("reasoning_bytes", &reasoning.len())
+                .finish(),
+            Self::LanguageEmbeddings { vectors, usage } => f
+                .debug_struct("LanguageEmbeddings")
+                .field("vector_count", &vectors.len())
+                .field("dimensions", &vectors.first().map(Vec::len))
+                .field("prompt_tokens", &usage.prompt_tokens)
+                .field("total_tokens", &usage.total_tokens)
+                .field("vectors", &"<redacted>")
                 .finish(),
             Self::Decisions { answers } => f
                 .debug_struct("Decisions")
@@ -64,6 +123,12 @@ impl std::fmt::Debug for NativeOutput {
 #[derive(Clone)]
 enum Pending {
     Decision {
+        id: u64,
+        count: u32,
+        next: u32,
+        json: String,
+    },
+    Embedding {
         id: u64,
         count: u32,
         next: u32,
@@ -87,7 +152,15 @@ pub struct ResultConsumer {
     terminal: Option<ResultTerminal>,
     encoded_bytes: usize,
     pending: Option<Pending>,
+    language_task: Option<LanguageTask>,
+    embedding_complete: bool,
     output: NativeOutput,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum LanguageTask {
+    Chat,
+    Embeddings,
 }
 
 impl std::fmt::Debug for ResultConsumer {
@@ -124,6 +197,8 @@ impl ResultConsumer {
             terminal: None,
             encoded_bytes: 0,
             pending: None,
+            language_task: None,
+            embedding_complete: false,
             output,
         })
     }
@@ -201,6 +276,27 @@ impl ResultConsumer {
     }
 
     fn append(&mut self, cursor: u64, event: &PageEvent) -> Result<(), ConsumeError> {
+        match event {
+            PageEvent::ChatContent { .. } | PageEvent::ChatReasoning { .. } => {
+                if self.language_task == Some(LanguageTask::Embeddings) {
+                    return Err(ConsumeError::WrongLane);
+                }
+                self.language_task = Some(LanguageTask::Chat);
+            }
+            PageEvent::EmbeddingJsonPart {
+                result_id,
+                part_index,
+                part_count,
+                json,
+            } => {
+                if self.language_task == Some(LanguageTask::Chat) {
+                    return Err(ConsumeError::WrongLane);
+                }
+                self.language_task = Some(LanguageTask::Embeddings);
+                return self.append_embeddings(cursor, *result_id, *part_index, *part_count, json);
+            }
+            PageEvent::DecisionJsonPart { .. } | PageEvent::MediaArtifactBatch { .. } => {}
+        }
         match (event, &mut self.output) {
             (PageEvent::ChatContent { text }, NativeOutput::Language { content, .. }) => {
                 content.push_str(text)
@@ -296,10 +392,90 @@ impl ResultConsumer {
         }
         Ok(())
     }
+
+    fn append_embeddings(
+        &mut self,
+        cursor: u64,
+        result_id: u64,
+        part_index: u32,
+        part_count: u32,
+        fragment: &str,
+    ) -> Result<(), ConsumeError> {
+        if self.embedding_complete {
+            return Err(ConsumeError::InvalidSequence);
+        }
+        if self.pending.is_none() {
+            if part_index != 0 || result_id != cursor {
+                return Err(ConsumeError::InvalidSequence);
+            }
+            if matches!(&self.output, NativeOutput::Language { .. }) {
+                self.output = NativeOutput::LanguageEmbeddings {
+                    vectors: Vec::new(),
+                    usage: EmbeddingUsage {
+                        prompt_tokens: 0,
+                        total_tokens: 0,
+                    },
+                };
+            }
+            if !matches!(&self.output, NativeOutput::LanguageEmbeddings { .. }) {
+                return Err(ConsumeError::WrongLane);
+            }
+            self.pending = Some(Pending::Embedding {
+                id: result_id,
+                count: part_count,
+                next: 0,
+                json: String::new(),
+            });
+        }
+
+        let completed_payload = {
+            let Some(Pending::Embedding {
+                id,
+                count,
+                next,
+                json,
+            }) = &mut self.pending
+            else {
+                return Err(ConsumeError::InvalidSequence);
+            };
+            if *id != result_id || *count != part_count || *next != part_index {
+                return Err(ConsumeError::InvalidSequence);
+            }
+            if json.len().saturating_add(fragment.len()) > MAX_EMBEDDING_JSON_BYTES {
+                return Err(ConsumeError::CapacityExceeded);
+            }
+            json.push_str(fragment);
+            *next += 1;
+            if *next == *count {
+                let payload: EmbeddingPayload =
+                    serde_json::from_str(json).map_err(|_| ConsumeError::InvalidNativeOutput)?;
+                let canonical = serialize_embedding_payload(&payload.vectors, &payload.usage)
+                    .map_err(|_| ConsumeError::InvalidNativeOutput)?;
+                if canonical != json.as_bytes() {
+                    return Err(ConsumeError::InvalidNativeOutput);
+                }
+                Some(payload)
+            } else {
+                None
+            }
+        };
+
+        if let Some(payload) = completed_payload {
+            let NativeOutput::LanguageEmbeddings { vectors, usage } = &mut self.output else {
+                return Err(ConsumeError::WrongLane);
+            };
+            *vectors = payload.vectors;
+            *usage = payload.usage;
+            self.pending = None;
+            self.embedding_complete = true;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::requests::EmbeddingUsage;
     use super::super::result_buffer::{ArtifactKind, ResultBuffer, ResultEvent, MIN_PAGE_BYTES};
     use super::*;
 
@@ -367,6 +543,295 @@ mod tests {
             panic!("wrong lane")
         };
         assert_eq!(actual, &artifacts);
+    }
+
+    #[test]
+    fn native_output_serialization_keeps_chat_bytes_and_uses_language_embeddings_shape() {
+        let chat = NativeOutput::Language {
+            content: "answer".into(),
+            reasoning: "think".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&chat).unwrap(),
+            r#"{"lane":"language","content":"answer","reasoning":"think"}"#
+        );
+        let embeddings = NativeOutput::LanguageEmbeddings {
+            vectors: vec![vec![0.5]],
+            usage: EmbeddingUsage {
+                prompt_tokens: 0,
+                total_tokens: 0,
+            },
+        };
+        assert_eq!(
+            serde_json::to_string(&embeddings).unwrap(),
+            r#"{"lane":"language","task":"embeddings","vectors":[[0.5]],"usage":{"prompt_tokens":0,"total_tokens":0}}"#
+        );
+    }
+
+    #[test]
+    fn embeddings_reassemble_as_a_bounded_language_task_and_remain_redacted() {
+        let mut buffer = ResultBuffer::new();
+        buffer.begin("embedding", Lane::Language).unwrap();
+        let vectors = vec![[0.125, -0.5, 0.0].repeat(1024); 2];
+        let usage = EmbeddingUsage {
+            prompt_tokens: 0,
+            total_tokens: 0,
+        };
+        buffer
+            .append(
+                "embedding",
+                ResultEvent::Embeddings {
+                    vectors: vectors.clone(),
+                    usage,
+                },
+            )
+            .unwrap();
+        buffer
+            .terminal("embedding", ResultTerminal::Succeeded)
+            .unwrap();
+        let consumer = reconstruct(&buffer, "embedding", Lane::Language);
+        let NativeOutput::LanguageEmbeddings {
+            vectors: actual,
+            usage: actual_usage,
+        } = consumer.output()
+        else {
+            panic!("wrong language task")
+        };
+        assert_eq!(actual, &vectors);
+        assert_eq!(*actual_usage, usage);
+        assert!(consumer.is_complete());
+        let serialized = serde_json::to_string(consumer.output()).unwrap();
+        assert!(serialized.starts_with(r#"{"lane":"language","task":"embeddings","vectors":[["#));
+        let debug = format!("{:?} {:?}", consumer, consumer.output());
+        assert!(!debug.contains("0.125"));
+        assert!(!debug.contains("-0.5"));
+    }
+
+    #[test]
+    fn malformed_embedding_payload_and_chat_mixing_roll_back() {
+        use super::super::result_buffer::CursorEvent;
+
+        let payload = serialize_embedding_payload(
+            &[vec![0.5]],
+            &EmbeddingUsage {
+                prompt_tokens: 0,
+                total_tokens: 0,
+            },
+        )
+        .unwrap();
+        let embedding_event = PageEvent::EmbeddingJsonPart {
+            result_id: 2,
+            part_index: 0,
+            part_count: 1,
+            json: String::from_utf8(payload).unwrap(),
+        };
+        let mut chat_then_embedding = ResultConsumer::new("mixed-chat", Lane::Language).unwrap();
+        chat_then_embedding
+            .consume(&ResultPage {
+                request_id: "mixed-chat".into(),
+                availability: Availability::Available,
+                events: vec![CursorEvent {
+                    cursor: 1,
+                    event: PageEvent::ChatContent {
+                        text: "answer".into(),
+                    },
+                }],
+                next_cursor: 1,
+                latest_cursor: 2,
+                terminal: None,
+            })
+            .unwrap();
+        let before = serde_json::to_vec(chat_then_embedding.output()).unwrap();
+        let next = ResultPage {
+            request_id: "mixed-chat".into(),
+            availability: Availability::Available,
+            events: vec![CursorEvent {
+                cursor: 2,
+                event: embedding_event.clone(),
+            }],
+            next_cursor: 2,
+            latest_cursor: 2,
+            terminal: Some(ResultTerminal::Succeeded),
+        };
+        assert_eq!(
+            chat_then_embedding.consume(&next),
+            Err(ConsumeError::WrongLane)
+        );
+        assert_eq!(chat_then_embedding.cursor(), 1);
+        assert_eq!(
+            serde_json::to_vec(chat_then_embedding.output()).unwrap(),
+            before
+        );
+
+        let mut embedding_then_chat =
+            ResultConsumer::new("mixed-embedding", Lane::Language).unwrap();
+        let PageEvent::EmbeddingJsonPart {
+            part_index,
+            part_count,
+            json,
+            ..
+        } = embedding_event
+        else {
+            unreachable!()
+        };
+        embedding_then_chat
+            .consume(&ResultPage {
+                request_id: "mixed-embedding".into(),
+                availability: Availability::Available,
+                events: vec![CursorEvent {
+                    cursor: 1,
+                    event: PageEvent::EmbeddingJsonPart {
+                        result_id: 1,
+                        part_index,
+                        part_count,
+                        json,
+                    },
+                }],
+                next_cursor: 1,
+                latest_cursor: 2,
+                terminal: None,
+            })
+            .unwrap();
+        let before = serde_json::to_vec(embedding_then_chat.output()).unwrap();
+        let chat = ResultPage {
+            request_id: "mixed-embedding".into(),
+            availability: Availability::Available,
+            events: vec![CursorEvent {
+                cursor: 2,
+                event: PageEvent::ChatContent { text: "x".into() },
+            }],
+            next_cursor: 2,
+            latest_cursor: 2,
+            terminal: Some(ResultTerminal::Succeeded),
+        };
+        assert_eq!(
+            embedding_then_chat.consume(&chat),
+            Err(ConsumeError::WrongLane)
+        );
+        assert_eq!(embedding_then_chat.cursor(), 1);
+        assert_eq!(
+            serde_json::to_vec(embedding_then_chat.output()).unwrap(),
+            before
+        );
+
+        let mut invalid = ResultConsumer::new("bad-embedding", Lane::Language).unwrap();
+        let page = ResultPage {
+            request_id: "bad-embedding".into(),
+            availability: Availability::Available,
+            events: vec![CursorEvent {
+                cursor: 1,
+                event: PageEvent::EmbeddingJsonPart {
+                    result_id: 1,
+                    part_index: 0,
+                    part_count: 1,
+                    json: r#"{"vectors":[[1.0]],"usage":{"prompt_tokens":0,"total_tokens":1}}"#
+                        .into(),
+                },
+            }],
+            next_cursor: 1,
+            latest_cursor: 1,
+            terminal: Some(ResultTerminal::Succeeded),
+        };
+        let before = serde_json::to_vec(invalid.output()).unwrap();
+        assert_eq!(
+            invalid.consume(&page),
+            Err(ConsumeError::InvalidNativeOutput)
+        );
+        assert_eq!(invalid.cursor(), 0);
+        assert_eq!(serde_json::to_vec(invalid.output()).unwrap(), before);
+    }
+
+    #[test]
+    fn embedding_page_part_corruption_rolls_back_cross_page_state() {
+        use super::super::result_buffer::CursorEvent;
+
+        let vectors = vec![vec![0.25; 300]];
+        let usage = EmbeddingUsage {
+            prompt_tokens: 2,
+            total_tokens: 2,
+        };
+        let json =
+            String::from_utf8(serialize_embedding_payload(&vectors, &usage).unwrap()).unwrap();
+        // This canonical payload contains only JSON punctuation and numbers,
+        // so fixed byte chunks are also valid UTF-8 test fragments.
+        let parts: Vec<String> = json
+            .as_bytes()
+            .chunks(512)
+            .map(|chunk| std::str::from_utf8(chunk).unwrap().to_owned())
+            .collect();
+        assert!(parts.len() > 1);
+        let part_count = parts.len() as u32;
+        let mut consumer = ResultConsumer::new("fragmented-embedding", Lane::Language).unwrap();
+        consumer
+            .consume(&ResultPage {
+                request_id: "fragmented-embedding".into(),
+                availability: Availability::Available,
+                events: vec![CursorEvent {
+                    cursor: 1,
+                    event: PageEvent::EmbeddingJsonPart {
+                        result_id: 1,
+                        part_index: 0,
+                        part_count,
+                        json: parts[0].clone(),
+                    },
+                }],
+                next_cursor: 1,
+                latest_cursor: part_count as u64,
+                terminal: None,
+            })
+            .unwrap();
+        let before = serde_json::to_vec(consumer.output()).unwrap();
+        let bad_page = ResultPage {
+            request_id: "fragmented-embedding".into(),
+            availability: Availability::Available,
+            events: vec![CursorEvent {
+                cursor: 2,
+                event: PageEvent::EmbeddingJsonPart {
+                    result_id: 1,
+                    part_index: 1,
+                    part_count: part_count + 1,
+                    json: parts[1].clone(),
+                },
+            }],
+            next_cursor: 2,
+            latest_cursor: part_count as u64,
+            terminal: None,
+        };
+        assert_eq!(
+            consumer.consume(&bad_page),
+            Err(ConsumeError::InvalidSequence)
+        );
+        assert_eq!(consumer.cursor(), 1);
+        assert_eq!(serde_json::to_vec(consumer.output()).unwrap(), before);
+
+        for index in 1..parts.len() {
+            let cursor = index as u64 + 1;
+            let terminal = (index + 1 == parts.len()).then_some(ResultTerminal::Succeeded);
+            consumer
+                .consume(&ResultPage {
+                    request_id: "fragmented-embedding".into(),
+                    availability: Availability::Available,
+                    events: vec![CursorEvent {
+                        cursor,
+                        event: PageEvent::EmbeddingJsonPart {
+                            result_id: 1,
+                            part_index: index as u32,
+                            part_count,
+                            json: parts[index].clone(),
+                        },
+                    }],
+                    next_cursor: cursor,
+                    latest_cursor: part_count as u64,
+                    terminal,
+                })
+                .unwrap();
+        }
+        assert!(consumer.is_complete());
+        assert!(matches!(
+            consumer.output(),
+            NativeOutput::LanguageEmbeddings { vectors: actual, usage: actual_usage }
+                if actual == &vectors && actual_usage == &usage
+        ));
     }
 
     #[test]

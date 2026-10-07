@@ -19,6 +19,7 @@ use serde_json::{Map, Value};
 
 use super::catalog::Lane;
 use super::ipc::validate_request_id;
+use super::requests::{serialize_embedding_payload, EmbeddingUsage, MAX_EMBEDDING_JSON_BYTES};
 
 pub const MAX_RETAINED_JOBS: usize = 64;
 pub const MAX_JOB_EVENT_BYTES: usize = 8 * 1024 * 1024;
@@ -34,6 +35,8 @@ const MAX_ARTIFACTS_PER_APPEND: usize = 16 * 1024;
 const CHAT_FRAGMENT_BYTES: usize = 64;
 const DECISION_PART_BYTES: usize = 128;
 const MAX_DECISION_PARTS: usize = MAX_DECISION_JSON_BYTES.div_ceil(DECISION_PART_BYTES - 3);
+const EMBEDDING_PART_BYTES: usize = 512;
+const MAX_EMBEDDING_PARTS: usize = MAX_EMBEDDING_JSON_BYTES.div_ceil(EMBEDDING_PART_BYTES);
 
 /// Fixed redacted failures from the in-memory result buffer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -48,6 +51,7 @@ pub enum ResultBufferError {
     NotTerminal,
     EventTooLarge,
     InvalidArtifactPath,
+    InvalidEmbedding,
     InvalidCursor,
     InvalidPageBudget,
     PageBudgetTooSmall,
@@ -67,6 +71,7 @@ impl fmt::Display for ResultBufferError {
             Self::NotTerminal => "only terminal results can be evicted",
             Self::EventTooLarge => "result event exceeds the bounded result limit",
             Self::InvalidArtifactPath => "media artifact reference is invalid",
+            Self::InvalidEmbedding => "embedding result is invalid or too large",
             Self::InvalidCursor => "result cursor is invalid",
             Self::InvalidPageBudget => "result page byte budget is invalid",
             Self::PageBudgetTooSmall => "result page budget cannot hold the next event",
@@ -170,6 +175,10 @@ impl fmt::Debug for MediaArtifact {
 pub enum ResultEvent {
     ChatContent(String),
     ChatReasoning(String),
+    Embeddings {
+        vectors: Vec<Vec<f32>>,
+        usage: EmbeddingUsage,
+    },
     DecisionAnswers(Map<String, Value>),
     MediaArtifacts(Vec<MediaArtifact>),
 }
@@ -186,6 +195,14 @@ impl fmt::Debug for ResultEvent {
                 .debug_struct("ChatReasoning")
                 .field("bytes", &text.len())
                 .field("text", &"<redacted>")
+                .finish(),
+            Self::Embeddings { vectors, usage } => formatter
+                .debug_struct("Embeddings")
+                .field("vector_count", &vectors.len())
+                .field("dimensions", &vectors.first().map(Vec::len))
+                .field("prompt_tokens", &usage.prompt_tokens)
+                .field("total_tokens", &usage.total_tokens)
+                .field("vectors", &"<redacted>")
                 .finish(),
             Self::DecisionAnswers(answers) => formatter
                 .debug_struct("DecisionAnswers")
@@ -211,6 +228,12 @@ pub enum PageEvent {
     },
     ChatReasoning {
         text: String,
+    },
+    EmbeddingJsonPart {
+        result_id: u64,
+        part_index: u32,
+        part_count: u32,
+        json: String,
     },
     DecisionJsonPart {
         result_id: u64,
@@ -238,6 +261,19 @@ impl fmt::Debug for PageEvent {
                 .debug_struct("ChatReasoning")
                 .field("bytes", &text.len())
                 .field("text", &"<redacted>")
+                .finish(),
+            Self::EmbeddingJsonPart {
+                result_id,
+                part_index,
+                part_count,
+                json,
+            } => formatter
+                .debug_struct("EmbeddingJsonPart")
+                .field("result_id", result_id)
+                .field("part_index", part_index)
+                .field("part_count", part_count)
+                .field("json_bytes", &json.len())
+                .field("json", &"<redacted>")
                 .finish(),
             Self::DecisionJsonPart {
                 result_id,
@@ -327,8 +363,10 @@ impl ResultPage {
             return Err(ResultBufferError::EventTooLarge);
         }
         let mut decision_parts: HashMap<u64, (u32, HashMap<u32, u64>)> = HashMap::new();
+        let mut embedding_parts: HashMap<u64, (u32, HashMap<u32, u64>)> = HashMap::new();
         let mut artifact_batches: HashMap<u64, (u32, HashMap<u32, u64>)> = HashMap::new();
         let mut native_lane = None;
+        let mut language_task = None;
         match self.availability {
             Availability::Unknown => {
                 if !self.events.is_empty()
@@ -354,9 +392,9 @@ impl ResultPage {
                 let mut previous = 0;
                 for item in &self.events {
                     let lane = match &item.event {
-                        PageEvent::ChatContent { .. } | PageEvent::ChatReasoning { .. } => {
-                            Lane::Language
-                        }
+                        PageEvent::ChatContent { .. }
+                        | PageEvent::ChatReasoning { .. }
+                        | PageEvent::EmbeddingJsonPart { .. } => Lane::Language,
                         PageEvent::DecisionJsonPart { .. } => Lane::Decisions,
                         PageEvent::MediaArtifactBatch { .. } => Lane::Media,
                     };
@@ -364,6 +402,14 @@ impl ResultPage {
                         return Err(ResultBufferError::WrongLane);
                     }
                     native_lane = Some(lane);
+                    if lane == Lane::Language {
+                        let is_embedding =
+                            matches!(&item.event, PageEvent::EmbeddingJsonPart { .. });
+                        if language_task.is_some_and(|expected| expected != is_embedding) {
+                            return Err(ResultBufferError::WrongLane);
+                        }
+                        language_task = Some(is_embedding);
+                    }
                     if item.cursor <= previous
                         || (previous != 0 && item.cursor != previous + 1)
                         || item.cursor > self.next_cursor
@@ -384,6 +430,21 @@ impl ResultPage {
                                 *part_count,
                                 item.cursor,
                                 MAX_DECISION_PARTS as u32,
+                            )?;
+                        }
+                        PageEvent::EmbeddingJsonPart {
+                            result_id,
+                            part_index,
+                            part_count,
+                            ..
+                        } => {
+                            validate_group_part(
+                                &mut embedding_parts,
+                                *result_id,
+                                *part_index,
+                                *part_count,
+                                item.cursor,
+                                MAX_EMBEDDING_PARTS as u32,
                             )?;
                         }
                         PageEvent::MediaArtifactBatch {
@@ -524,10 +585,19 @@ impl ResultBuffer {
         event: ResultEvent,
     ) -> Result<(), ResultBufferError> {
         validate_id(request_id)?;
-        let (lane, latest_cursor, event_bytes, chat_raw_bytes, terminal, reserved_bytes) = {
+        let (
+            lane,
+            language_kind,
+            latest_cursor,
+            event_bytes,
+            chat_raw_bytes,
+            terminal,
+            reserved_bytes,
+        ) = {
             let job = self.job(request_id)?;
             (
                 job.lane,
+                job.language_kind,
                 job.latest_cursor,
                 job.event_bytes,
                 job.chat_raw_bytes,
@@ -540,6 +610,17 @@ impl ResultBuffer {
         }
         let event_lane = event.lane();
         if lane != event_lane {
+            return Err(ResultBufferError::WrongLane);
+        }
+        let incoming_language_kind = event.language_kind();
+        if matches!(
+            (language_kind, incoming_language_kind),
+            (Some(LanguageResultKind::Embeddings), Some(_))
+                | (
+                    Some(LanguageResultKind::Chat),
+                    Some(LanguageResultKind::Embeddings)
+                )
+        ) {
             return Err(ResultBufferError::WrongLane);
         }
         let added_chat_bytes = event.raw_chat_bytes();
@@ -605,6 +686,9 @@ impl ResultBuffer {
             .get_mut(request_id)
             .ok_or(ResultBufferError::UnknownRequest)?;
         job.events.extend(staged_records);
+        if incoming_language_kind.is_some() {
+            job.language_kind = incoming_language_kind;
+        }
         job.latest_cursor = last_cursor;
         job.event_bytes += staged_bytes;
         job.chat_raw_bytes = new_chat_raw_bytes;
@@ -785,11 +869,18 @@ impl ResultBuffer {
 struct ResultEntry {
     reserved_bytes: usize,
     lane: Lane,
+    language_kind: Option<LanguageResultKind>,
     events: Vec<StoredResultEvent>,
     latest_cursor: u64,
     event_bytes: usize,
     chat_raw_bytes: usize,
     terminal: Option<ResultTerminal>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum LanguageResultKind {
+    Chat,
+    Embeddings,
 }
 
 struct StoredResultEvent {
@@ -802,6 +893,7 @@ impl ResultEntry {
         Self {
             reserved_bytes: 0,
             lane,
+            language_kind: None,
             events: Vec::new(),
             latest_cursor: 0,
             event_bytes: 0,
@@ -818,9 +910,19 @@ struct Tombstone {
 }
 
 impl ResultEvent {
+    fn language_kind(&self) -> Option<LanguageResultKind> {
+        match self {
+            Self::ChatContent(_) | Self::ChatReasoning(_) => Some(LanguageResultKind::Chat),
+            Self::Embeddings { .. } => Some(LanguageResultKind::Embeddings),
+            Self::DecisionAnswers(_) | Self::MediaArtifacts(_) => None,
+        }
+    }
+
     fn lane(&self) -> Lane {
         match self {
-            Self::ChatContent(_) | Self::ChatReasoning(_) => Lane::Language,
+            Self::ChatContent(_) | Self::ChatReasoning(_) | Self::Embeddings { .. } => {
+                Lane::Language
+            }
             Self::DecisionAnswers(_) => Lane::Decisions,
             Self::MediaArtifacts(_) => Lane::Media,
         }
@@ -829,7 +931,7 @@ impl ResultEvent {
     fn raw_chat_bytes(&self) -> usize {
         match self {
             Self::ChatContent(text) | Self::ChatReasoning(text) => text.len(),
-            Self::DecisionAnswers(_) | Self::MediaArtifacts(_) => 0,
+            Self::Embeddings { .. } | Self::DecisionAnswers(_) | Self::MediaArtifacts(_) => 0,
         }
     }
 }
@@ -848,6 +950,24 @@ fn prepare_events(
             .into_iter()
             .map(|text| PageEvent::ChatReasoning { text })
             .collect()),
+        ResultEvent::Embeddings { vectors, usage } => {
+            let json = serialize_embedding_payload(&vectors, &usage)
+                .map_err(|_| ResultBufferError::InvalidEmbedding)?;
+            let json = String::from_utf8(json).map_err(|_| ResultBufferError::Serialization)?;
+            let parts = split_text(&json, EMBEDDING_PART_BYTES);
+            let part_count =
+                u32::try_from(parts.len()).map_err(|_| ResultBufferError::EventTooLarge)?;
+            Ok(parts
+                .into_iter()
+                .enumerate()
+                .map(|(part_index, json)| PageEvent::EmbeddingJsonPart {
+                    result_id: first_cursor,
+                    part_index: part_index as u32,
+                    part_count,
+                    json,
+                })
+                .collect())
+        }
         ResultEvent::DecisionAnswers(answers) => {
             let json = serialize_decision_answers(&answers)?;
             let parts = split_text(&json, DECISION_PART_BYTES);
@@ -1101,6 +1221,25 @@ fn validate_page_event(item: &CursorEvent) -> Result<(), ResultBufferError> {
                 || *part_count as usize > MAX_DECISION_PARTS
                 || json.len() > DECISION_PART_BYTES
                 || json.is_empty()
+                || (*part_index == 0 && *result_id != item.cursor)
+            {
+                return Err(ResultBufferError::InvalidCursor);
+            }
+        }
+        PageEvent::EmbeddingJsonPart {
+            result_id,
+            part_index,
+            part_count,
+            json,
+        } => {
+            if *result_id == 0
+                || *result_id > item.cursor
+                || *part_count == 0
+                || *part_index >= *part_count
+                || *part_count as usize > MAX_EMBEDDING_PARTS
+                || json.len() > EMBEDDING_PART_BYTES
+                || json.is_empty()
+                || !json.is_ascii()
                 || (*part_index == 0 && *result_id != item.cursor)
             {
                 return Err(ResultBufferError::InvalidCursor);
@@ -1708,5 +1847,101 @@ mod tests {
         assert_eq!(job.latest_cursor, 0);
         assert!(job.events.is_empty());
         assert_eq!(global.total_event_bytes, MAX_TOTAL_EVENT_BYTES);
+    }
+
+    #[test]
+    fn language_result_kind_guard_rejects_mixed_or_repeated_embeddings_transactionally() {
+        let usage = EmbeddingUsage {
+            prompt_tokens: 0,
+            total_tokens: 0,
+        };
+        let mut chat_first = ResultBuffer::new();
+        chat_first.begin("chat-first", Lane::Language).unwrap();
+        chat_first
+            .append("chat-first", ResultEvent::ChatContent("answer".into()))
+            .unwrap();
+        let before = (
+            chat_first.jobs["chat-first"].latest_cursor,
+            chat_first.jobs["chat-first"].event_bytes,
+            chat_first.total_event_bytes,
+            chat_first.total_reserved_bytes,
+        );
+        assert_eq!(
+            chat_first.append(
+                "chat-first",
+                ResultEvent::Embeddings {
+                    vectors: vec![vec![1.0]],
+                    usage,
+                }
+            ),
+            Err(ResultBufferError::WrongLane)
+        );
+        assert_eq!(
+            (
+                chat_first.jobs["chat-first"].latest_cursor,
+                chat_first.jobs["chat-first"].event_bytes,
+                chat_first.total_event_bytes,
+                chat_first.total_reserved_bytes,
+            ),
+            before
+        );
+
+        let mut embeddings_first = ResultBuffer::new();
+        embeddings_first
+            .begin("embeddings-first", Lane::Language)
+            .unwrap();
+        embeddings_first
+            .append(
+                "embeddings-first",
+                ResultEvent::Embeddings {
+                    vectors: vec![vec![1.0]],
+                    usage,
+                },
+            )
+            .unwrap();
+        let before = (
+            embeddings_first.jobs["embeddings-first"].latest_cursor,
+            embeddings_first.jobs["embeddings-first"].event_bytes,
+            embeddings_first.total_event_bytes,
+            embeddings_first.total_reserved_bytes,
+        );
+        for invalid in [
+            ResultEvent::ChatContent("answer".into()),
+            ResultEvent::Embeddings {
+                vectors: vec![vec![2.0]],
+                usage,
+            },
+        ] {
+            assert_eq!(
+                embeddings_first.append("embeddings-first", invalid),
+                Err(ResultBufferError::WrongLane)
+            );
+            assert_eq!(
+                (
+                    embeddings_first.jobs["embeddings-first"].latest_cursor,
+                    embeddings_first.jobs["embeddings-first"].event_bytes,
+                    embeddings_first.total_event_bytes,
+                    embeddings_first.total_reserved_bytes,
+                ),
+                before
+            );
+        }
+
+        let mut invalid_vectors = ResultBuffer::new();
+        invalid_vectors
+            .begin("invalid-vector", Lane::Language)
+            .unwrap();
+        assert_eq!(
+            invalid_vectors.append(
+                "invalid-vector",
+                ResultEvent::Embeddings {
+                    vectors: vec![vec![f32::NAN]],
+                    usage,
+                }
+            ),
+            Err(ResultBufferError::InvalidEmbedding)
+        );
+        assert_eq!(invalid_vectors.jobs["invalid-vector"].latest_cursor, 0);
+        assert_eq!(invalid_vectors.jobs["invalid-vector"].event_bytes, 0);
     }
 }

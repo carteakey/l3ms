@@ -10,6 +10,21 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Add bounded native embedding requests, vectors/usage, one-shot language HTTP
+  execution, transactional paged results and keyboard text-batch forms while
+  preserving existing chat envelopes. General managed language dispatch remains
+  gated; archived embedding profiles are not activated.
+- Add instance/generation-bound per-runtime admission closures and targeted
+  drain reservations, conservative interrupted-history accounting and
+  persistence-failure quarantine; these do not prove native/GPU release.
+- Add bounded fixed-route owned-engine health checks with supervisor peer
+  verification; Comfy inspection is not model readiness, and llama-server health
+  is deliberately distinct from llama-swap router/model readiness.
+- Keep long native form inputs visible around the Unicode-safe cursor and
+  refuse malformed Unicode command indentation without panicking.
+- Add explicit revision-pinned minimal Nagi-Smol/ModernBERT acquisition with
+  checksum verification, without downloading training checkpoints or claiming
+  real inference acceptance.
 - Preserve manifest-derived embedding task discovery without activating
   archived profiles or enabling embedding inference dispatch.
 - Replace the unaccepted two-unit namespace-joining scaffold with one isolated

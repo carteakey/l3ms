@@ -466,6 +466,18 @@ impl OwnedService {
     pub fn intent_record(&self) -> &ServiceIntentRecord {
         &self.intent
     }
+
+    /// Peer identity of the owned isolated-engine supervisor on `engine.sock`.
+    /// The helper is launched by the coordinator's user manager, so it shares
+    /// the captured coordinator UID. Ordinary services deliberately expose no
+    /// peer identity to native-engine health probes.
+    pub(crate) fn supervisor_peer_identity(&self) -> Option<(u32, u32)> {
+        let ServiceLaunchRole::IsolatedEngineSupervisor(coordinator) = &self.intent.launch_role
+        else {
+            return None;
+        };
+        Some((self.main_pid, coordinator.uid()))
+    }
 }
 
 impl fmt::Debug for OwnedService {

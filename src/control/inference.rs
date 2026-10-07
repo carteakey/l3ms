@@ -23,7 +23,7 @@ use super::ipc::{
 use super::requests::{InferenceRequest, MediaInput};
 use super::routes::{resolve_profile_route, ResolvedProfileRoute};
 use super::runtime::{Cancellation, ResourceClaim};
-use crate::job_history::{CrossToolkitJobStart, CrossToolkitJobUpdate, JobHistory};
+use crate::job_history::{CrossToolkitJobStart, CrossToolkitJobUpdate, JobHistory, JobRecord};
 
 const MAX_CAPACITY: usize = 128;
 const MAX_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
@@ -32,6 +32,7 @@ const MAX_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SubmissionError {
     Unavailable,
+    RuntimeAdmissionClosed,
     QueueFull,
     DuplicateRequest,
     InvalidRequest,
@@ -70,6 +71,78 @@ impl Cancellation for RequestCancellation {
 pub enum AdmissionState {
     ReconciliationRequired,
     Ready,
+}
+
+/// Fixed failures from per-runtime admission closure operations.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeAdmissionError {
+    UnboundRuntime,
+    GenerationExhausted,
+    StaleCloseToken,
+}
+
+impl std::fmt::Display for RuntimeAdmissionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::UnboundRuntime => "runtime admission: runtime is not bound",
+            Self::GenerationExhausted => "runtime admission: close generation exhausted",
+            Self::StaleCloseToken => "runtime admission: close token is stale",
+        })
+    }
+}
+
+impl std::error::Error for RuntimeAdmissionError {}
+
+/// Opaque proof of one runtime-specific admission close generation. The
+/// token is deliberately non-Clone; a later close for the same runtime makes
+/// this generation stale.
+pub struct RuntimeAdmissionClose {
+    runtime: RuntimeIdentity,
+    generation: u64,
+    owner_identity: Arc<()>,
+}
+
+impl std::fmt::Debug for RuntimeAdmissionClose {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("RuntimeAdmissionClose([redacted])")
+    }
+}
+
+/// Accepted local reservations and unresolved retained history for one runtime.
+/// A zero local pending/active count is not drained while retained ownership is
+/// unknown or interrupted; even a fully drained report does not prove backend
+/// cleanup or resource release.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimeDrainState {
+    pending_jobs: usize,
+    active_jobs: usize,
+    unresolved_retained_jobs: usize,
+    admission_closed: bool,
+}
+
+impl RuntimeDrainState {
+    pub fn pending_jobs(self) -> usize {
+        self.pending_jobs
+    }
+
+    pub fn active_jobs(self) -> usize {
+        self.active_jobs
+    }
+
+    pub fn unresolved_retained_jobs(self) -> usize {
+        self.unresolved_retained_jobs
+    }
+
+    pub fn admission_closed(self) -> bool {
+        self.admission_closed
+    }
+
+    pub fn is_drained(self) -> bool {
+        self.admission_closed
+            && self.pending_jobs == 0
+            && self.active_jobs == 0
+            && self.unresolved_retained_jobs == 0
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -191,6 +264,9 @@ pub struct CoordinatorCore {
     active: BTreeMap<u64, Active>,
     capacity: usize,
     admission: AdmissionState,
+    runtime_admission_closures: BTreeMap<RuntimeIdentity, u64>,
+    next_runtime_close_generation: u64,
+    admission_owner_identity: Arc<()>,
     cpu_decisions_only: bool,
 }
 
@@ -222,6 +298,9 @@ impl CoordinatorCore {
             active: BTreeMap::new(),
             capacity,
             admission: AdmissionState::ReconciliationRequired,
+            runtime_admission_closures: BTreeMap::new(),
+            next_runtime_close_generation: 1,
+            admission_owner_identity: Arc::new(()),
             cpu_decisions_only: false,
         })
     }
@@ -229,6 +308,95 @@ impl CoordinatorCore {
     pub fn admission(&self) -> AdmissionState {
         self.admission
     }
+
+    /// Close only new submissions routed to one bound runtime and return the
+    /// current close-generation token. Calling this again for a closed runtime
+    /// rotates the generation, making any earlier token stale. The close is
+    /// local to this coordinator instance and does not change accepted work,
+    /// history, queue capacity, or global reconciliation state.
+    pub fn close_runtime_admission(
+        &mut self,
+        runtime: &RuntimeIdentity,
+    ) -> std::result::Result<RuntimeAdmissionClose, RuntimeAdmissionError> {
+        if !self.bindings.contains_key(runtime) {
+            return Err(RuntimeAdmissionError::UnboundRuntime);
+        }
+        let generation = self.next_runtime_close_generation;
+        let next_generation = generation
+            .checked_add(1)
+            .ok_or(RuntimeAdmissionError::GenerationExhausted)?;
+        self.next_runtime_close_generation = next_generation;
+        self.runtime_admission_closures
+            .insert(runtime.clone(), generation);
+        Ok(RuntimeAdmissionClose {
+            runtime: runtime.clone(),
+            generation,
+            owner_identity: Arc::clone(&self.admission_owner_identity),
+        })
+    }
+
+    /// Reopen submissions for a runtime only with its latest close token. The
+    /// caller must first establish that this exact runtime is healthy; token
+    /// matching proves only that this close generation is current.
+    pub fn reopen_runtime_admission(
+        &mut self,
+        close: RuntimeAdmissionClose,
+    ) -> std::result::Result<(), RuntimeAdmissionError> {
+        if !self.is_current_runtime_close(&close) {
+            return Err(RuntimeAdmissionError::StaleCloseToken);
+        }
+        self.runtime_admission_closures.remove(&close.runtime);
+        Ok(())
+    }
+
+    fn is_current_runtime_close(&self, close: &RuntimeAdmissionClose) -> bool {
+        Arc::ptr_eq(&self.admission_owner_identity, &close.owner_identity)
+            && self.runtime_admission_closures.get(&close.runtime) == Some(&close.generation)
+    }
+
+    /// Report accepted queued/active work for one bound runtime, plus all
+    /// unresolved retained history (its original runtime is not persisted).
+    /// Active includes reservations awaiting cleanup
+    /// acknowledgment. Unknown or interrupted retained jobs prevent a drained
+    /// result. This is not a native-backend or resource-release probe, and it
+    /// does not itself reserve work. Global `reserve_next` may select other-
+    /// runtime FIFO work first; use [`Self::reserve_next_for_runtime`] or a
+    /// higher-level admission policy when this runtime needs a targeted drain.
+    pub fn runtime_drain_state(
+        &self,
+        runtime: &RuntimeIdentity,
+    ) -> std::result::Result<RuntimeDrainState, RuntimeAdmissionError> {
+        if !self.bindings.contains_key(runtime) {
+            return Err(RuntimeAdmissionError::UnboundRuntime);
+        }
+        let tracked_jobs = self
+            .pending
+            .iter()
+            .map(|pending| pending.job_id)
+            .chain(self.active.keys().copied())
+            .collect::<std::collections::BTreeSet<_>>();
+        Ok(RuntimeDrainState {
+            pending_jobs: self
+                .pending
+                .iter()
+                .filter(|pending| pending.route.runtime == *runtime)
+                .count(),
+            active_jobs: self
+                .active
+                .values()
+                .filter(|active| active.route.runtime == *runtime)
+                .count(),
+            unresolved_retained_jobs: self
+                .history
+                .records()
+                .iter()
+                .filter(|job| !tracked_jobs.contains(&job.id))
+                .filter(|job| retained_job_may_be_unresolved(job))
+                .count(),
+            admission_closed: self.runtime_admission_closures.contains_key(runtime),
+        })
+    }
+
     pub fn queued_count(&self) -> usize {
         self.pending.len()
     }
@@ -357,8 +525,11 @@ impl CoordinatorCore {
         self.cancel(job.id)
     }
 
-    /// Called only after the host executor has reconciled actual backend jobs,
-    /// admission and resource ownership. This does not perform those probes.
+    /// Called only after the host executor has reconciled all retained engine
+    /// jobs, runtime health, admission and resource ownership. This does not
+    /// perform those probes. Per-runtime close state survives quarantine in
+    /// this core but is not restored after process restart; restart begins
+    /// globally unavailable until this reconciliation is completed.
     pub fn confirm_reconciled(&mut self) -> Result<()> {
         ensure!(
             self.active.is_empty(),
@@ -399,7 +570,9 @@ impl CoordinatorCore {
                 Err(error) => wire_error(
                     request_id,
                     match error {
-                        SubmissionError::Unavailable => ResponseErrorCode::Unavailable,
+                        SubmissionError::Unavailable | SubmissionError::RuntimeAdmissionClosed => {
+                            ResponseErrorCode::Unavailable
+                        }
                         SubmissionError::QueueFull => ResponseErrorCode::QueueFull,
                         SubmissionError::DuplicateRequest => ResponseErrorCode::DuplicateRequest,
                         SubmissionError::InvalidRequest => ResponseErrorCode::InvalidRequest,
@@ -512,9 +685,6 @@ impl CoordinatorCore {
         {
             return Err(SubmissionError::DuplicateRequest);
         }
-        if self.pending.len() + self.active.len() >= self.capacity {
-            return Err(SubmissionError::QueueFull);
-        }
         let profile = request
             .validate(&self.catalog)
             .map_err(|_| SubmissionError::InvalidRequest)?;
@@ -524,6 +694,12 @@ impl CoordinatorCore {
             .bindings
             .get(&route.runtime)
             .ok_or(SubmissionError::Unavailable)?;
+        if self.runtime_admission_closures.contains_key(&route.runtime) {
+            return Err(SubmissionError::RuntimeAdmissionClosed);
+        }
+        if self.pending.len() + self.active.len() >= self.capacity {
+            return Err(SubmissionError::QueueFull);
+        }
         if self.cpu_decisions_only
             && (!cpu_decision_route(&route) || resource != ResourceClaim::None)
         {
@@ -592,6 +768,31 @@ impl CoordinatorCore {
     /// request blocked by active work. Reserved streams hold their place until
     /// the executor acknowledges actual completion.
     pub fn reserve_next(&mut self, now: Instant) -> Result<Option<DispatchTicket>> {
+        self.reserve_matching_runtime(None, now)
+    }
+
+    /// Reserve accepted work for exactly the runtime represented by a current
+    /// close token. The borrowed token remains current for additional drain
+    /// reservations until admission is reopened or a newer close replaces it.
+    /// This still only reserves coordinator work; it does not establish engine
+    /// health, dispatch permission, or resource release.
+    pub fn reserve_next_for_runtime(
+        &mut self,
+        close: &RuntimeAdmissionClose,
+        now: Instant,
+    ) -> Result<Option<DispatchTicket>> {
+        ensure!(
+            self.is_current_runtime_close(close),
+            "runtime admission close token is stale"
+        );
+        self.reserve_matching_runtime(Some(&close.runtime), now)
+    }
+
+    fn reserve_matching_runtime(
+        &mut self,
+        runtime: Option<&RuntimeIdentity>,
+        now: Instant,
+    ) -> Result<Option<DispatchTicket>> {
         ensure!(
             self.admission == AdmissionState::Ready,
             "runtime reconciliation is required"
@@ -599,23 +800,29 @@ impl CoordinatorCore {
         let mut index = 0;
         while index < self.pending.len() {
             let pending = &self.pending[index];
-            if now >= pending.deadline || pending.cancellation.is_cancelled() {
+            let selected = runtime.is_none_or(|runtime| pending.route.runtime == *runtime);
+            if selected && (now >= pending.deadline || pending.cancellation.is_cancelled()) {
+                let job_id = pending.job_id;
                 let state = if pending.cancellation.is_cancelled() {
                     "cancelled"
                 } else {
                     "failed"
                 };
-                self.persist_update(pending.job_id, state, None, None)?;
+                if let Err(error) = self.persist_update(job_id, state, None, None) {
+                    self.quarantine();
+                    return Err(error);
+                }
                 self.pending.remove(index);
             } else {
                 index += 1;
             }
         }
         let Some(index) = self.pending.iter().position(|pending| {
-            !self
-                .active
-                .values()
-                .any(|active| resources_conflict(pending.resource, active.resource))
+            runtime.is_none_or(|runtime| pending.route.runtime == *runtime)
+                && !self
+                    .active
+                    .values()
+                    .any(|active| resources_conflict(pending.resource, active.resource))
         }) else {
             return Ok(None);
         };
@@ -967,8 +1174,18 @@ fn toolkit_for_lane(lane: Lane) -> &'static str {
     }
 }
 
+fn retained_job_may_be_unresolved(job: &JobRecord) -> bool {
+    match job.metadata.result_state.as_deref() {
+        Some("succeeded") => job.status != "done",
+        Some("failed") => job.status != "failed",
+        Some("cancelled") => job.status != "cancelled",
+        Some(_) => true,
+        None => !matches!(job.status.as_str(), "done" | "failed" | "cancelled"),
+    }
+}
+
 fn same_request(left: &InferenceRequest, right: &InferenceRequest) -> bool {
-    use InferenceRequest::{Chat, Decision, Media};
+    use InferenceRequest::{Chat, Decision, Embeddings, Media};
 
     match (left, right) {
         (
@@ -991,6 +1208,16 @@ fn same_request(left: &InferenceRequest, right: &InferenceRequest) -> bool {
                     .zip(right_turns)
                     .all(|(left, right)| left.role == right.role && left.content == right.content)
         }
+        (
+            Embeddings {
+                profile: left_profile,
+                input: left_input,
+            },
+            Embeddings {
+                profile: right_profile,
+                input: right_input,
+            },
+        ) => left_profile == right_profile && left_input == right_input,
         (
             Media {
                 profile: left_profile,
@@ -1227,6 +1454,561 @@ mod tests {
             .map(str::to_owned)
     }
 
+    #[test]
+    fn runtime_close_refuses_only_selected_submissions_without_persisting_them() {
+        let data = TempDir::new().unwrap();
+        let mut coordinator = core(data.path(), 8);
+        coordinator.confirm_reconciled().unwrap();
+        let media_runtime = RuntimeIdentity::new(Lane::Media, "audio.cpp").unwrap();
+        let _close = coordinator.close_runtime_admission(&media_runtime).unwrap();
+
+        assert_eq!(
+            coordinator.submit_checked(
+                "closed-media".into(),
+                media(),
+                Duration::from_secs(5),
+                Instant::now(),
+            ),
+            Err(SubmissionError::RuntimeAdmissionClosed)
+        );
+        assert_eq!(coordinator.request_state("closed-media"), None);
+        assert!(coordinator.history().records().is_empty());
+        assert_eq!(coordinator.queued_count(), 0);
+        assert!(!data.path().join("jobs.json").exists());
+
+        coordinator
+            .submit(
+                "open-language".into(),
+                chat(),
+                Duration::from_secs(5),
+                Instant::now(),
+            )
+            .unwrap();
+        assert_eq!(coordinator.queued_count(), 1);
+        assert_eq!(coordinator.request_state("open-language"), Some("queued"));
+        let media_state = coordinator.runtime_drain_state(&media_runtime).unwrap();
+        assert_eq!(media_state.pending_jobs(), 0);
+        assert!(media_state.admission_closed());
+        let language_runtime = RuntimeIdentity::new(Lane::Language, "llama-swap").unwrap();
+        let language_state = coordinator.runtime_drain_state(&language_runtime).unwrap();
+        assert_eq!(language_state.pending_jobs(), 1);
+        assert!(!language_state.admission_closed());
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &std::fs::read(data.path().join("jobs.json")).unwrap()
+            )
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn closed_runtime_continues_scheduling_accepted_work_through_cancellation() {
+        let fixture = DispatchFixture::new();
+        let mut coordinator = fixture.coordinator();
+        coordinator.confirm_reconciled().unwrap();
+        let runtime = RuntimeIdentity::new(Lane::Media, "fixture-runtime").unwrap();
+        let now = Instant::now();
+        let first_id = coordinator
+            .submit(
+                "first-accepted".into(),
+                DispatchFixture::request(),
+                Duration::from_secs(30),
+                now,
+            )
+            .unwrap();
+        let second_id = coordinator
+            .submit(
+                "second-accepted".into(),
+                DispatchFixture::request(),
+                Duration::from_secs(30),
+                now,
+            )
+            .unwrap();
+        let _close = coordinator.close_runtime_admission(&runtime).unwrap();
+
+        let initial = coordinator.runtime_drain_state(&runtime).unwrap();
+        assert_eq!(initial.pending_jobs(), 2);
+        assert_eq!(initial.active_jobs(), 0);
+        assert!(!initial.is_drained());
+
+        let first = coordinator.reserve_next(now).unwrap().unwrap();
+        assert_eq!(first.job_id, first_id);
+        coordinator.cancel(first_id).unwrap();
+        assert!(first.cancellation.is_cancelled());
+        let cancelling = coordinator.runtime_drain_state(&runtime).unwrap();
+        assert_eq!(cancelling.pending_jobs(), 1);
+        assert_eq!(cancelling.active_jobs(), 1);
+        coordinator
+            .complete(
+                first_id,
+                Completion::Cancelled,
+                Vec::new(),
+                now + Duration::from_millis(1),
+            )
+            .unwrap();
+
+        let second = coordinator
+            .reserve_next(now + Duration::from_millis(2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.job_id, second_id);
+        coordinator.cancel(second_id).unwrap();
+        coordinator
+            .complete(
+                second_id,
+                Completion::Cancelled,
+                Vec::new(),
+                now + Duration::from_millis(3),
+            )
+            .unwrap();
+        assert!(coordinator
+            .reserve_next(now + Duration::from_millis(4))
+            .unwrap()
+            .is_none());
+
+        let drained = coordinator.runtime_drain_state(&runtime).unwrap();
+        assert_eq!(drained.pending_jobs(), 0);
+        assert_eq!(drained.active_jobs(), 0);
+        assert_eq!(drained.unresolved_retained_jobs(), 0);
+        assert!(drained.admission_closed());
+        assert!(drained.is_drained());
+        assert_eq!(
+            coordinator.submit_checked(
+                "too-late".into(),
+                DispatchFixture::request(),
+                Duration::from_secs(30),
+                now,
+            ),
+            Err(SubmissionError::RuntimeAdmissionClosed)
+        );
+    }
+
+    #[test]
+    fn scoped_reservation_skips_other_runtime_fifo_work_and_drains_only_closed_runtime() {
+        let data = TempDir::new().unwrap();
+        let mut coordinator = core(data.path(), 8);
+        coordinator.confirm_reconciled().unwrap();
+        let runtime = RuntimeIdentity::new(Lane::Media, "audio.cpp").unwrap();
+        let now = Instant::now();
+        coordinator
+            .submit(
+                "other-runtime-first".into(),
+                chat(),
+                Duration::from_secs(30),
+                now,
+            )
+            .unwrap();
+        let first_target = coordinator
+            .submit("target-first".into(), media(), Duration::from_secs(30), now)
+            .unwrap();
+        let second_target = coordinator
+            .submit(
+                "target-second".into(),
+                media(),
+                Duration::from_secs(30),
+                now,
+            )
+            .unwrap();
+        let close = coordinator.close_runtime_admission(&runtime).unwrap();
+
+        let first = coordinator
+            .reserve_next_for_runtime(&close, now)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.job_id, first_target);
+        assert_eq!(first.request_id, "target-first");
+        assert_eq!(first.route.runtime, runtime);
+        assert_eq!(coordinator.queued_count(), 2);
+        assert_eq!(
+            coordinator
+                .runtime_drain_state(&RuntimeIdentity::new(Lane::Language, "llama-swap").unwrap())
+                .unwrap()
+                .pending_jobs(),
+            1
+        );
+
+        coordinator
+            .begin_dispatch(&first, now + Duration::from_millis(1))
+            .unwrap();
+        coordinator
+            .complete(
+                first_target,
+                Completion::Failed,
+                Vec::new(),
+                now + Duration::from_millis(2),
+            )
+            .unwrap();
+
+        let second = coordinator
+            .reserve_next_for_runtime(&close, now + Duration::from_millis(3))
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.job_id, second_target);
+        assert_eq!(second.route.runtime, runtime);
+        coordinator.cancel(second_target).unwrap();
+        coordinator
+            .complete(
+                second_target,
+                Completion::Cancelled,
+                Vec::new(),
+                now + Duration::from_millis(4),
+            )
+            .unwrap();
+        assert!(coordinator
+            .reserve_next_for_runtime(&close, now + Duration::from_millis(5))
+            .unwrap()
+            .is_none());
+
+        let target_state = coordinator.runtime_drain_state(&runtime).unwrap();
+        assert_eq!(target_state.pending_jobs(), 0);
+        assert_eq!(target_state.active_jobs(), 0);
+        assert!(target_state.is_drained());
+        assert_eq!(
+            coordinator.request_state("other-runtime-first"),
+            Some("queued")
+        );
+        let other = coordinator
+            .reserve_next(now + Duration::from_millis(6))
+            .unwrap()
+            .unwrap();
+        assert_eq!(other.request_id, "other-runtime-first");
+    }
+
+    #[test]
+    fn scoped_reservation_respects_conflicting_active_resources() {
+        let data = TempDir::new().unwrap();
+        let mut coordinator = core(data.path(), 8);
+        coordinator.confirm_reconciled().unwrap();
+        let runtime = RuntimeIdentity::new(Lane::Media, "audio.cpp").unwrap();
+        let now = Instant::now();
+        let other_id = coordinator
+            .submit(
+                "active-other-runtime".into(),
+                chat(),
+                Duration::from_secs(30),
+                now,
+            )
+            .unwrap();
+        let target_id = coordinator
+            .submit(
+                "blocked-target-runtime".into(),
+                media(),
+                Duration::from_secs(30),
+                now,
+            )
+            .unwrap();
+        let close = coordinator.close_runtime_admission(&runtime).unwrap();
+
+        let active_other = coordinator.reserve_next(now).unwrap().unwrap();
+        assert_eq!(active_other.job_id, other_id);
+        assert!(coordinator
+            .reserve_next_for_runtime(&close, now + Duration::from_millis(1))
+            .unwrap()
+            .is_none());
+        assert_eq!(coordinator.queued_count(), 1);
+        assert_eq!(coordinator.active_count(), 1);
+
+        coordinator.cancel(other_id).unwrap();
+        coordinator
+            .complete(
+                other_id,
+                Completion::Cancelled,
+                Vec::new(),
+                now + Duration::from_millis(2),
+            )
+            .unwrap();
+        let target = coordinator
+            .reserve_next_for_runtime(&close, now + Duration::from_millis(3))
+            .unwrap()
+            .unwrap();
+        assert_eq!(target.job_id, target_id);
+        coordinator.cancel(target_id).unwrap();
+        coordinator
+            .complete(
+                target_id,
+                Completion::Cancelled,
+                Vec::new(),
+                now + Duration::from_millis(4),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn scoped_reservation_expires_only_selected_runtime_work() {
+        let data = TempDir::new().unwrap();
+        let mut coordinator = core(data.path(), 8);
+        coordinator.confirm_reconciled().unwrap();
+        let runtime = RuntimeIdentity::new(Lane::Media, "audio.cpp").unwrap();
+        let now = Instant::now();
+        coordinator
+            .submit(
+                "expired-target".into(),
+                media(),
+                Duration::from_secs(1),
+                now,
+            )
+            .unwrap();
+        coordinator
+            .submit("other-runtime".into(), chat(), Duration::from_secs(30), now)
+            .unwrap();
+        let close = coordinator.close_runtime_admission(&runtime).unwrap();
+
+        assert!(coordinator
+            .reserve_next_for_runtime(&close, now + Duration::from_secs(2))
+            .unwrap()
+            .is_none());
+        assert_eq!(coordinator.request_state("expired-target"), Some("failed"));
+        assert_eq!(coordinator.request_state("other-runtime"), Some("queued"));
+        assert_eq!(coordinator.queued_count(), 1);
+        let other = coordinator
+            .reserve_next(now + Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(other.request_id, "other-runtime");
+    }
+
+    #[test]
+    fn scoped_reservation_quarantines_and_retains_expired_work_if_persistence_fails() {
+        let fixture = DispatchFixture::new();
+        let mut coordinator = fixture.coordinator();
+        coordinator.confirm_reconciled().unwrap();
+        let runtime = RuntimeIdentity::new(Lane::Media, "fixture-runtime").unwrap();
+        let now = Instant::now();
+        coordinator
+            .submit(
+                "expired-but-retained".into(),
+                DispatchFixture::request(),
+                Duration::from_secs(1),
+                now,
+            )
+            .unwrap();
+        let close = coordinator.close_runtime_admission(&runtime).unwrap();
+
+        let jobs_path = fixture.root.path().join("jobs.json");
+        std::fs::remove_file(&jobs_path).unwrap();
+        std::fs::create_dir(&jobs_path).unwrap();
+        assert!(coordinator
+            .reserve_next_for_runtime(&close, now + Duration::from_secs(2))
+            .is_err());
+
+        assert_eq!(
+            coordinator.admission(),
+            AdmissionState::ReconciliationRequired
+        );
+        assert_eq!(coordinator.queued_count(), 1);
+        assert_eq!(coordinator.active_count(), 0);
+        assert_eq!(
+            coordinator.request_state("expired-but-retained"),
+            Some("queued")
+        );
+        let drain = coordinator.runtime_drain_state(&runtime).unwrap();
+        assert_eq!(drain.pending_jobs(), 1);
+        assert!(drain.admission_closed());
+        assert!(!drain.is_drained());
+    }
+
+    #[test]
+    fn stale_runtime_close_token_cannot_reopen_a_newer_close_generation() {
+        let fixture = DispatchFixture::new();
+        let mut coordinator = fixture.coordinator();
+        coordinator.confirm_reconciled().unwrap();
+        let runtime = RuntimeIdentity::new(Lane::Media, "fixture-runtime").unwrap();
+        let now = Instant::now();
+        let job_id = coordinator
+            .submit(
+                "accepted-before-stale-close".into(),
+                DispatchFixture::request(),
+                Duration::from_secs(30),
+                now,
+            )
+            .unwrap();
+        let stale = coordinator.close_runtime_admission(&runtime).unwrap();
+        let current = coordinator.close_runtime_admission(&runtime).unwrap();
+
+        assert!(coordinator.reserve_next_for_runtime(&stale, now).is_err());
+        assert_eq!(coordinator.queued_count(), 1);
+        assert_eq!(
+            coordinator.reopen_runtime_admission(stale),
+            Err(RuntimeAdmissionError::StaleCloseToken)
+        );
+        assert!(coordinator
+            .runtime_drain_state(&runtime)
+            .unwrap()
+            .admission_closed());
+        assert_eq!(
+            coordinator.submit_checked(
+                "still-closed".into(),
+                DispatchFixture::request(),
+                Duration::from_secs(5),
+                Instant::now(),
+            ),
+            Err(SubmissionError::RuntimeAdmissionClosed)
+        );
+
+        let ticket = coordinator
+            .reserve_next_for_runtime(&current, now)
+            .unwrap()
+            .unwrap();
+        assert_eq!(ticket.job_id, job_id);
+        coordinator
+            .complete(job_id, Completion::Cancelled, Vec::new(), now)
+            .unwrap();
+        coordinator.reopen_runtime_admission(current).unwrap();
+        assert!(!coordinator
+            .runtime_drain_state(&runtime)
+            .unwrap()
+            .admission_closed());
+        assert!(coordinator
+            .submit(
+                "reopened".into(),
+                DispatchFixture::request(),
+                Duration::from_secs(5),
+                Instant::now(),
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn scoped_reservation_rejects_close_token_from_another_core_with_same_generation() {
+        let first_fixture = DispatchFixture::new();
+        let second_fixture = DispatchFixture::new();
+        let mut first_core = first_fixture.coordinator();
+        let mut second_core = second_fixture.coordinator();
+        first_core.confirm_reconciled().unwrap();
+        second_core.confirm_reconciled().unwrap();
+        let runtime = RuntimeIdentity::new(Lane::Media, "fixture-runtime").unwrap();
+        let now = Instant::now();
+        first_core
+            .submit(
+                "first-core-pending".into(),
+                DispatchFixture::request(),
+                Duration::from_secs(30),
+                now,
+            )
+            .unwrap();
+        second_core
+            .submit(
+                "second-core-pending".into(),
+                DispatchFixture::request(),
+                Duration::from_secs(30),
+                now,
+            )
+            .unwrap();
+        let first_close = first_core.close_runtime_admission(&runtime).unwrap();
+        let second_close = second_core.close_runtime_admission(&runtime).unwrap();
+
+        assert!(second_core
+            .reserve_next_for_runtime(&first_close, now)
+            .is_err());
+        assert_eq!(second_core.queued_count(), 1);
+        let own_ticket = second_core
+            .reserve_next_for_runtime(&second_close, now)
+            .unwrap()
+            .unwrap();
+        assert_eq!(own_ticket.request_id, "second-core-pending");
+        assert_eq!(first_core.queued_count(), 1);
+    }
+
+    #[test]
+    fn same_core_quarantine_preserves_runtime_close_and_pending_work_can_resume() {
+        let fixture = DispatchFixture::new();
+        let mut coordinator = fixture.coordinator();
+        coordinator.confirm_reconciled().unwrap();
+        let runtime = RuntimeIdentity::new(Lane::Media, "fixture-runtime").unwrap();
+        let now = Instant::now();
+        let job_id = coordinator
+            .submit(
+                "accepted-before-close".into(),
+                DispatchFixture::request(),
+                Duration::from_secs(30),
+                now,
+            )
+            .unwrap();
+        let close = coordinator.close_runtime_admission(&runtime).unwrap();
+        coordinator.quarantine();
+
+        assert_eq!(
+            coordinator.admission(),
+            AdmissionState::ReconciliationRequired
+        );
+        assert!(coordinator.reserve_next(now).is_err());
+        assert!(coordinator.reserve_next_for_runtime(&close, now).is_err());
+        assert!(coordinator
+            .runtime_drain_state(&runtime)
+            .unwrap()
+            .admission_closed());
+
+        coordinator.confirm_reconciled().unwrap();
+        assert!(coordinator
+            .runtime_drain_state(&runtime)
+            .unwrap()
+            .admission_closed());
+        let ticket = coordinator
+            .reserve_next_for_runtime(&close, now)
+            .unwrap()
+            .unwrap();
+        assert_eq!(ticket.job_id, job_id);
+        coordinator
+            .complete(job_id, Completion::Cancelled, Vec::new(), now)
+            .unwrap();
+        assert!(coordinator
+            .runtime_drain_state(&runtime)
+            .unwrap()
+            .is_drained());
+    }
+
+    #[test]
+    fn restart_restores_no_close_token_and_interrupted_history_is_not_drained() {
+        let fixture = DispatchFixture::new();
+        let mut coordinator = fixture.coordinator();
+        coordinator.confirm_reconciled().unwrap();
+        let runtime = RuntimeIdentity::new(Lane::Media, "fixture-runtime").unwrap();
+        let now = Instant::now();
+        coordinator
+            .submit(
+                "interrupted-on-restart".into(),
+                DispatchFixture::request(),
+                Duration::from_secs(30),
+                now,
+            )
+            .unwrap();
+        let _close = coordinator.close_runtime_admission(&runtime).unwrap();
+        drop(coordinator);
+
+        // The durable row stores a profile, not its original runtime binding.
+        // A later manifest change must not hide potentially live old work.
+        fixture.rewrite_media("moved-runtime", "scripts/runner.py");
+
+        let mut restarted = fixture.coordinator();
+        assert_eq!(
+            restarted.admission(),
+            AdmissionState::ReconciliationRequired
+        );
+        assert_eq!(restarted.queued_count(), 0);
+        assert_eq!(
+            restarted.request_state("interrupted-on-restart"),
+            Some("interrupted")
+        );
+        let drain = restarted.runtime_drain_state(&runtime).unwrap();
+        assert!(!drain.admission_closed());
+        assert_eq!(drain.unresolved_retained_jobs(), 1);
+        assert!(!drain.is_drained());
+        assert!(restarted.reserve_next(now).is_err());
+        assert_eq!(
+            restarted.submit_checked(
+                "no-replay-before-reconcile".into(),
+                DispatchFixture::request(),
+                Duration::from_secs(5),
+                now,
+            ),
+            Err(SubmissionError::Unavailable)
+        );
+    }
+
     fn cpu_fixture_core(fixture: &DispatchFixture, resource: ResourceClaim) -> CoordinatorCore {
         let root = fixture.root.path();
         std::fs::write(root.join("decisions/decision-runtimes.json"), serde_json::json!({
@@ -1260,6 +2042,28 @@ mod tests {
             *key = ProfileKey::new(Lane::Decisions, profile).unwrap();
         }
         request
+    }
+
+    #[test]
+    fn close_token_cannot_reopen_a_different_core_with_the_same_generation() {
+        let first_data = TempDir::new().unwrap();
+        let second_data = TempDir::new().unwrap();
+        let mut first = core(first_data.path(), 8);
+        let mut second = core(second_data.path(), 8);
+        let runtime = RuntimeIdentity::new(Lane::Language, "llama-swap").unwrap();
+        assert!(!first.runtime_drain_state(&runtime).unwrap().is_drained());
+        let first_close = first.close_runtime_admission(&runtime).unwrap();
+        let second_close = second.close_runtime_admission(&runtime).unwrap();
+        assert_eq!(
+            second.reopen_runtime_admission(first_close),
+            Err(RuntimeAdmissionError::StaleCloseToken)
+        );
+        assert!(second
+            .runtime_drain_state(&runtime)
+            .unwrap()
+            .admission_closed());
+        second.reopen_runtime_admission(second_close).unwrap();
+        assert!(!second.runtime_drain_state(&runtime).unwrap().is_drained());
     }
 
     #[test]
