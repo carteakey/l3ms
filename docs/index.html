@@ -513,6 +513,8 @@
           <a href="${escapeHtml(run.sourceUrl)}" rel="noopener">Review source</a>
         </article>
       `).join("");
+    }
+
     function renderEvolution() {
       const container = document.getElementById("evolution-table-body");
       if (!dashboard.progression || !dashboard.progression.length) {
