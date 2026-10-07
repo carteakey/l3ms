@@ -8,6 +8,32 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
+## Current resumed checkpoint — 2026-10-07
+
+Original source HEAD moved from `5792522` to `ed7538a`; the migration branch
+remains separate at `4008dd5` with in-progress native forms and isolated-supervisor
+work. Original dirty files are preserved. Committed serving YAML is synchronized
+without a live reload. See [source reconciliation](serving-baseline.md) for
+imported benchmark provenance and missing harnesses. Dashboard regeneration,
+nine Python data-contract tests and JavaScript DOM fixtures pass; browser/live
+acceptance and publication remain gated. Supervisor recovery is being tightened
+so a stale coordinator can authorize only exact-generation cleanup, not reuse or
+inference admission. This checkpoint is not a full-port completion claim.
+
+The single-supervisor model-free live probe passed on 2026-10-07: named FD
+handoff, actual helper/backend namespace equality and host separation,
+coordinator-only Unix transport, one native proof GET, exact-generation stop,
+process birth-identity disappearance and empty/removed cgroup. Existing live
+services and GPU state were unchanged. See [measured launch gate](private-engine-probe.md).
+Real native health, model/TTS execution and coordinated GPU switching remain open.
+
+Combined verification after the discovery/forms/supervisor/source-sync slice:
+**648 passed, 1 ignored**, strict all-target Clippy, formatting and whitespace
+checks pass. Nine dashboard data tests, nine probe parser cases and shipped
+JavaScript DOM fixtures pass. Manifest-derived embedding discovery is present;
+typed embedding requests/results/execution and incremental language events are
+not yet wired. No existing service was stopped, and nothing was pushed or published.
+
 Linear tracking: [CAR-215](https://linear.app/carteakey/issue/CAR-215/consolidate-l3ms-l2m2-and-l3ds-into-the-local-3-mode-model-stack)
 is the parent; [CAR-216](https://linear.app/carteakey/issue/CAR-216/import-l2m2-and-l3ds-into-the-l3ms-monorepo-with-verified-standalone)
 covers Phases 0–3, CAR-217 Phases 4–5, CAR-218 Phases 6–7, CAR-219 Phase 8,

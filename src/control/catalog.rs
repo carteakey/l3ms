@@ -409,10 +409,15 @@ fn load_language(
         let native_source = NativeProfileSource::Language {
             model_id: key.profile_id.clone(),
         };
+        let tasks = entry
+            .tasks
+            .into_iter()
+            .map(Task::new)
+            .collect::<Result<Vec<_>>>()?;
         let profile = CatalogProfile {
             name: key.profile_id.to_string(),
             key,
-            tasks: vec![Task::new("chat")?],
+            tasks,
             runtime: RuntimeIdentity::new(Lane::Language, "llama-swap")?,
             source_path: source_path.clone(),
             device: None,
@@ -677,6 +682,45 @@ mod tests {
             catalog.inspect(&key("media:shared-id")).unwrap().tasks,
             vec![Task::new("image").unwrap(), Task::new("video").unwrap(),]
         );
+    }
+
+    #[test]
+    fn language_tasks_follow_active_embedding_flags_not_profile_names() {
+        let root = fixture_root();
+        write(
+            root.path(),
+            "llama-swap.yaml",
+            r#"models:
+  "arbitrary-name":
+    cmd: |
+      llama-server --embedding
+  "ordinary-chat":
+    cmd: |
+      llama-server --port ${PORT}
+  # "nomic-embed-text-v1.5":
+  #   cmd: |
+  #     llama-server --embedding
+"#,
+        );
+
+        let catalog = Catalog::load(root.path()).expect("load fixture catalog");
+        assert_eq!(
+            catalog
+                .inspect(&key("language:arbitrary-name"))
+                .unwrap()
+                .tasks,
+            vec![Task::new("embeddings").unwrap()]
+        );
+        assert_eq!(
+            catalog
+                .inspect(&key("language:ordinary-chat"))
+                .unwrap()
+                .tasks,
+            vec![Task::new("chat").unwrap()]
+        );
+        assert!(catalog
+            .inspect(&key("language:nomic-embed-text-v1.5"))
+            .is_none());
     }
 
     #[test]

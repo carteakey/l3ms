@@ -9,15 +9,18 @@
 //! does not authorize engine activation or resolve GPU conflicts.
 
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::catalog::RuntimeIdentity;
 use super::cgroup_release::{
     CgroupObservation, CgroupObservationKind, CgroupReleaseErrorKind, CgroupReleaseProbe,
 };
+use super::engine_helper::{supervisor_arguments, BackendProcessSpec};
+use super::engine_transport::{BackendPort, CoordinatorIdentityDescriptor};
 use super::managed_service::{
     LaunchRecipe, ManagedServiceController, ManagedServiceErrorKind, OwnedService, ReconcileResult,
-    ServiceIntentRecord, StartDisposition, StartFailure, StoppedService,
+    ServiceIntentRecord, StartDisposition, StartFailure, StopOnlyService, StoppedService,
 };
 use super::ownership::CoordinatorLock;
 use super::runtime::OperationContext;
@@ -245,6 +248,75 @@ impl fmt::Display for IntentRetirementError {
 
 impl std::error::Error for IntentRetirementError {}
 
+fn observe_stopped_receipt(
+    receipt: StoppedService,
+    probe: &CgroupReleaseProbe,
+    context: &OperationContext<'_>,
+) -> Result<StoppedServiceObservation, StopAndObserveError> {
+    let observation = match probe.observe(&receipt, context) {
+        Ok(observation) => observation,
+        Err(kind) => {
+            return Err(StopAndObserveError {
+                kind: StopAndObserveErrorKind::Observation(kind),
+                receipt: Some(Box::new(receipt)),
+            });
+        }
+    };
+    if !observation.matches(&receipt) {
+        return Err(StopAndObserveError {
+            kind: StopAndObserveErrorKind::Observation(CgroupReleaseErrorKind::InvalidReceipt),
+            receipt: Some(Box::new(receipt)),
+        });
+    }
+    Ok(StoppedServiceObservation {
+        receipt,
+        observation,
+    })
+}
+
+/// Validated inputs for one isolated engine launch. The manager still captures
+/// coordinator identity immediately before preparation so this value cannot
+/// carry stale process identity across a coordinator restart.
+pub struct IsolatedEngineLaunch {
+    runtime_identity: RuntimeIdentity,
+    backend_recipe: LaunchRecipe,
+    helper_executable: PathBuf,
+    transport_directory: PathBuf,
+    backend_port: BackendPort,
+    stop_timeout: Duration,
+}
+
+impl IsolatedEngineLaunch {
+    pub fn new(
+        runtime_identity: RuntimeIdentity,
+        backend_recipe: LaunchRecipe,
+        helper_executable: impl AsRef<Path>,
+        transport_directory: impl AsRef<Path>,
+        backend_port: u16,
+        stop_timeout: Duration,
+    ) -> Result<Self, ManagedServiceErrorKind> {
+        if stop_timeout.is_zero() || stop_timeout > Duration::from_secs(300) {
+            return Err(ManagedServiceErrorKind::InvalidStopTimeout);
+        }
+        let backend_port = BackendPort::new(backend_port)
+            .map_err(|_| ManagedServiceErrorKind::InvalidBackendPort)?;
+        Ok(Self {
+            runtime_identity,
+            backend_recipe,
+            helper_executable: helper_executable.as_ref().to_path_buf(),
+            transport_directory: transport_directory.as_ref().to_path_buf(),
+            backend_port,
+            stop_timeout,
+        })
+    }
+}
+
+impl fmt::Debug for IsolatedEngineLaunch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("IsolatedEngineLaunch([redacted])")
+    }
+}
+
 /// Borrowing the guard prevents normal callers from dropping host exclusion
 /// while this owner is in use. The caller must use the same configured host
 /// lock directory as all other coordinated entry points; advisory locks do not
@@ -298,59 +370,62 @@ impl<'host> ManagedRuntimeOwner<'host> {
         self.start_inner(Some(runtime_identity), recipe, stop_timeout, context)
     }
 
-    /// Start a fresh backend owner in a manager-created private network
-    /// namespace. This generated role is the only path that asks systemd for
-    /// PrivateNetwork=yes; generic and external runtime flows are unchanged.
-    pub fn start_private_network_engine(
+    /// Start the supervisor and backend together in one manager-created
+    /// private network namespace and one systemd-owned cgroup. The write-ahead
+    /// intent binds the runtime and coordinator process identity before the
+    /// manager sees a start request. Manager READY proves transport setup
+    /// only; native backend health remains a separate admission check.
+    pub fn start_isolated_engine(
         &mut self,
-        runtime_identity: RuntimeIdentity,
-        recipe: LaunchRecipe,
-        stop_timeout: Duration,
+        launch: IsolatedEngineLaunch,
         context: &OperationContext<'_>,
     ) -> Result<OwnedService, OwnerStartError> {
         check_context(context).map_err(OwnerStartError::Preparation)?;
-        let prepared = self
-            .controller
-            .prepare_private_network_engine(runtime_identity, recipe, stop_timeout)
-            .map_err(OwnerStartError::Preparation)?;
-        self.persist_and_dispatch(prepared, context)
-    }
-
-    /// Start the typed byte-bridge only for a currently active owned engine
-    /// whose exact durable intent is present. The controller captures and
-    /// rechecks the manager generation/MainPID before persisting bridge
-    /// ownership; a later helper confirms the manager-opened namespace FDs
-    /// match actual kernel namespaces before readiness.
-    pub fn start_engine_namespace_bridge(
-        &mut self,
-        engine: &OwnedService,
-        recipe: LaunchRecipe,
-        stop_timeout: Duration,
-        context: &OperationContext<'_>,
-    ) -> Result<OwnedService, OwnerStartError> {
-        check_context(context).map_err(OwnerStartError::Preparation)?;
-        let records = self
-            .store
-            .list()
-            .map_err(|kind| OwnerStartError::Persistence {
-                intent: Box::new(engine.intent_record().clone()),
-                kind,
+        let coordinator = CoordinatorIdentityDescriptor::capture_current().map_err(|_| {
+            OwnerStartError::Preparation(ManagedServiceErrorKind::CoordinatorIdentityUnavailable)
+        })?;
+        let current_executable = std::env::current_exe()
+            .map_err(|_| {
+                OwnerStartError::Preparation(ManagedServiceErrorKind::ExecutableUnavailable)
+            })?
+            .canonicalize()
+            .map_err(|_| {
+                OwnerStartError::Preparation(ManagedServiceErrorKind::ExecutableUnavailable)
             })?;
-        if !records
-            .iter()
-            .any(|record| record == engine.intent_record())
+        if launch.helper_executable.canonicalize().ok().as_deref()
+            != Some(current_executable.as_path())
         {
             return Err(OwnerStartError::Preparation(
-                ManagedServiceErrorKind::OwnershipMismatch,
+                ManagedServiceErrorKind::InvalidRecipe,
             ));
         }
-        let namespace = self
-            .controller
-            .capture_engine_namespace_identity(engine, context)
-            .map_err(OwnerStartError::Preparation)?;
+        let backend = BackendProcessSpec::new(
+            launch.backend_recipe.executable(),
+            launch.backend_recipe.working_directory(),
+            launch.backend_recipe.arguments().iter().cloned(),
+        )
+        .map_err(|_| OwnerStartError::Preparation(ManagedServiceErrorKind::InvalidRecipe))?;
+        let helper_arguments = supervisor_arguments(
+            &launch.transport_directory,
+            launch.backend_port,
+            coordinator,
+            &backend,
+        )
+        .map_err(|_| OwnerStartError::Preparation(ManagedServiceErrorKind::InvalidRecipe))?;
+        let supervisor_recipe = LaunchRecipe::new(
+            &current_executable,
+            launch.backend_recipe.working_directory(),
+            helper_arguments,
+        )
+        .map_err(OwnerStartError::Preparation)?;
         let prepared = self
             .controller
-            .prepare_engine_namespace_bridge(recipe, stop_timeout, namespace)
+            .prepare_isolated_engine_supervisor(
+                launch.runtime_identity,
+                supervisor_recipe,
+                launch.stop_timeout,
+                coordinator,
+            )
             .map_err(OwnerStartError::Preparation)?;
         self.persist_and_dispatch(prepared, context)
     }
@@ -409,16 +484,16 @@ impl<'host> ManagedRuntimeOwner<'host> {
         let mut observations = Vec::with_capacity(records.len());
         for intent in records {
             observation_context(context)?;
-            let observation =
-                self.controller
-                    .reconcile(&intent, context)
-                    .map_err(|kind| match kind {
-                        ManagedServiceErrorKind::Cancelled => OwnerObservationError::Cancelled,
-                        ManagedServiceErrorKind::DeadlineExceeded => {
-                            OwnerObservationError::DeadlineExceeded
-                        }
-                        _ => OwnerObservationError::ManagerUnavailable,
-                    })?;
+            let observation = self
+                .controller
+                .reconcile_restored_intent(&intent, context)
+                .map_err(|kind| match kind {
+                    ManagedServiceErrorKind::Cancelled => OwnerObservationError::Cancelled,
+                    ManagedServiceErrorKind::DeadlineExceeded => {
+                        OwnerObservationError::DeadlineExceeded
+                    }
+                    _ => OwnerObservationError::ManagerUnavailable,
+                })?;
             observations.push(RetainedServiceObservation {
                 intent,
                 observation,
@@ -451,6 +526,29 @@ impl<'host> ManagedRuntimeOwner<'host> {
         self.controller.stop(service, context)
     }
 
+    /// Stop one exact isolated-supervisor generation recovered from the
+    /// secure retained-intent store. The borrowed token survives every
+    /// failure, and the durable WAL record is never retired here.
+    pub fn stop_stop_only(
+        &mut self,
+        service: &StopOnlyService,
+        context: &OperationContext<'_>,
+    ) -> Result<StoppedService, ManagedServiceErrorKind> {
+        check_context(context)?;
+        let records = self
+            .store
+            .list()
+            .map_err(|_| ManagedServiceErrorKind::UnitStateUnverifiable)?;
+        if !records
+            .iter()
+            .any(|record| record == service.intent_record())
+        {
+            return Err(ManagedServiceErrorKind::OwnershipMismatch);
+        }
+        check_context(context)?;
+        self.controller.stop_stop_only(service, context)
+    }
+
     /// Stop the exact owned generation, then inspect only the cgroup bound to
     /// the returned stop receipt. The durable intent remains retained on all
     /// outcomes. If observation fails after stop acknowledgment, the error
@@ -468,25 +566,24 @@ impl<'host> ManagedRuntimeOwner<'host> {
                 kind: StopAndObserveErrorKind::Stop(kind),
                 receipt: None,
             })?;
-        let observation = match probe.observe(&receipt, context) {
-            Ok(observation) => observation,
-            Err(kind) => {
-                return Err(StopAndObserveError {
-                    kind: StopAndObserveErrorKind::Observation(kind),
-                    receipt: Some(Box::new(receipt)),
-                });
-            }
-        };
-        if !observation.matches(&receipt) {
-            return Err(StopAndObserveError {
-                kind: StopAndObserveErrorKind::Observation(CgroupReleaseErrorKind::InvalidReceipt),
-                receipt: Some(Box::new(receipt)),
-            });
-        }
-        Ok(StoppedServiceObservation {
-            receipt,
-            observation,
-        })
+        observe_stopped_receipt(receipt, probe, context)
+    }
+
+    /// Stop a recovered supervisor generation and continue through the same
+    /// generation-bound cgroup observation path used by ordinary ownership.
+    pub fn stop_stop_only_and_observe(
+        &mut self,
+        service: &StopOnlyService,
+        probe: &CgroupReleaseProbe,
+        context: &OperationContext<'_>,
+    ) -> Result<StoppedServiceObservation, StopAndObserveError> {
+        let receipt =
+            self.stop_stop_only(service, context)
+                .map_err(|kind| StopAndObserveError {
+                    kind: StopAndObserveErrorKind::Stop(kind),
+                    receipt: None,
+                })?;
+        observe_stopped_receipt(receipt, probe, context)
     }
 
     /// Retire a retained intent only after rechecking its opaque stop receipt,
@@ -660,6 +757,19 @@ if pathlib.Path(sys.argv[0]).name == 'fake-run':
     description = next(a.split('=', 1)[1] for a in args if a.startswith('--description='))
     record = json.loads((intents / (unit + '.json')).read_text())
     assert record['unit_name'] == unit
+    if (root / 'require-supervisor').exists():
+        identity = record['coordinator_identity']
+        assert record['schema'] == 3
+        assert record['launch_role'] == 'isolated_engine_supervisor'
+        assert record['runtime_lane'] == 'media'
+        assert record['runtime_name'] == 'comfyui'
+        assert identity['pid'] == os.getppid()
+        assert identity['uid'] == os.geteuid()
+        assert '--service-type=notify' in args
+        assert '--property=PrivateNetwork=yes' in args
+        assert any(a.startswith('--property=OpenFile=/proc/' + str(identity['pid'])
+                   + '/ns/net:l3ms-coordinator-netns:read-only') for a in args)
+        assert not any('JoinsNamespaceOf=' in a for a in args)
     if (root / 'require-runtime').exists():
         assert record['schema'] == 2
         assert record['runtime_lane'] == 'media'
@@ -668,12 +778,20 @@ if pathlib.Path(sys.argv[0]).name == 'fake-run':
         log.write('start\n')
     state.write_text(json.dumps(dict(unit=unit, description=description,
                                      active='active', invocation='a'*32)))
+    if (root / 'require-supervisor').exists() or (root / 'isolated-snapshot').exists():
+        data = json.loads(state.read_text())
+        data.update(type='notify', private_network='yes', joins_namespace_of='')
+        if (root / 'require-supervisor').exists():
+            data['main_pid'] = os.getppid()
+        state.write_text(json.dumps(data))
     sys.exit(9 if (root / 'fail-launcher').exists() else 0)
 if 'list-units' in args or 'list-unit-files' in args:
     sys.exit(0)
 if 'stop' in args:
     with (root / 'stops').open('a') as log:
         log.write('stop\n')
+    if (root / 'fail-stop').exists():
+        sys.exit(23)
     state.unlink()
     sys.exit(0)
 if 'show' in args:
@@ -687,14 +805,16 @@ if 'show' in args:
         print('LoadState=not-found')
         sys.exit(0)
     active = data.get('active', 'active')
-    main_pid = '1234' if active == 'active' else '0'
+    main_pid = data.get('main_pid', '1234' if active == 'active' else '0')
     print('LoadState=loaded\nActiveState=' + active + '\nMainPID=' + main_pid + '\nTransient=yes')
     print('InvocationID=' + data.get('invocation', 'a' * 32))
     print('ControlGroup=' + data.get('cgroup', '/user.slice/' + data['unit']))
     print('FragmentPath=/run/user/1000/systemd/transient/' + data['unit'])
     print('Description=' + data['description'])
     print('Restart=no\nKillMode=control-group')
-    print('Type=exec\nPrivateNetwork=no\nJoinsNamespaceOf=')
+    print('Type=' + data.get('type', 'exec'))
+    print('PrivateNetwork=' + data.get('private_network', 'no'))
+    print('JoinsNamespaceOf=' + data.get('joins_namespace_of', ''))
     sys.exit(0)
 sys.exit(23)
 "#
@@ -730,12 +850,54 @@ sys.exit(23)
         }
 
         fn cgroup_probe(&self, service: &OwnedService, events: Option<&str>) -> CgroupReleaseProbe {
-            let leaf = self.cgroup_leaf(service);
+            self.cgroup_probe_for_unit(service.unit_name(), events)
+        }
+
+        fn cgroup_probe_for_unit(
+            &self,
+            unit_name: &str,
+            events: Option<&str>,
+        ) -> CgroupReleaseProbe {
+            let leaf = self.cgroups.path().join("user.slice").join(unit_name);
             fs::create_dir_all(&leaf).unwrap();
             if let Some(events) = events {
                 fs::write(leaf.join("cgroup.events"), events).unwrap();
             }
             CgroupReleaseProbe::with_test_root(self.cgroups.path()).unwrap()
+        }
+
+        fn install_stale_supervisor_intent(
+            &self,
+            owner: &mut ManagedRuntimeOwner<'_>,
+        ) -> ServiceIntentRecord {
+            fs::write(self.root.path().join("isolated-snapshot"), "").unwrap();
+            let current = CoordinatorIdentityDescriptor::capture_current().unwrap();
+            let stale_pid = if current.pid() == 2 { 3 } else { 2 };
+            let stale = CoordinatorIdentityDescriptor::from_parts(
+                stale_pid,
+                current.uid(),
+                current.start_time_ticks(),
+                current.network_namespace_device(),
+                current.network_namespace_inode(),
+            )
+            .unwrap();
+            let prepared = owner
+                .controller
+                .prepare_isolated_engine_supervisor(
+                    RuntimeIdentity::new(Lane::Media, "comfyui").unwrap(),
+                    self.recipe(),
+                    Duration::from_secs(1),
+                    stale,
+                )
+                .unwrap();
+            let intent = prepared.intent_record().clone();
+            owner.store.record(&intent).unwrap();
+            let failure = owner
+                .controller
+                .dispatch(prepared, &self.context())
+                .unwrap_err();
+            assert_eq!(failure.disposition(), StartDisposition::OwnershipUncertain);
+            intent
         }
 
         fn cgroup_leaf(&self, service: &OwnedService) -> std::path::PathBuf {
@@ -846,6 +1008,270 @@ sys.exit(23)
             fs::read_to_string(fixture.root.path().join("starts")).unwrap(),
             "start\n"
         );
+    }
+
+    #[test]
+    fn isolated_engine_wal_persists_one_supervisor_unit_before_manager_dispatch() {
+        let fixture = Fixture::new();
+        fs::write(fixture.root.path().join("require-supervisor"), "").unwrap();
+        let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+        let mut owner = fixture.owner(&guard);
+        let launch = IsolatedEngineLaunch::new(
+            RuntimeIdentity::new(Lane::Media, "comfyui").unwrap(),
+            fixture.recipe(),
+            std::env::current_exe().unwrap(),
+            fixture.root.path(),
+            8188,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let error = owner
+            .start_isolated_engine(launch, &fixture.context())
+            .unwrap_err();
+
+        let error_category = match &error {
+            OwnerStartError::Preparation(kind) => format!("preparation:{kind:?}"),
+            OwnerStartError::Persistence { kind, .. } => format!("persistence:{kind:?}"),
+            OwnerStartError::NotDispatched { kind, .. } => format!("not-dispatched:{kind:?}"),
+            OwnerStartError::Dispatch(failure) => format!("dispatch:{:?}", failure.kind()),
+        };
+
+        // The fake manager reports the expected generated supervisor shape,
+        // but the MainPID shares the coordinator's host namespace. The role
+        // must fail closed after dispatch while preserving the exact schema-3
+        // WAL record for reconciliation.
+        assert_eq!(
+            error.disposition(),
+            StartDisposition::OwnershipUncertain,
+            "unexpected error category: {error_category}"
+        );
+        let records = ServiceIntentStore::open(fixture.intents.path())
+            .unwrap()
+            .list()
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].runtime_identity(),
+            Some(&RuntimeIdentity::new(Lane::Media, "comfyui").unwrap())
+        );
+        let stored: serde_json::Value = serde_json::from_slice(
+            &fs::read(
+                fixture
+                    .intents
+                    .path()
+                    .join(format!("{}.json", records[0].unit_name())),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(stored["schema"], 3);
+        assert_eq!(stored["launch_role"], "isolated_engine_supervisor");
+        assert_eq!(
+            fs::read_to_string(fixture.root.path().join("starts")).unwrap(),
+            "start\n"
+        );
+    }
+
+    #[test]
+    fn restored_supervisor_from_different_coordinator_can_stop_only_exact_generation() {
+        let fixture = Fixture::new();
+        let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+        let mut owner = fixture.owner(&guard);
+        let intent = fixture.install_stale_supervisor_intent(&mut owner);
+
+        assert!(matches!(
+            owner.controller.reconcile(&intent, &fixture.context()),
+            Err(ManagedServiceErrorKind::OwnershipMismatch)
+        ));
+
+        let observations = owner.reconcile(&fixture.context()).unwrap();
+        let stop_only = match &observations[0].observation {
+            ReconcileResult::StopOnly(stop_only) => stop_only,
+            other => panic!("expected stop-only recovery, got {other:?}"),
+        };
+        assert_eq!(stop_only.intent_record(), &intent);
+
+        let probe =
+            fixture.cgroup_probe_for_unit(intent.unit_name(), Some("populated 0\nfrozen 0\n"));
+        let stopped = owner
+            .stop_stop_only_and_observe(stop_only, &probe, &fixture.context())
+            .unwrap();
+        assert_eq!(stopped.receipt().intent_record(), &intent);
+        owner
+            .retire_stopped(&stopped, &probe, &fixture.context())
+            .unwrap();
+
+        assert!(owner.store.list().unwrap().is_empty());
+        assert_eq!(
+            fs::read_to_string(fixture.root.path().join("starts")).unwrap(),
+            "start\n"
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.root.path().join("stops")).unwrap(),
+            "stop\n"
+        );
+    }
+
+    #[test]
+    fn manager_observation_failure_never_mints_stop_only_token() {
+        let fixture = Fixture::new();
+        let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+        let mut owner = fixture.owner(&guard);
+        fixture.install_stale_supervisor_intent(&mut owner);
+
+        let state_path = fixture.root.path().join("manager-state.json");
+        let mut state: serde_json::Value =
+            serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+        state["private_network"] = serde_json::Value::String("no".to_owned());
+        fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+        let wrong_role = owner.reconcile(&fixture.context()).unwrap();
+        assert!(matches!(
+            &wrong_role[0].observation,
+            ReconcileResult::Unknown
+        ));
+
+        state["private_network"] = serde_json::Value::String("yes".to_owned());
+        fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+        fs::write(fixture.root.path().join("fail-show"), "").unwrap();
+
+        assert!(matches!(
+            owner.reconcile(&fixture.context()),
+            Err(OwnerObservationError::ManagerUnavailable)
+        ));
+        assert!(!fixture.root.path().join("stops").exists());
+        assert_eq!(owner.store.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn stop_only_refuses_replaced_invocation_and_main_pid_without_stopping() {
+        let fixture = Fixture::new();
+        let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+        let mut owner = fixture.owner(&guard);
+        let intent = fixture.install_stale_supervisor_intent(&mut owner);
+        let observations = owner.reconcile(&fixture.context()).unwrap();
+        let ReconcileResult::StopOnly(stop_only) = &observations[0].observation else {
+            panic!("expected stop-only recovery");
+        };
+        let state_path = fixture.root.path().join("manager-state.json");
+        let mut state: serde_json::Value =
+            serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+
+        state["invocation"] = serde_json::Value::String("b".repeat(32));
+        fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+        assert_eq!(
+            owner.stop_stop_only(stop_only, &fixture.context()),
+            Err(ManagedServiceErrorKind::OwnershipMismatch)
+        );
+
+        state["invocation"] = serde_json::Value::String("a".repeat(32));
+        state["main_pid"] = serde_json::Value::String("4321".to_owned());
+        fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+        assert_eq!(
+            owner.stop_stop_only(stop_only, &fixture.context()),
+            Err(ManagedServiceErrorKind::OwnershipMismatch)
+        );
+
+        assert!(owner
+            .store
+            .list()
+            .unwrap()
+            .iter()
+            .any(|record| record == &intent));
+        assert!(!fixture.root.path().join("stops").exists());
+    }
+
+    #[test]
+    fn corrupt_wal_refuses_stop_only_without_removing_intent() {
+        let fixture = Fixture::new();
+        let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+        let mut owner = fixture.owner(&guard);
+        let intent = fixture.install_stale_supervisor_intent(&mut owner);
+        let observations = owner.reconcile(&fixture.context()).unwrap();
+        let ReconcileResult::StopOnly(stop_only) = &observations[0].observation else {
+            panic!("expected stop-only recovery");
+        };
+        fs::write(fixture.intents.path().join("unexpected"), "preserve me").unwrap();
+
+        assert_eq!(
+            owner.stop_stop_only(stop_only, &fixture.context()),
+            Err(ManagedServiceErrorKind::UnitStateUnverifiable)
+        );
+        assert!(!fixture.root.path().join("stops").exists());
+        assert!(fixture
+            .intents
+            .path()
+            .join(format!("{}.json", intent.unit_name()))
+            .exists());
+    }
+
+    #[test]
+    fn uncertain_stop_retains_wal_and_never_replays_start() {
+        let fixture = Fixture::new();
+        let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+        let mut owner = fixture.owner(&guard);
+        let intent = fixture.install_stale_supervisor_intent(&mut owner);
+        let observations = owner.reconcile(&fixture.context()).unwrap();
+        let ReconcileResult::StopOnly(stop_only) = &observations[0].observation else {
+            panic!("expected stop-only recovery");
+        };
+        fs::write(fixture.root.path().join("fail-stop"), "").unwrap();
+
+        assert_eq!(
+            owner.stop_stop_only(stop_only, &fixture.context()),
+            Err(ManagedServiceErrorKind::ManagerCommandFailed)
+        );
+        assert!(owner
+            .store
+            .list()
+            .unwrap()
+            .iter()
+            .any(|record| record == &intent));
+        assert_eq!(
+            fs::read_to_string(fixture.root.path().join("starts")).unwrap(),
+            "start\n"
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.root.path().join("stops")).unwrap(),
+            "stop\n"
+        );
+
+        let retry_observation = owner.reconcile(&fixture.context()).unwrap();
+        assert!(matches!(
+            &retry_observation[0].observation,
+            ReconcileResult::StopOnly(_)
+        ));
+        assert_eq!(
+            fs::read_to_string(fixture.root.path().join("starts")).unwrap(),
+            "start\n"
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.root.path().join("stops")).unwrap(),
+            "stop\n"
+        );
+    }
+
+    #[test]
+    fn ordinary_and_external_units_never_get_stop_only_capability() {
+        let fixture = Fixture::new();
+        let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+        let mut owner = fixture.owner(&guard);
+        owner
+            .start(fixture.recipe(), Duration::from_secs(1), &fixture.context())
+            .unwrap();
+
+        let observations = owner.reconcile(&fixture.context()).unwrap();
+        assert!(matches!(
+            &observations[0].observation,
+            ReconcileResult::Owned(_)
+        ));
+        assert!(ServiceIntentRecord::from_persisted_parts(
+            "fixture".to_owned(),
+            "llama-swap.service".to_owned(),
+            "b".repeat(64),
+            30_000,
+        )
+        .is_err());
+        assert!(!fixture.root.path().join("stops").exists());
     }
 
     #[test]

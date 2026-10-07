@@ -36,6 +36,16 @@ def valid_community_run():
 
 
 class DashboardDataTest(unittest.TestCase):
+    def test_served_generation_profiles_match_dashboard_metadata(self):
+        parsed = dashboard.parse_models((ROOT / "llama-swap.yaml").read_text())
+        active = {
+            key for key, model in parsed.items()
+            if model.get("cmd") and not model.get("unlisted", False)
+            and "--embedding" not in model["cmd"]
+        }
+        metadata = json.loads((ROOT / "docs" / "dashboard-meta.json").read_text())
+        self.assertEqual(active, set(metadata["models"]))
+
     def test_every_local_profile_has_complete_evidence_shape(self):
         meta = json.loads((ROOT / "docs" / "dashboard-meta.json").read_text())
         for profile_id, display in meta["models"].items():
@@ -43,6 +53,28 @@ class DashboardDataTest(unittest.TestCase):
                 evidence = dashboard.profile_evidence(display)
                 self.assertEqual(set(dashboard.EVIDENCE_FIELDS), set(evidence) - {"scope"})
                 self.assertEqual("local", evidence["scope"])
+
+    def test_new_engine_macros_require_explicit_portable_paths(self):
+        snippet = dashboard.portable_command({"cmd":
+            "${strata_python} ${strata_server} --config ${strata_iq3_config} "
+            "--port ${PORT} --model ${env.L3MS_ROOT}/weights/model.gguf"})
+        for variable in ("STRATA_PYTHON", "STRATA_SERVER", "STRATA_IQ3_CONFIG"):
+            self.assertIn(f'{variable}="/path/to/{variable.lower()}"', snippet)
+            self.assertIn(f'"${variable}"', snippet)
+        self.assertNotIn("${strata_", snippet)
+        self.assertNotIn("${env.", snippet)
+        self.assertIn('"$MODEL_PATH"', snippet)
+
+    def test_published_commands_do_not_include_host_paths_or_router_macros(self):
+        parsed = dashboard.parse_models((ROOT / "llama-swap.yaml").read_text())
+        meta = json.loads((ROOT / "docs" / "dashboard-meta.json").read_text())
+        for profile_id in meta["models"]:
+            with self.subTest(profile=profile_id):
+                snippet = dashboard.portable_command(parsed[profile_id])
+                self.assertNotIn("/home/", snippet)
+                self.assertNotIn("${env.", snippet)
+                self.assertNotIn("${qwen", snippet)
+                self.assertNotIn("${strata", snippet)
 
     def test_community_run_requires_reproducibility_fields(self):
         run = valid_community_run()

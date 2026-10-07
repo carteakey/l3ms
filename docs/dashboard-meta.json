@@ -1,27 +1,35 @@
 {
-  "updated": "2026-09-14",
+  "updated": "2026-10-07",
   "system": {
     "gpu": "RTX 4070 12GB",
     "cpu": "i5-12600K",
     "ram": "64GB DDR5 (4x16, running 5000 MT/s)",
     "os": "CachyOS / CUDA"
   },
-  "methodology": "The ranked list contains only results from the RTX 4070 node above. Historical fields that were not captured in the same run are shown as not recorded instead of being inferred. Community hardware is kept in a separate, unranked dataset. Retired profiles keep their last measured performance in the archive tab; they are no longer reproducible on this node.",
+  "methodology": "The ranked list contains only results from the RTX 4070 node above. Historical fields that were not captured in the same run are shown as not recorded instead of being inferred. Community hardware is kept in a separate, unranked dataset. Retired profiles keep their last measured performance in the archive tab; they are no longer reproducible on this node. Qwen3.8 serving metadata was imported from original checkout commit ed7538a; these are source-reported historical measurements, not monorepo acceptance results. Referenced new benchmark harnesses were not committed in that source snapshot and have not been imported. Historical model results may use different hardware settings.",
   "models": {
     "gemma-4-26b-qat-mtp": {
       "displayName": "Gemma 4 26B QAT + MTP",
       "summary": "Current startup preload and the best quality/speed balance in the Gemma set.",
       "tps": 100.6,
       "quant": "UD-Q4_K_XL (QAT)",
-      "tags": ["MTP", "MoE", "QAT", "Preload"],
+      "tags": [
+        "MTP",
+        "MoE",
+        "QAT",
+        "Preload"
+      ],
       "benchmark": "mtp_bench_gemma.py"
     },
     "gemma-4-26b-qat": {
       "displayName": "Gemma 4 26B QAT",
       "summary": "Full model without speculative drafting; useful as the MTP control profile.",
-      "tps": 69.0,
+      "tps": 69,
       "quant": "UD-Q4_K_XL (QAT)",
-      "tags": ["MoE", "QAT"],
+      "tags": [
+        "MoE",
+        "QAT"
+      ],
       "benchmark": "mtp_bench_gemma.py"
     },
     "qwen3-6-mtp-q6": {
@@ -29,7 +37,10 @@
       "summary": "Higher-precision Q6 variant; slower, but useful when Q4 quality is not enough.",
       "tps": 43.1,
       "quant": "UD-Q6_K",
-      "tags": ["MTP", "MoE"],
+      "tags": [
+        "MTP",
+        "MoE"
+      ],
       "benchmark": "mtp_bench_qwen.py"
     },
     "qwen38-flash-next-mtp": {
@@ -42,46 +53,67 @@
       "draftAcceptance": "77-96% (gated, p-min 0.7)",
       "llamaCppCommit": "d1a92352c on master b78a39a2f (PR #28243)",
       "quant": "AD-4.27bpw Q4_K_M M64 + shared-Q4_K_M MTP",
-      "tags": ["MoE", "MTP", "PLE-on-SSD"],
+      "tags": [
+        "MoE",
+        "MTP",
+        "PLE-on-SSD"
+      ],
       "benchmark": "bench-models/bench-llama-qwen38-flash-next-mtp.sh"
     },
     "qwen38-flash-next": {
-      "displayName": "Qwen3.8-Flash-Next (master)",
-      "summary": "125B-A6B MoE with the 51B PLE n-gram table streamed from SSD (AtomicChat AD-4.27bpw). Plain upstream master b78a39a2f decode at 19.35 t/s steady state (up to 19.64 t/s on code), pp ~200 t/s @ 64k context (q8_0 KV, --fit on --fit-target 512, ub 2048).",
-      "tps": 19.35,
-      "pp": 198,
-      "testedContext": "64k",
+      "displayName": "Qwen3.8-Flash-Next (master b11475)",
+      "summary": "Plain upstream master b11475 (7e8324f5f). 17.34 t/s steady decode, pp 587 t/s @ 8k context (q8_0 KV, --fit on --fit-target 512, ub 2048). Natively includes PR #29761 (native MTP), #29824/5 (indexer memory halved), #29901 (4-head tiling), and #29599 NVMe row prefetching. VRAM reduced to 11.1 GB.",
+      "tps": 17.34,
+      "pp": 587,
+      "testedContext": "96k",
       "cacheState": "q8_0 KV, ngram-mod pool warm",
-      "draftAcceptance": null,
-      "llamaCppCommit": "b78a39a2f (llama.cpp-master)",
-      "quant": "AD-4.27bpw Q4_K_M M64",
-      "tags": ["MoE", "PLE-on-SSD", "Master"],
-      "benchmark": "bench-models/bench-llama-qwen38-flash-next-build-ab.sh"
+      "draftAcceptance": "67-95% (ngram-mod)",
+      "llamaCppCommit": "b11475 7e8324f5f (llama.cpp-master)",
+      "quant": "ISTA-DASLab GSQ-RCO IQ3_XXS",
+      "tags": [
+        "MoE",
+        "Master",
+        "PLE-on-SSD"
+      ],
+      "benchmark": "docs/migration/serving-baseline.md",
+      "originalBenchmark": "bench-models/bench-qwen38-refresh-ab.sh",
+      "benchmarkCommand": null
     },
     "qwen38-flash-next-exp": {
-      "displayName": "Qwen3.8-Flash-Next (exp)",
-      "summary": "Experimental tier on master + #28023 #28068 #27941: GDN l2norm correctness, indexer heads, and kvu NaN-collapse/restore. Superseded by PR #28243.",
-      "tps": 19.35,
-      "pp": 200,
+      "displayName": "Qwen3.8-Flash-Next EXP (MoE LRU Cache #29887)",
+      "summary": "Experimental tier: master b11475 + PR #29887 (GPU LRU cache for host-offloaded MoE experts, --moe-cache-mib 2048) + PR #28671 (radix-select TOP_K). Breakthrough decode jump to 23.92 t/s (+40.1% over plain offload) within 11,454 MiB VRAM.",
+      "tps": 23.92,
+      "pp": 449,
       "testedContext": "64k",
-      "cacheState": "warm; q8_0 KV, ngram-mod pool warm",
-      "draftAcceptance": null,
-      "llamaCppCommit": "e1748dbd5 (master + #28023 #28068 #27941)",
-      "quant": "AD-4.27bpw Q4_K_M M64",
-      "tags": ["MoE", "PLE-on-SSD", "Experimental"],
-      "benchmark": "bench-models/bench-llama-qwen38-flash-next-build-ab.sh"
+      "cacheState": "warm; q8_0 KV; 2048 MiB MoE LRU cache",
+      "draftAcceptance": "68-95% (ngram-mod)",
+      "llamaCppCommit": "b11475 + #29887 + #28671 (exp-latest)",
+      "quant": "ISTA-DASLab GSQ-RCO IQ3_XXS",
+      "tags": [
+        "MoE",
+        "Experimental",
+        "MoE-Cache"
+      ],
+      "benchmark": "docs/migration/serving-baseline.md",
+      "originalBenchmark": "bench-models/bench-qwen38-refresh-ab.sh",
+      "benchmarkCommand": null
     },
     "qwen38-flash-next-vision": {
-      "displayName": "Qwen3.8-Flash-Next Vision (master)",
-      "summary": "Multimodal vision tier: upstream master b78a39a2f with mmproj-F16.gguf projector. Offloads 3 MoE layers to GPU (-ncmoe 45), 18.2-18.6 t/s @ 16k ctx, 10.6 GB VRAM with 1.68 GB headroom.",
+      "displayName": "Qwen3.8-Flash-Next Vision (master b11475)",
+      "summary": "Multimodal vision tier: upstream master b11475 with mmproj-F16.gguf projector. Offloads 3 MoE layers to GPU (-ncmoe 45), 18.2-18.6 t/s @ 32k ctx, 10.8 GB VRAM with 1.3 GB headroom.",
       "tps": 18.4,
       "pp": 185,
-      "testedContext": "16k",
+      "testedContext": "32k",
       "cacheState": "warm; q8_0 KV",
       "draftAcceptance": null,
-      "llamaCppCommit": "b78a39a2f (llama.cpp-master)",
-      "quant": "AD-4.27bpw Q4_K_M M64 + mmproj-F16",
-      "tags": ["MoE", "Vision", "Master", "PLE-on-SSD"],
+      "llamaCppCommit": "b11475 7e8324f5f (llama.cpp-master)",
+      "quant": "ISTA-DASLab GSQ-RCO IQ3_XXS + mmproj-F16",
+      "tags": [
+        "MoE",
+        "Vision",
+        "Master",
+        "PLE-on-SSD"
+      ],
       "benchmark": "bench-models/bench-llama-qwen38-flash-next-build-ab.sh"
     },
     "qwen3-8-27b-iq3-xxs": {
@@ -94,47 +126,451 @@
       "draftAcceptance": null,
       "llamaCppCommit": null,
       "quant": "UD-IQ3_XXS (3.06 bpw)",
-      "tags": ["Dense", "Long-context"],
+      "tags": [
+        "Dense",
+        "Long-context"
+      ],
       "benchmark": "docs/qwen3-8-27b-local-post.md"
+    },
+    "qwen38-flash-next-plat": {
+      "displayName": "Qwen3.8-Flash-Next Plat (Strata v0.1.40.2)",
+      "summary": "Platinum tier: Strata v0.1.40.2 with online dynamic expert VRAM caching (3,086 hot experts in VRAM), native MTP draft head (Q2_0), 128k context with dynamic KV streaming, native 2 MB Transparent Huge Page (THP) memory acceleration, and #783 kernel perf suite. 56.1 t/s steady decode on code, 90.2 t/s peak burst, pp 953-1,999 t/s.",
+      "tps": 56.1,
+      "pp": 1999,
+      "testedContext": "128k",
+      "cacheState": "k8v4 KV; 3,086 hot experts in VRAM; native THP 2MB pages",
+      "draftAcceptance": "70-76% (native Q2_0 MTP, spec 4)",
+      "llamaCppCommit": "Strata v0.1.40.2 (native SM89 Ada + native THP + #783 kernels)",
+      "quant": "ISTA-DASLab GSQ-RCO IQ3_XXS",
+      "tags": [
+        "MoE",
+        "Strata",
+        "MTP",
+        "Platinum",
+        "128k"
+      ],
+      "benchmark": "docs/migration/serving-baseline.md",
+      "originalBenchmark": "bench-models/bench-qwen38-refresh-ab.sh",
+      "benchmarkCommand": null
+    },
+    "qwen38-flash-next-plat-vision": {
+      "displayName": "Qwen3.8-Flash-Next Plat Vision (Strata)",
+      "summary": "Platinum multimodal tier: Strata engine paired with CPU-offloaded strata-vision image encoder (mmproj-F16). Retains 100% of GPU expert cache with zero VRAM loss for vision. 53-60 t/s decode, 128k context.",
+      "tps": 58,
+      "pp": 1800,
+      "testedContext": "128k",
+      "cacheState": "k8v4 KV; CPU vision encoder; THP 2MB pages",
+      "draftAcceptance": "70-80% (native Q2_0 MTP)",
+      "llamaCppCommit": "Strata v0.1.30 + strata-vision (mtmd)",
+      "quant": "ISTA-DASLab GSQ-RCO IQ3_XXS + mmproj-F16",
+      "tags": [
+        "MoE",
+        "Vision",
+        "Strata",
+        "128k"
+      ],
+      "benchmark": "docs/migration/serving-baseline.md",
+      "originalBenchmark": "bench-models/bench_strata_long_horizon.py",
+      "benchmarkCommand": null
     }
   },
   "benchmarks": {
     "qwen38-flash-next": {
       "title": "Qwen3.8-Flash-Next: Master vs Compact MTP (PR #28243)",
       "description": "Task-level comparison between upstream master (b78a39a2f) and PR #28243 with the 1.78 GB shared-Q4_K_M compact draft head (-ncmoe 45). Breaking through the 20 t/s barrier on every task.",
-      "metrics": [["Master avg", "19.35 t/s"], ["MTP peak", "22.40 t/s"], ["MTP run avg", "20.65 t/s"], ["Accept rate", "88.2%"]],
-      "tasks": [["code_python", 19.64, 22.40, "95.8%"], ["sql_gen", 19.45, 22.15, "94.6%"], ["code_cpp", 19.51, 21.92, "92.4%"], ["qa_factual", 19.38, 20.91, "89.1%"], ["summarize", 19.30, 20.85, "88.2%"], ["stepwise_math", 19.22, 20.45, "84.5%"], ["explain_concept", 19.32, 20.38, "83.7%"], ["creative_short", 19.25, 20.12, "77.2%"]]
+      "metrics": [
+        [
+          "Master avg",
+          "19.35 t/s"
+        ],
+        [
+          "MTP peak",
+          "22.40 t/s"
+        ],
+        [
+          "MTP run avg",
+          "20.65 t/s"
+        ],
+        [
+          "Accept rate",
+          "88.2%"
+        ]
+      ],
+      "tasks": [
+        [
+          "code_python",
+          19.64,
+          22.4,
+          "95.8%"
+        ],
+        [
+          "sql_gen",
+          19.45,
+          22.15,
+          "94.6%"
+        ],
+        [
+          "code_cpp",
+          19.51,
+          21.92,
+          "92.4%"
+        ],
+        [
+          "qa_factual",
+          19.38,
+          20.91,
+          "89.1%"
+        ],
+        [
+          "summarize",
+          19.3,
+          20.85,
+          "88.2%"
+        ],
+        [
+          "stepwise_math",
+          19.22,
+          20.45,
+          "84.5%"
+        ],
+        [
+          "explain_concept",
+          19.32,
+          20.38,
+          "83.7%"
+        ],
+        [
+          "creative_short",
+          19.25,
+          20.12,
+          "77.2%"
+        ]
+      ]
     },
     "gemma4-12b": {
       "title": "Gemma 4 12B QAT: baseline vs MTP (archived model)",
       "description": "Task-level generation throughput, kept for historical reference. The 12B family has been retired; MTP averaged 120.8 t/s across this run and acceptance varies materially by task.",
-      "metrics": [["Baseline avg", "59.9 t/s"], ["MTP peak", "135.7 t/s"], ["MTP avg", "120.8 t/s"], ["Accept rate", "65.8%"]],
-      "tasks": [["stepwise_math", 59.8, 135.7, "81.8%"], ["summarize", 59.9, 133.5, "79.8%"], ["code_python", 59.9, 130.5, "77.3%"], ["translation", 60.0, 128.6, "75.4%"], ["code_cpp", 60.0, 120.4, "68.4%"], ["long_code_review", 57.6, 111.7, "63.4%"], ["qa_factual", 59.9, 107.2, "57.1%"], ["explain_concept", 59.9, 105.7, "55.9%"], ["creative_short", 60.0, 94.0, "45.8%"]]
+      "metrics": [
+        [
+          "Baseline avg",
+          "59.9 t/s"
+        ],
+        [
+          "MTP peak",
+          "135.7 t/s"
+        ],
+        [
+          "MTP avg",
+          "120.8 t/s"
+        ],
+        [
+          "Accept rate",
+          "65.8%"
+        ]
+      ],
+      "tasks": [
+        [
+          "stepwise_math",
+          59.8,
+          135.7,
+          "81.8%"
+        ],
+        [
+          "summarize",
+          59.9,
+          133.5,
+          "79.8%"
+        ],
+        [
+          "code_python",
+          59.9,
+          130.5,
+          "77.3%"
+        ],
+        [
+          "translation",
+          60,
+          128.6,
+          "75.4%"
+        ],
+        [
+          "code_cpp",
+          60,
+          120.4,
+          "68.4%"
+        ],
+        [
+          "long_code_review",
+          57.6,
+          111.7,
+          "63.4%"
+        ],
+        [
+          "qa_factual",
+          59.9,
+          107.2,
+          "57.1%"
+        ],
+        [
+          "explain_concept",
+          59.9,
+          105.7,
+          "55.9%"
+        ],
+        [
+          "creative_short",
+          60,
+          94,
+          "45.8%"
+        ]
+      ]
     },
     "gemma4-26b": {
       "title": "Gemma 4 26B QAT: baseline vs MTP",
       "description": "Task-level MTP run. The 100.6 t/s profile result above comes from a separate optimized throughput run; these rows show how acceptance changes by workload.",
-      "metrics": [["Q5 reference", "38.5 t/s"], ["QAT profile", "69.0 t/s"], ["Best MTP profile", "100.6 t/s"], ["Best speedup", "2.61x"]],
-      "tasks": [["stepwise_math", 44.45, 57.77, "81.6%"], ["translation", 44.59, 49.60, "82.5%"], ["qa_factual", 44.66, 49.57, "80.6%"], ["code_python", 44.62, 45.99, "60.3%"], ["code_cpp", 44.78, 45.10, "70.5%"], ["creative_short", 45.32, 40.96, "66.0%"], ["summarize", 44.94, 32.31, "38.3%"], ["long_code_review", 43.98, 26.22, "28.2%"], ["explain_concept", 44.74, 25.80, "31.4%"]]
+      "metrics": [
+        [
+          "Q5 reference",
+          "38.5 t/s"
+        ],
+        [
+          "QAT profile",
+          "69.0 t/s"
+        ],
+        [
+          "Best MTP profile",
+          "100.6 t/s"
+        ],
+        [
+          "Best speedup",
+          "2.61x"
+        ]
+      ],
+      "tasks": [
+        [
+          "stepwise_math",
+          44.45,
+          57.77,
+          "81.6%"
+        ],
+        [
+          "translation",
+          44.59,
+          49.6,
+          "82.5%"
+        ],
+        [
+          "qa_factual",
+          44.66,
+          49.57,
+          "80.6%"
+        ],
+        [
+          "code_python",
+          44.62,
+          45.99,
+          "60.3%"
+        ],
+        [
+          "code_cpp",
+          44.78,
+          45.1,
+          "70.5%"
+        ],
+        [
+          "creative_short",
+          45.32,
+          40.96,
+          "66.0%"
+        ],
+        [
+          "summarize",
+          44.94,
+          32.31,
+          "38.3%"
+        ],
+        [
+          "long_code_review",
+          43.98,
+          26.22,
+          "28.2%"
+        ],
+        [
+          "explain_concept",
+          44.74,
+          25.8,
+          "31.4%"
+        ]
+      ]
     },
     "qwen3-6-35b": {
       "title": "Qwen3.6 35B-A3B: baseline vs MTP",
       "description": "Task-level comparison for Qwen3.6 35B. The served profile uses the conservative 60.3 t/s validated configuration; this separate run averaged 68.5 t/s.",
-      "metrics": [["Baseline avg", "51.3 t/s"], ["MTP peak", "74.0 t/s"], ["MTP run avg", "68.5 t/s"], ["Accept rate", "82.7%"]],
-      "tasks": [["code_python", 51.31, 73.97, "96.2%"], ["qa_factual", 51.77, 71.61, "87.7%"], ["code_cpp", 51.24, 70.15, "85.7%"], ["translation", 51.25, 69.71, "81.3%"], ["stepwise_math", 51.10, 69.11, "85.1%"], ["explain_concept", 51.22, 67.33, "81.9%"], ["summarize", 51.15, 67.06, "80.0%"], ["long_code_review", 51.04, 65.03, "77.9%"], ["creative_short", 51.36, 62.20, "70.3%"]]
+      "metrics": [
+        [
+          "Baseline avg",
+          "51.3 t/s"
+        ],
+        [
+          "MTP peak",
+          "74.0 t/s"
+        ],
+        [
+          "MTP run avg",
+          "68.5 t/s"
+        ],
+        [
+          "Accept rate",
+          "82.7%"
+        ]
+      ],
+      "tasks": [
+        [
+          "code_python",
+          51.31,
+          73.97,
+          "96.2%"
+        ],
+        [
+          "qa_factual",
+          51.77,
+          71.61,
+          "87.7%"
+        ],
+        [
+          "code_cpp",
+          51.24,
+          70.15,
+          "85.7%"
+        ],
+        [
+          "translation",
+          51.25,
+          69.71,
+          "81.3%"
+        ],
+        [
+          "stepwise_math",
+          51.1,
+          69.11,
+          "85.1%"
+        ],
+        [
+          "explain_concept",
+          51.22,
+          67.33,
+          "81.9%"
+        ],
+        [
+          "summarize",
+          51.15,
+          67.06,
+          "80.0%"
+        ],
+        [
+          "long_code_review",
+          51.04,
+          65.03,
+          "77.9%"
+        ],
+        [
+          "creative_short",
+          51.36,
+          62.2,
+          "70.3%"
+        ]
+      ]
     }
   },
   "archived": [
-    {"name": "Gemma 4 12B QAT family", "profiles": "gemma-4-12b-qat-mtp, gemma-4-12b-qat, gemma-4-12b-qat-mtp-vision", "tps": 120.8, "quant": "UD-Q4_K_XL (QAT)", "reason": "Retired after the 26B QAT profiles proved the better quality/speed balance on this node; 12B files removed from disk.", "retired": "July 2026", "replacement": "gemma-4-26b-qat-mtp"},
-    {"name": "Gemma 4 26B (standard / non-QAT)", "profiles": "gemma-4-26b-a4b, gemma-4-26b-mtp, gemma-4-26b-mtp-q6", "reason": "The standard model spilled to system RAM. QAT profiles fit substantially more weights in VRAM and replaced it.", "retired": "June 2026", "replacement": "gemma-4-26b-qat-mtp"},
-    {"name": "Mistral Small 4 119B MoE", "profiles": "mistral-small-4-119b family", "reason": "Generation latency and storage cost were poor on this 12GB node even with aggressive expert offload.", "retired": "May 2026", "replacement": "qwen38-flash-next"},
-    {"name": "NVIDIA Nemotron 3 Super 120B", "profiles": "nemotron-super-120b", "reason": "Retired to recover storage; the 3-bit profile traded away too much quality for its throughput.", "retired": "April 2026", "replacement": "qwen38-flash-next"},
-    {"name": "Qwen3.6 35B baseline", "profiles": "unsloth/Qwen3.6-35B-A3B-GGUF", "reason": "Removed after MTP profiles were validated.", "retired": "June 2026", "replacement": "qwen3-6-mtp-q6"},
-    {"name": "Qwen3-Coder-Next 80B.A3B", "profiles": "qwen3-coder-next, qwen3-coder-next-legacy, qwen3-coder-next-ik", "tps": 39.6, "quant": "UD-Q4_K_XL", "reason": "Model files deleted in the 2026-08-31 storage cleanup; superseded as production coder by Qwen3.8-Flash-Next.", "retired": "August 2026", "replacement": "qwen38-flash-next"},
-    {"name": "gpt-oss 120B", "profiles": "gpt-oss-120b, gpt-oss-120b-legacy, gpt-oss-120b-low", "tps": 28.5, "quant": "MXFP4", "reason": "Model files deleted in the 2026-08-31 storage cleanup; was production default before Qwen3.8-Flash-Next.", "retired": "August 2026", "replacement": "qwen38-flash-next"},
-    {"name": "Qwen3.6 35B-A3B MTP (UD-Q4_K_XL)", "profiles": "qwen3-6-mtp, qwen3-6-mtp-vision", "tps": 60.3, "quant": "UD-Q4_K_XL", "reason": "UD-Q4_K_XL weights and the mmproj-F16 projector deleted; the higher-precision Q6 profile remains active.", "retired": "August 2026", "replacement": "qwen3-6-mtp-q6"},
-    {"name": "Gemma 4 26B QAT + MTP (Vision)", "profiles": "gemma-4-26b-qat-mtp-vision", "tps": 39.0, "quant": "UD-Q4_K_XL (QAT)", "reason": "BF16 vision projector deleted in the 2026-08-31 cleanup; text-only QAT + MTP profiles remain active.", "retired": "August 2026", "replacement": "gemma-4-26b-qat-mtp"},
-    {"name": "Sarvam 30B", "profiles": "sarvam-30b", "tps": 15.0, "quant": "Q6_K", "reason": "Weights and the PR-20275 custom build dropped in the 2026-08-31 storage cleanup.", "retired": "August 2026", "replacement": "qwen3-8-27b-iq3-xxs"},
-    {"name": "OmniCoder 9B", "profiles": "Tesslate/OmniCoder-9B-GGUF", "reason": "Replaced by Qwen3-Coder-Next, which delivered stronger coding quality at usable hybrid-MoE throughput.", "retired": "March 2026", "replacement": "qwen3-coder-next (now archived)"}
+    {
+      "name": "Gemma 4 12B QAT family",
+      "profiles": "gemma-4-12b-qat-mtp, gemma-4-12b-qat, gemma-4-12b-qat-mtp-vision",
+      "tps": 120.8,
+      "quant": "UD-Q4_K_XL (QAT)",
+      "reason": "Retired after the 26B QAT profiles proved the better quality/speed balance on this node; 12B files removed from disk.",
+      "retired": "July 2026",
+      "replacement": "gemma-4-26b-qat-mtp"
+    },
+    {
+      "name": "Gemma 4 26B (standard / non-QAT)",
+      "profiles": "gemma-4-26b-a4b, gemma-4-26b-mtp, gemma-4-26b-mtp-q6",
+      "reason": "The standard model spilled to system RAM. QAT profiles fit substantially more weights in VRAM and replaced it.",
+      "retired": "June 2026",
+      "replacement": "gemma-4-26b-qat-mtp"
+    },
+    {
+      "name": "Mistral Small 4 119B MoE",
+      "profiles": "mistral-small-4-119b family",
+      "reason": "Generation latency and storage cost were poor on this 12GB node even with aggressive expert offload.",
+      "retired": "May 2026",
+      "replacement": "qwen38-flash-next"
+    },
+    {
+      "name": "NVIDIA Nemotron 3 Super 120B",
+      "profiles": "nemotron-super-120b",
+      "reason": "Retired to recover storage; the 3-bit profile traded away too much quality for its throughput.",
+      "retired": "April 2026",
+      "replacement": "qwen38-flash-next"
+    },
+    {
+      "name": "Qwen3.6 35B baseline",
+      "profiles": "unsloth/Qwen3.6-35B-A3B-GGUF",
+      "reason": "Removed after MTP profiles were validated.",
+      "retired": "June 2026",
+      "replacement": "qwen3-6-mtp-q6"
+    },
+    {
+      "name": "Qwen3-Coder-Next 80B.A3B",
+      "profiles": "qwen3-coder-next, qwen3-coder-next-legacy, qwen3-coder-next-ik",
+      "tps": 39.6,
+      "quant": "UD-Q4_K_XL",
+      "reason": "Model files deleted in the 2026-08-31 storage cleanup; superseded as production coder by Qwen3.8-Flash-Next.",
+      "retired": "August 2026",
+      "replacement": "qwen38-flash-next"
+    },
+    {
+      "name": "gpt-oss 120B",
+      "profiles": "gpt-oss-120b, gpt-oss-120b-legacy, gpt-oss-120b-low",
+      "tps": 28.5,
+      "quant": "MXFP4",
+      "reason": "Model files deleted in the 2026-08-31 storage cleanup; was production default before Qwen3.8-Flash-Next.",
+      "retired": "August 2026",
+      "replacement": "qwen38-flash-next"
+    },
+    {
+      "name": "Qwen3.6 35B-A3B MTP (UD-Q4_K_XL)",
+      "profiles": "qwen3-6-mtp, qwen3-6-mtp-vision",
+      "tps": 60.3,
+      "quant": "UD-Q4_K_XL",
+      "reason": "UD-Q4_K_XL weights and the mmproj-F16 projector deleted; the higher-precision Q6 profile remains active.",
+      "retired": "August 2026",
+      "replacement": "qwen3-6-mtp-q6"
+    },
+    {
+      "name": "Gemma 4 26B QAT + MTP (Vision)",
+      "profiles": "gemma-4-26b-qat-mtp-vision",
+      "tps": 39,
+      "quant": "UD-Q4_K_XL (QAT)",
+      "reason": "BF16 vision projector deleted in the 2026-08-31 cleanup; text-only QAT + MTP profiles remain active.",
+      "retired": "August 2026",
+      "replacement": "gemma-4-26b-qat-mtp"
+    },
+    {
+      "name": "Sarvam 30B",
+      "profiles": "sarvam-30b",
+      "tps": 15,
+      "quant": "Q6_K",
+      "reason": "Weights and the PR-20275 custom build dropped in the 2026-08-31 storage cleanup.",
+      "retired": "August 2026",
+      "replacement": "qwen3-8-27b-iq3-xxs"
+    },
+    {
+      "name": "OmniCoder 9B",
+      "profiles": "Tesslate/OmniCoder-9B-GGUF",
+      "reason": "Replaced by Qwen3-Coder-Next, which delivered stronger coding quality at usable hybrid-MoE throughput.",
+      "retired": "March 2026",
+      "replacement": "qwen3-coder-next (now archived)"
+    }
   ]
 }

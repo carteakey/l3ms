@@ -38,7 +38,39 @@ actual namespace; the helper must still verify it differs from the coordinator
 before binding/readiness. One captured service generation/cgroup owns the whole
 pair. A generic one-shot process runner is not a long-lived supervisor.
 
-That replacement is being implemented, not accepted yet. It still needs helper
-lifetime, descriptor handoff, readiness, cancellation, exact cgroup cleanup and
-real engine/GPU acceptance. The existing helper's kernel namespace refusal is
-retained; no boolean bypass or host-TCP fallback is permitted.
+## Single-supervisor probe — 2026-10-07
+
+The bounded model-free replacement probe passed on this host:
+
+```sh
+cargo build --locked --offline
+python3 maintenance/probe-isolated-supervisor.py --self-test
+python3 maintenance/probe-isolated-supervisor.py --run
+```
+
+It starts one unique transient `Type=notify`, `PrivateNetwork=yes` service with
+the actual branch helper and a Python standard-library HTTP backend. A named
+manager-opened coordinator namespace descriptor is passed to the helper. The
+probe's own process is the authorized Unix client; no model, GPU, installed
+service, dependency environment or host TCP listener is used. The unit has a
+20-second runtime ceiling, five-second start and two-second stop timeouts.
+
+Measured evidence: host namespace `(5, 4026531833)`; helper and backend both
+`(5, 4026535525)`. The private Unix socket's peer PID matched the helper, the
+backend parent matched that helper, and both belonged to the captured service
+cgroup. One bounded native proof GET succeeded (78 request / 247 response
+bytes). Generation, MainPID and isolation properties were checked again before
+stopping. Captured helper/backend PID birth identities were absent afterward,
+and the owned cgroup was empty or removed; only then was the probe's private
+temporary directory removed. No probe units remained loaded. Existing
+llama-swap stayed running at PID 138426, ComfyUI stayed inactive, and GPU memory
+remained 44 MiB. The parser self-test passes nine framing cases without a unit.
+
+This accepts the model-free descriptor/namespace/byte-transport/cleanup topology,
+not full runtime lifecycle or inference admission. Native engine health, native
+asynchronous draining, real model/TTS execution, coordinated GPU release and
+crash/restart acceptance still remain. `READY=1` means helper transport setup,
+not backend health. The kernel namespace refusal remains; no boolean bypass or
+host-TCP fallback is permitted. Unknown start/generation or incomplete cleanup
+retains the private probe directory and relies on the bounded unit lifetime;
+it never authorizes stopping an unverified unit.

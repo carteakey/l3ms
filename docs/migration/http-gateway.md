@@ -24,7 +24,7 @@ with mode 0600, at most 16 KiB. Supply every field; unknown fields are refused:
 Replace the placeholder with a fresh unpredictable credential; do not commit it,
 place it in argv, or include it in logs/screenshots. Accepted token length is
 32–256 visible ASCII bytes, which is a format check, not an entropy guarantee.
-Bind must be loopback. The coordinator directory must be absolute and satisfy
+Bind must be loopback with an explicit nonzero port. The coordinator directory must be absolute and satisfy
 the existing private IPC ownership/permission checks when contacted. There is
 no default token, endpoint fallback, CORS support, or public bind.
 

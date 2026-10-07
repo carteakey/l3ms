@@ -187,6 +187,23 @@ def portable_command(model: dict) -> str:
     command = re.sub(r"(?m)(--mmproj\s+)\S+", r'\1"$MMPROJ_PATH"', command)
     command = command.replace("--host 0.0.0.0", "--host 127.0.0.1")
 
+    # New engine macros must not leak into shell snippets as unset lowercase
+    # router variables. Require operator-supplied paths, not inferred binaries.
+    extra_variables = set()
+    if "${env.L3MS_ROOT}" in command:
+        command = command.replace("${env.L3MS_ROOT}", "${L3MS_ROOT}")
+        extra_variables.add("L3MS_ROOT")
+
+    def portable_macro(match):
+        name = match.group(1)
+        if name == "L3MS_ROOT":
+            return match.group(0)
+        variable = name.upper()
+        extra_variables.add(variable)
+        return f'"${variable}"'
+
+    command = re.sub(r"\$\{([A-Za-z_][A-Za-z_0-9]*)\}", portable_macro, command)
+
     lines = [line.strip() for line in command.splitlines() if line.strip()]
     shell_command = " \\\n  ".join(lines)
     preamble = [
@@ -194,6 +211,10 @@ def portable_command(model: dict) -> str:
         'CPU_RANGE="${CPU_RANGE:-0-11}"',
         'PORT="${PORT:-8080}"',
     ]
+    preamble.extend(
+        f'{variable}="/path/to/{variable.lower()}"'
+        for variable in sorted(extra_variables)
+    )
     if "$LLAMA_SERVER" in shell_command:
         preamble.append('LLAMA_SERVER="${LLAMA_SERVER:-./vendor/llama.cpp/build/bin/llama-server}"')
     if "$IK_LLAMA_SERVER" in shell_command:

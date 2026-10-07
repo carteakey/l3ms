@@ -53,6 +53,7 @@ struct Config {
 impl Config {
     fn into_gateway(self) -> Result<(HttpGatewayConfig, Duration), LaunchError> {
         if self.schema_version != 1
+            || self.bind.port() == 0
             || !self.coordinator_socket_directory.is_absolute()
             || !(1..=30_000).contains(&self.request_timeout_ms)
             || !(1..=3600).contains(&self.session_timeout_seconds)
@@ -126,7 +127,7 @@ mod tests {
     use std::os::unix::fs::{symlink, PermissionsExt};
 
     fn config() -> serde_json::Value {
-        serde_json::json!({"schema_version":1,"bind":"127.0.0.1:0",
+        serde_json::json!({"schema_version":1,"bind":"127.0.0.1:8081",
             "coordinator_socket_directory":"/absolute/private/coordinator",
             "bearer_token":"01234567890123456789012345678901",
             "request_timeout_ms":100,"session_attempts":4,"peer_attempts":4,
@@ -141,6 +142,7 @@ mod tests {
             .is_ok());
         for (field, value) in [
             ("bind", serde_json::json!("0.0.0.0:8080")),
+            ("bind", serde_json::json!("127.0.0.1:0")),
             (
                 "coordinator_socket_directory",
                 serde_json::json!("relative"),

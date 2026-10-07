@@ -10,6 +10,19 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Preserve manifest-derived embedding task discovery without activating
+  archived profiles or enabling embedding inference dispatch.
+- Replace the unaccepted two-unit namespace-joining scaffold with one isolated
+  engine supervisor, durable launch identity, actual kernel namespace checks and
+  exact-generation stop-only recovery after coordinator loss. The bounded
+  model-free live probe passed; native engine/GPU acceptance remains gated.
+- Add bounded native keyboard task forms for chat, workflows, script argv,
+  speech modes and decisions, with explicit caller IDs/tasks, refreshed-profile
+  validation and lost-acknowledgment submission guards. Embeddings remain gated.
+- Synchronize committed original serving configuration at `ed7538a` without
+  reloading services; regenerate the three-lane dashboard with source-reported
+  Qwen3.8 metadata, portable engine placeholders, cache busting and active-profile
+  coverage tests. Missing source benchmark harnesses remain explicitly unverified.
 - Add explicit authenticated loopback HTTP gateway sessions with strict private
   configuration, bounded framing/IO, shared scoped shutdown handlers and one IPC
   exchange per request; failed/lost Submit replies never trigger automatic retry.

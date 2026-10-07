@@ -20,8 +20,7 @@ use std::path::{Component, Path};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::managed_service::{
-    runtime_identity_from_persisted_parts, EngineNamespaceIdentity, ServiceIntentRecord,
-    ServiceLaunchRole,
+    runtime_identity_from_persisted_parts, ServiceIntentRecord, ServiceLaunchRole,
 };
 use super::runtime::OperationContext;
 
@@ -480,22 +479,17 @@ struct PersistedIntent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     launch_role: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    engine_namespace: Option<PersistedEngineNamespace>,
+    coordinator_identity: Option<PersistedCoordinatorIdentity>,
 }
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct PersistedEngineNamespace {
-    engine_unit_name: String,
-    engine_invocation_id: String,
-    engine_main_pid: u32,
-    engine_namespace_device: u64,
-    engine_namespace_inode: u64,
-    coordinator_pid: u32,
-    coordinator_uid: u32,
-    coordinator_start_time_ticks: u64,
-    coordinator_namespace_device: u64,
-    coordinator_namespace_inode: u64,
+struct PersistedCoordinatorIdentity {
+    pid: u32,
+    uid: u32,
+    start_time_ticks: u64,
+    network_namespace_device: u64,
+    network_namespace_inode: u64,
 }
 
 // Distinguish an absent schema-1 field from an explicitly supplied null.
@@ -515,7 +509,7 @@ impl PersistedIntent {
             record.launch_identity().to_owned(),
             record.stop_timeout_millis(),
             record.runtime_identity().cloned(),
-            record.launch_role().clone(),
+            *record.launch_role(),
         )
         .map_err(|_| ServiceIntentStoreError::InvalidRecord)?;
         let runtime_lane = record
@@ -524,29 +518,18 @@ impl PersistedIntent {
         let runtime_name = record
             .runtime_identity()
             .map(|identity| Some(identity.as_str().to_owned()));
-        let (launch_role, engine_namespace) = match record.launch_role() {
+        let (launch_role, coordinator_identity) = match record.launch_role() {
             ServiceLaunchRole::Ordinary => (None, None),
-            ServiceLaunchRole::PrivateNetworkEngine => {
-                (Some("private_network_engine".to_owned()), None)
-            }
-            ServiceLaunchRole::EngineNamespaceBridge(engine) => {
-                let coordinator = engine.coordinator_identity();
-                (
-                    Some("engine_namespace_bridge".to_owned()),
-                    Some(PersistedEngineNamespace {
-                        engine_unit_name: engine.unit_name().to_owned(),
-                        engine_invocation_id: engine.invocation_id().to_owned(),
-                        engine_main_pid: engine.main_pid(),
-                        engine_namespace_device: engine.namespace_device(),
-                        engine_namespace_inode: engine.namespace_inode(),
-                        coordinator_pid: coordinator.pid(),
-                        coordinator_uid: coordinator.uid(),
-                        coordinator_start_time_ticks: coordinator.start_time_ticks(),
-                        coordinator_namespace_device: coordinator.network_namespace_device(),
-                        coordinator_namespace_inode: coordinator.network_namespace_inode(),
-                    }),
-                )
-            }
+            ServiceLaunchRole::IsolatedEngineSupervisor(coordinator) => (
+                Some("isolated_engine_supervisor".to_owned()),
+                Some(PersistedCoordinatorIdentity {
+                    pid: coordinator.pid(),
+                    uid: coordinator.uid(),
+                    start_time_ticks: coordinator.start_time_ticks(),
+                    network_namespace_device: coordinator.network_namespace_device(),
+                    network_namespace_inode: coordinator.network_namespace_inode(),
+                }),
+            ),
         };
         Ok(Self {
             schema: if launch_role.is_some() {
@@ -563,7 +546,7 @@ impl PersistedIntent {
             runtime_lane,
             runtime_name,
             launch_role,
-            engine_namespace,
+            coordinator_identity,
         })
     }
 
@@ -577,44 +560,32 @@ impl PersistedIntent {
             runtime_lane,
             runtime_name,
             launch_role,
-            engine_namespace,
+            coordinator_identity,
         } = self;
         let runtime_identity = match (schema, runtime_lane, runtime_name) {
-            (1, None, None) | (3, None, None) => None,
+            (1, None, None) => None,
             (2 | 3, Some(Some(lane)), Some(Some(name))) => Some(
                 runtime_identity_from_persisted_parts(&lane, name)
                     .map_err(|_| ServiceIntentStoreError::CorruptStore)?,
             ),
             _ => return Err(ServiceIntentStoreError::CorruptStore),
         };
-        let launch_role = match (schema, launch_role.as_deref(), engine_namespace) {
+        let launch_role = match (schema, launch_role.as_deref(), coordinator_identity) {
             (1 | 2, None, None) => ServiceLaunchRole::Ordinary,
-            (3, Some("private_network_engine"), None) => ServiceLaunchRole::PrivateNetworkEngine,
-            (3, Some("engine_namespace_bridge"), Some(engine)) => {
+            (3, Some("isolated_engine_supervisor"), Some(coordinator)) => {
+                if runtime_identity.is_none() {
+                    return Err(ServiceIntentStoreError::CorruptStore);
+                }
                 let coordinator =
                     super::engine_transport::CoordinatorIdentityDescriptor::from_parts(
-                        engine.coordinator_pid,
-                        engine.coordinator_uid,
-                        engine.coordinator_start_time_ticks,
-                        engine.coordinator_namespace_device,
-                        engine.coordinator_namespace_inode,
+                        coordinator.pid,
+                        coordinator.uid,
+                        coordinator.start_time_ticks,
+                        coordinator.network_namespace_device,
+                        coordinator.network_namespace_inode,
                     )
                     .map_err(|_| ServiceIntentStoreError::CorruptStore)?;
-                let runtime_identity = runtime_identity
-                    .clone()
-                    .ok_or(ServiceIntentStoreError::CorruptStore)?;
-                ServiceLaunchRole::EngineNamespaceBridge(Box::new(
-                    EngineNamespaceIdentity::from_parts(
-                        engine.engine_unit_name,
-                        engine.engine_invocation_id,
-                        engine.engine_main_pid,
-                        engine.engine_namespace_device,
-                        engine.engine_namespace_inode,
-                        runtime_identity,
-                        coordinator,
-                    )
-                    .map_err(|_| ServiceIntentStoreError::CorruptStore)?,
-                ))
+                ServiceLaunchRole::IsolatedEngineSupervisor(coordinator)
             }
             _ => return Err(ServiceIntentStoreError::CorruptStore),
         };
@@ -778,6 +749,22 @@ mod tests {
         .unwrap()
     }
 
+    fn supervisor_intent(suffix: u128) -> ServiceIntentRecord {
+        let random = format!("{suffix:032x}");
+        ServiceIntentRecord::from_persisted_parts_with_role(
+            "coordinator".to_owned(),
+            format!("l3ms-coordinator-{random}.service"),
+            "d".repeat(64),
+            45_000,
+            Some(RuntimeIdentity::new(Lane::Media, "comfyui").unwrap()),
+            ServiceLaunchRole::IsolatedEngineSupervisor(
+                super::super::engine_transport::CoordinatorIdentityDescriptor::capture_current()
+                    .unwrap(),
+            ),
+        )
+        .unwrap()
+    }
+
     fn filename(record: &ServiceIntentRecord) -> String {
         format!("{}{}", record.unit_name(), JSON_SUFFIX)
     }
@@ -842,6 +829,36 @@ mod tests {
         assert_eq!(persisted.as_object().unwrap().len(), 7);
         assert!(persisted.get("argv").is_none());
         assert!(persisted.get("env").is_none());
+
+        let restored = store.list().unwrap().pop().unwrap();
+        assert_eq!(restored, original);
+        assert_eq!(
+            restored.runtime_identity(),
+            Some(&RuntimeIdentity::new(Lane::Media, "comfyui").unwrap())
+        );
+    }
+
+    #[test]
+    fn supervisor_record_round_trips_exact_typed_launch_metadata() {
+        let directory = private_directory();
+        let store = ServiceIntentStore::open(directory.path()).unwrap();
+        let original = supervisor_intent(17);
+        store.record(&original).unwrap();
+
+        let persisted: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(directory.path().join(filename(&original))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted["schema"], 3);
+        assert_eq!(persisted["launch_role"], "isolated_engine_supervisor");
+        assert_eq!(persisted["runtime_lane"], "media");
+        assert_eq!(persisted["runtime_name"], "comfyui");
+        assert_eq!(persisted.as_object().unwrap().len(), 9);
+        let identity = persisted["coordinator_identity"].as_object().unwrap();
+        assert_eq!(identity.len(), 5);
+        assert_eq!(identity["pid"], std::process::id());
+        assert!(persisted.get("argv").is_none());
+        assert!(persisted.get("environment").is_none());
 
         let restored = store.list().unwrap().pop().unwrap();
         assert_eq!(restored, original);
@@ -977,6 +994,47 @@ mod tests {
         unknown_field["argv"] = serde_json::json!(["must-not-be-persisted"]);
         cases.push(serde_json::to_vec(&unknown_field).unwrap());
         cases.push(b"{truncated".to_vec());
+
+        for bytes in cases {
+            let directory = private_directory();
+            write_private_file(&directory.path().join(&filename), &bytes, FILE_MODE);
+            let store = ServiceIntentStore::open(directory.path()).unwrap();
+            assert_eq!(store.list(), Err(ServiceIntentStoreError::CorruptStore));
+        }
+    }
+
+    #[test]
+    fn malformed_supervisor_role_identity_and_binding_fail_closed() {
+        let record = supervisor_intent(20);
+        let filename = filename(&record);
+        let valid = serde_json::to_value(PersistedIntent::from_record(&record).unwrap()).unwrap();
+        let mut cases = Vec::new();
+
+        let mut missing_identity = valid.clone();
+        missing_identity
+            .as_object_mut()
+            .unwrap()
+            .remove("coordinator_identity");
+        cases.push(serde_json::to_vec(&missing_identity).unwrap());
+
+        let mut missing_binding = valid.clone();
+        missing_binding
+            .as_object_mut()
+            .unwrap()
+            .remove("runtime_name");
+        cases.push(serde_json::to_vec(&missing_binding).unwrap());
+
+        let mut invalid_pid = valid.clone();
+        invalid_pid["coordinator_identity"]["pid"] = serde_json::Value::from(0);
+        cases.push(serde_json::to_vec(&invalid_pid).unwrap());
+
+        let mut unknown_role = valid.clone();
+        unknown_role["launch_role"] = serde_json::Value::String("engine_bridge".to_owned());
+        cases.push(serde_json::to_vec(&unknown_role).unwrap());
+
+        let mut legacy_schema_with_role = valid;
+        legacy_schema_with_role["schema"] = serde_json::Value::from(2);
+        cases.push(serde_json::to_vec(&legacy_schema_with_role).unwrap());
 
         for bytes in cases {
             let directory = private_directory();

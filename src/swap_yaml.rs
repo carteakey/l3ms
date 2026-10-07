@@ -25,6 +25,12 @@ pub struct SwapYamlEntry {
     pub disabled: bool,
     /// First `-m` (or `--model`) path found in the entry's cmd block.
     pub model_path: Option<String>,
+    /// Tasks inferred from active flags in the entry's `cmd` value.
+    ///
+    /// The current serving convention is `--embedding`/`--embeddings` for
+    /// embedding profiles and chat otherwise. This is intentionally based on
+    /// command flags, not model names or comments.
+    pub tasks: Vec<String>,
 }
 
 const MODELS_SECTION: &str = "models:";
@@ -89,10 +95,149 @@ pub fn parse_entries(text: &str) -> Vec<SwapYamlEntry> {
             id: id.to_owned(),
             disabled: body.iter().any(|line| is_disabled_line(line)),
             model_path: body.iter().find_map(|line| model_path(line)),
+            tasks: inferred_tasks(body, indentation(lines[index])),
         });
         index = end;
     }
     entries
+}
+
+fn inferred_tasks(body: &[&str], entry_indent: usize) -> Vec<String> {
+    if cmd_has_embedding_flag(body, entry_indent) {
+        vec!["embeddings".to_owned()]
+    } else {
+        vec!["chat".to_owned()]
+    }
+}
+
+/// Detect embedding mode only in active shell tokens from a `cmd:` value.
+/// The parser deliberately handles this narrow YAML/shell subset without
+/// treating comments, metadata, descriptions, or quoted option values as
+/// executable flags.
+fn cmd_has_embedding_flag(body: &[&str], entry_indent: usize) -> bool {
+    let mut index = 0;
+    while index < body.len() {
+        let line = body[index];
+        let Some((indent, value)) = cmd_value(line, entry_indent + 2) else {
+            index += 1;
+            continue;
+        };
+
+        let value = value.trim();
+        let is_block = value.starts_with('|') || value.starts_with('>');
+        if is_block {
+            index += 1;
+            let mut command = String::new();
+            let content_indent = body[index..]
+                .iter()
+                .find(|line| !line.trim().is_empty())
+                .map(|line| indentation(line))
+                .unwrap_or(indent + 2);
+            while index < body.len() {
+                let next = body[index];
+                if !next.trim().is_empty() && indentation(next) <= indent {
+                    break;
+                }
+                if !next.trim().is_empty() && next.len() >= content_indent {
+                    command.push_str(&next[content_indent..]);
+                }
+                command.push('\n');
+                index += 1;
+            }
+            if shell_has_embedding_flag(&command) {
+                return true;
+            }
+        } else {
+            // YAML permits one-line `cmd` scalars as well as literal blocks.
+            // Remove only an outer YAML quote pair; shell-level quotes inside
+            // the value remain visible to the shell token scanner.
+            let command = unquote_yaml_scalar(strip_yaml_inline_comment(value));
+            if shell_has_embedding_flag(command) {
+                return true;
+            }
+            index += 1;
+        }
+    }
+    false
+}
+
+fn cmd_value(line: &str, expected_indent: usize) -> Option<(usize, &str)> {
+    let trimmed = line.trim_start();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+    let (key, value) = trimmed.split_once(':')?;
+    let indent = indentation(line);
+    (indent == expected_indent && key.trim() == "cmd").then_some((indent, value))
+}
+
+fn indentation(line: &str) -> usize {
+    line.len() - line.trim_start().len()
+}
+
+fn unquote_yaml_scalar(value: &str) -> &str {
+    if value.len() >= 2 {
+        let bytes = value.as_bytes();
+        if (bytes[0] == b'\'' && bytes[value.len() - 1] == b'\'')
+            || (bytes[0] == b'"' && bytes[value.len() - 1] == b'"')
+        {
+            return &value[1..value.len() - 1];
+        }
+    }
+    value
+}
+
+fn strip_yaml_inline_comment(value: &str) -> &str {
+    let mut quote = None;
+    let mut escaped = false;
+    let mut previous_whitespace = true;
+    for (index, character) in value.char_indices() {
+        if escaped {
+            escaped = false;
+            previous_whitespace = false;
+            continue;
+        }
+        match (quote, character) {
+            (Some('"'), '\\') => escaped = true,
+            (Some(current), candidate) if current == candidate => quote = None,
+            (None, '\'') | (None, '"') => quote = Some(character),
+            (None, '#') if previous_whitespace => return &value[..index],
+            _ => {}
+        }
+        previous_whitespace = character.is_whitespace();
+    }
+    value
+}
+
+/// Return whether a shell command contains an active, exact embedding flag.
+/// Shell quote removal is applied before matching, then known value-taking
+/// options prevent their following argument from being mistaken for a flag.
+fn shell_has_embedding_flag(command: &str) -> bool {
+    let Ok(tokens) = shell_words::split(command) else {
+        // Malformed quoting or a trailing escape is not evidence enough to
+        // classify the profile as embeddings.
+        return false;
+    };
+    let mut skip_value = false;
+    for token in tokens {
+        if skip_value {
+            skip_value = false;
+            continue;
+        }
+        if matches!(token.as_str(), "--embedding" | "--embeddings") {
+            return true;
+        }
+        skip_value = option_takes_value(&token);
+    }
+    false
+}
+
+fn option_takes_value(token: &str) -> bool {
+    if matches!(token, "-m" | "--model" | "--description") {
+        return true;
+    }
+    crate::param_registry::find_by_flag(token)
+        .is_some_and(|index| crate::param_registry::REGISTRY[index].takes_value())
 }
 
 /// Parse model entries and merge their config-level state into `models`.
@@ -426,6 +571,7 @@ on_startup:
         let entries = parse_entries(SAMPLE);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].id, "alpha");
+        assert_eq!(entries[0].tasks, vec!["chat"]);
         assert!(!entries[0].disabled);
         assert_eq!(
             entries[0].model_path.as_deref(),
@@ -443,6 +589,100 @@ on_startup:
         let text = "models:\n  # \"old\":\n  #   cmd: x\nother: 1\n";
         assert!(parse_entries(text).is_empty());
         assert!(parse_entries("no models here").is_empty());
+    }
+
+    #[test]
+    fn infers_embedding_tasks_from_active_cmd_flags_only() {
+        let text = r#"models:
+  "embed-singular":
+    cmd: |
+      llama-server -m /models/one.gguf
+      --embedding
+      --port ${PORT}
+  "embed-plural":
+    cmd: llama-server --embeddings # enable vector output
+  "chat-model":
+    cmd: |
+      llama-server -m /models/chat.gguf --port ${PORT}
+"#;
+
+        let entries = parse_entries(text);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].tasks, vec!["embeddings"]);
+        assert_eq!(entries[1].tasks, vec!["embeddings"]);
+        assert_eq!(entries[2].tasks, vec!["chat"]);
+    }
+
+    #[test]
+    fn ignores_embedding_text_in_comments_quoted_values_and_metadata() {
+        let text = r#"models:
+  "ordinary":
+    description: "--embedding"
+    metadata:
+      cmd: --embeddings
+    cmd: |
+      llama-server --alias "--embedding" --description "Use --embeddings"
+      --port ${PORT} # --embedding is only a comment
+      # --embeddings is an old commented flag
+  # "archived-embed":
+  #   cmd: |
+  #     llama-server --embedding
+"#;
+
+        let entries = parse_entries(text);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "ordinary");
+        assert!(!entries[0].disabled);
+        assert_eq!(entries[0].tasks, vec!["chat"]);
+    }
+
+    #[test]
+    fn honors_quoted_flag_argv_and_skips_known_option_values() {
+        let text = r#"models:
+  "quoted-flag":
+    cmd: |
+      llama-server "--embedding"
+  "quoted-model-path":
+    cmd: |
+      llama-server -m "--embedding"
+  "quoted-alias":
+    cmd: |
+      llama-server --alias "--embeddings"
+  "quoted-description":
+    cmd: |
+      llama-server --description "--embedding"
+  "continued-flag":
+    cmd: |
+      llama-server --embed\
+      ding
+  "unterminated-quote":
+    cmd: |
+      llama-server "--embedding
+"#;
+
+        let entries = parse_entries(text);
+        assert_eq!(entries.len(), 6);
+        assert_eq!(entries[0].tasks, vec!["embeddings"]);
+        assert_eq!(entries[1].tasks, vec!["chat"]);
+        assert_eq!(entries[2].tasks, vec!["chat"]);
+        assert_eq!(entries[3].tasks, vec!["chat"]);
+        assert_eq!(entries[4].tasks, vec!["embeddings"]);
+        assert_eq!(entries[5].tasks, vec!["chat"]);
+    }
+
+    #[test]
+    fn disabled_embedding_entry_remains_disabled_and_keeps_inferred_task() {
+        let text = r#"models:
+  "archived-embed":
+    disabled: true
+    cmd: |
+      llama-server --embedding
+"#;
+
+        let entries = parse_entries(text);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].disabled);
+        assert_eq!(entries[0].tasks, vec!["embeddings"]);
     }
 
     #[test]

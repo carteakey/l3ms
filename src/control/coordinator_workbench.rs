@@ -22,6 +22,7 @@ use super::ipc::{
 use super::result_consumer::NativeOutput;
 use super::runtime::{Cancellation, OperationContext};
 use super::submission_file::{self, SubmissionFileError};
+use super::task_form::{self, TaskFormDraft, TaskFormError};
 
 const ACTION_TIMEOUT: Duration = Duration::from_secs(3);
 const ACTION_QUEUE_CAPACITY: usize = 1;
@@ -31,6 +32,7 @@ const EVENT_QUEUE_CAPACITY: usize = 4;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PreparationError {
     SubmitFile(SubmissionFileError),
+    TaskForm(TaskFormError),
     SelectedProfileMismatch,
 }
 
@@ -38,6 +40,7 @@ impl std::fmt::Display for PreparationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::SubmitFile(error) => error.fmt(f),
+            Self::TaskForm(error) => error.fmt(f),
             Self::SelectedProfileMismatch => {
                 f.write_str("submit profile does not match the selected Stack Catalog profile")
             }
@@ -108,6 +111,27 @@ pub fn prepare_submission(
     selected_profile: &ProfileKey,
 ) -> Result<PreparedSubmission, PreparationError> {
     let envelope = submission_file::read(path, catalog).map_err(PreparationError::SubmitFile)?;
+    prepare_validated_envelope(envelope, selected_profile)
+}
+
+/// Construct an opaque one-shot submission from the in-memory native task
+/// form. `build_submit` performs the bounded envelope and refreshed-catalog
+/// validation before this function accepts the envelope for enqueue.
+pub(crate) fn prepare_task_form_submission(
+    catalog: &Catalog,
+    draft: TaskFormDraft,
+    selected_profile: &ProfileKey,
+) -> Result<PreparedSubmission, PreparationError> {
+    let envelope = task_form::build_submit(catalog, draft).map_err(PreparationError::TaskForm)?;
+    prepare_validated_envelope(envelope, selected_profile)
+}
+
+fn prepare_validated_envelope(
+    envelope: RequestEnvelope,
+    selected_profile: &ProfileKey,
+) -> Result<PreparedSubmission, PreparationError> {
+    ipc::validate_request_envelope(&envelope)
+        .map_err(|_| PreparationError::SubmitFile(SubmissionFileError::Invalid))?;
     let ClientRequest::Submit {
         request_id,
         request,

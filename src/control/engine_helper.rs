@@ -279,6 +279,11 @@ pub fn run_supervisor(
                     || monitor.failed.load(Ordering::Acquire) =>
             {
                 backend_exited = monitor.exited.load(Ordering::Acquire);
+                if monitor.failed.load(Ordering::Acquire)
+                    && !SHUTDOWN_REQUESTED.load(Ordering::Acquire)
+                {
+                    relay_failure_seen = true;
+                }
                 break;
             }
             Err(RelayFailure::NoDispatch(NoDispatchReason::BackendUnavailable)) => {}
@@ -761,7 +766,7 @@ fn notify_transport_ready() -> Result<(), ()> {
 }
 
 fn validate_arguments(arguments: Vec<OsString>) -> Result<Vec<OsString>, EngineHelperError> {
-    if arguments.is_empty() || arguments.len() > MAX_ARGUMENTS + 16 {
+    if arguments.len() > MAX_ARGUMENTS + 16 {
         return Err(EngineHelperError::InvalidArguments);
     }
     let mut total = 0usize;
@@ -820,6 +825,8 @@ fn take_path(
 mod tests {
     use super::*;
     use std::os::unix::ffi::OsStringExt;
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
 
     static NEXT_FIXTURE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -875,6 +882,34 @@ mod tests {
     }
 
     #[test]
+    fn supervisor_roundtrip_allows_a_backend_without_arguments_but_not_empty_helper_config() {
+        let directory = private_fixture_dir();
+        let backend = BackendProcessSpec::new(
+            std::env::current_exe().unwrap(),
+            std::env::current_dir().unwrap(),
+            [],
+        )
+        .unwrap();
+        let arguments = supervisor_arguments(
+            &directory,
+            BackendPort::new(8188).unwrap(),
+            CoordinatorIdentityDescriptor::capture_current().unwrap(),
+            &backend,
+        )
+        .unwrap();
+        assert!(parse_arguments(arguments)
+            .unwrap()
+            .backend
+            .arguments
+            .is_empty());
+        assert_eq!(
+            parse_arguments(Vec::new()).map(|_| ()),
+            Err(EngineHelperError::InvalidArguments)
+        );
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
     fn supervisor_argument_roundtrip_preserves_non_utf8_backend_arguments() {
         let directory = private_fixture_dir();
         let backend = BackendProcessSpec::new(
@@ -918,5 +953,62 @@ mod tests {
             validate_activation_values("1", "1", LISTEN_FD_NAME, pid),
             Err(EngineHelperError::InvalidActivationEnvironment)
         );
+    }
+
+    fn spawn_test_child(script: &str) -> Child {
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command.process_group(0);
+        command.spawn().unwrap()
+    }
+
+    fn terminate_test_child(child: &mut Child, monitor: &mut ChildMonitor) {
+        let started = Instant::now();
+        let result = terminate_child_group(child, monitor);
+        monitor.stop_and_join();
+        assert!(result.is_ok(), "bounded child-group cleanup failed");
+        assert!(started.elapsed() < CHILD_TERM_GRACE + CHILD_KILL_GRACE + Duration::from_secs(2));
+    }
+
+    #[test]
+    fn cleanup_terminates_live_child_group() {
+        let mut child = spawn_test_child("exec sleep 30");
+        let mut monitor = ChildMonitor::start(child.id()).unwrap();
+        terminate_test_child(&mut child, &mut monitor);
+    }
+
+    #[test]
+    fn cleanup_kills_term_resistant_child_group_within_bound() {
+        let mut child = spawn_test_child("trap '' TERM; exec sleep 30");
+        let mut monitor = ChildMonitor::start(child.id()).unwrap();
+        terminate_test_child(&mut child, &mut monitor);
+    }
+
+    #[test]
+    fn exited_leader_stays_unreaped_until_lingering_group_is_signalled() {
+        let mut child = spawn_test_child("sleep 30 & exit 0");
+        let mut monitor = ChildMonitor::start(child.id()).unwrap();
+        let leader = i32::try_from(child.id()).unwrap();
+        assert!(waitid_child_exited(leader, CHILD_TERM_GRACE).unwrap());
+        // WNOWAIT must leave the direct child as an unreaped zombie while the
+        // final process-group signal reaches its still-running descendant.
+        assert!(terminate_child_group(&mut child, &monitor).is_ok());
+        monitor.stop_and_join();
+    }
+
+    #[test]
+    fn monitor_failure_never_certifies_exit_or_skips_authoritative_cleanup() {
+        let mut child = spawn_test_child("exec sleep 30");
+        let mut monitor = ChildMonitor::start(child.id()).unwrap();
+        let leader = i32::try_from(child.id()).unwrap();
+        monitor.failed.store(true, Ordering::Release);
+        assert!(!wait_child_exit(leader, &monitor, Duration::ZERO).unwrap());
+        assert!(!waitid_child_exited(leader, Duration::ZERO).unwrap());
+        terminate_test_child(&mut child, &mut monitor);
     }
 }

@@ -77,6 +77,7 @@ pub enum CommandId {
     StackCatalogSelectNext,
     StackCatalogRefresh,
     StackCatalogSubmit,
+    StackCatalogForm,
     StackCatalogObserve,
     StackCatalogCancel,
     ParamBuilderToggleFocus,
@@ -176,7 +177,7 @@ pub enum CommandId {
 impl CommandId {
     /// Every command identifier. Kept in declaration order for completeness
     /// checks and integrations which want to validate their dispatch table.
-    pub const ALL: [Self; 103] = [
+    pub const ALL: [Self; 104] = [
         Self::Quit,
         Self::ShowHelp,
         Self::ShowPalette,
@@ -193,6 +194,7 @@ impl CommandId {
         Self::StackCatalogSelectNext,
         Self::StackCatalogRefresh,
         Self::StackCatalogSubmit,
+        Self::StackCatalogForm,
         Self::StackCatalogObserve,
         Self::StackCatalogCancel,
         Self::ParamBuilderToggleFocus,
@@ -301,6 +303,7 @@ impl CommandId {
             Self::StackCatalogSelectNext => "stack-catalog.select-next",
             Self::StackCatalogRefresh => "stack-catalog.refresh",
             Self::StackCatalogSubmit => "stack-catalog.submit",
+            Self::StackCatalogForm => "stack-catalog.form",
             Self::StackCatalogObserve => "stack-catalog.observe",
             Self::StackCatalogCancel => "stack-catalog.cancel",
             Self::ParamBuilderToggleFocus => "param-builder.toggle-focus",
@@ -677,6 +680,23 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Stack Catalog: submit one explicit request file",
         true,
         ["coordinator", "request", "run", "inference"]
+    ),
+    command!(
+        StackCatalogForm,
+        StackCatalog,
+        "f",
+        "Compose native task form",
+        "Stack Catalog: compose a native lane-specific request in memory",
+        true,
+        [
+            "coordinator",
+            "request",
+            "form",
+            "language",
+            "media",
+            "speech",
+            "decision"
+        ]
     ),
     command!(
         StackCatalogObserve,

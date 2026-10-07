@@ -89,8 +89,14 @@ See the [migration status](docs/migration/status.md),
   coordinator, settings, routing, and request IDs; preserve standalone commands.
   Linux CLI request status/cancel/results and one-shot Submit are implemented.
   Shared bounded output reassembly, explicit CLI output and keyboard-first
-  strict-file submit/observe/cancel UI pass fixtures. Full native task forms,
+  strict-file submit/observe/cancel UI pass fixtures. Native bounded task forms
+  for chat, media workflows/scripts, speech modes and decisions are implemented;
   managed engine/media routing and live acceptance remain unfinished.
+  Preserve the full plan's language scope: add manifest-derived embedding task
+  discovery (implemented from active command flags) and typed embedding request/result/adapter support (the shared
+  language contract currently supports chat only). Connect incremental language
+  stream events, task-aware artifact access and visible runtime recovery/status;
+  native envelope forwarding and JSON output panels alone are not full parity.
 - [ ] Add HTTP ingress to that coordinator only after local operation is proven;
   verify authentication and cancellation/reconnect behavior across clients.
   Explicit bounded loopback gateway and strict private foreground configuration
@@ -108,9 +114,12 @@ See the [migration status](docs/migration/status.md),
   restart, timeout, contention, and rollback paths before enabling public actions.
 - [ ] Complete visual/keyboard/mobile review of the three-lane site and verify
   generated data against native manifests; do not publish before the audit gate.
-  Six data-contract tests and shipped-JavaScript DOM fixtures pass locally;
+  Nine data-contract tests and shipped-JavaScript DOM fixtures pass locally;
   CI now runs both. No browser is available in this session, so real rendering,
   mobile layout and browser accessibility/keyboard acceptance remain pending.
+  Committed serving source ed7538a is synchronized; imported metrics are not
+  monorepo live acceptance. New source-referenced benchmark harnesses were not
+  committed and remain an explicit import/validation gap.
 - [x] Replace the confirmed documentation-only key-like example in the current
   tree with a clear placeholder; historical blobs remain unaudited/unchanged.
 - [ ] Sanitize the exact outgoing history/export and re-audit endpoints, host paths, secrets, and large

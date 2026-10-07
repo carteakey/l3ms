@@ -54,3 +54,4 @@ pub mod service_intents;
 #[cfg(target_os = "linux")]
 pub mod service_owner;
 pub mod submission_file;
+pub mod task_form;

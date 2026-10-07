@@ -22,6 +22,7 @@ use crate::control::coordinator_workbench::{
     self as coordinator_workbench, CancelOutcome, CoordinatorWorkbench, ObserveFailure,
     PreparationError, SubmitOutcome, WorkbenchEvent,
 };
+use crate::control::requests::SpeechMode;
 use crate::control::result_consumer::NativeOutput;
 use crate::{
     chat::{
@@ -32,6 +33,10 @@ use crate::{
     commands::{command, search_all_commands, visible_commands, CommandContext, CommandId},
     config_store::{load_config, DownloadConfig},
     control::catalog::{Catalog, CatalogProfile, Device, Lane, Readiness},
+    control::task_form::{
+        TaskFields, TaskFormDraft, TaskFormError, MAX_TASK_FORM_FIELD_BYTES,
+        MAX_TASK_FORM_TOTAL_BYTES,
+    },
     download_editor::DownloadEditor,
     download_preflight::{
         probe_disk_space, run_download_preflight_cancellable, DiskSpace, DownloadPreflight,
@@ -219,6 +224,7 @@ enum InputMode {
     ChatEndpoint,
     ChatSystemPrompt,
     CoordinatorInput,
+    TaskForm,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,6 +232,540 @@ enum CoordinatorInputAction {
     SubmitFile,
     ObserveId,
     CancelId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaskFormField {
+    RequestId,
+    Timeout,
+    DeclaredTask,
+    MediaOperation,
+    LanguageTurns,
+    MaxTokens,
+    MediaWorkflowGraph,
+    MediaScriptArgv,
+    SpeechText,
+    SpeechMode,
+    SpeechInstruction,
+    SpeechVoiceReference,
+    SpeechReferenceText,
+    DecisionState,
+    DecisionQuestions,
+    Submit,
+}
+
+impl TaskFormField {
+    fn label(self) -> &'static str {
+        match self {
+            Self::RequestId => "Caller request ID",
+            Self::Timeout => "Timeout (ms)",
+            Self::DeclaredTask => "Declared task",
+            Self::MediaOperation => "Media input kind",
+            Self::LanguageTurns => "Chat turns JSON",
+            Self::MaxTokens => "Max tokens",
+            Self::MediaWorkflowGraph => "Workflow graph JSON",
+            Self::MediaScriptArgv => "Script argv JSON array",
+            Self::SpeechText => "Speech text",
+            Self::SpeechMode => "Speech mode",
+            Self::SpeechInstruction => "Design instruction",
+            Self::SpeechVoiceReference => "Voice reference path",
+            Self::SpeechReferenceText => "Reference transcript",
+            Self::DecisionState => "Decision state JSON",
+            Self::DecisionQuestions => "Decision questions JSON",
+            Self::Submit => "Submit once",
+        }
+    }
+
+    fn is_selector(self) -> bool {
+        matches!(
+            self,
+            Self::DeclaredTask | Self::MediaOperation | Self::SpeechMode
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaskFormMediaOperation {
+    Workflow,
+    Script,
+    Speech,
+}
+
+impl TaskFormMediaOperation {
+    const ALL: [Self; 3] = [Self::Workflow, Self::Script, Self::Speech];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Workflow => "workflow graph",
+            Self::Script => "native script argv",
+            Self::Speech => "typed speech",
+        }
+    }
+}
+
+impl SpeechMode {
+    const TASK_FORM_MODES: [Self; 4] = [
+        Self::Standard,
+        Self::VoiceDesign,
+        Self::VoiceClone,
+        Self::Streaming,
+    ];
+
+    fn task_form_label(self) -> &'static str {
+        match self {
+            Self::Standard => "standard (tts)",
+            Self::VoiceDesign => "design",
+            Self::VoiceClone => "clone (clon)",
+            Self::Streaming => "streaming (tts)",
+        }
+    }
+}
+
+#[derive(Default)]
+struct TaskFormValues {
+    request_id: String,
+    timeout: String,
+    language_turns: String,
+    max_tokens: String,
+    workflow_graph: String,
+    script_argv: String,
+    speech_text: String,
+    speech_instruction: String,
+    speech_voice_reference: String,
+    speech_reference_text: String,
+    decision_state: String,
+    decision_questions: String,
+}
+
+impl TaskFormValues {
+    fn total_bytes(&self) -> usize {
+        [
+            self.request_id.len(),
+            self.timeout.len(),
+            self.language_turns.len(),
+            self.max_tokens.len(),
+            self.workflow_graph.len(),
+            self.script_argv.len(),
+            self.speech_text.len(),
+            self.speech_instruction.len(),
+            self.speech_voice_reference.len(),
+            self.speech_reference_text.len(),
+            self.decision_state.len(),
+            self.decision_questions.len(),
+        ]
+        .into_iter()
+        .fold(0usize, usize::saturating_add)
+    }
+
+    fn clear_media_inputs(&mut self) {
+        self.workflow_graph.clear();
+        self.script_argv.clear();
+        self.speech_text.clear();
+        self.speech_instruction.clear();
+        self.speech_voice_reference.clear();
+        self.speech_reference_text.clear();
+    }
+}
+
+/// Sensitive form contents are kept only in this transient editor and never
+/// formatted through Debug, status text, or activity logs.
+struct TaskFormEditor {
+    profile: crate::control::catalog::ProfileKey,
+    profile_snapshot: CatalogProfile,
+    declared_tasks: Vec<String>,
+    selected_task: Option<usize>,
+    media_operation: Option<TaskFormMediaOperation>,
+    speech_mode: Option<SpeechMode>,
+    fields: Vec<TaskFormField>,
+    active: usize,
+    cursor_byte: usize,
+    values: TaskFormValues,
+}
+
+impl TaskFormEditor {
+    fn new(profile: &CatalogProfile) -> Self {
+        let mut editor = Self {
+            profile: profile.key.clone(),
+            profile_snapshot: profile.clone(),
+            declared_tasks: profile
+                .tasks
+                .iter()
+                .map(|task| task.as_str().to_owned())
+                .collect(),
+            selected_task: None,
+            media_operation: None,
+            speech_mode: None,
+            fields: Vec::new(),
+            active: 0,
+            cursor_byte: 0,
+            values: TaskFormValues::default(),
+        };
+        editor.refresh_fields();
+        editor
+    }
+
+    fn refresh_fields(&mut self) {
+        let mut fields = vec![
+            TaskFormField::RequestId,
+            TaskFormField::Timeout,
+            TaskFormField::DeclaredTask,
+        ];
+        match self.profile.lane {
+            Lane::Language => {
+                fields.extend([TaskFormField::LanguageTurns, TaskFormField::MaxTokens])
+            }
+            Lane::Decisions => fields.extend([
+                TaskFormField::DecisionState,
+                TaskFormField::DecisionQuestions,
+            ]),
+            Lane::Media => {
+                fields.push(TaskFormField::MediaOperation);
+                match self.media_operation {
+                    Some(TaskFormMediaOperation::Workflow) => {
+                        fields.push(TaskFormField::MediaWorkflowGraph);
+                    }
+                    Some(TaskFormMediaOperation::Script) => {
+                        fields.push(TaskFormField::MediaScriptArgv);
+                    }
+                    Some(TaskFormMediaOperation::Speech) => fields.extend([
+                        TaskFormField::SpeechText,
+                        TaskFormField::SpeechMode,
+                        TaskFormField::SpeechInstruction,
+                        TaskFormField::SpeechVoiceReference,
+                        TaskFormField::SpeechReferenceText,
+                    ]),
+                    None => {}
+                }
+            }
+        }
+        fields.push(TaskFormField::Submit);
+        self.fields = fields;
+        self.active = self.active.min(self.fields.len().saturating_sub(1));
+        self.sync_cursor();
+    }
+
+    fn active_field(&self) -> TaskFormField {
+        self.fields[self.active]
+    }
+
+    fn current_text(&self) -> Option<&str> {
+        self.value(self.active_field()).map(String::as_str)
+    }
+
+    fn current_text_mut(&mut self) -> Option<&mut String> {
+        self.value_mut(self.active_field())
+    }
+
+    fn value(&self, field: TaskFormField) -> Option<&String> {
+        match field {
+            TaskFormField::RequestId => Some(&self.values.request_id),
+            TaskFormField::Timeout => Some(&self.values.timeout),
+            TaskFormField::LanguageTurns => Some(&self.values.language_turns),
+            TaskFormField::MaxTokens => Some(&self.values.max_tokens),
+            TaskFormField::MediaWorkflowGraph => Some(&self.values.workflow_graph),
+            TaskFormField::MediaScriptArgv => Some(&self.values.script_argv),
+            TaskFormField::SpeechText => Some(&self.values.speech_text),
+            TaskFormField::SpeechInstruction => Some(&self.values.speech_instruction),
+            TaskFormField::SpeechVoiceReference => Some(&self.values.speech_voice_reference),
+            TaskFormField::SpeechReferenceText => Some(&self.values.speech_reference_text),
+            TaskFormField::DecisionState => Some(&self.values.decision_state),
+            TaskFormField::DecisionQuestions => Some(&self.values.decision_questions),
+            TaskFormField::DeclaredTask
+            | TaskFormField::MediaOperation
+            | TaskFormField::SpeechMode
+            | TaskFormField::Submit => None,
+        }
+    }
+
+    fn value_mut(&mut self, field: TaskFormField) -> Option<&mut String> {
+        match field {
+            TaskFormField::RequestId => Some(&mut self.values.request_id),
+            TaskFormField::Timeout => Some(&mut self.values.timeout),
+            TaskFormField::LanguageTurns => Some(&mut self.values.language_turns),
+            TaskFormField::MaxTokens => Some(&mut self.values.max_tokens),
+            TaskFormField::MediaWorkflowGraph => Some(&mut self.values.workflow_graph),
+            TaskFormField::MediaScriptArgv => Some(&mut self.values.script_argv),
+            TaskFormField::SpeechText => Some(&mut self.values.speech_text),
+            TaskFormField::SpeechInstruction => Some(&mut self.values.speech_instruction),
+            TaskFormField::SpeechVoiceReference => Some(&mut self.values.speech_voice_reference),
+            TaskFormField::SpeechReferenceText => Some(&mut self.values.speech_reference_text),
+            TaskFormField::DecisionState => Some(&mut self.values.decision_state),
+            TaskFormField::DecisionQuestions => Some(&mut self.values.decision_questions),
+            TaskFormField::DeclaredTask
+            | TaskFormField::MediaOperation
+            | TaskFormField::SpeechMode
+            | TaskFormField::Submit => None,
+        }
+    }
+
+    fn field_display(&self, field: TaskFormField) -> String {
+        match field {
+            TaskFormField::DeclaredTask => self
+                .selected_task
+                .and_then(|index| self.declared_tasks.get(index))
+                .cloned()
+                .unwrap_or_else(|| "(choose with ↑/↓)".into()),
+            TaskFormField::MediaOperation => self
+                .media_operation
+                .map(TaskFormMediaOperation::label)
+                .unwrap_or("(choose with ↑/↓)")
+                .to_owned(),
+            TaskFormField::SpeechMode => self
+                .speech_mode
+                .map(SpeechMode::task_form_label)
+                .unwrap_or("(choose with ↑/↓)")
+                .to_owned(),
+            TaskFormField::Submit => "Ctrl+Enter or focus this row and press Enter".into(),
+            text_field => self
+                .value(text_field)
+                .filter(|value| !value.is_empty())
+                .map(|value| safe_form_preview(value, 88))
+                .unwrap_or_else(|| "(empty)".into()),
+        }
+    }
+
+    fn move_focus(&mut self, direction: isize) {
+        let count = self.fields.len();
+        if count == 0 {
+            return;
+        }
+        self.active = if direction < 0 {
+            (self.active + count - 1) % count
+        } else {
+            (self.active + 1) % count
+        };
+        self.sync_cursor();
+    }
+
+    fn sync_cursor(&mut self) {
+        self.cursor_byte = self
+            .value(self.active_field())
+            .map_or(0, |value| value.len());
+    }
+
+    fn cycle_selector(&mut self, direction: isize) -> bool {
+        match self.active_field() {
+            TaskFormField::DeclaredTask => {
+                let Some(index) =
+                    next_selection(self.selected_task, self.declared_tasks.len(), direction)
+                else {
+                    return false;
+                };
+                self.selected_task = Some(index);
+                true
+            }
+            TaskFormField::MediaOperation => {
+                let Some(index) = next_selection(
+                    self.media_operation.map(|operation| {
+                        TaskFormMediaOperation::ALL
+                            .iter()
+                            .position(|candidate| *candidate == operation)
+                            .unwrap_or(0)
+                    }),
+                    TaskFormMediaOperation::ALL.len(),
+                    direction,
+                ) else {
+                    return false;
+                };
+                let operation = TaskFormMediaOperation::ALL[index];
+                if self.media_operation != Some(operation) {
+                    self.values.clear_media_inputs();
+                    self.speech_mode = None;
+                    self.media_operation = Some(operation);
+                    self.refresh_fields();
+                }
+                true
+            }
+            TaskFormField::SpeechMode => {
+                let Some(index) = next_selection(
+                    self.speech_mode.and_then(|mode| {
+                        SpeechMode::TASK_FORM_MODES
+                            .iter()
+                            .position(|candidate| *candidate == mode)
+                    }),
+                    SpeechMode::TASK_FORM_MODES.len(),
+                    direction,
+                ) else {
+                    return false;
+                };
+                self.speech_mode = Some(SpeechMode::TASK_FORM_MODES[index]);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn insert_char(&mut self, character: char) -> bool {
+        if character.is_control() {
+            return false;
+        }
+        self.insert_text(&character.to_string())
+    }
+
+    fn insert_newline(&mut self) -> bool {
+        self.insert_text("\n")
+    }
+
+    fn insert_text(&mut self, input: &str) -> bool {
+        let Some(field) = self.current_text() else {
+            return false;
+        };
+        let field_limit = match self.active_field() {
+            TaskFormField::RequestId => MAX_STACK_ID_INPUT_BYTES,
+            TaskFormField::Timeout => 32,
+            _ => MAX_TASK_FORM_FIELD_BYTES,
+        };
+        if field.len().saturating_add(input.len()) > field_limit
+            || self.values.total_bytes().saturating_add(input.len()) > MAX_TASK_FORM_TOTAL_BYTES
+        {
+            return false;
+        }
+        let cursor = self.cursor_byte.min(field.len());
+        {
+            let Some(field) = self.current_text_mut() else {
+                return false;
+            };
+            field.insert_str(cursor, input);
+        }
+        self.cursor_byte = cursor + input.len();
+        true
+    }
+
+    fn backspace(&mut self) {
+        let cursor_byte = self.cursor_byte;
+        let previous = {
+            let Some(field) = self.current_text_mut() else {
+                return;
+            };
+            let Some((previous, _)) = field[..cursor_byte].char_indices().next_back() else {
+                return;
+            };
+            field.remove(previous);
+            previous
+        };
+        self.cursor_byte = previous;
+    }
+
+    fn move_cursor(&mut self, direction: isize) {
+        let Some(field) = self.current_text() else {
+            return;
+        };
+        let cursor_byte = if direction < 0 {
+            field[..self.cursor_byte]
+                .char_indices()
+                .next_back()
+                .map_or(0, |(index, _)| index)
+        } else {
+            self.cursor_byte
+                + field[self.cursor_byte..]
+                    .chars()
+                    .next()
+                    .map_or(0, char::len_utf8)
+        };
+        self.cursor_byte = cursor_byte;
+    }
+
+    fn move_cursor_edge(&mut self, to_end: bool) {
+        if let Some(cursor_byte) = self
+            .current_text()
+            .map(|field| if to_end { field.len() } else { 0 })
+        {
+            self.cursor_byte = cursor_byte;
+        }
+    }
+
+    fn to_draft(&self) -> Result<TaskFormDraft, TaskFormError> {
+        let request_id = self.values.request_id.clone();
+        let timeout_ms = self
+            .values
+            .timeout
+            .parse::<u64>()
+            .map_err(|_| TaskFormError::InvalidRequest)?;
+        let selected_task = self
+            .selected_task
+            .and_then(|index| self.declared_tasks.get(index))
+            .ok_or(TaskFormError::ProfileTaskMismatch)?;
+        let declared_task = crate::control::catalog::Task::new(selected_task.clone())
+            .map_err(|_| TaskFormError::ProfileTaskMismatch)?;
+        let fields = match self.profile.lane {
+            Lane::Language => TaskFields::Language {
+                turns: serde_json::from_str(&self.values.language_turns)
+                    .map_err(|_| TaskFormError::InvalidNativeFields)?,
+                max_tokens: self
+                    .values
+                    .max_tokens
+                    .parse::<u32>()
+                    .map_err(|_| TaskFormError::InvalidNativeFields)?,
+            },
+            Lane::Decisions => TaskFields::Decisions {
+                state: serde_json::from_str(&self.values.decision_state)
+                    .map_err(|_| TaskFormError::InvalidNativeFields)?,
+                questions: serde_json::from_str(&self.values.decision_questions)
+                    .map_err(|_| TaskFormError::InvalidNativeFields)?,
+            },
+            Lane::Media => match self
+                .media_operation
+                .ok_or(TaskFormError::InvalidNativeFields)?
+            {
+                TaskFormMediaOperation::Workflow => TaskFields::MediaWorkflow {
+                    graph: serde_json::from_str(&self.values.workflow_graph)
+                        .map_err(|_| TaskFormError::InvalidNativeFields)?,
+                },
+                TaskFormMediaOperation::Script => TaskFields::MediaScript {
+                    args: serde_json::from_str(&self.values.script_argv)
+                        .map_err(|_| TaskFormError::InvalidNativeFields)?,
+                },
+                TaskFormMediaOperation::Speech => TaskFields::Speech {
+                    text: self.values.speech_text.clone(),
+                    mode: self.speech_mode.ok_or(TaskFormError::InvalidNativeFields)?,
+                    instruction: nonempty_form_field(&self.values.speech_instruction),
+                    voice_reference: nonempty_form_field(&self.values.speech_voice_reference),
+                    reference_text: nonempty_form_field(&self.values.speech_reference_text),
+                },
+            },
+        };
+        Ok(TaskFormDraft::new(
+            self.profile.clone(),
+            declared_task,
+            request_id,
+            timeout_ms,
+            fields,
+        ))
+    }
+}
+
+fn next_selection(current: Option<usize>, count: usize, direction: isize) -> Option<usize> {
+    if count == 0 {
+        return None;
+    }
+    Some(match current {
+        Some(index) if direction < 0 => (index + count - 1) % count,
+        Some(index) => (index + 1) % count,
+        None if direction < 0 => count - 1,
+        None => 0,
+    })
+}
+
+fn nonempty_form_field(value: &str) -> Option<String> {
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn safe_form_preview(value: &str, max_chars: usize) -> String {
+    let mut rendered = String::new();
+    let mut characters = value.chars();
+    for character in characters.by_ref().take(max_chars) {
+        if character == '\n' {
+            rendered.push('↵');
+        } else if character.is_control() {
+            rendered.push(' ');
+        } else {
+            rendered.push(character);
+        }
+    }
+    if characters.next().is_some() {
+        rendered.push('…');
+    }
+    rendered
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -402,6 +942,7 @@ struct App {
     coordinator_action_pending: bool,
     coordinator_input: String,
     coordinator_input_action: Option<CoordinatorInputAction>,
+    task_form_editor: Option<TaskFormEditor>,
     coordinator_output: Option<NativeOutput>,
     coordinator_output_complete: bool,
     coordinator_results_available: bool,
@@ -565,6 +1106,7 @@ impl App {
             coordinator_action_pending: false,
             coordinator_input: String::new(),
             coordinator_input_action: None,
+            task_form_editor: None,
             coordinator_output: None,
             coordinator_output_complete: false,
             coordinator_results_available: false,
@@ -1381,7 +1923,10 @@ impl App {
             self.handle_download_input_key(key);
             return Ok(());
         }
-        if key.code == KeyCode::Char('?') && key.modifiers == KeyModifiers::NONE {
+        if self.input_mode == InputMode::Normal
+            && key.code == KeyCode::Char('?')
+            && key.modifiers == KeyModifiers::NONE
+        {
             self.show_help = true;
             return Ok(());
         }
@@ -1457,6 +2002,9 @@ impl App {
 
     fn leave_tab_inputs(&mut self) {
         self.store_active_script_view();
+        if self.input_mode == InputMode::TaskForm {
+            self.task_form_editor = None;
+        }
         self.input_mode = InputMode::Normal;
         self.script_input_target = None;
         self.script_versions_target = None;
@@ -1662,9 +2210,26 @@ impl App {
                     self.coordinator_input.clear();
                     self.coordinator_input_action = None;
                 }
+                if self.input_mode == InputMode::TaskForm {
+                    self.task_form_editor = None;
+                }
                 self.input_mode = InputMode::Normal;
             }
             KeyCode::Enter => match self.input_mode {
+                InputMode::TaskForm => {
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        || self
+                            .task_form_editor
+                            .as_ref()
+                            .is_some_and(|editor| editor.active_field() == TaskFormField::Submit)
+                    {
+                        self.submit_task_form();
+                    } else if let Some(editor) = self.task_form_editor.as_mut() {
+                        if !editor.insert_newline() {
+                            self.status = "Task form field or aggregate input limit reached".into();
+                        }
+                    }
+                }
                 InputMode::ChatMessage => self.send_chat_message(),
                 InputMode::ChatEndpoint => self.start_chat_connect(),
                 InputMode::CoordinatorInput => self.finish_coordinator_input(),
@@ -1677,6 +2242,36 @@ impl App {
                 InputMode::ChatSystemPrompt => self.input_mode = InputMode::Normal,
                 _ => self.input_mode = InputMode::Normal,
             },
+            KeyCode::Tab | KeyCode::BackTab if self.input_mode == InputMode::TaskForm => {
+                if let Some(editor) = self.task_form_editor.as_mut() {
+                    let direction = if key.code == KeyCode::BackTab
+                        || key.modifiers.contains(KeyModifiers::SHIFT)
+                    {
+                        -1
+                    } else {
+                        1
+                    };
+                    editor.move_focus(direction);
+                }
+            }
+            KeyCode::Up | KeyCode::Down if self.input_mode == InputMode::TaskForm => {
+                if let Some(editor) = self.task_form_editor.as_mut() {
+                    let direction = if key.code == KeyCode::Up { -1 } else { 1 };
+                    if !editor.cycle_selector(direction) {
+                        editor.move_focus(direction);
+                    }
+                }
+            }
+            KeyCode::Left | KeyCode::Right if self.input_mode == InputMode::TaskForm => {
+                if let Some(editor) = self.task_form_editor.as_mut() {
+                    editor.move_cursor(if key.code == KeyCode::Left { -1 } else { 1 });
+                }
+            }
+            KeyCode::Home | KeyCode::End if self.input_mode == InputMode::TaskForm => {
+                if let Some(editor) = self.task_form_editor.as_mut() {
+                    editor.move_cursor_edge(key.code == KeyCode::End);
+                }
+            }
             KeyCode::Backspace => match self.input_mode {
                 InputMode::ModelFilter => {
                     self.model_filter.pop();
@@ -1707,6 +2302,11 @@ impl App {
                 }
                 InputMode::CoordinatorInput => {
                     self.coordinator_input.pop();
+                }
+                InputMode::TaskForm => {
+                    if let Some(editor) = self.task_form_editor.as_mut() {
+                        editor.backspace();
+                    }
                 }
                 InputMode::Normal => {}
             },
@@ -1744,6 +2344,14 @@ impl App {
                             && !character.is_control()
                         {
                             self.coordinator_input.push(character);
+                        }
+                    }
+                    InputMode::TaskForm => {
+                        if let Some(editor) = self.task_form_editor.as_mut() {
+                            if !editor.insert_char(character) && !character.is_control() {
+                                self.status =
+                                    "Task form field or aggregate input limit reached".into();
+                            }
                         }
                     }
                     InputMode::Normal => {}
@@ -2317,6 +2925,7 @@ impl App {
             }
             StackCatalogRefresh => self.refresh_stack_catalog(),
             StackCatalogSubmit => self.begin_coordinator_input(CoordinatorInputAction::SubmitFile),
+            StackCatalogForm => self.begin_task_form(),
             StackCatalogObserve => self.begin_coordinator_observe(),
             StackCatalogCancel => self.begin_coordinator_cancel(),
             PreviousTab => {
@@ -3556,6 +4165,7 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => Some(CommandId::StackCatalogSelectNext),
             KeyCode::Char('r') => Some(CommandId::StackCatalogRefresh),
             KeyCode::Char('s') => Some(CommandId::StackCatalogSubmit),
+            KeyCode::Char('f') => Some(CommandId::StackCatalogForm),
             KeyCode::Char('o') => Some(CommandId::StackCatalogObserve),
             KeyCode::Char('c') => Some(CommandId::StackCatalogCancel),
             _ => None,
@@ -3563,6 +4173,149 @@ impl App {
         if let Some(command) = command {
             if let Err(error) = self.execute_command(command) {
                 self.status = format!("Stack Catalog: {error:#}");
+            }
+        }
+    }
+
+    fn begin_task_form(&mut self) {
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.status = "The private coordinator workbench is available on Linux only".into();
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if self.coordinator_action_pending
+                || (self.coordinator_request_id.is_some() && !self.coordinator_request_terminal)
+            {
+                self.status = "Caller ID remains ambiguous or nonterminal; observe or cancel it before another Submit".into();
+                return;
+            }
+            if self.stack_coordinator_socket_dir.is_none() {
+                self.status =
+                    "No explicit private coordinator socket is configured in shared settings"
+                        .into();
+                return;
+            }
+            let Some(profile) = self.selected_stack_profile().cloned() else {
+                self.status =
+                    "Select a manifest profile before opening the native task form".into();
+                return;
+            };
+            if profile.tasks.is_empty() {
+                self.status = "Selected profile declares no task forms".into();
+                return;
+            }
+            self.task_form_editor = Some(TaskFormEditor::new(&profile));
+            self.input_mode = InputMode::TaskForm;
+            self.status = "Native task form open · choose the declared task explicitly".into();
+        }
+    }
+
+    fn submit_task_form(&mut self) {
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.status = "The private coordinator workbench is available on Linux only".into();
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if self.coordinator_action_pending
+                || (self.coordinator_request_id.is_some() && !self.coordinator_request_terminal)
+            {
+                self.status = "Caller ID remains ambiguous or nonterminal; observe or cancel it before another Submit".into();
+                return;
+            }
+            let Some(socket_directory) = self.stack_coordinator_socket_dir.clone() else {
+                self.status =
+                    "No explicit private coordinator socket is configured in shared settings"
+                        .into();
+                return;
+            };
+            let Some(catalog) = self.stack_catalog.as_ref() else {
+                self.status = "Refresh the Stack Catalog before submitting".into();
+                return;
+            };
+            let Some(editor) = self.task_form_editor.as_ref() else {
+                self.status = "Native task form is not open".into();
+                return;
+            };
+            let selected_profile = editor.profile.clone();
+            if catalog.inspect(&selected_profile) != Some(&editor.profile_snapshot) {
+                self.status =
+                    "Selected profile changed; refresh and reopen the form before submitting"
+                        .into();
+                return;
+            }
+            let draft = match editor.to_draft() {
+                Ok(draft) => draft,
+                Err(error) => {
+                    self.status = error.to_string();
+                    return;
+                }
+            };
+            let prepared = match coordinator_workbench::prepare_task_form_submission(
+                catalog,
+                draft,
+                &selected_profile,
+            ) {
+                Ok(prepared) => prepared,
+                Err(PreparationError::SelectedProfileMismatch) => {
+                    self.status =
+                        "Selected profile or declared task changed; refresh and reopen the form"
+                            .into();
+                    return;
+                }
+                Err(PreparationError::TaskForm(error)) => {
+                    self.status = error.to_string();
+                    return;
+                }
+                Err(_) => {
+                    self.status = "Native task form is invalid for the refreshed catalog".into();
+                    return;
+                }
+            };
+            if self.coordinator_request_id.as_deref() == Some(prepared.request_id()) {
+                self.status =
+                    "Use a different caller-supplied ID after a terminal request; IDs are never replayed".into();
+                return;
+            }
+            if !self.ensure_coordinator_worker() {
+                return;
+            }
+            let request_id = prepared.request_id().to_owned();
+            let lane = prepared.lane();
+            let previous_request = (
+                self.coordinator_request_id.clone(),
+                self.coordinator_request_lane,
+                self.coordinator_request_terminal,
+            );
+            // Retain explicit identity before enqueue; the worker may begin
+            // the private IPC exchange as soon as this call succeeds.
+            self.coordinator_request_id = Some(request_id.clone());
+            self.coordinator_request_lane = Some(lane);
+            self.coordinator_request_terminal = false;
+            let result = self
+                .coordinator_workbench
+                .as_mut()
+                .expect("worker initialized")
+                .submit(socket_directory, prepared);
+            match result {
+                Ok(_) => {
+                    self.coordinator_output = None;
+                    self.coordinator_output_complete = false;
+                    self.coordinator_results_available = false;
+                    self.coordinator_action_pending = true;
+                    self.task_form_editor = None;
+                    self.input_mode = InputMode::Normal;
+                    self.status =
+                        "Caller ID retained; submitting native task form once to the configured coordinator".into();
+                }
+                Err(_) => {
+                    self.coordinator_request_id = previous_request.0;
+                    self.coordinator_request_lane = previous_request.1;
+                    self.coordinator_request_terminal = previous_request.2;
+                    self.status =
+                        "Coordinator worker did not accept the form; nothing was dispatched".into();
+                }
             }
         }
     }
@@ -4556,6 +5309,8 @@ impl App {
             self.draw_chat_prompts(frame);
         } else if self.script_versions_target.is_some() {
             self.draw_script_versions(frame);
+        } else if self.input_mode == InputMode::TaskForm {
+            self.draw_task_form(frame);
         }
     }
 
@@ -5461,7 +6216,7 @@ impl App {
                 .count()
         };
         let title = format!(
-            "{} profile(s) · language {} · media {} · decisions {} · r refresh · s submit · o observe · c cancel",
+            "{} profile(s) · language {} · media {} · decisions {} · r refresh · s file · f form · o observe · c cancel",
             profiles.len(),
             count_for(Lane::Language),
             count_for(Lane::Media),
@@ -5540,7 +6295,7 @@ impl App {
                 if self.coordinator_action_pending {
                     "action pending…"
                 } else {
-                    "idle · s/o/c"
+                    "idle · f/s/o/c"
                 }
             )
         };
@@ -5584,6 +6339,125 @@ impl App {
                 .wrap(Wrap { trim: false }),
             sections[2],
         );
+    }
+
+    fn draw_task_form(&self, frame: &mut Frame) {
+        let Some(editor) = self.task_form_editor.as_ref() else {
+            return;
+        };
+        let area = centered_rect(92, 90, frame.area());
+        frame.render_widget(Clear, area);
+        let panes = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(6),
+                Constraint::Length(3),
+            ])
+            .split(area);
+        frame.render_widget(
+            Paragraph::new(format!(
+                "Profile: {} · choose the task explicitly from its declared list",
+                editor.profile
+            ))
+            .style(theme::text())
+            .block(
+                theme::block()
+                    .title("Native task form · in memory only")
+                    .borders(Borders::ALL),
+            )
+            .wrap(Wrap { trim: false }),
+            panes[0],
+        );
+
+        let lines = editor
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(index, field)| {
+                let selected = index == editor.active;
+                let marker = if selected { "▶ " } else { "  " };
+                let label = format!("{}: ", field.label());
+                let mut spans = vec![
+                    Span::styled(
+                        marker,
+                        if selected {
+                            theme::border_focused()
+                        } else {
+                            Style::default()
+                        },
+                    ),
+                    Span::styled(
+                        label,
+                        if selected {
+                            theme::title()
+                        } else {
+                            theme::text()
+                        },
+                    ),
+                    Span::raw(editor.field_display(*field)),
+                ];
+                if selected && field.is_selector() {
+                    spans.push(Span::styled("  ↑/↓ choose", theme::warning()));
+                }
+                Line::from(spans)
+            })
+            .collect::<Vec<_>>();
+        let visible_rows = panes[1].height.saturating_sub(2) as usize;
+        let scroll = if visible_rows == 0 {
+            0
+        } else {
+            editor.active.saturating_sub(visible_rows.saturating_sub(1))
+        };
+        frame.render_widget(
+            Paragraph::new(lines)
+                .style(theme::text())
+                .block(
+                    theme::block()
+                        .title("Fields · payload stays out of logs/history")
+                        .borders(Borders::ALL),
+                )
+                .scroll((scroll.min(u16::MAX as usize) as u16, 0)),
+            panes[1],
+        );
+        frame.render_widget(
+            Paragraph::new("Tab/Shift+Tab move fields · ↑/↓ choose task/kind/mode · Enter inserts newline · Ctrl+Enter submits once · Esc clears draft")
+                .style(theme::warning())
+                .block(theme::block().borders(Borders::ALL))
+                .wrap(Wrap { trim: false }),
+            panes[2],
+        );
+
+        let field = editor.active_field();
+        if !field.is_selector()
+            && field != TaskFormField::Submit
+            && panes[1].width > 2
+            && panes[1].height > 2
+        {
+            let label_width = field.label().chars().count() as u16 + 4;
+            let cursor_chars = editor
+                .current_text()
+                .map(|value| {
+                    UnicodeWidthStr::width(
+                        safe_form_preview(&value[..editor.cursor_byte], 88).as_str(),
+                    )
+                    .min(u16::MAX as usize) as u16
+                })
+                .unwrap_or(0);
+            let body_visible_row = editor.active.saturating_sub(scroll);
+            let cursor_x = panes[1]
+                .x
+                .saturating_add(1)
+                .saturating_add(label_width)
+                .saturating_add(cursor_chars)
+                .min(panes[1].x.saturating_add(panes[1].width.saturating_sub(2)));
+            let cursor_y = panes[1]
+                .y
+                .saturating_add(1)
+                .saturating_add(body_visible_row.min(u16::MAX as usize) as u16)
+                .min(panes[1].y.saturating_add(panes[1].height.saturating_sub(2)));
+            frame.set_cursor_position((cursor_x, cursor_y));
+        }
     }
 
     fn draw_download(&mut self, frame: &mut Frame, area: Rect) {
@@ -5918,10 +6792,13 @@ impl App {
                 InputMode::ChatEndpoint => "  CHAT ENDPOINT",
                 InputMode::ChatSystemPrompt => "  SYSTEM PROMPT INPUT",
                 InputMode::CoordinatorInput => "  COORDINATOR INPUT",
+                InputMode::TaskForm => "  NATIVE TASK FORM",
             }
         };
         let controls = if self.script_input_target.is_some() {
             "Esc list │ F1–F8 tabs │ Ctrl+P palette │ Ctrl+C quit"
+        } else if self.input_mode == InputMode::TaskForm {
+            "Tab/Shift+Tab fields │ Enter newline │ Ctrl+Enter submit once │ Esc discard"
         } else if self.tab == Tab::Download && self.download.focus() != DownloadFocus::Table {
             "Tab/Shift+Tab fields │ Esc table │ Ctrl+P palette │ Ctrl+C quit"
         } else {
@@ -7468,6 +8345,129 @@ mod tests {
         assert!(!app.chat_connection_pending);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn task_form_requires_explicit_choices_and_handles_unicode_bounds_and_navigation() {
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        let mut app = fixture.app();
+        app.handle_key(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE))
+            .unwrap();
+        let chat_index = app
+            .stack_catalog
+            .as_ref()
+            .unwrap()
+            .list()
+            .iter()
+            .position(|profile| profile.key.profile_id.as_str() == "local-chat")
+            .unwrap();
+        app.stack_catalog_state.select(Some(chat_index));
+        app.stack_coordinator_socket_dir = Some(fixture.data.path().to_path_buf());
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.input_mode, InputMode::TaskForm);
+        let editor = app.task_form_editor.as_ref().unwrap();
+        assert_eq!(editor.active_field(), TaskFormField::RequestId);
+        assert!(editor.selected_task.is_none());
+        assert!(editor.values.request_id.is_empty());
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('π'), KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(
+            app.task_form_editor.as_ref().unwrap().values.request_id,
+            "π"
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.task_form_editor.as_ref().unwrap().values.timeout, "\n");
+        assert!(app.coordinator_workbench.is_none());
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        let selected_before = app.stack_catalog_state.selected();
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        let editor = app.task_form_editor.as_ref().unwrap();
+        assert_eq!(editor.field_display(TaskFormField::DeclaredTask), "chat");
+        assert_eq!(app.stack_catalog_state.selected(), selected_before);
+        assert!(!app.status.contains('π'));
+        assert!(!app.log.iter().any(|line| line.contains('π')));
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.task_form_editor.is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_task_form_render_keeps_unicode_cursor_and_small_terminals_bounded() {
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        let catalog = Catalog::load(&fixture.root).unwrap();
+        let profile = catalog
+            .list()
+            .iter()
+            .find(|profile| profile.key.profile_id.as_str() == "local-chat")
+            .unwrap();
+        let mut app = fixture.app();
+        let mut editor = TaskFormEditor::new(profile);
+        editor.values.request_id = "界e\u{301}".into();
+        editor.sync_cursor();
+        app.task_form_editor = Some(editor);
+        app.input_mode = InputMode::TaskForm;
+        for (width, height) in [(100, 30), (80, 24), (40, 12), (10, 5)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| app.draw_task_form(frame)).unwrap();
+            let cursor = terminal.get_cursor_position().unwrap();
+            assert!(
+                cursor.x < width && cursor.y < height,
+                "cursor outside {width}x{height}"
+            );
+        }
+        assert!(!app.log.iter().any(|line| line.contains('界')));
+        assert!(!app.status.contains('界'));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn task_form_bounds_each_field_and_aggregate_before_typing_more() {
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        let catalog = Catalog::load(&fixture.root).unwrap();
+        let profile = catalog
+            .list()
+            .iter()
+            .find(|profile| profile.key.profile_id.as_str() == "local-chat")
+            .unwrap();
+        let mut editor = TaskFormEditor::new(profile);
+        editor.values.request_id = "a".repeat(MAX_STACK_ID_INPUT_BYTES);
+        editor.sync_cursor();
+        assert!(!editor.insert_char('x'));
+
+        editor.values.request_id = "a".repeat(MAX_STACK_ID_INPUT_BYTES);
+        editor.values.timeout = "3".repeat(32);
+        editor.values.language_turns = "c".repeat(MAX_TASK_FORM_FIELD_BYTES);
+        let remaining = MAX_TASK_FORM_TOTAL_BYTES
+            - editor.values.request_id.len()
+            - editor.values.timeout.len()
+            - editor.values.language_turns.len();
+        editor.values.max_tokens = "4".repeat(remaining);
+        editor.move_focus(1);
+        editor.move_focus(1);
+        editor.move_focus(1);
+        editor.move_focus(1);
+        assert_eq!(editor.active_field(), TaskFormField::MaxTokens);
+        assert!(!editor.insert_char('x'));
+    }
+
     #[test]
     fn stack_catalog_uses_configured_roots_and_reports_refresh_errors() {
         let fixture = AppFixture::new();
@@ -7754,6 +8754,158 @@ mod tests {
         assert!(!app.coordinator_action_pending);
         assert!(app.status.contains("Submit accepted"));
         server.join().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_task_form_submits_once_through_the_same_private_coordinator_gate() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+
+        use crate::control::ipc::{
+            self, AcceptedOperation, ClientRequest, RequestStatus, ResponseEnvelope,
+            ResponseMessage,
+        };
+
+        const REQUEST_ID: &str = "caller:form-ui";
+        const PRIVATE_TURN: &str = "task form payload stays private";
+
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        let socket_directory = tempfile::tempdir().unwrap();
+        fs::set_permissions(socket_directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let listener =
+            UnixListener::bind(socket_directory.path().join("coordinator.sock")).unwrap();
+        fs::set_permissions(
+            socket_directory.path().join("coordinator.sock"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let mut settings = crate::settings::Settings::default();
+        settings.stack.coordinator_socket_dir = Some(socket_directory.path().display().to_string());
+        crate::settings::save_settings_in(fixture.data.path(), &settings).unwrap();
+
+        let (received_sender, received_receiver) = std::sync::mpsc::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            let mut stream = listener.accept().unwrap().0;
+            let ipc::IncomingRequest::Control(ClientRequest::Submit {
+                request_id,
+                timeout,
+                request,
+            }) = ipc::read_incoming_request(&mut stream).unwrap()
+            else {
+                panic!("native form should issue one Submit")
+            };
+            assert_eq!(request_id, REQUEST_ID);
+            assert_eq!(timeout.as_millis(), 30_000);
+            assert_eq!(request.profile().lane, Lane::Language);
+            assert_eq!(request.profile().profile_id.as_str(), "local-chat");
+            let crate::control::requests::InferenceRequest::Chat {
+                turns, max_tokens, ..
+            } = request
+            else {
+                panic!("form retains the language-native chat shape")
+            };
+            assert_eq!(max_tokens, 64);
+            assert_eq!(turns.len(), 1);
+            assert_eq!(turns[0].role, crate::control::requests::ChatRole::User);
+            assert_eq!(turns[0].content, PRIVATE_TURN);
+            received_sender.send(()).unwrap();
+            release_receiver
+                .recv_timeout(Duration::from_secs(3))
+                .unwrap();
+            ipc::write_response(
+                &mut stream,
+                &ResponseEnvelope::v1(ResponseMessage::Accepted {
+                    request_id,
+                    operation: AcceptedOperation::Submit,
+                    state: RequestStatus::Queued,
+                }),
+            )
+            .unwrap();
+        });
+
+        let mut app = fixture.app();
+        app.handle_key(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE))
+            .unwrap();
+        let selected_language = app
+            .stack_catalog
+            .as_ref()
+            .unwrap()
+            .list()
+            .iter()
+            .position(|profile| profile.key.profile_id.as_str() == "local-chat")
+            .unwrap();
+        app.stack_catalog_state.select(Some(selected_language));
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+            .unwrap();
+        for character in REQUEST_ID.chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        for character in "30000".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        for character in format!(r#"[{{"role":"user","content":"{PRIVATE_TURN}"}}]"#).chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        for character in "64".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+                .unwrap();
+        }
+
+        // Even if the table's highlight changes while the form is open, its
+        // captured profile key remains the route being validated and sent.
+        let selected_media = app
+            .stack_catalog
+            .as_ref()
+            .unwrap()
+            .list()
+            .iter()
+            .position(|profile| profile.key.profile_id.as_str() == "breeze")
+            .unwrap();
+        app.stack_catalog_state.select(Some(selected_media));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL))
+            .unwrap();
+        assert_eq!(app.coordinator_request_id.as_deref(), Some(REQUEST_ID));
+        assert_eq!(app.coordinator_request_lane, Some(Lane::Language));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.task_form_editor.is_none());
+        received_receiver
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap();
+        assert!(!app.status.contains(PRIVATE_TURN));
+        assert!(!app.log.iter().any(|line| line.contains(PRIVATE_TURN)));
+        release_sender.send(()).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while app.coordinator_action_pending && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+            app.drain_background_events();
+        }
+        assert!(!app.coordinator_action_pending);
+        assert_eq!(app.coordinator_request_id.as_deref(), Some(REQUEST_ID));
+        assert!(app.status.contains("Submit accepted"));
+        assert!(!app.status.contains(PRIVATE_TURN));
+        assert!(!app.log.iter().any(|line| line.contains(PRIVATE_TURN)));
+        server.join().unwrap();
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(!terminal_text(&terminal).contains(PRIVATE_TURN));
     }
 
     #[cfg(target_os = "linux")]
