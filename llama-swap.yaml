@@ -31,11 +31,17 @@ macros:
   "ik_server":     "${env.L3MS_ROOT}/vendor/ik_llama.cpp/build/bin/llama-server"
   "puzzle_server": "${env.L3MS_ROOT}/vendor/llama.cpp-pr-test-21032/build/bin/llama-server"
   "sarvam_server":  "${env.L3MS_ROOT}/vendor/llama.cpp-pr-test-20275/build/bin/llama-server"
-  # qwen3.8 flash-next tiers: master (gold) / MTP (PR #28243 on master) / exp (#28068)
+  # qwen3.8 flash-next tiers: master (gold) / MTP (PR #28243 on master) / exp (#29887 MoE LRU cache)
   "qwen38_master_server":  "${env.L3MS_ROOT}/vendor/llama.cpp-master/build/bin/llama-server"
-  "qwen38_mtp_server":     "${env.L3MS_ROOT}/vendor/llama.cpp-pr-test-28770-28699-28213/build/bin/llama-server"
-  "qwen38_exp_server":     "${env.L3MS_ROOT}/vendor/llama.cpp-pr-test-28770-28699-28213/build/bin/llama-server"
+  "qwen38_mtp_server":     "${env.L3MS_ROOT}/vendor/llama.cpp-exp-stack-v2/build/bin/llama-server"
+  "qwen38_exp_server":     "${env.L3MS_ROOT}/vendor/llama.cpp-exp-latest/build/bin/llama-server"
   "qwen38_exp_mtp_server": "${env.L3MS_ROOT}/vendor/llama.cpp-pr-test-28023-28068-27941/build/bin/llama-server"
+  # strata tier: v0.1.40.2 dynamic expert cache + native MTP
+  "strata_python":         "${env.L3MS_ROOT}/vendor/strata/.venv/bin/python"
+  "strata_server":         "${env.L3MS_ROOT}/vendor/strata-latest/serve/server.py"
+  "strata_iq3_config":     "${env.L3MS_ROOT}/vendor/strata-latest/strata-iq3_xxs.json"
+  "strata_vision_config":  "${env.L3MS_ROOT}/vendor/strata-latest/strata-vision.json"
+  "strata_iq3s_config":    "${env.L3MS_ROOT}/vendor/strata/strata-iq3_s.json"
 
   # --- shared paths ---
   "chat_template": "${env.L3MS_ROOT}/chat-template.jinja"
@@ -225,21 +231,78 @@ models:
   #    --host 0.0.0.0 --port ${PORT}
 
   ## ===========================================================================
+  ## Qwen3.8 Flash Next Plat (Strata v0.1.40.2, ISTA-DASLab IQ3_XXS, 128k ctx)
+  ## ===========================================================================
+
+  "qwen38-flash-next-plat":
+    name: "Qwen3.8-Flash-Next Plat (Strata v0.1.40.2, ISTA-DASLab IQ3_XXS, 128k ctx, 56-90 t/s)"
+    description: "Platinum: Strata v0.1.40.2 with dynamic expert VRAM caching (3,086 hot experts in VRAM) + native MTP speculative decoding (Q2_0 draft head) + K8V4 KV cache + 128k context with dynamic KV streaming. 56.1 t/s steady decode on real code, 90.2 t/s peak, pp=952-1,999 t/s @ 8k. See docs/strata-evaluation-internal.md."
+    cmd: |
+      taskset -c ${cpu_range} ${strata_python}
+      ${strata_server}
+      --engine strata
+      --config ${strata_iq3_config}
+      --port ${PORT}
+
+  "strata":
+    name: "Strata (Qwen3.8-Flash-Next Plat, ISTA-DASLab IQ3_XXS, 128k ctx, 56-90 t/s)"
+    description: "Alias for qwen38-flash-next-plat. High-throughput 56+ t/s coding and reasoning tier."
+    unlisted: true
+    cmd: |
+      taskset -c ${cpu_range} ${strata_python}
+      ${strata_server}
+      --engine strata
+      --config ${strata_iq3_config}
+      --port ${PORT}
+
+  "qwen38-flash-next-plat-vision":
+    name: "Qwen3.8-Flash-Next Plat Vision (Strata v0.1.40.2 + strata-vision, mmproj-F16, 128k ctx)"
+    description: "Platinum Vision: Strata v0.1.40.2 with native CPU-offloaded strata-vision image encoder (mmproj-F16) preserving 100% VRAM expert cache. 53-60 t/s decode, multimodal image understanding via OpenAI / Anthropic API."
+    cmd: |
+      taskset -c ${cpu_range} ${strata_python}
+      ${strata_server}
+      --engine strata
+      --config ${strata_vision_config}
+      --port ${PORT}
+
+  "strata-vision":
+    name: "Strata Vision (Qwen3.8-Flash-Next Plat + strata-vision, mmproj-F16)"
+    description: "Alias for qwen38-flash-next-plat-vision. High-throughput multimodal tier."
+    unlisted: true
+    cmd: |
+      taskset -c ${cpu_range} ${strata_python}
+      ${strata_server}
+      --engine strata
+      --config ${strata_vision_config}
+      --port ${PORT}
+
+  "qwen38-flash-next-plat-iq3s":
+    name: "Qwen3.8-Flash-Next Plat IQ3_S (Strata v0.1.40.2, ISTA-DASLab IQ3_S, 128k ctx, 46-75 t/s)"
+    description: "Platinum Full-Fidelity: Strata v0.1.40.2 with ISTA-DASLab IQ3_S (highest precision quant, matching full 16-bit model performance) + dynamic expert VRAM caching + native MTP speculative decoding + K8V4 KV cache + 128k context. See docs/strata-evaluation-internal.md."
+    unlisted: true
+    cmd: |
+      taskset -c ${cpu_range} ${strata_python}
+      ${strata_server}
+      --engine strata
+      --config ${strata_iq3s_config}
+      --port ${PORT}
+
+  ## ===========================================================================
   ## Qwen3.8 Flash Next (177B: 125B-A6B MoE + 51B ngram table on SSD)
   ## ===========================================================================
 # [retired 2026-08-31 — model files deleted from disk, see docs/bench-results.md archive]
 
   "qwen38-flash-next":
-    name: "Qwen3.8-Flash-Next (master b78a39a2f, AtomicChat AD-4.27bpw, ngram-on-SSD)"
-    description: "Gold: plain upstream master b78a39a2f, conservative. 19.35 t/s fresh decode (up to 19.6 t/s code), pp=300-385 t/s @ ub 2048, 64k ctx, q8 KV, ngram-mod spec. Reasoning: effort=xhigh, budget=4000. See docs/qwen38-flash-next-internal.md."
+    name: "Qwen3.8-Flash-Next (master b11475 7e8324f5f, ISTA-DASLab IQ3_XXS, 96k ctx)"
+    description: "Gold: plain upstream master b11475 (7e8324f5f). 17.34 t/s steady decode, pp=463-587 t/s @ 8k, 96k ctx, q8 KV, ngram-mod spec. Natively includes PR #29761, #29824, #29825. Reasoning: effort=xhigh, budget=4000. See docs/qwen38-flash-next-internal.md."
     env:
       - "GGML_CUDA_GRAPH_OPT=1"
     cmd: |
       taskset -c ${cpu_range} ${qwen38_master_server}
-      -m /home/kchauhan/models/qwen38-flash-next/AD-4.27bpw-Q4_K_M-M64/Qwen3.8-Flash-Next-AD-4.27bpw-Q4_K_M-M64-00001-of-00033.gguf
+      -m /home/kchauhan/models/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf
       --alias Qwen3.8-Flash-Next
       --fit on --fit-target 512
-      -c 65536 --parallel 1
+      -c 98304 --parallel 1
       -b 4096 -ub 2048
       -fa on --jinja
       -ctk q8_0 -ctv q8_0
@@ -253,13 +316,13 @@ models:
       --host 0.0.0.0 --port ${PORT}
 
   "qwen38-flash-next-exp":
-    name: "Qwen3.8-Flash-Next EXP (QSA Sparsity Stack: #28770 #28699 #28213, AtomicChat AD-4.27bpw)"
-    description: "Experimental tier: QSA Sparsity Stack — CUDA sparse Flash Attention (#28770), incremental pooled-key indexer cache (#28699), and gather sparse decode (#28213). Breaks 20 t/s on plain decode (20.11 t/s @ 4k-8k ctx), 3.8x prefill boost at 1k depth (223.3 vs 58.0 t/s), +6 MiB VRAM delta. Same flags as gold for A/B."
+    name: "Qwen3.8-Flash-Next EXP (b11479 + MoE Cache #29887 + Radix Select #28671, ISTA-DASLab IQ3_XXS)"
+    description: "Experimental tier: llama.cpp b11479 with dynamic GPU MoE expert LRU caching (--moe-cache-mib 2048) + radix-select TOP_K. 23.92 t/s steady decode (+40% over gold), pp=449 t/s @ 8k, 65k ctx. See docs/qwen38-flash-next-internal.md."
     env:
       - "GGML_CUDA_GRAPH_OPT=1"
     cmd: |
       taskset -c ${cpu_range} ${qwen38_exp_server}
-      -m /home/kchauhan/models/qwen38-flash-next/AD-4.27bpw-Q4_K_M-M64/Qwen3.8-Flash-Next-AD-4.27bpw-Q4_K_M-M64-00001-of-00033.gguf
+      -m /home/kchauhan/models/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf
       --alias Qwen3.8-Flash-Next-Exp
       --fit on --fit-target 512
       -c 65536 --parallel 1
@@ -268,6 +331,7 @@ models:
       -ctk q8_0 -ctv q8_0
       -t 10 --threads-batch 12 --prio 2
       --lazy-mode on
+      --moe-cache-mib 2048
       --spec-type ngram-mod
       --spec-ngram-mod-n-match 60 --spec-ngram-mod-n-min 12 --spec-ngram-mod-n-max 24
       --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
@@ -280,16 +344,16 @@ models:
   # ===========================================================================
 
   "qwen38-flash-next-mtp":
-    name: "Qwen3.8-Flash-Next MTP (Unified QSA Sparsity + PR #28243, shared-Q4_K_M, ncmoe 45)"
-    description: "Speculative tier: Unified QSA Sparsity Stack (#28770 + #28699 + #28213) + PR #28243 with unsloth mtp-Qwen3.8-Flash-Next-shared-Q4_K_M.gguf (1.78 GB). Offloads 3 MoE layers to GPU (-ncmoe 45), 87% draft acceptance, breaks 20 t/s across tasks with sparse FA acceleration, 11.8 GB VRAM. See docs/qwen38-flash-next-internal.md."
+    name: "Qwen3.8-Flash-Next MTP (Unified QSA Sparsity V2 + PR #28243, shared-Q4_K_M, ncmoe 46)"
+    description: "Speculative tier: Unified QSA Sparsity Stack V2 (#28770 + #28699 + #28213 + #29166) + PR #28243 with unsloth mtp-Qwen3.8-Flash-Next-shared-Q4_K_M.gguf (1.78 GB) + NVMe row prefetching (#29599). Offloads 2 MoE layers to GPU (-ncmoe 46), 97-100% draft acceptance (2.76-2.93 tok/step), 25.3-27.06 t/s decode, 11.0 GB VRAM. See docs/qwen38-flash-next-internal.md."
     env:
       - "GGML_CUDA_GRAPH_OPT=1"
     cmd: |
       taskset -c ${cpu_range} ${qwen38_mtp_server}
-      -m /home/kchauhan/models/qwen38-flash-next/AD-4.27bpw-Q4_K_M-M64/Qwen3.8-Flash-Next-AD-4.27bpw-Q4_K_M-M64-00001-of-00033.gguf
+      -m /home/kchauhan/models/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf
       --spec-draft-model /home/kchauhan/models/unsloth/Qwen3.8-Flash-Next-GGUF/MTP/mtp-Qwen3.8-Flash-Next-shared-Q4_K_M.gguf
       --alias Qwen3.8-Flash-Next-MTP
-      -ngl 99 -ncmoe 45
+      -ngl 99 -ncmoe 46
       -c 16384 --parallel 1
       -b 2048 -ub 512
       -fa on --jinja
@@ -304,17 +368,17 @@ models:
       --host 0.0.0.0 --port ${PORT}
 
   # ===========================================================================
-  # Qwen3.8 Flash Next Vision (AtomicChat AD-4.27bpw + mmproj-F16)
+  # Qwen3.8 Flash Next Vision (ISTA-DASLab IQ3_XXS + mmproj-F16)
   # ===========================================================================
 
   "qwen38-flash-next-vision":
-    name: "Qwen3.8-Flash-Next Vision (master b78a39a2f, mmproj-F16, ncmoe 45)"
-    description: "Multimodal tier: master b78a39a2f with mmproj-F16 vision projector. Offloads 3 MoE layers to GPU (-ncmoe 45), 18.2-18.6 t/s @ 16k ctx, ub 1024, 10.6 GB VRAM (1.68 GB headroom for image activations/KV). See docs/qwen38-flash-next-internal.md."
+    name: "Qwen3.8-Flash-Next Vision (master b11475, mmproj-F16, ncmoe 45)"
+    description: "Multimodal tier: plain upstream master b11475 with mmproj-F16 vision projector. Offloads 3 MoE layers to GPU (-ncmoe 45), 18.2-18.6 t/s @ 16k ctx, ub 1024, 10.6 GB VRAM (1.68 GB headroom for image activations/KV). See docs/qwen38-flash-next-internal.md."
     env:
       - "GGML_CUDA_GRAPH_OPT=1"
     cmd: |
       taskset -c ${cpu_range} ${qwen38_master_server}
-      -m /home/kchauhan/models/qwen38-flash-next/AD-4.27bpw-Q4_K_M-M64/Qwen3.8-Flash-Next-AD-4.27bpw-Q4_K_M-M64-00001-of-00033.gguf
+      -m /home/kchauhan/models/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf
       --mmproj /home/kchauhan/models/unsloth/Qwen3.8-Flash-Next-GGUF/mmproj-F16.gguf
       --alias Qwen3.8-Flash-Next-Vision
       -ngl 99 -ncmoe 45
