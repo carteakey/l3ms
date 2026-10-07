@@ -255,6 +255,17 @@ models:
       --config ${strata_iq3_config}
       --port ${PORT}
 
+  "plat":
+    name: "Plat (Qwen3.8-Flash-Next Plat Alias)"
+    description: "Alias for qwen38-flash-next-plat. High-throughput 56+ t/s coding and reasoning tier."
+    unlisted: true
+    cmd: |
+      taskset -c ${cpu_range} ${strata_python}
+      ${strata_server}
+      --engine strata
+      --config ${strata_iq3_config}
+      --port ${PORT}
+
   "qwen38-flash-next-plat-vision":
     name: "Qwen3.8-Flash-Next Plat Vision (Strata v0.1.40.2 + strata-vision, mmproj-F16, 128k ctx)"
     description: "Platinum Vision: Strata v0.1.40.2 with native CPU-offloaded strata-vision image encoder (mmproj-F16) preserving 100% VRAM expert cache. 53-60 t/s decode, multimodal image understanding via OpenAI / Anthropic API."
@@ -267,6 +278,17 @@ models:
 
   "strata-vision":
     name: "Strata Vision (Qwen3.8-Flash-Next Plat + strata-vision, mmproj-F16)"
+    description: "Alias for qwen38-flash-next-plat-vision. High-throughput multimodal tier."
+    unlisted: true
+    cmd: |
+      taskset -c ${cpu_range} ${strata_python}
+      ${strata_server}
+      --engine strata
+      --config ${strata_vision_config}
+      --port ${PORT}
+
+  "plat-vision":
+    name: "Plat Vision (Qwen3.8-Flash-Next Plat Vision Alias)"
     description: "Alias for qwen38-flash-next-plat-vision. High-throughput multimodal tier."
     unlisted: true
     cmd: |
@@ -372,8 +394,8 @@ models:
   # ===========================================================================
 
   "qwen38-flash-next-vision":
-    name: "Qwen3.8-Flash-Next Vision (master b11475, mmproj-F16, ncmoe 45)"
-    description: "Multimodal tier: plain upstream master b11475 with mmproj-F16 vision projector. Offloads 3 MoE layers to GPU (-ncmoe 45), 18.2-18.6 t/s @ 16k ctx, ub 1024, 10.6 GB VRAM (1.68 GB headroom for image activations/KV). See docs/qwen38-flash-next-internal.md."
+    name: "Qwen3.8-Flash-Next Vision (master b11475, mmproj-F16, 32k ctx, ncmoe 45)"
+    description: "Multimodal tier: plain upstream master b11475 with mmproj-F16 vision projector. Offloads 3 MoE layers to GPU (-ncmoe 45), 18.2-18.6 t/s @ 32k ctx, ub 1024, 10.8 GB VRAM (1.32 GB headroom for image activations/KV). See docs/qwen38-flash-next-internal.md."
     env:
       - "GGML_CUDA_GRAPH_OPT=1"
     cmd: |
@@ -382,7 +404,7 @@ models:
       --mmproj /home/kchauhan/models/unsloth/Qwen3.8-Flash-Next-GGUF/mmproj-F16.gguf
       --alias Qwen3.8-Flash-Next-Vision
       -ngl 99 -ncmoe 45
-      -c 16384 --parallel 1
+      -c 32768 --parallel 1
       -b 2048 -ub 1024
       -fa on --jinja
       -ctk q8_0 -ctv q8_0

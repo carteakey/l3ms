@@ -229,7 +229,7 @@ window.L3MS_DASHBOARD = {
         "llamaCppCommit": "b11475 + #29887 + #28671 (exp-latest)",
         "benchmarkCommand": "bash bench-models/bench-qwen38-refresh-ab.sh"
       },
-      "command": "MODEL_PATH=\"/path/to/model.gguf\"\nCPU_RANGE=\"${CPU_RANGE:-0-11}\"\nPORT=\"${PORT:-8080}\"\nexport GGML_CUDA_GRAPH_OPT=1\n\ntaskset -c \"$CPU_RANGE\" ${qwen38_exp_server} \\\n  -m \"$MODEL_PATH\" \\\n  --alias Qwen3.8-Flash-Next-Exp \\\n  --fit on --fit-target 512 \\\n  -c 65536 --parallel 1 \\\n  -b 4096 -ub 1024 \\\n  -fa on --jinja \\\n  -ctk q8_0 -ctv q8_0 \\\n  -t 10 --threads-batch 12 --prio 2 \\\n  --lazy-mode on \\\n  --spec-type ngram-mod \\\n  --spec-ngram-mod-n-match 60 --spec-ngram-mod-n-min 12 --spec-ngram-mod-n-max 24 \\\n  --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 \\\n  --reasoning-effort xhigh --reasoning-budget 4000 --reasoning-preserve \\\n  --no-warmup \\\n  --host 127.0.0.1 --port \"$PORT\"",
+      "command": "MODEL_PATH=\"/path/to/model.gguf\"\nCPU_RANGE=\"${CPU_RANGE:-0-11}\"\nPORT=\"${PORT:-8080}\"\nexport GGML_CUDA_GRAPH_OPT=1\n\ntaskset -c \"$CPU_RANGE\" ${qwen38_exp_server} \\\n  -m \"$MODEL_PATH\" \\\n  --alias Qwen3.8-Flash-Next-Exp \\\n  --fit on --fit-target 512 \\\n  -c 65536 --parallel 1 \\\n  -b 4096 -ub 1024 \\\n  -fa on --jinja \\\n  -ctk q8_0 -ctv q8_0 \\\n  -t 10 --threads-batch 12 --prio 2 \\\n  --lazy-mode on \\\n  --moe-cache-mib 2048 \\\n  --spec-type ngram-mod \\\n  --spec-ngram-mod-n-match 60 --spec-ngram-mod-n-min 12 --spec-ngram-mod-n-max 24 \\\n  --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 \\\n  --reasoning-effort xhigh --reasoning-budget 4000 --reasoning-preserve \\\n  --no-warmup \\\n  --host 127.0.0.1 --port \"$PORT\"",
       "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/llama-swap.yaml",
       "benchmarkUrl": "https://github.com/carteakey/l3ms/blob/main/bench-models/bench-qwen38-refresh-ab.sh"
     },
@@ -268,15 +268,15 @@ window.L3MS_DASHBOARD = {
       "benchmarkUrl": "https://github.com/carteakey/l3ms/blob/main/bench-models/bench-llama-qwen38-flash-next-mtp.sh"
     },
     {
-      "displayName": "Qwen3.8-Flash-Next Vision (master)",
-      "summary": "Multimodal vision tier: upstream master b78a39a2f with mmproj-F16.gguf projector. Offloads 3 MoE layers to GPU (-ncmoe 45), 18.2-18.6 t/s @ 16k ctx, 10.6 GB VRAM with 1.68 GB headroom.",
+      "displayName": "Qwen3.8-Flash-Next Vision (master b11475)",
+      "summary": "Multimodal vision tier: upstream master b11475 with mmproj-F16.gguf projector. Offloads 3 MoE layers to GPU (-ncmoe 45), 18.2-18.6 t/s @ 32k ctx, 10.8 GB VRAM with 1.3 GB headroom.",
       "tps": 18.4,
       "pp": 185,
-      "testedContext": "16k",
+      "testedContext": "32k",
       "cacheState": "warm; q8_0 KV",
       "draftAcceptance": null,
-      "llamaCppCommit": "b78a39a2f (llama.cpp-master)",
-      "quant": "AD-4.27bpw Q4_K_M M64 + mmproj-F16",
+      "llamaCppCommit": "b11475 7e8324f5f (llama.cpp-master)",
+      "quant": "ISTA-DASLab GSQ-RCO IQ3_XXS + mmproj-F16",
       "tags": [
         "MoE",
         "Vision",
@@ -285,20 +285,20 @@ window.L3MS_DASHBOARD = {
       ],
       "benchmark": "bench-models/bench-llama-qwen38-flash-next-build-ab.sh",
       "id": "qwen38-flash-next-vision",
-      "name": "Qwen3.8-Flash-Next Vision (master)",
-      "description": "Multimodal vision tier: upstream master b78a39a2f with mmproj-F16.gguf projector. Offloads 3 MoE layers to GPU (-ncmoe 45), 18.2-18.6 t/s @ 16k ctx, 10.6 GB VRAM with 1.68 GB headroom.",
-      "context": "16k",
+      "name": "Qwen3.8-Flash-Next Vision (master b11475)",
+      "description": "Multimodal vision tier: upstream master b11475 with mmproj-F16.gguf projector. Offloads 3 MoE layers to GPU (-ncmoe 45), 18.2-18.6 t/s @ 32k ctx, 10.8 GB VRAM with 1.3 GB headroom.",
+      "context": "32k",
       "evidence": {
         "scope": "local",
         "pp": 185,
         "tg": 18.4,
-        "testedContext": "16k",
+        "testedContext": "32k",
         "cacheState": "warm; q8_0 KV",
         "draftAcceptance": null,
-        "llamaCppCommit": "b78a39a2f (llama.cpp-master)",
+        "llamaCppCommit": "b11475 7e8324f5f (llama.cpp-master)",
         "benchmarkCommand": "bash bench-models/bench-llama-qwen38-flash-next-build-ab.sh"
       },
-      "command": "MODEL_PATH=\"/path/to/model.gguf\"\nCPU_RANGE=\"${CPU_RANGE:-0-11}\"\nPORT=\"${PORT:-8080}\"\nMMPROJ_PATH=\"/path/to/mmproj.gguf\"\nexport GGML_CUDA_GRAPH_OPT=1\n\ntaskset -c \"$CPU_RANGE\" ${qwen38_master_server} \\\n  -m \"$MODEL_PATH\" \\\n  --mmproj \"$MMPROJ_PATH\" \\\n  --alias Qwen3.8-Flash-Next-Vision \\\n  -ngl 99 -ncmoe 45 \\\n  -c 16384 --parallel 1 \\\n  -b 2048 -ub 1024 \\\n  -fa on --jinja \\\n  -ctk q8_0 -ctv q8_0 \\\n  -t 10 --threads-batch 12 --prio 2 \\\n  --lazy-mode on \\\n  --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 \\\n  --reasoning-effort xhigh --reasoning-budget 4000 --reasoning-preserve \\\n  --no-warmup \\\n  --host 127.0.0.1 --port \"$PORT\"",
+      "command": "MODEL_PATH=\"/path/to/model.gguf\"\nCPU_RANGE=\"${CPU_RANGE:-0-11}\"\nPORT=\"${PORT:-8080}\"\nMMPROJ_PATH=\"/path/to/mmproj.gguf\"\nexport GGML_CUDA_GRAPH_OPT=1\n\ntaskset -c \"$CPU_RANGE\" ${qwen38_master_server} \\\n  -m \"$MODEL_PATH\" \\\n  --mmproj \"$MMPROJ_PATH\" \\\n  --alias Qwen3.8-Flash-Next-Vision \\\n  -ngl 99 -ncmoe 45 \\\n  -c 32768 --parallel 1 \\\n  -b 2048 -ub 1024 \\\n  -fa on --jinja \\\n  -ctk q8_0 -ctv q8_0 \\\n  -t 10 --threads-batch 12 --prio 2 \\\n  --lazy-mode on \\\n  --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 \\\n  --reasoning-effort xhigh --reasoning-budget 4000 --reasoning-preserve \\\n  --no-warmup \\\n  --host 127.0.0.1 --port \"$PORT\"",
       "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/llama-swap.yaml",
       "benchmarkUrl": "https://github.com/carteakey/l3ms/blob/main/bench-models/bench-llama-qwen38-flash-next-build-ab.sh"
     },

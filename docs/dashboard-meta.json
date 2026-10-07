@@ -98,15 +98,15 @@
       "benchmark": "bench-models/bench-qwen38-refresh-ab.sh"
     },
     "qwen38-flash-next-vision": {
-      "displayName": "Qwen3.8-Flash-Next Vision (master)",
-      "summary": "Multimodal vision tier: upstream master b78a39a2f with mmproj-F16.gguf projector. Offloads 3 MoE layers to GPU (-ncmoe 45), 18.2-18.6 t/s @ 16k ctx, 10.6 GB VRAM with 1.68 GB headroom.",
+      "displayName": "Qwen3.8-Flash-Next Vision (master b11475)",
+      "summary": "Multimodal vision tier: upstream master b11475 with mmproj-F16.gguf projector. Offloads 3 MoE layers to GPU (-ncmoe 45), 18.2-18.6 t/s @ 32k ctx, 10.8 GB VRAM with 1.3 GB headroom.",
       "tps": 18.4,
       "pp": 185,
-      "testedContext": "16k",
+      "testedContext": "32k",
       "cacheState": "warm; q8_0 KV",
       "draftAcceptance": null,
-      "llamaCppCommit": "b78a39a2f (llama.cpp-master)",
-      "quant": "AD-4.27bpw Q4_K_M M64 + mmproj-F16",
+      "llamaCppCommit": "b11475 7e8324f5f (llama.cpp-master)",
+      "quant": "ISTA-DASLab GSQ-RCO IQ3_XXS + mmproj-F16",
       "tags": ["MoE", "Vision", "Master", "PLE-on-SSD"],
       "benchmark": "bench-models/bench-llama-qwen38-flash-next-build-ab.sh"
     },
