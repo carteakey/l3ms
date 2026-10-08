@@ -10,13 +10,12 @@ existing Linear migration issues rather than replacing their acceptance criteria
 
 ## Monorepo: next work
 
-Latest offline checkpoint: opt-in CPU daemon dispatch and foreground launch,
-one-shot Submit, private native HTTP and shared result reassembly on
-`feature/l3ms-monorepo`; 714 root tests passed,
-1 ignored. This is offline implementation evidence, not live cutover acceptance.
-Formatting and whitespace checks pass; the new managed-owner integration is
-still being wired and strict Clippy must be rerun on that completed slice. Managed
-engine supervisor/lifecycle integration is still unfinished.
+Latest offline checkpoint on `feature/l3ms-monorepo`: 779 root tests passed,
+1 ignored, strict all-target Clippy, formatting and whitespace checks pass.
+Opt-in CPU dispatch, managed-language launch, resumable native results and
+owned per-job packet/service handoff are implemented. Cross-runtime daemon
+dispatch, job finalization/recovery and real managed acceptance are unfinished.
+This is offline implementation evidence, not live cutover acceptance.
 The repeat-run fixture `ETXTBSY` race is corrected with test-only fork/write
 serialization; production launch failures remain fail-closed without retries.
 See the [migration status](docs/migration/status.md),
@@ -95,6 +94,12 @@ See the [migration status](docs/migration/status.md),
   is implemented for resident engines and accepted Breeze/local-decision native
   execution, with model-free child fixtures. Per-job service ownership and
   coordinator dispatch still need integration; visibility is not GPU isolation.
+  Owned per-job packet/claim and service-launch handoff are now implemented:
+  pinned private directories, full accepted route, exact device/parent identity,
+  payload-free schema-4 WAL, and parked one-shot native wrappers. Wire the
+  coordinator's dispatch/completion path to these handles, stop-only startup
+  recovery, cgroup/GPU release and fresh artifact publication before enabling
+  cross-runtime jobs. Do not treat packet readiness as job completion.
   CPU-only worker and restricted core admission are now connected to an opt-in
   foreground daemon with responsive private status/cancel/result queries,
   quota-before-acknowledgment, cancellation and bounded shutdown fixtures.

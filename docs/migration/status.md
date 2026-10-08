@@ -10,6 +10,33 @@ runtime check.
 
 ## Current resumed checkpoint — 2026-10-08
 
+The owned-job handoff passes **779 root tests, 1 ignored**, strict all-target
+Clippy, formatting and whitespace checks. It composes pinned private packets, explicit accepted
+routes/devices, payload-free schema-4 service intents and an internal one-shot
+native helper. Existing schema-1/2/3 record shapes remain compatible. A durable
+exclusive execution claim refuses duplicate/restarted attempts; publication
+uncertainty never grants retry. Request packets are bounded to 2 MiB including
+the route/envelope and native request validation; result packets stay at 2 MiB.
+Recovery bounds round-trip without truncating subsecond deadlines. Packet
+parsers reject duplicate keys, unknown fields and tuple-shaped DTOs.
+
+The owner publishes the validated request before preparing/recording the exact
+runtime launch; helper argv carries job/request, coordinator birth identity and
+the captured private directory device/inode. Parent loss cancels native work;
+the wrapper stays parked, even after uncertain result publication, for exact
+owned-service Stop. A model-free native subprocess fixture proves typed CPU
+output does not exit its wrapper before Stop. Joined fake-manager fixtures
+check the service WAL before dispatch and Stop-only restoration/retirement with
+one Start and one Stop. This is not a live systemd/model/GPU acceptance claim.
+
+Native candidates are deliberately not final published inference results.
+Remaining integration: coordinator/worker per-job dispatch, exact Stop plus
+cgroup/GPU release, fresh artifact validation and typed publication, then
+multi-runtime language/Comfy/TTS/decision switching. The current managed-language
+startup still refuses foreign runtime/job intents; it must not adopt or replay
+them. A deliberate multi-runtime recovery path is required before enabling
+those lanes. No original checkout or live service changed for this slice.
+
 The physical-device execution slice passes **757 tests, 1 ignored**, strict
 all-target Clippy, formatting and whitespace checks. A typed CUDA selection
 accepts only one complete canonical physical GPU UUID. The managed-language

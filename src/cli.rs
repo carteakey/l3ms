@@ -178,6 +178,14 @@ pub fn run() -> Result<u8> {
         if let Some(result) = isolated_engine_action(arguments) {
             return result;
         }
+        let arguments: Vec<OsString> = std::env::args_os().skip(1).collect();
+        if arguments.first().is_some_and(|argument| {
+            crate::control::owned_job_helper::is_helper_entrypoint(argument)
+        }) {
+            return crate::control::owned_job_helper::run_helper(arguments)
+                .map(|()| 0)
+                .map_err(anyhow::Error::new);
+        }
     }
     dispatch(Cli::parse())
 }

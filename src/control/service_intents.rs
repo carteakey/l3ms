@@ -20,7 +20,8 @@ use std::path::{Component, Path};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::managed_service::{
-    runtime_identity_from_persisted_parts, ServiceIntentRecord, ServiceLaunchRole,
+    runtime_identity_from_persisted_parts, OwnedLocalJobBinding, ServiceIntentRecord,
+    ServiceLaunchRole,
 };
 use super::runtime::OperationContext;
 
@@ -284,7 +285,7 @@ impl ServiceIntentStore {
         {
             return Err(not_retired(ServiceIntentStoreError::CorruptStore));
         }
-        let persisted: PersistedIntent = serde_json::from_slice(&bytes)
+        let persisted: PersistedIntent = decode_persisted_intent(&bytes)
             .map_err(|_| not_retired(ServiceIntentStoreError::CorruptStore))?;
         let stored = persisted
             .into_record()
@@ -421,8 +422,7 @@ impl ServiceIntentStore {
             return Err(ServiceIntentStoreError::CorruptStore);
         }
 
-        let persisted: PersistedIntent =
-            serde_json::from_slice(&bytes).map_err(|_| ServiceIntentStoreError::CorruptStore)?;
+        let persisted = decode_persisted_intent(&bytes)?;
         let record = persisted
             .into_record()
             .map_err(|_| ServiceIntentStoreError::CorruptStore)?;
@@ -480,6 +480,8 @@ struct PersistedIntent {
     launch_role: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     coordinator_identity: Option<PersistedCoordinatorIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owned_local_job: Option<PersistedOwnedLocalJob>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -490,6 +492,37 @@ struct PersistedCoordinatorIdentity {
     start_time_ticks: u64,
     network_namespace_device: u64,
     network_namespace_inode: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedOwnedLocalJob {
+    job_id: u64,
+    request_id: String,
+    job_directory: String,
+    directory_device: u64,
+    directory_inode: u64,
+}
+
+fn decode_persisted_intent(bytes: &[u8]) -> Result<PersistedIntent, ServiceIntentStoreError> {
+    // Decode the original bytes into typed DTOs, preserving duplicate-key
+    // rejection. Shape checks separately forbid serde's tuple-struct syntax.
+    let persisted =
+        serde_json::from_slice(bytes).map_err(|_| ServiceIntentStoreError::CorruptStore)?;
+    let shape: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| ServiceIntentStoreError::CorruptStore)?;
+    let object = shape
+        .as_object()
+        .ok_or(ServiceIntentStoreError::CorruptStore)?;
+    for key in ["coordinator_identity", "owned_local_job"] {
+        if object
+            .get(key)
+            .is_some_and(|value| !value.is_null() && !value.is_object())
+        {
+            return Err(ServiceIntentStoreError::CorruptStore);
+        }
+    }
+    Ok(persisted)
 }
 
 // Distinguish an absent schema-1 field from an explicitly supplied null.
@@ -509,7 +542,7 @@ impl PersistedIntent {
             record.launch_identity().to_owned(),
             record.stop_timeout_millis(),
             record.runtime_identity().cloned(),
-            *record.launch_role(),
+            record.launch_role().clone(),
         )
         .map_err(|_| ServiceIntentStoreError::InvalidRecord)?;
         let runtime_lane = record
@@ -518,26 +551,37 @@ impl PersistedIntent {
         let runtime_name = record
             .runtime_identity()
             .map(|identity| Some(identity.as_str().to_owned()));
-        let (launch_role, coordinator_identity) = match record.launch_role() {
-            ServiceLaunchRole::Ordinary => (None, None),
+        let (launch_role, coordinator_identity, owned_local_job) = match record.launch_role() {
+            ServiceLaunchRole::Ordinary => (None, None, None),
             ServiceLaunchRole::IsolatedEngineSupervisor(coordinator) => (
                 Some("isolated_engine_supervisor".to_owned()),
-                Some(PersistedCoordinatorIdentity {
-                    pid: coordinator.pid(),
-                    uid: coordinator.uid(),
-                    start_time_ticks: coordinator.start_time_ticks(),
-                    network_namespace_device: coordinator.network_namespace_device(),
-                    network_namespace_inode: coordinator.network_namespace_inode(),
+                Some(PersistedCoordinatorIdentity::from_descriptor(*coordinator)),
+                None,
+            ),
+            ServiceLaunchRole::OwnedLocalJob(binding) => (
+                Some("owned_local_job".to_owned()),
+                Some(PersistedCoordinatorIdentity::from_descriptor(
+                    binding.coordinator_identity(),
+                )),
+                Some(PersistedOwnedLocalJob {
+                    job_id: binding.job_id(),
+                    request_id: binding.request_id().to_owned(),
+                    job_directory: binding
+                        .job_directory()
+                        .to_str()
+                        .ok_or(ServiceIntentStoreError::InvalidRecord)?
+                        .to_owned(),
+                    directory_device: binding.directory_device(),
+                    directory_inode: binding.directory_inode(),
                 }),
             ),
         };
         Ok(Self {
-            schema: if launch_role.is_some() {
-                3
-            } else if runtime_lane.is_some() {
-                2
-            } else {
-                1
+            schema: match record.launch_role() {
+                ServiceLaunchRole::Ordinary if runtime_lane.is_some() => 2,
+                ServiceLaunchRole::Ordinary => 1,
+                ServiceLaunchRole::IsolatedEngineSupervisor(_) => 3,
+                ServiceLaunchRole::OwnedLocalJob(_) => 4,
             },
             coordinator_id: record.coordinator_id().to_owned(),
             unit_name: record.unit_name().to_owned(),
@@ -547,6 +591,7 @@ impl PersistedIntent {
             runtime_name,
             launch_role,
             coordinator_identity,
+            owned_local_job,
         })
     }
 
@@ -561,31 +606,47 @@ impl PersistedIntent {
             runtime_name,
             launch_role,
             coordinator_identity,
+            owned_local_job,
         } = self;
         let runtime_identity = match (schema, runtime_lane, runtime_name) {
             (1, None, None) => None,
-            (2 | 3, Some(Some(lane)), Some(Some(name))) => Some(
+            (2..=4, Some(Some(lane)), Some(Some(name))) => Some(
                 runtime_identity_from_persisted_parts(&lane, name)
                     .map_err(|_| ServiceIntentStoreError::CorruptStore)?,
             ),
             _ => return Err(ServiceIntentStoreError::CorruptStore),
         };
-        let launch_role = match (schema, launch_role.as_deref(), coordinator_identity) {
-            (1 | 2, None, None) => ServiceLaunchRole::Ordinary,
-            (3, Some("isolated_engine_supervisor"), Some(coordinator)) => {
+        let launch_role = match (
+            schema,
+            launch_role.as_deref(),
+            coordinator_identity,
+            owned_local_job,
+        ) {
+            (1 | 2, None, None, None) => ServiceLaunchRole::Ordinary,
+            (3, Some("isolated_engine_supervisor"), Some(coordinator), None) => {
                 if runtime_identity.is_none() {
                     return Err(ServiceIntentStoreError::CorruptStore);
                 }
-                let coordinator =
-                    super::engine_transport::CoordinatorIdentityDescriptor::from_parts(
-                        coordinator.pid,
-                        coordinator.uid,
-                        coordinator.start_time_ticks,
-                        coordinator.network_namespace_device,
-                        coordinator.network_namespace_inode,
-                    )
-                    .map_err(|_| ServiceIntentStoreError::CorruptStore)?;
+                let coordinator = coordinator.into_descriptor()?;
                 ServiceLaunchRole::IsolatedEngineSupervisor(coordinator)
+            }
+            (4, Some("owned_local_job"), Some(coordinator), Some(binding)) => {
+                let runtime = runtime_identity
+                    .as_ref()
+                    .ok_or(ServiceIntentStoreError::CorruptStore)?;
+                let coordinator = coordinator.into_descriptor()?;
+                ServiceLaunchRole::OwnedLocalJob(
+                    OwnedLocalJobBinding::from_persisted_parts(
+                        runtime.clone(),
+                        binding.job_id,
+                        binding.request_id,
+                        binding.job_directory.into(),
+                        binding.directory_device,
+                        binding.directory_inode,
+                        coordinator,
+                    )
+                    .map_err(|_| ServiceIntentStoreError::CorruptStore)?,
+                )
             }
             _ => return Err(ServiceIntentStoreError::CorruptStore),
         };
@@ -596,6 +657,32 @@ impl PersistedIntent {
             stop_timeout_millis,
             runtime_identity,
             launch_role,
+        )
+        .map_err(|_| ServiceIntentStoreError::CorruptStore)
+    }
+}
+
+impl PersistedCoordinatorIdentity {
+    fn from_descriptor(descriptor: super::engine_transport::CoordinatorIdentityDescriptor) -> Self {
+        Self {
+            pid: descriptor.pid(),
+            uid: descriptor.uid(),
+            start_time_ticks: descriptor.start_time_ticks(),
+            network_namespace_device: descriptor.network_namespace_device(),
+            network_namespace_inode: descriptor.network_namespace_inode(),
+        }
+    }
+
+    fn into_descriptor(
+        self,
+    ) -> Result<super::engine_transport::CoordinatorIdentityDescriptor, ServiceIntentStoreError>
+    {
+        super::engine_transport::CoordinatorIdentityDescriptor::from_parts(
+            self.pid,
+            self.uid,
+            self.start_time_ticks,
+            self.network_namespace_device,
+            self.network_namespace_inode,
         )
         .map_err(|_| ServiceIntentStoreError::CorruptStore)
     }
@@ -765,6 +852,40 @@ mod tests {
         .unwrap()
     }
 
+    fn owned_local_job_intent(suffix: u128) -> (tempfile::TempDir, ServiceIntentRecord) {
+        let directory = private_directory();
+        let job_directory = directory.path().join("job-private");
+        std::fs::create_dir(&job_directory).unwrap();
+        std::fs::set_permissions(
+            &job_directory,
+            std::fs::Permissions::from_mode(DIRECTORY_MODE),
+        )
+        .unwrap();
+        let binding = OwnedLocalJobBinding::capture(
+            RuntimeIdentity::new(Lane::Media, "breeze-speech").unwrap(),
+            42,
+            "caller:item-42",
+            &job_directory,
+            super::super::engine_transport::CoordinatorIdentityDescriptor::capture_current()
+                .unwrap(),
+        )
+        .unwrap();
+        // Keep the intent directory dedicated to records. A disappeared job
+        // path must not prevent structural restoration for exact-service Stop.
+        std::fs::remove_dir(&job_directory).unwrap();
+        let random = format!("{suffix:032x}");
+        let intent = ServiceIntentRecord::from_persisted_parts_with_role(
+            "coordinator".to_owned(),
+            format!("l3ms-coordinator-{random}.service"),
+            "e".repeat(64),
+            45_000,
+            Some(RuntimeIdentity::new(Lane::Media, "breeze-speech").unwrap()),
+            ServiceLaunchRole::OwnedLocalJob(binding),
+        )
+        .unwrap();
+        (directory, intent)
+    }
+
     fn filename(record: &ServiceIntentRecord) -> String {
         format!("{}{}", record.unit_name(), JSON_SUFFIX)
     }
@@ -866,6 +987,87 @@ mod tests {
             restored.runtime_identity(),
             Some(&RuntimeIdentity::new(Lane::Media, "comfyui").unwrap())
         );
+    }
+
+    #[test]
+    fn owned_job_intent_rejects_tuple_shaped_nested_metadata() {
+        let (_directory, record) = owned_local_job_intent(25);
+        let original: serde_json::Value = serde_json::from_slice(&raw_record(&record)).unwrap();
+        for (key, fields) in [
+            (
+                "coordinator_identity",
+                vec![
+                    "pid",
+                    "uid",
+                    "start_time_ticks",
+                    "network_namespace_device",
+                    "network_namespace_inode",
+                ],
+            ),
+            (
+                "owned_local_job",
+                vec![
+                    "job_id",
+                    "request_id",
+                    "job_directory",
+                    "directory_device",
+                    "directory_inode",
+                ],
+            ),
+        ] {
+            let mut changed = original.clone();
+            let values = fields
+                .iter()
+                .map(|field| changed[key][field].clone())
+                .collect();
+            changed[key] = serde_json::Value::Array(values);
+            assert!(decode_persisted_intent(&serde_json::to_vec(&changed).unwrap()).is_err());
+        }
+    }
+
+    #[test]
+    fn owned_local_job_schema_round_trips_safe_binding_without_payload() {
+        let (directory, original) = owned_local_job_intent(22);
+        let store = ServiceIntentStore::open(directory.path()).unwrap();
+        store.record(&original).unwrap();
+        let path = directory.path().join(filename(&original));
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(persisted["schema"], 4);
+        assert_eq!(persisted["launch_role"], "owned_local_job");
+        assert_eq!(persisted["runtime_lane"], "media");
+        assert_eq!(persisted["runtime_name"], "breeze-speech");
+        assert_eq!(persisted.as_object().unwrap().len(), 10);
+        let binding = persisted["owned_local_job"].as_object().unwrap();
+        assert_eq!(binding.len(), 5);
+        assert_eq!(binding["job_id"], 42);
+        assert_eq!(binding["request_id"], "caller:item-42");
+        assert!(binding["job_directory"].as_str().unwrap().starts_with('/'));
+        assert!(persisted.get("prompt").is_none());
+        assert!(persisted.get("argv").is_none());
+        assert!(persisted.get("answers").is_none());
+        let debug = format!("{original:?}");
+        assert!(!debug.contains("caller:item-42"));
+        assert!(!debug.contains(binding["job_directory"].as_str().unwrap()));
+
+        let restored = store.list().unwrap().pop().unwrap();
+        assert_eq!(restored, original);
+        let restored_binding = restored.owned_local_job_binding().unwrap();
+        assert_eq!(restored_binding.job_id(), 42);
+        assert_eq!(restored_binding.request_id(), "caller:item-42");
+        assert_eq!(
+            restored_binding.directory_device(),
+            binding["directory_device"].as_u64().unwrap()
+        );
+        assert_eq!(
+            restored_binding.directory_inode(),
+            binding["directory_inode"].as_u64().unwrap()
+        );
+
+        // A vanished directory must not prevent exact-generation Stop-only
+        // recovery from reading the retained intent.
+        assert!(!restored_binding.job_directory().exists());
+        assert_eq!(store.list().unwrap(), vec![original]);
     }
 
     #[test]
@@ -1042,6 +1244,90 @@ mod tests {
             let store = ServiceIntentStore::open(directory.path()).unwrap();
             assert_eq!(store.list(), Err(ServiceIntentStoreError::CorruptStore));
         }
+    }
+
+    #[test]
+    fn malformed_owned_local_job_schema_and_duplicate_binding_fields_fail_closed() {
+        let (_job_root, record) = owned_local_job_intent(23);
+        let record_filename = filename(&record);
+        let valid = serde_json::to_value(PersistedIntent::from_record(&record).unwrap()).unwrap();
+        let mut cases = Vec::new();
+
+        let mut zero_job = valid.clone();
+        zero_job["owned_local_job"]["job_id"] = serde_json::Value::from(0);
+        cases.push(serde_json::to_vec(&zero_job).unwrap());
+
+        let mut invalid_request_id = valid.clone();
+        invalid_request_id["owned_local_job"]["request_id"] =
+            serde_json::Value::String("password=secret".to_owned());
+        cases.push(serde_json::to_vec(&invalid_request_id).unwrap());
+
+        let mut relative_path = valid.clone();
+        relative_path["owned_local_job"]["job_directory"] =
+            serde_json::Value::String("private/job".to_owned());
+        cases.push(serde_json::to_vec(&relative_path).unwrap());
+
+        let mut noncanonical_path = valid.clone();
+        noncanonical_path["owned_local_job"]["job_directory"] =
+            serde_json::Value::String("/tmp/../private/job".to_owned());
+        cases.push(serde_json::to_vec(&noncanonical_path).unwrap());
+
+        let mut missing_inode = valid.clone();
+        missing_inode["owned_local_job"]
+            .as_object_mut()
+            .unwrap()
+            .remove("directory_inode");
+        cases.push(serde_json::to_vec(&missing_inode).unwrap());
+
+        let mut zero_inode = valid.clone();
+        zero_inode["owned_local_job"]["directory_inode"] = serde_json::Value::from(0);
+        cases.push(serde_json::to_vec(&zero_inode).unwrap());
+
+        let mut missing_runtime = valid.clone();
+        missing_runtime
+            .as_object_mut()
+            .unwrap()
+            .remove("runtime_name");
+        cases.push(serde_json::to_vec(&missing_runtime).unwrap());
+
+        let mut wrong_schema = valid.clone();
+        wrong_schema["schema"] = serde_json::Value::from(3);
+        cases.push(serde_json::to_vec(&wrong_schema).unwrap());
+
+        let mut unknown_nested = valid.clone();
+        unknown_nested["owned_local_job"]["argv"] = serde_json::json!(["must-not-be-persisted"]);
+        cases.push(serde_json::to_vec(&unknown_nested).unwrap());
+
+        let mut wrong_role = valid.clone();
+        wrong_role["launch_role"] = serde_json::Value::String("ordinary".to_owned());
+        cases.push(serde_json::to_vec(&wrong_role).unwrap());
+
+        for bytes in cases {
+            let directory = private_directory();
+            write_private_file(&directory.path().join(&record_filename), &bytes, FILE_MODE);
+            let store = ServiceIntentStore::open(directory.path()).unwrap();
+            assert_eq!(store.list(), Err(ServiceIntentStoreError::CorruptStore));
+        }
+
+        // serde_json's typed struct visitor rejects duplicate object keys;
+        // keep this raw-text test because a Value round-trip would erase them.
+        let mut duplicate_json = String::from_utf8(raw_record(&record)).unwrap();
+        let job_id = record.owned_local_job_binding().unwrap().job_id();
+        let job_field = format!("\"job_id\":{job_id},");
+        assert!(duplicate_json.contains(&job_field));
+        duplicate_json = duplicate_json.replacen(
+            &job_field,
+            &format!("\"job_id\":{job_id},\"job_id\":999,"),
+            1,
+        );
+        let directory = private_directory();
+        write_private_file(
+            &directory.path().join(&record_filename),
+            duplicate_json.as_bytes(),
+            FILE_MODE,
+        );
+        let store = ServiceIntentStore::open(directory.path()).unwrap();
+        assert_eq!(store.list(), Err(ServiceIntentStoreError::CorruptStore));
     }
 
     #[test]

@@ -10,6 +10,11 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Add pinned private request/result packets and durable one-shot execution
+  claims for owned Breeze/local-decision jobs. Bind payload-free job metadata
+  to exact runtime launches, preserve legacy intent schemas and restore new
+  job intents as Stop-only. Internal helpers retain unpublished results until
+  Stop; multi-runtime daemon dispatch and live acceptance remain unfinished.
 - Add fresh Breeze artifact revalidation for the owned-job post-stop handoff;
   reject output mutated after a native result candidate. The caller still must
   prove exact-service/cgroup cleanup before final publication.

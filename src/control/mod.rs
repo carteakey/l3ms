@@ -47,6 +47,10 @@ pub mod native_commands;
 #[cfg(target_os = "linux")]
 pub(crate) mod native_http;
 pub mod native_paths;
+#[cfg(target_os = "linux")]
+pub(crate) mod owned_job_helper;
+#[cfg(target_os = "linux")]
+pub(crate) mod owned_job_store;
 pub mod ownership;
 pub mod process;
 pub mod requests;

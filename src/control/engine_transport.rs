@@ -330,6 +330,30 @@ struct PinnedCoordinator {
     network_namespace: File,
 }
 
+/// Birth-verified, pidfd-pinned coordinator observation for owned job helpers.
+/// This grants no runtime or namespace authority. Losing liveness requests
+/// native cancellation; it does not prove an owned job cgroup was released.
+pub(crate) struct CoordinatorLiveness {
+    identity: PinnedCoordinator,
+}
+
+impl CoordinatorLiveness {
+    pub(crate) fn from_expected(
+        descriptor: CoordinatorIdentityDescriptor,
+    ) -> Result<Self, EngineTransportError> {
+        descriptor.validate_shape()?;
+        let namespace = File::open(format!("/proc/{}/ns/net", descriptor.pid()))
+            .map_err(|_| EngineTransportError::CoordinatorUnavailable)?;
+        Ok(Self {
+            identity: PinnedCoordinator::from_expected(descriptor, namespace)?,
+        })
+    }
+
+    pub(crate) fn is_live(&self) -> bool {
+        self.identity.verify_live_process().is_ok()
+    }
+}
+
 impl PinnedCoordinator {
     fn from_expected(
         descriptor: CoordinatorIdentityDescriptor,

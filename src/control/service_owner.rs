@@ -21,9 +21,13 @@ use super::engine_helper::{supervisor_arguments, BackendProcessSpec, StackRoot};
 use super::engine_transport::{BackendPort, CoordinatorIdentityDescriptor};
 use super::managed_service::{
     LaunchRecipe, ManagedServiceController, ManagedServiceErrorKind, ManagedServiceState,
-    OwnedService, ReconcileResult, ServiceIntentRecord, StartDisposition, StartFailure,
-    StopOnlyService, StoppedService,
+    OwnedLocalJobBinding, OwnedService, ReconcileResult, ServiceIntentRecord, StartDisposition,
+    StartFailure, StopOnlyService, StoppedService,
 };
+pub use super::owned_job_store::{
+    DeviceSelection, JobExecutionBounds, OwnedJobRequestSpec, OwnedJobStoreError,
+};
+use super::owned_job_store::{NativeJobResult, OwnedJobStore, ValidatedOwnedJob};
 use super::ownership::CoordinatorLock;
 use super::runtime::OperationContext;
 use super::service_intents::{
@@ -99,6 +103,52 @@ impl std::error::Error for OwnerObservationError {}
 pub struct RetainedServiceObservation {
     pub intent: ServiceIntentRecord,
     pub observation: ReconcileResult,
+}
+
+/// A live owned wrapper plus its pinned private packet association. A native
+/// result candidate never drops this handle or authorizes reservation release.
+pub struct OwnedNativeJob {
+    service: OwnedService,
+    store: OwnedJobStore,
+    job: ValidatedOwnedJob,
+}
+
+impl OwnedNativeJob {
+    pub fn service(&self) -> &OwnedService {
+        &self.service
+    }
+    pub fn job_id(&self) -> u64 {
+        self.job.job_id()
+    }
+    pub fn request_id(&self) -> &str {
+        self.job.request_id()
+    }
+    pub fn observe_native_result(&self) -> Result<NativeJobCandidate, OwnedJobStoreError> {
+        self.store
+            .read_result(&self.job)
+            .map(|result| NativeJobCandidate { result })
+    }
+}
+
+impl fmt::Debug for OwnedNativeJob {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("OwnedNativeJob(<retained private association>)")
+    }
+}
+
+/// Private typed output that is deliberately not a published inference result.
+pub struct NativeJobCandidate {
+    result: NativeJobResult,
+}
+impl NativeJobCandidate {
+    pub fn is_success(&self) -> bool {
+        !matches!(self.result, NativeJobResult::Failed(_))
+    }
+}
+impl fmt::Debug for NativeJobCandidate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("NativeJobCandidate(<unpublished>)")
+    }
 }
 
 /// Fixed failure phase and category for the stop-plus-observation operation.
@@ -458,6 +508,78 @@ impl<'host> ManagedRuntimeOwner<'host> {
             )
             .map_err(OwnerStartError::Preparation)?;
         self.persist_and_dispatch(prepared, context)
+    }
+
+    /// Start a one-shot local job wrapper with durable job/runtime ownership.
+    /// The caller must first publish its validated private request packet and
+    /// retain admission/reservations. Native result readiness is not release;
+    /// this uses the ordinary exact-service Stop/cgroup observation path.
+    pub fn start_owned_local_job(
+        &mut self,
+        binding: OwnedLocalJobBinding,
+        stop_timeout: Duration,
+        context: &OperationContext<'_>,
+    ) -> Result<OwnedService, OwnerStartError> {
+        check_context(context).map_err(OwnerStartError::Preparation)?;
+        let executable = std::env::current_exe()
+            .and_then(|path| path.canonicalize())
+            .map_err(|_| {
+                OwnerStartError::Preparation(ManagedServiceErrorKind::ExecutableUnavailable)
+            })?;
+        let recipe = LaunchRecipe::new(
+            &executable,
+            binding.job_directory(),
+            super::owned_job_helper::helper_arguments(&binding),
+        )
+        .map_err(OwnerStartError::Preparation)?;
+        let prepared = self
+            .controller
+            .prepare_owned_local_job(binding, recipe, stop_timeout)
+            .map_err(OwnerStartError::Preparation)?;
+        self.persist_and_dispatch(prepared, context)
+    }
+
+    /// Publish a fresh validated request and start its one-shot owned wrapper.
+    /// Caller admission and resource checks remain prerequisites. Failed packet
+    /// or WAL publication is retained, never overwritten or replayed.
+    pub fn start_owned_local_job_request(
+        &mut self,
+        job_directory: &Path,
+        spec: OwnedJobRequestSpec<'_>,
+        stop_timeout: Duration,
+        context: &OperationContext<'_>,
+    ) -> Result<OwnedNativeJob, OwnerStartError> {
+        check_context(context).map_err(OwnerStartError::Preparation)?;
+        let store = OwnedJobStore::open(job_directory).map_err(|_| {
+            OwnerStartError::Preparation(ManagedServiceErrorKind::InvalidOwnedJobBinding)
+        })?;
+        let job = store.write_request(spec).map_err(|_| {
+            OwnerStartError::Preparation(ManagedServiceErrorKind::InvalidOwnedJobBinding)
+        })?;
+        let coordinator = CoordinatorIdentityDescriptor::capture_current().map_err(|_| {
+            OwnerStartError::Preparation(ManagedServiceErrorKind::CoordinatorIdentityUnavailable)
+        })?;
+        let binding = OwnedLocalJobBinding::capture(
+            job.route().runtime.clone(),
+            job.job_id(),
+            job.request_id(),
+            job_directory,
+            coordinator,
+        )
+        .map_err(OwnerStartError::Preparation)?;
+        if binding.directory_device() != store.directory_device()
+            || binding.directory_inode() != store.directory_inode()
+        {
+            return Err(OwnerStartError::Preparation(
+                ManagedServiceErrorKind::InvalidOwnedJobBinding,
+            ));
+        }
+        let service = self.start_owned_local_job(binding, stop_timeout, context)?;
+        Ok(OwnedNativeJob {
+            service,
+            store,
+            job,
+        })
     }
 
     fn start_inner(
@@ -859,6 +981,18 @@ if pathlib.Path(sys.argv[0]).name == 'fake-run':
     description = next(a.split('=', 1)[1] for a in args if a.startswith('--description='))
     record = json.loads((intents / (unit + '.json')).read_text())
     assert record['unit_name'] == unit
+    if (root / 'require-owned-job').exists():
+        assert record['schema'] == 4
+        assert record['launch_role'] == 'owned_local_job'
+        assert record['runtime_lane'] == 'decisions'
+        assert record['runtime_name'] == 'nagi'
+        assert record['owned_local_job']['job_id'] == 17
+        assert record['owned_local_job']['request_id'] == 'fixture-owned-job'
+        assert '--l3ms-owned-local-job-v1' in args
+        assert '--service-type=exec' in args
+        assert '--property=PrivateNetwork=yes' not in args
+        assert not any('OpenFile=' in a for a in args)
+        assert record['coordinator_identity']['pid'] == os.getppid()
     if (root / 'require-supervisor').exists():
         identity = record['coordinator_identity']
         assert record['schema'] == 3
@@ -1027,6 +1161,48 @@ sys.exit(23)
                 .unwrap();
             (probe, stopped)
         }
+    }
+
+    #[test]
+    fn owned_job_wal_precedes_manager_dispatch_and_restores_stop_only() {
+        let fixture = Fixture::new();
+        fs::write(fixture.root.path().join("require-owned-job"), "1").unwrap();
+        let directory = fixture.root.path().join("private-job");
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+        let mut owner = fixture.owner(&guard);
+        let binding = OwnedLocalJobBinding::capture(
+            RuntimeIdentity::new(Lane::Decisions, "nagi").unwrap(),
+            17,
+            "fixture-owned-job",
+            &directory,
+            CoordinatorIdentityDescriptor::capture_current().unwrap(),
+        )
+        .unwrap();
+        let service = owner
+            .start_owned_local_job(binding, Duration::from_secs(1), &fixture.context())
+            .unwrap();
+        let restored = owner.reconcile(&fixture.context()).unwrap();
+        assert_eq!(restored.len(), 1);
+        assert!(matches!(
+            restored[0].observation,
+            ReconcileResult::StopOnly(_)
+        ));
+        let (probe, stopped) =
+            fixture.stop_with_observation(&mut owner, &service, Some("populated 0\n"));
+        owner
+            .retire_stopped(&stopped, &probe, &fixture.context())
+            .unwrap();
+        assert!(owner.reconcile(&fixture.context()).unwrap().is_empty());
+        assert_eq!(
+            fs::read_to_string(fixture.root.path().join("starts")).unwrap(),
+            "start\n"
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.root.path().join("stops")).unwrap(),
+            "stop\n"
+        );
     }
 
     #[test]
