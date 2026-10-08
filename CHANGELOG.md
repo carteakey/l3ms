@@ -10,6 +10,11 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Retain optional native decision latency and provider-specific usage in one
+  transactional result append for CPU and managed local jobs. Answer-only pages
+  stay unchanged; new metadata events require upgraded clients. The consumer
+  exposes typed metadata separately, without inventing metrics or changing the
+  answer-only output export. TUI display remains follow-up work.
 - Add explicit shutdown-accounting regression coverage: resident-router cleanup
   cannot stand in for unproven local-job cleanup or release its reservation.
 - Compose opt-in allowlisted Breeze/local Nagi/Laya jobs with the managed

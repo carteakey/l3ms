@@ -941,7 +941,11 @@ impl ManagedLocalTicketExecutor<'_, '_> {
         }
         let event = match released {
             ReleasedNativeOutcome::Decision(native) => match native.result {
-                InferenceResult::Decision { answers } => ResultEvent::DecisionAnswers(answers),
+                InferenceResult::Decision { answers } => ResultEvent::DecisionResult {
+                    answers,
+                    native_latency: native.native_latency,
+                    native_usage: native.native_usage,
+                },
                 _ => return outcome,
             },
             ReleasedNativeOutcome::Breeze { mode: _, artifacts } => {

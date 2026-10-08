@@ -153,7 +153,12 @@ establish a retrieval route or a matching pinned root. Byte retrieval still
 needs request/job-bound reference authorization, no-follow root/file access,
 bounded reads and drift rejection. Do not expose the private job directory
 through a generic static file server. Optional native decision latency/usage
-also remain absent from client result pages, despite retention in job packets.
+now reach result pages as additive `DecisionMetadataJsonPart` events: exact
+bounded integer nanoseconds and unchanged provider-specific usage fields.
+Answers and metadata publish transactionally. Legacy answer-only pages stay
+unchanged, but metadata pages require upgraded strict clients. The consumer
+exposes typed metadata separately; answer-only exports and TUI display do not
+include it yet. Native timing is not queue, cold-start or coordinator timing.
 
 The dedicated router file is strict duplicate-free JSON, which is also a YAML
 subset accepted by the router. It must be separate from the original

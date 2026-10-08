@@ -10,6 +10,17 @@ runtime check.
 
 ## Current resumed checkpoint — 2026-10-08
 
+The subsequent native decision metadata slice passes **798 root tests, 1 ignored**,
+strict all-target Clippy, formatting and whitespace checks. CPU and managed
+local publication now preserve optional native latency/usage in one transactional
+append. Nanoseconds round-trip exactly across minimum-sized pages; overflow
+rejects the whole append without publishing answers or advancing the cursor.
+Usage retains native field semantics and redacted debug output. Existing
+answer-only pages stay unchanged; additive metadata events require upgraded
+clients. Typed consumer access is implemented, while TUI display/answer-only
+exports remain unchanged. Joined CPU daemon coverage checks the actual fixture's
+12.5 ms native value, not fabricated coordinator timing. This is offline evidence.
+
 The subsequent managed-stack composition passes **796 root tests, 1 ignored**,
 strict all-target Clippy, formatting and whitespace checks. It adds opt-in `local_job_profiles` and
 `job_directory_root` to the private managed-session JSON. Omitting both keeps
@@ -34,7 +45,7 @@ durable completion history; they do not expose the private absolute job root.
 Remaining gates: full injected mixed-worker lifecycle tests; crash-safe
 multi-runtime recovery and durable cleanup/history association; Comfy
 generation-bound dispatch/transport and artifact integration; optional native
-decision latency/usage delivery to clients; HTTP artifact-root integration; and
+decision metadata display/export; HTTP artifact-root integration; and
 real model/GPU switching, cancellation and exact service restoration acceptance.
 Current startup still refuses retained foreign/job intents rather than adopting
 or replaying them. No live service or original checkout changed in this slice.

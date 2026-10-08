@@ -1040,7 +1040,14 @@ impl ControlDaemon {
                 };
                 if self
                     .results
-                    .append(&slot.request_id, ResultEvent::DecisionAnswers(answers))
+                    .append(
+                        &slot.request_id,
+                        ResultEvent::DecisionResult {
+                            answers,
+                            native_latency: native.native_latency,
+                            native_usage: native.native_usage,
+                        },
+                    )
                     .is_err()
                 {
                     return self
@@ -1988,7 +1995,7 @@ mod tests {
         );
         let page = result_page(&directory, "cpu-once");
         assert_eq!(page.terminal, Some(ResultTerminal::Succeeded));
-        assert_eq!(page.events.len(), 1);
+        assert_eq!(page.events.len(), 2);
         let PageEvent::DecisionJsonPart { json, .. } = &page.events[0].event else {
             panic!("expected native decision result page");
         };
@@ -1997,6 +2004,11 @@ mod tests {
             native,
             serde_json::json!({"route":{"choice":"secret-answer"}})
         );
+        let PageEvent::DecisionMetadataJsonPart { json, .. } = &page.events[1].event else {
+            panic!("expected native decision metadata page");
+        };
+        let metadata: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(metadata["native_latency_ns"], 12_500_000);
         assert_eq!(std::fs::read(&marker).unwrap(), b"x");
 
         let first_report = cancel_outer_and_join(cancellation.as_ref(), worker);

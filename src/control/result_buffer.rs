@@ -13,6 +13,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::io::{self, Write};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -52,6 +53,7 @@ pub enum ResultBufferError {
     EventTooLarge,
     InvalidArtifactPath,
     InvalidEmbedding,
+    InvalidDecisionMetadata,
     InvalidChatEvent,
     ReservationRequired,
     InvalidCursor,
@@ -74,6 +76,7 @@ impl fmt::Display for ResultBufferError {
             Self::EventTooLarge => "result event exceeds the bounded result limit",
             Self::InvalidArtifactPath => "media artifact reference is invalid",
             Self::InvalidEmbedding => "embedding result is invalid or too large",
+            Self::InvalidDecisionMetadata => "native decision metadata is invalid or too large",
             Self::InvalidChatEvent => "chat stream event sequence is invalid",
             Self::ReservationRequired => "chat streaming requires a reserved result slot",
             Self::InvalidCursor => "result cursor is invalid",
@@ -188,6 +191,14 @@ pub enum ResultEvent {
         usage: EmbeddingUsage,
     },
     DecisionAnswers(Map<String, Value>),
+    /// Atomically append one native decision answer object and its optional
+    /// provider-supplied metadata. Existing `DecisionAnswers` callers retain
+    /// their exact event and wire format.
+    DecisionResult {
+        answers: Map<String, Value>,
+        native_latency: Option<Duration>,
+        native_usage: Option<Map<String, Value>>,
+    },
     MediaArtifacts(Vec<MediaArtifact>),
 }
 
@@ -222,6 +233,18 @@ impl fmt::Debug for ResultEvent {
                 .field("answer_count", &answers.len())
                 .field("answers", &"<redacted>")
                 .finish(),
+            Self::DecisionResult {
+                answers,
+                native_latency,
+                native_usage,
+            } => formatter
+                .debug_struct("DecisionResult")
+                .field("answer_count", &answers.len())
+                .field("native_latency", native_latency)
+                .field("has_native_usage", &native_usage.is_some())
+                .field("answers", &"<redacted>")
+                .field("native_usage", &"<redacted>")
+                .finish(),
             Self::MediaArtifacts(artifacts) => formatter
                 .debug_struct("MediaArtifacts")
                 .field("artifact_count", &artifacts.len())
@@ -255,6 +278,14 @@ pub enum PageEvent {
         json: String,
     },
     DecisionJsonPart {
+        result_id: u64,
+        part_index: u32,
+        part_count: u32,
+        json: String,
+    },
+    /// Optional native decision metadata, separate from the unchanged answer
+    /// object parts. The JSON payload is chunked with the same page bounds.
+    DecisionMetadataJsonPart {
         result_id: u64,
         part_index: u32,
         part_count: u32,
@@ -306,6 +337,19 @@ impl fmt::Debug for PageEvent {
                 json,
             } => formatter
                 .debug_struct("DecisionJsonPart")
+                .field("result_id", result_id)
+                .field("part_index", part_index)
+                .field("part_count", part_count)
+                .field("json_bytes", &json.len())
+                .field("json", &"<redacted>")
+                .finish(),
+            Self::DecisionMetadataJsonPart {
+                result_id,
+                part_index,
+                part_count,
+                json,
+            } => formatter
+                .debug_struct("DecisionMetadataJsonPart")
                 .field("result_id", result_id)
                 .field("part_index", part_index)
                 .field("part_count", part_count)
@@ -387,6 +431,7 @@ impl ResultPage {
             return Err(ResultBufferError::EventTooLarge);
         }
         let mut decision_parts: HashMap<u64, (u32, HashMap<u32, u64>)> = HashMap::new();
+        let mut decision_metadata_parts: HashMap<u64, (u32, HashMap<u32, u64>)> = HashMap::new();
         let mut embedding_parts: HashMap<u64, (u32, HashMap<u32, u64>)> = HashMap::new();
         let mut artifact_batches: HashMap<u64, (u32, HashMap<u32, u64>)> = HashMap::new();
         let mut native_lane = None;
@@ -423,7 +468,8 @@ impl ResultPage {
                         | PageEvent::ChatUsage { .. }
                         | PageEvent::ChatStreamComplete
                         | PageEvent::EmbeddingJsonPart { .. } => Lane::Language,
-                        PageEvent::DecisionJsonPart { .. } => Lane::Decisions,
+                        PageEvent::DecisionJsonPart { .. }
+                        | PageEvent::DecisionMetadataJsonPart { .. } => Lane::Decisions,
                         PageEvent::MediaArtifactBatch { .. } => Lane::Media,
                     };
                     if native_lane.is_some_and(|expected| expected != lane) {
@@ -470,6 +516,21 @@ impl ResultPage {
                         } => {
                             validate_group_part(
                                 &mut decision_parts,
+                                *result_id,
+                                *part_index,
+                                *part_count,
+                                item.cursor,
+                                MAX_DECISION_PARTS as u32,
+                            )?;
+                        }
+                        PageEvent::DecisionMetadataJsonPart {
+                            result_id,
+                            part_index,
+                            part_count,
+                            ..
+                        } => {
+                            validate_group_part(
+                                &mut decision_metadata_parts,
                                 *result_id,
                                 *part_index,
                                 *part_count,
@@ -667,6 +728,7 @@ impl ResultBuffer {
             reserved_bytes,
             chat_usage_seen,
             chat_stream_complete,
+            decision_metadata_seen,
         ) = {
             let job = self.job(request_id)?;
             (
@@ -679,6 +741,7 @@ impl ResultBuffer {
                 job.reserved_bytes,
                 job.chat_usage_seen,
                 job.chat_stream_complete,
+                job.decision_metadata_seen,
             )
         };
         if terminal.is_some() {
@@ -687,6 +750,14 @@ impl ResultBuffer {
         let event_lane = event.lane();
         if lane != event_lane {
             return Err(ResultBufferError::WrongLane);
+        }
+        if decision_metadata_seen
+            && matches!(
+                &event,
+                ResultEvent::DecisionAnswers(_) | ResultEvent::DecisionResult { .. }
+            )
+        {
+            return Err(ResultBufferError::InvalidDecisionMetadata);
         }
         let incoming_language_kind = event.language_kind();
         if matches!(
@@ -707,6 +778,7 @@ impl ResultBuffer {
         }
         let chat_usage_event = matches!(&event, ResultEvent::ChatUsage { .. });
         let chat_stream_complete_event = matches!(&event, ResultEvent::ChatStreamComplete);
+        let decision_metadata_event = event.has_native_decision_metadata();
         let added_chat_bytes = event.raw_chat_bytes();
         let new_chat_raw_bytes = chat_raw_bytes
             .checked_add(added_chat_bytes)
@@ -778,6 +850,12 @@ impl ResultBuffer {
         }
         if chat_stream_complete_event {
             job.chat_stream_complete = true;
+        }
+        if decision_metadata_event {
+            job.decision_metadata_seen = true;
+        }
+        if decision_metadata_event {
+            job.decision_metadata_seen = true;
         }
         job.latest_cursor = last_cursor;
         job.event_bytes += staged_bytes;
@@ -966,6 +1044,7 @@ struct ResultEntry {
     chat_raw_bytes: usize,
     chat_usage_seen: bool,
     chat_stream_complete: bool,
+    decision_metadata_seen: bool,
     terminal: Option<ResultTerminal>,
 }
 
@@ -992,6 +1071,7 @@ impl ResultEntry {
             chat_raw_bytes: 0,
             chat_usage_seen: false,
             chat_stream_complete: false,
+            decision_metadata_seen: false,
             terminal: None,
         }
     }
@@ -1011,7 +1091,9 @@ impl ResultEvent {
             | Self::ChatUsage { .. }
             | Self::ChatStreamComplete => Some(LanguageResultKind::Chat),
             Self::Embeddings { .. } => Some(LanguageResultKind::Embeddings),
-            Self::DecisionAnswers(_) | Self::MediaArtifacts(_) => None,
+            Self::DecisionAnswers(_) | Self::DecisionResult { .. } | Self::MediaArtifacts(_) => {
+                None
+            }
         }
     }
 
@@ -1022,7 +1104,7 @@ impl ResultEvent {
             | Self::ChatUsage { .. }
             | Self::ChatStreamComplete
             | Self::Embeddings { .. } => Lane::Language,
-            Self::DecisionAnswers(_) => Lane::Decisions,
+            Self::DecisionAnswers(_) | Self::DecisionResult { .. } => Lane::Decisions,
             Self::MediaArtifacts(_) => Lane::Media,
         }
     }
@@ -1034,8 +1116,22 @@ impl ResultEvent {
             | Self::ChatStreamComplete
             | Self::Embeddings { .. }
             | Self::DecisionAnswers(_)
+            | Self::DecisionResult { .. }
             | Self::MediaArtifacts(_) => 0,
         }
+    }
+
+    fn has_native_decision_metadata(&self) -> bool {
+        matches!(
+            self,
+            Self::DecisionResult {
+                native_latency: Some(_),
+                ..
+            } | Self::DecisionResult {
+                native_usage: Some(_),
+                ..
+            }
+        )
     }
 }
 
@@ -1076,20 +1172,33 @@ fn prepare_events(
                 .collect())
         }
         ResultEvent::DecisionAnswers(answers) => {
-            let json = serialize_decision_answers(&answers)?;
-            let parts = split_text(&json, DECISION_PART_BYTES);
-            let part_count =
-                u32::try_from(parts.len()).map_err(|_| ResultBufferError::EventTooLarge)?;
-            Ok(parts
-                .into_iter()
-                .enumerate()
-                .map(|(part_index, json)| PageEvent::DecisionJsonPart {
-                    result_id: first_cursor,
-                    part_index: part_index as u32,
-                    part_count,
-                    json,
-                })
-                .collect())
+            prepare_decision_answer_events(first_cursor, answers)
+        }
+        ResultEvent::DecisionResult {
+            answers,
+            native_latency,
+            native_usage,
+        } => {
+            let answers_json = serialize_decision_answers(&answers)?;
+            let metadata_json = serialize_decision_metadata(native_latency, native_usage)?;
+            if answers_json
+                .len()
+                .checked_add(metadata_json.as_ref().map_or(0, String::len))
+                .is_none_or(|bytes| bytes > MAX_DECISION_JSON_BYTES)
+            {
+                return Err(ResultBufferError::InvalidDecisionMetadata);
+            }
+            let mut events = prepare_decision_answer_json(first_cursor, &answers_json)?;
+            if let Some(metadata_json) = metadata_json {
+                let metadata_cursor = first_cursor
+                    .checked_add(events.len() as u64)
+                    .ok_or(ResultBufferError::CapacityExceeded)?;
+                events.extend(prepare_decision_metadata_json(
+                    metadata_cursor,
+                    &metadata_json,
+                )?);
+            }
+            Ok(events)
         }
         ResultEvent::MediaArtifacts(artifacts) => {
             if artifacts.len() > MAX_ARTIFACTS_PER_APPEND || artifacts.len() > u32::MAX as usize {
@@ -1159,6 +1268,74 @@ fn serialize_decision_answers(answers: &Map<String, Value>) -> Result<String, Re
         });
     }
     String::from_utf8(bounded.bytes).map_err(|_| ResultBufferError::Serialization)
+}
+
+fn serialize_decision_metadata(
+    native_latency: Option<Duration>,
+    native_usage: Option<Map<String, Value>>,
+) -> Result<Option<String>, ResultBufferError> {
+    let mut payload = Map::new();
+    if let Some(latency) = native_latency {
+        let nanos = u64::try_from(latency.as_nanos())
+            .map_err(|_| ResultBufferError::InvalidDecisionMetadata)?;
+        payload.insert("native_latency_ns".to_owned(), Value::from(nanos));
+    }
+    if let Some(usage) = native_usage {
+        payload.insert("native_usage".to_owned(), Value::Object(usage));
+    }
+    if payload.is_empty() {
+        return Ok(None);
+    }
+    serialize_decision_answers(&payload)
+        .map(Some)
+        .map_err(|error| match error {
+            ResultBufferError::EventTooLarge => ResultBufferError::InvalidDecisionMetadata,
+            other => other,
+        })
+}
+
+fn prepare_decision_answer_events(
+    first_cursor: u64,
+    answers: Map<String, Value>,
+) -> Result<Vec<PageEvent>, ResultBufferError> {
+    let json = serialize_decision_answers(&answers)?;
+    prepare_decision_answer_json(first_cursor, &json)
+}
+
+fn prepare_decision_answer_json(
+    first_cursor: u64,
+    json: &str,
+) -> Result<Vec<PageEvent>, ResultBufferError> {
+    let parts = split_text(json, DECISION_PART_BYTES);
+    let part_count = u32::try_from(parts.len()).map_err(|_| ResultBufferError::EventTooLarge)?;
+    Ok(parts
+        .into_iter()
+        .enumerate()
+        .map(|(part_index, json)| PageEvent::DecisionJsonPart {
+            result_id: first_cursor,
+            part_index: part_index as u32,
+            part_count,
+            json,
+        })
+        .collect())
+}
+
+fn prepare_decision_metadata_json(
+    first_cursor: u64,
+    json: &str,
+) -> Result<Vec<PageEvent>, ResultBufferError> {
+    let parts = split_text(json, DECISION_PART_BYTES);
+    let part_count = u32::try_from(parts.len()).map_err(|_| ResultBufferError::EventTooLarge)?;
+    Ok(parts
+        .into_iter()
+        .enumerate()
+        .map(|(part_index, json)| PageEvent::DecisionMetadataJsonPart {
+            result_id: first_cursor,
+            part_index: part_index as u32,
+            part_count,
+            json,
+        })
+        .collect())
 }
 
 struct LimitedJsonBuffer {
@@ -1334,6 +1511,24 @@ fn validate_page_event(item: &CursorEvent) -> Result<(), ResultBufferError> {
                 return Err(ResultBufferError::InvalidCursor);
             }
         }
+        PageEvent::DecisionMetadataJsonPart {
+            result_id,
+            part_index,
+            part_count,
+            json,
+        } => {
+            if *result_id == 0
+                || *result_id > item.cursor
+                || *part_count == 0
+                || *part_index >= *part_count
+                || *part_count as usize > MAX_DECISION_PARTS
+                || json.len() > DECISION_PART_BYTES
+                || json.is_empty()
+                || (*part_index == 0 && *result_id != item.cursor)
+            {
+                return Err(ResultBufferError::InvalidCursor);
+            }
+        }
         PageEvent::EmbeddingJsonPart {
             result_id,
             part_index,
@@ -1403,6 +1598,30 @@ fn validate_group_part(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn overflowing_native_latency_rolls_back_answers_and_cursor() {
+        let mut buffer = super::ResultBuffer::new();
+        buffer.begin("native", super::Lane::Decisions).unwrap();
+        let before = buffer.page("native", 0, super::MIN_PAGE_BYTES).unwrap();
+        assert_eq!(
+            buffer.append(
+                "native",
+                super::ResultEvent::DecisionResult {
+                    answers: serde_json::json!({"answer": true})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                    native_latency: Some(std::time::Duration::from_secs(u64::MAX)),
+                    native_usage: None,
+                }
+            ),
+            Err(super::ResultBufferError::InvalidDecisionMetadata)
+        );
+        assert_eq!(
+            buffer.page("native", 0, super::MIN_PAGE_BYTES).unwrap(),
+            before
+        );
+    }
     use super::*;
 
     #[test]

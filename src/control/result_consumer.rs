@@ -6,6 +6,7 @@
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
 use serde_json::{Map, Value};
+use std::time::Duration;
 
 use super::catalog::Lane;
 use super::ipc::validate_request_id;
@@ -53,6 +54,35 @@ pub enum NativeOutput {
     Media {
         artifacts: Vec<MediaArtifact>,
     },
+}
+
+/// Native decision timing/usage values retained independently of the
+/// compatibility-stable answer-only `NativeOutput::Decisions` shape.
+#[derive(Clone, PartialEq)]
+pub struct NativeDecisionMetadata {
+    native_latency: Option<Duration>,
+    native_usage: Option<Map<String, Value>>,
+}
+
+impl NativeDecisionMetadata {
+    pub fn native_latency(&self) -> Option<Duration> {
+        self.native_latency
+    }
+
+    pub fn native_usage(&self) -> Option<&Map<String, Value>> {
+        self.native_usage.as_ref()
+    }
+}
+
+impl std::fmt::Debug for NativeDecisionMetadata {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeDecisionMetadata")
+            .field("native_latency", &self.native_latency)
+            .field("has_native_usage", &self.native_usage.is_some())
+            .field("native_usage", &"<redacted>")
+            .finish()
+    }
 }
 
 impl Serialize for NativeOutput {
@@ -128,6 +158,12 @@ enum Pending {
         next: u32,
         json: String,
     },
+    DecisionMetadata {
+        id: u64,
+        count: u32,
+        next: u32,
+        json: String,
+    },
     Embedding {
         id: u64,
         count: u32,
@@ -156,6 +192,8 @@ pub struct ResultConsumer {
     embedding_complete: bool,
     chat_completion_tokens: Option<u64>,
     chat_stream_completed: bool,
+    decision_answers_seen: bool,
+    decision_metadata: Option<NativeDecisionMetadata>,
     output: NativeOutput,
 }
 
@@ -203,6 +241,8 @@ impl ResultConsumer {
             embedding_complete: false,
             chat_completion_tokens: None,
             chat_stream_completed: false,
+            decision_answers_seen: false,
+            decision_metadata: None,
             output,
         })
     }
@@ -237,6 +277,11 @@ impl ResultConsumer {
     /// does not mean the coordinator job is terminal or resources are free.
     pub fn chat_stream_completed(&self) -> bool {
         self.chat_stream_completed
+    }
+    /// Native decision timing/usage, if the producer supplied it. This does
+    /// not alter the answer-only `NativeOutput::Decisions` serialization.
+    pub fn decision_metadata(&self) -> Option<&NativeDecisionMetadata> {
+        self.decision_metadata.as_ref()
     }
 
     /// Consume exactly the page requested after `cursor()`. Empty polls are
@@ -348,6 +393,20 @@ impl ResultConsumer {
                 self.language_task = Some(LanguageTask::Embeddings);
                 return self.append_embeddings(cursor, *result_id, *part_index, *part_count, json);
             }
+            PageEvent::DecisionMetadataJsonPart {
+                result_id,
+                part_index,
+                part_count,
+                json,
+            } => {
+                return self.append_decision_metadata(
+                    cursor,
+                    *result_id,
+                    *part_index,
+                    *part_count,
+                    json,
+                );
+            }
             PageEvent::DecisionJsonPart { .. } | PageEvent::MediaArtifactBatch { .. } => {}
         }
         match (event, &mut self.output) {
@@ -407,6 +466,7 @@ impl ResultConsumer {
                         return Err(ConsumeError::InvalidNativeOutput);
                     }
                     answers.push(native);
+                    self.decision_answers_seen = true;
                     self.pending = None;
                 }
             }
@@ -442,6 +502,62 @@ impl ResultConsumer {
                 }
             }
             _ => return Err(ConsumeError::WrongLane),
+        }
+        Ok(())
+    }
+
+    fn append_decision_metadata(
+        &mut self,
+        cursor: u64,
+        result_id: u64,
+        part_index: u32,
+        part_count: u32,
+        fragment: &str,
+    ) -> Result<(), ConsumeError> {
+        if self.lane != Lane::Decisions {
+            return Err(ConsumeError::WrongLane);
+        }
+        if !self.decision_answers_seen {
+            return Err(ConsumeError::InvalidSequence);
+        }
+        if self.pending.is_none() {
+            if self.decision_metadata.is_some() || part_index != 0 || result_id != cursor {
+                return Err(ConsumeError::InvalidSequence);
+            }
+            self.pending = Some(Pending::DecisionMetadata {
+                id: result_id,
+                count: part_count,
+                next: 0,
+                json: String::new(),
+            });
+        }
+        let complete_metadata = {
+            let Some(Pending::DecisionMetadata {
+                id,
+                count,
+                next,
+                json,
+            }) = &mut self.pending
+            else {
+                return Err(ConsumeError::InvalidSequence);
+            };
+            if *id != result_id || *count != part_count || *next != part_index {
+                return Err(ConsumeError::InvalidSequence);
+            }
+            if json.len().saturating_add(fragment.len()) > 1024 * 1024 {
+                return Err(ConsumeError::CapacityExceeded);
+            }
+            json.push_str(fragment);
+            *next += 1;
+            if *next == *count {
+                Some(parse_decision_metadata(json)?)
+            } else {
+                None
+            }
+        };
+        if let Some(metadata) = complete_metadata {
+            self.decision_metadata = Some(metadata);
+            self.pending = None;
         }
         Ok(())
     }
@@ -526,8 +642,85 @@ impl ResultConsumer {
     }
 }
 
+fn parse_decision_metadata(json: &str) -> Result<NativeDecisionMetadata, ConsumeError> {
+    let mut payload: Map<String, Value> =
+        serde_json::from_str(json).map_err(|_| ConsumeError::InvalidNativeOutput)?;
+    if serde_json::to_string(&payload).map_err(|_| ConsumeError::InvalidNativeOutput)? != json {
+        return Err(ConsumeError::InvalidNativeOutput);
+    }
+    if payload.is_empty()
+        || payload
+            .keys()
+            .any(|key| !matches!(key.as_str(), "native_latency_ns" | "native_usage"))
+    {
+        return Err(ConsumeError::InvalidNativeOutput);
+    }
+    let native_latency = payload
+        .remove("native_latency_ns")
+        .map(|value| {
+            value
+                .as_u64()
+                .map(Duration::from_nanos)
+                .ok_or(ConsumeError::InvalidNativeOutput)
+        })
+        .transpose()?;
+    let native_usage = payload
+        .remove("native_usage")
+        .map(|value| match value {
+            Value::Object(usage) => Ok(usage),
+            _ => Err(ConsumeError::InvalidNativeOutput),
+        })
+        .transpose()?;
+    if native_latency.is_none() && native_usage.is_none() {
+        return Err(ConsumeError::InvalidNativeOutput);
+    }
+    Ok(NativeDecisionMetadata {
+        native_latency,
+        native_usage,
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn decision_metadata_roundtrips_exactly_without_changing_answers() {
+        let mut buffer = ResultBuffer::new();
+        buffer.begin("native", super::Lane::Decisions).unwrap();
+        let answers = serde_json::json!({"answer": "private-answer".repeat(1000)})
+            .as_object()
+            .unwrap()
+            .clone();
+        let usage =
+            serde_json::json!({"provider_units": 7, "opaque": "private-usage".repeat(1000)})
+                .as_object()
+                .unwrap()
+                .clone();
+        buffer
+            .append(
+                "native",
+                ResultEvent::DecisionResult {
+                    answers: answers.clone(),
+                    native_latency: Some(std::time::Duration::from_nanos(12_500_001)),
+                    native_usage: Some(usage.clone()),
+                },
+            )
+            .unwrap();
+        buffer
+            .terminal("native", super::ResultTerminal::Succeeded)
+            .unwrap();
+        let consumer = reconstruct(&buffer, "native", super::Lane::Decisions);
+        let metadata = consumer.decision_metadata().unwrap();
+        assert_eq!(
+            metadata.native_latency(),
+            Some(std::time::Duration::from_nanos(12_500_001))
+        );
+        assert_eq!(metadata.native_usage(), Some(&usage));
+        let super::NativeOutput::Decisions { answers: actual } = consumer.output() else {
+            panic!("wrong output lane");
+        };
+        assert_eq!(actual, &vec![answers]);
+        assert!(!format!("{metadata:?}").contains("private-usage"));
+    }
     use super::super::requests::EmbeddingUsage;
     use super::super::result_buffer::{ArtifactKind, ResultBuffer, ResultEvent, MIN_PAGE_BYTES};
     use super::*;
