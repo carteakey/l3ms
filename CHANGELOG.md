@@ -10,6 +10,9 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Raise dashboard secondary-text contrast on every dark panel and add an
+  offline contrast regression; visual/browser acceptance remains separately
+  recorded from model/runtime acceptance.
 - Preserve incremental native chat deltas, token usage and stream completion
   separately from durable job completion, with bounded transactional result
   publication. Explicit workbench observations resume their verified cursor

@@ -76,6 +76,12 @@ and object-only native JSON parsing. These are fixtures, not real managed-model
 acceptance. Foreground owner integration is in progress; strict Clippy must be
 rerun once its newly added ownership/readiness methods are actually wired.
 
+Isolated headless Firefox is now available for local visual checks despite the
+unavailable connected browser surface. The root reviewed desktop/mobile initial
+language-panel renders and corrected secondary-text contrast; ten offline
+data/contrast tests and DOM fixtures pass. Real multi-lane interaction and
+comprehensive accessibility remain pending. See [browser evidence](site-browser-acceptance.md).
+
 Linear tracking: [CAR-215](https://linear.app/carteakey/issue/CAR-215/consolidate-l3ms-l2m2-and-l3ds-into-the-local-3-mode-model-stack)
 is the parent; [CAR-216](https://linear.app/carteakey/issue/CAR-216/import-l2m2-and-l3ds-into-the-l3ms-monorepo-with-verified-standalone)
 covers Phases 0–3, CAR-217 Phases 4–5, CAR-218 Phases 6–7, CAR-219 Phase 8,
