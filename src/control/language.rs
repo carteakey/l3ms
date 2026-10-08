@@ -19,7 +19,7 @@ use super::requests::{
     MAX_EMBEDDING_JSON_BYTES,
 };
 use super::result_buffer::{ResultBuffer, ResultEvent};
-use super::routes::{resolve_profile_route, NativeRoute};
+use super::routes::{resolve_profile_route, NativeRoute, ResolvedProfileRoute};
 use super::runtime::OperationContext;
 use crate::chat::ChatRequest;
 use crate::llama_swap::{auth_headers, normalize_base_url};
@@ -171,6 +171,31 @@ impl LanguageAdapter {
         catalog: &Catalog,
         request: &InferenceRequest,
         context: &OperationContext<'_>,
+        on_event: impl FnMut(ChatStreamEvent<'_>) -> Result<(), ChatEventCallbackError>,
+    ) -> Result<InferenceResult, LanguageFailure> {
+        self.execute_with_events_inner(catalog, request, None, context, on_event)
+    }
+
+    /// Execute against the complete route retained at coordinator acceptance.
+    /// The refreshed profile, runtime, device, native route, task set and
+    /// readiness must all still match before any HTTP request is constructed.
+    pub fn execute_with_events_for_route(
+        &self,
+        catalog: &Catalog,
+        request: &InferenceRequest,
+        accepted_route: &ResolvedProfileRoute,
+        context: &OperationContext<'_>,
+        on_event: impl FnMut(ChatStreamEvent<'_>) -> Result<(), ChatEventCallbackError>,
+    ) -> Result<InferenceResult, LanguageFailure> {
+        self.execute_with_events_inner(catalog, request, Some(accepted_route), context, on_event)
+    }
+
+    fn execute_with_events_inner(
+        &self,
+        catalog: &Catalog,
+        request: &InferenceRequest,
+        accepted_route: Option<&ResolvedProfileRoute>,
+        context: &OperationContext<'_>,
         mut on_event: impl FnMut(ChatStreamEvent<'_>) -> Result<(), ChatEventCallbackError>,
     ) -> Result<InferenceResult, LanguageFailure> {
         check_context(context, DispatchDisposition::NoDispatch)?;
@@ -186,7 +211,7 @@ impl LanguageAdapter {
                 LanguageErrorKind::InvalidRequest,
             )
         })?;
-        let native = native_request(&catalog, request)?;
+        let native = native_request_for_route(&catalog, request, accepted_route)?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -255,6 +280,28 @@ impl LanguageAdapter {
         request: &InferenceRequest,
         context: &OperationContext<'_>,
     ) -> Result<InferenceResult, LanguageFailure> {
+        self.execute_embeddings_inner(catalog, request, None, context)
+    }
+
+    /// Execute embeddings only if the complete route retained at acceptance
+    /// remains identical in the refreshed catalog. Drift fails before HTTP.
+    pub fn execute_embeddings_for_route(
+        &self,
+        catalog: &Catalog,
+        request: &InferenceRequest,
+        accepted_route: &ResolvedProfileRoute,
+        context: &OperationContext<'_>,
+    ) -> Result<InferenceResult, LanguageFailure> {
+        self.execute_embeddings_inner(catalog, request, Some(accepted_route), context)
+    }
+
+    fn execute_embeddings_inner(
+        &self,
+        catalog: &Catalog,
+        request: &InferenceRequest,
+        accepted_route: Option<&ResolvedProfileRoute>,
+        context: &OperationContext<'_>,
+    ) -> Result<InferenceResult, LanguageFailure> {
         check_context(context, DispatchDisposition::NoDispatch)?;
         if tokio::runtime::Handle::try_current().is_ok() {
             return Err(failure(
@@ -268,7 +315,7 @@ impl LanguageAdapter {
                 LanguageErrorKind::InvalidRequest,
             )
         })?;
-        let native = native_embedding_request(&catalog, request)?;
+        let native = native_embedding_request_for_route(&catalog, request, accepted_route)?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -570,9 +617,18 @@ fn check_context(
     Ok(())
 }
 
+#[cfg(test)]
 fn native_request(
     catalog: &Catalog,
     request: &InferenceRequest,
+) -> Result<ChatRequest, LanguageFailure> {
+    native_request_for_route(catalog, request, None)
+}
+
+fn native_request_for_route(
+    catalog: &Catalog,
+    request: &InferenceRequest,
+    accepted_route: Option<&ResolvedProfileRoute>,
 ) -> Result<ChatRequest, LanguageFailure> {
     let invalid = failure(
         DispatchDisposition::NoDispatch,
@@ -580,6 +636,9 @@ fn native_request(
     );
     request.validate(catalog).map_err(|_| invalid)?;
     let route = resolve_profile_route(catalog, request.profile()).map_err(|_| invalid)?;
+    if accepted_route.is_some_and(|accepted| accepted != &route) {
+        return Err(invalid);
+    }
     let NativeRoute::LlamaSwapModel { model_id, .. } = route.native_route else {
         return Err(invalid);
     };
@@ -607,9 +666,10 @@ fn native_request(
     Ok(native)
 }
 
-fn native_embedding_request(
+fn native_embedding_request_for_route(
     catalog: &Catalog,
     request: &InferenceRequest,
+    accepted_route: Option<&ResolvedProfileRoute>,
 ) -> Result<NativeEmbeddingsRequest, LanguageFailure> {
     let invalid = failure(
         DispatchDisposition::NoDispatch,
@@ -617,6 +677,9 @@ fn native_embedding_request(
     );
     request.validate(catalog).map_err(|_| invalid)?;
     let route = resolve_profile_route(catalog, request.profile()).map_err(|_| invalid)?;
+    if accepted_route.is_some_and(|accepted| accepted != &route) {
+        return Err(invalid);
+    }
     let NativeRoute::LlamaSwapModel { model_id, .. } = route.native_route else {
         return Err(invalid);
     };
@@ -809,8 +872,11 @@ impl Output {
 
 #[cfg(test)]
 mod tests {
-    use super::super::catalog::{Lane, ProfileKey};
+    use super::super::catalog::{
+        Device, Lane, ProfileId, ProfileKey, Readiness, RuntimeIdentity, Task,
+    };
     use super::super::requests::ChatTurn;
+    use super::super::routes::{resolve_profile_route, NativeRoute};
     use super::super::runtime::{Cancellation, NeverCancel};
     use super::*;
     use std::fs;
@@ -874,6 +940,57 @@ mod tests {
         }
     }
 
+    fn route_drift_cases(route: &ResolvedProfileRoute) -> Vec<ResolvedProfileRoute> {
+        let mut cases = Vec::with_capacity(6);
+
+        let mut drifted = route.clone();
+        drifted.profile.profile_id = ProfileId::new("drifted-profile").unwrap();
+        cases.push(drifted);
+
+        let mut drifted = route.clone();
+        drifted.runtime = RuntimeIdentity::new(Lane::Language, "drifted-runtime").unwrap();
+        cases.push(drifted);
+
+        let mut drifted = route.clone();
+        drifted.device = Some(match route.device.as_ref() {
+            Some(Device::Cpu) => Device::Cuda,
+            Some(Device::Cuda | Device::Remote) | None => Device::Cpu,
+            Some(Device::Other(value)) => Device::Other(format!("{value}-drifted")),
+        });
+        cases.push(drifted);
+
+        let mut drifted = route.clone();
+        match &mut drifted.native_route {
+            NativeRoute::LlamaSwapModel { model_id, .. } => {
+                *model_id = ProfileId::new("drifted-model").unwrap();
+            }
+            _ => panic!("language fixture must resolve to llama-swap"),
+        }
+        cases.push(drifted);
+
+        let mut drifted = route.clone();
+        drifted.tasks.push(Task::new("drifted-task").unwrap());
+        cases.push(drifted);
+
+        let mut drifted = route.clone();
+        drifted.readiness = match route.readiness {
+            Readiness::ManifestPresent => Readiness::Installed,
+            Readiness::Installed => Readiness::Healthy,
+            Readiness::Healthy => Readiness::ManifestPresent,
+        };
+        cases.push(drifted);
+
+        cases
+    }
+
+    fn assert_listener_has_no_connection(listener: &TcpListener) {
+        match listener.accept() {
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Ok(_) => panic!("route drift dispatched an HTTP request"),
+            Err(error) => panic!("fixture listener failed: {error}"),
+        }
+    }
+
     #[test]
     fn native_translation_preserves_role_order_and_text_without_extra_system_prompt() {
         let native = native_request(&catalog(), &request()).unwrap();
@@ -889,6 +1006,98 @@ mod tests {
                 {"role":"user", "content":"next"}
             ])
         );
+    }
+
+    #[test]
+    fn chat_route_drift_is_rejected_before_http_dispatch() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let catalog = catalog();
+        let request = request();
+        let accepted = resolve_profile_route(&catalog, request.profile()).unwrap();
+        let adapter = LanguageAdapter::new(&endpoint, None).unwrap();
+        let context = OperationContext::new(Instant::now() + Duration::from_secs(5), &NeverCancel);
+
+        for drifted in route_drift_cases(&accepted) {
+            let error = adapter
+                .execute_with_events_for_route(&catalog, &request, &drifted, &context, |_| {
+                    panic!("callback must not run when the route is stale")
+                })
+                .err()
+                .expect("stale accepted route must fail");
+            assert_eq!(
+                error,
+                failure(
+                    DispatchDisposition::NoDispatch,
+                    LanguageErrorKind::InvalidRequest,
+                )
+            );
+            assert_listener_has_no_connection(&listener);
+        }
+    }
+
+    #[test]
+    fn embeddings_route_drift_is_rejected_before_http_dispatch() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (_root, catalog) = embedding_catalog();
+        let request = embedding_request();
+        let accepted = resolve_profile_route(&catalog, request.profile()).unwrap();
+        let adapter = LanguageAdapter::new(&endpoint, None).unwrap();
+        let context = OperationContext::new(Instant::now() + Duration::from_secs(5), &NeverCancel);
+
+        for drifted in route_drift_cases(&accepted) {
+            let error = adapter
+                .execute_embeddings_for_route(&catalog, &request, &drifted, &context)
+                .err()
+                .expect("stale accepted route must fail");
+            assert_eq!(
+                error,
+                failure(
+                    DispatchDisposition::NoDispatch,
+                    LanguageErrorKind::InvalidRequest,
+                )
+            );
+            assert_listener_has_no_connection(&listener);
+        }
+    }
+
+    #[test]
+    fn route_bound_embeddings_refreshes_manifest_before_any_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (root, catalog) = embedding_catalog();
+        let request = embedding_request();
+        let accepted = resolve_profile_route(&catalog, request.profile()).unwrap();
+        // The cached catalog still declares embeddings. Only an actual refresh
+        // observes that the native manifest now declares a chat-only model.
+        fs::write(
+            root.path().join("llama-swap.yaml"),
+            "models:\n  embedding-fixture:\n    cmd: llama-server\n",
+        )
+        .unwrap();
+        assert!(request.validate(&catalog).is_ok());
+        let error = LanguageAdapter::new(&endpoint, None)
+            .unwrap()
+            .execute_embeddings_for_route(
+                &catalog,
+                &request,
+                &accepted,
+                &OperationContext::new(Instant::now() + Duration::from_secs(2), &NeverCancel),
+            )
+            .err()
+            .expect("changed native manifest must not dispatch");
+        assert_eq!(
+            error,
+            failure(
+                DispatchDisposition::NoDispatch,
+                LanguageErrorKind::InvalidRequest
+            )
+        );
+        assert_listener_has_no_connection(&listener);
     }
 
     #[test]
@@ -1440,10 +1649,13 @@ mod tests {
             write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
         });
         let (_root, catalog) = embedding_catalog();
+        let request = embedding_request();
+        let accepted_route = resolve_profile_route(&catalog, request.profile()).unwrap();
         let result = adapter
-            .execute_embeddings(
+            .execute_embeddings_for_route(
                 &catalog,
-                &embedding_request(),
+                &request,
+                &accepted_route,
                 &OperationContext::new(Instant::now() + Duration::from_secs(3), &NeverCancel),
             )
             .unwrap();
@@ -1455,6 +1667,9 @@ mod tests {
     fn actual_http_adapter_preserves_native_request_and_accepts_reasoning_only_completion() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let catalog = catalog();
+        let request = request();
+        let accepted_route = resolve_profile_route(&catalog, request.profile()).unwrap();
         let server = std::thread::spawn(move || {
             let accept_deadline = Instant::now() + Duration::from_secs(2);
             let (mut stream, _) = loop {
@@ -1477,11 +1692,12 @@ mod tests {
         });
         let result = LanguageAdapter::new(&endpoint, None)
             .unwrap()
-            .execute(
-                &catalog(),
-                &request(),
+            .execute_with_events_for_route(
+                &catalog,
+                &request,
+                &accepted_route,
                 &OperationContext::new(Instant::now() + Duration::from_secs(2), &NeverCancel),
-                |_| true,
+                |_| Ok(()),
             )
             .unwrap();
         let InferenceResult::Chat {

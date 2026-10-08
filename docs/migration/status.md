@@ -8,7 +8,30 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
-## Current resumed checkpoint — 2026-10-07
+## Current resumed checkpoint — 2026-10-08
+
+The native managed-language integration passes **734 tests, 1 ignored**, strict
+all-target Clippy, formatting and whitespace checks. This is not a live
+managed-runtime acceptance claim. The new concrete executor is limited to one
+owned isolated llama-swap router and declared llama-server-compatible language
+models; media/TTS/decision GPU switching remains unfinished.
+
+New fixtures cover exact GPU/startup binding, fresh route/model readiness,
+retained-history rejection, generic reconciliation compatibility, object-shaped
+private configuration, bounded worker event delivery and cleanup on lost normal
+completion delivery. Stop-receipt retries prove one Stop across delayed cgroup
+observations and retain the receipt on cancellation or foreign-ledger rejection.
+Joined daemon completion accounting retains uncertain reservations unless
+cleanup is proven. Late-readiness shutdown coverage remains predicate-level;
+full injected daemon/native-worker lifecycle tests and real managed acceptance
+are still outstanding. No live service was stopped for this checkpoint.
+
+The site now uses the Signal / 03 visual direction, committed as `6cbef1b`.
+The real Firefox desktop/mobile probe passed again after the theme change;
+root reviewed desktop media and mobile decisions renders. Palette regression
+checks now cover primary/secondary text, functional accents and focus on all
+three surfaces. The GPUI frontend is a recorded recommendation, not a dependency
+or a completed native migration. See [interface direction](../interface-direction.md).
 
 Original source HEAD moved from `5792522` to `ed7538a`; the migration branch
 remains separate, with discovery/forms/supervisor/source-sync committed at
@@ -99,9 +122,9 @@ CAR-220 Phase 9, and CAR-221 Phase 10.
 | 4. Shared contracts | In development | Read-only catalog and offline `l3ms --list stack`, layered settings, existing-store job metadata, and typed lane request/result validation are on the branch. Adapter contracts and full compatibility/live release gates remain; release stays gated by Phase 3. |
 | 5. Runtime adapters | In development | Concrete bounded language execution, ComfyUI job handling, CPU-local decision supervision, Breeze speech execution/artifact validation, and inert generic media recipes pass fixtures. Private language/Comfy Unix HTTP transport also passes native fixtures. General lifecycle/admission, GPU release, real TTS/decision pilots, and user-facing switching remain pending. |
 | 6. Local coordinator | In development | Durable queue, ownership locks, v1 control/v2 native result pages, one-shot CLI Submit and opt-in foreground CPU-local decision dispatch pass offline fixtures. Current CUDA profiles remain gated. General managed-engine/media dispatch, installation, server-pushed streaming and real cross-client acceptance remain pending. |
-| 7. HTTP ingress | Pending | Gateway to the same coordinator. |
+| 7. HTTP ingress | In development | Bounded authenticated loopback gateway forwards to the same coordinator; native framing, cancellation and lost-ack/no-retry fixtures pass. Installed/live multi-client acceptance remains pending. |
 | 8. Unified workbench | In development | Three-lane Stack Catalog shares settings and has opt-in strict-file submit/observe/cancel with retained IDs and private native output. Full task-form parity and live managed routing remain pending. |
-| 9. Public site | In development | Local static site now has separate language, media/TTS, and decision views generated from native manifests; six generator/site checks pass. Visual/browser review and all publication gates remain pending. |
+| 9. Public site | In development | Separate language, media/TTS and decision views derive from native manifests. Ten data/contrast tests, DOM fixtures and real Firefox desktop/mobile click/keyboard/focus/layout checks pass, including the Signal / 03 style. Comprehensive accessibility and publication/export gates remain pending. |
 | 10. Final acceptance | Pending | Live gates and old-path retirement review. |
 
 ## Current safeguards

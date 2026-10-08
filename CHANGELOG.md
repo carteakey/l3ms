@@ -10,6 +10,14 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Add an opt-in concrete managed-language foreground session with explicit
+  private configuration, listener-shared host ownership, exact router activation
+  and readiness, fresh accepted routes, bounded native results and conservative
+  shutdown/quarantine. Keep CPU launcher behavior unchanged; cross-runtime media/
+  TTS/GPU-decision dispatch and real managed acceptance remain unfinished.
+- Bind language/Comfy native operations to the full accepted route and reject
+  refreshed route drift before dispatch; require object-shaped native Comfy
+  acknowledgments/status and preserve uncertain one-shot activation outcomes.
 - Retain exact-generation stop receipts across read-only cgroup observation
   retries, with retained-intent and manager revalidation; cancellation and a
   foreign intent ledger cannot cause a repeated Stop or discard the receipt.

@@ -1,8 +1,9 @@
 # Managed foreground session: remaining integration contract
 
-This records the next implementation slice, not deployed functionality or live
-acceptance. The current foreground executor remains CPU-decision-only. Original
-repositories and services are preserved; migration work stays on
+This records the managed integration contract, not deployed functionality or live
+acceptance. The branch has a concrete managed-language executor under verification
+alongside the existing CPU-decision executor. Original repositories and services
+are preserved; migration work stays on
 `feature/l3ms-monorepo`.
 
 ## Ownership and ordering
@@ -47,6 +48,14 @@ conflicting work and retains ownership records.
 | ComfyUI | Launch its direct Python entrypoint with explicit existing private output/user directories. `/system_stats` is inspection/liveness, not loaded-model readiness. | Track each submitted native UUID; cancellation dispatch is not terminal acknowledgment. |
 | Breeze and local decisions | Per-request native executable/Python work, not implicitly a resident HTTP runtime. | Process-group cleanup is not proof that escaping descendants or the GPU are released. |
 
+For Comfy, the supplied UUID is initially a **dispatch candidate**, not a known
+native job. Persist a separate generation-/route-bound dispatch intent before
+the one POST. The existing history `backend_id` records a verified native ID;
+do not populate it from the candidate alone. Attach it only after the exact
+acknowledgment or a positive read-only observation of that UUID. Missing history
+or a 404 is `Unknown`, not evidence of non-submission. Candidate persistence,
+recovery and the worker/coordinator handshake still need implementation.
+
 The manifest currently permits llama-swap model startup up to 500 seconds while
 the old standalone load client allows 60. The managed path needs one explicit
 bounded activation horizon and reconciliation, not repeated load requests.
@@ -62,12 +71,64 @@ never cause a second activation request merely to check status.
 
 There is no dedicated router `/upstream/{id}/load` API in installed v247:
 generic upstream routes forward the remaining path to the native backend.
-For an explicitly declared llama-server-compatible backend, the planned
+For an explicitly declared llama-server-compatible backend, the branch's
 activation request is one side-effectful `/upstream/{encoded-id}/health` GET,
 which can start/swap that model before forwarding native health. It must not
 be used as a read-only probe. Other backend health contracts stay gated until
 declared and verified; the old standalone load client is not the managed
 activation implementation.
+
+## Concrete language-session entrypoint
+
+`l3ms --coordinator-managed-session /absolute/path/private-session.json` uses a
+separate schema from `--coordinator-cpu-daemon`. It does not adopt the running
+legacy service or enable ComfyUI, TTS, GPU decisions or arbitrary native engines.
+Do not run it against an occupied GPU as a substitute for a maintenance plan.
+
+Its schema version is `1`; `backend_contract` must be
+`"llama_swap_v247_llama_server"`. Configuration must be an existing private
+owner-controlled file (0600) and specify these fields explicitly:
+
+- Paths: `repository_root`, `socket_directory`, `lock_directory`,
+  `data_directory`, `standalone_data_directory`, `service_intent_directory`,
+  `transport_directory`, `private_router_config`, `router_executable` and
+  `router_working_directory`. Use existing absolute paths and separate private
+  coordinator state from standalone history. Private directories must satisfy
+  the existing ownership/mode checks; no original checkout is removed.
+- Route: `coordinator_id`, `startup_profile` (a real `language:<profile-id>`),
+  `supported_model_tasks` (model IDs mapped to explicit `chat` and/or
+  `embeddings` task arrays), and `router_port`. Supported IDs must exist in the
+  dedicated router configuration; the startup profile must resolve in the
+  current native catalog with its declared tasks.
+- Physical resource: `gpu_uuid`, `gpu_index` and `gpu_idle_mib`. Idle memory
+  allowance is not permission to ignore an unknown compute claimant.
+- Bounds: `queue_capacity` (1–128), `peer_timeout_ms` (1–30000),
+  `max_connections` (1–4096), `session_timeout_seconds` and
+  `request_timeout_seconds` (1–3600 each), `activation_timeout_seconds`
+  (1–500), and `stop_timeout_seconds` / `recovery_timeout_seconds` (1–300 each).
+
+The dedicated router file is strict duplicate-free JSON, which is also a YAML
+subset accepted by the router. It must be separate from the original
+`llama-swap.yaml`, contain an object-valued `models` map, contain no `apiKeys`
+at any depth, and use no ambient `${env.*}` expansion except explicit
+`${env.L3MS_ROOT}`. Its device/inode and exact bytes are retained and checked
+before activation and inference; config drift closes the session, not a silent
+hot reload. Operator-provided native commands remain trusted configuration, not
+proof that arbitrary engines implement the declared backend contract.
+
+The listener owns history, result retention and reservations. A scoped worker
+borrows that same host lock for owner/transport/native HTTP operations. Accepted
+routes are refreshed before activation and again before inference. Native chat
+deltas, usage and stream completion reach the existing bounded result interface;
+embeddings retain typed vectors/usage. Readiness does not authorize unsupported
+models or tasks. On uncertainty, retain/quarantine until exact-service stop,
+cgroup release and physical GPU idle are proven. Read-only cleanup observation
+retries retain the original stop receipt and never issue a second Stop. An
+uncertain managed-session CLI report exits nonzero.
+
+Offline fixtures and a successful build do not prove real managed language
+execution, cross-client acceptance or cross-runtime switching. Those remain
+separate gates before deployment.
 
 ## Explicit configuration, no ambient assumptions
 

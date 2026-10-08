@@ -6,17 +6,24 @@
 //! not deduplicate IDs. Tokens are single-use and adapter-local, not a fence
 //! against direct clients or a durable ownership registry after restart.
 
-use std::{error::Error, fmt, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, error::Error, fmt, sync::Arc, time::Duration};
 
+use serde::de::value::MapAccessDeserializer;
+use serde::de::{Error as DeError, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
 use super::catalog::{Catalog, Lane};
 use super::language::DispatchDisposition;
 use super::requests::{InferenceRequest, MediaInput};
+use super::routes::{resolve_profile_route, ResolvedProfileRoute};
 use super::runtime::OperationContext;
 use crate::llama_swap::{auth_headers, normalize_base_url};
 
 const MAX_RESPONSE: usize = 2 * 1024 * 1024;
+const MAX_NATIVE_OBJECT_ENTRIES: usize = 4096;
+const MAX_NATIVE_OUTPUT_ITEMS: usize = 4096;
+const MAX_NATIVE_MESSAGES: usize = 4096;
 const POLL: Duration = Duration::from_millis(25);
 
 /// Explicit caller assertion, based on the installed server implementation.
@@ -58,10 +65,12 @@ pub struct PreparedComfyJob {
     id: String,
     catalog: Catalog,
     request: InferenceRequest,
+    accepted_route: ResolvedProfileRoute,
     attempted: bool,
 }
 impl PreparedComfyJob {
-    /// Save this ID in durable job history before calling submit.
+    /// Candidate native prompt ID. Persist it as a dispatch intent before
+    /// submit; it is not an acknowledged backend ID until native acceptance.
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -155,15 +164,38 @@ impl ComfyAdapter {
         request: &InferenceRequest,
         fresh_uuid: &str,
     ) -> Result<PreparedComfyJob, ComfyFailure> {
+        self.prepare_inner(catalog, request, None, fresh_uuid)
+    }
+
+    /// Prepare against the exact route already accepted by the coordinator.
+    /// The full route is retained and checked again immediately before POST.
+    pub fn prepare_for_route(
+        &self,
+        catalog: &Catalog,
+        request: &InferenceRequest,
+        accepted_route: &ResolvedProfileRoute,
+        fresh_uuid: &str,
+    ) -> Result<PreparedComfyJob, ComfyFailure> {
+        self.prepare_inner(catalog, request, Some(accepted_route), fresh_uuid)
+    }
+
+    fn prepare_inner(
+        &self,
+        catalog: &Catalog,
+        request: &InferenceRequest,
+        accepted_route: Option<&ResolvedProfileRoute>,
+        fresh_uuid: &str,
+    ) -> Result<PreparedComfyJob, ComfyFailure> {
         if !canonical_uuid(fresh_uuid) {
             return Err(no_dispatch(ComfyErrorKind::InvalidRequest));
         }
-        validate_workflow(catalog, request)?;
+        let route = validate_workflow(catalog, request, accepted_route)?;
         Ok(PreparedComfyJob {
             owner: self.owner.clone(),
             id: fresh_uuid.to_owned(),
             catalog: catalog.clone(),
             request: request.clone(),
+            accepted_route: route,
             attempted: false,
         })
     }
@@ -175,12 +207,37 @@ impl ComfyAdapter {
         job: &mut PreparedComfyJob,
         context: &OperationContext<'_>,
     ) -> Result<(), ComfyFailure> {
+        let accepted_route = job.accepted_route.clone();
+        self.submit_inner(job, &accepted_route, context)
+    }
+
+    /// Submit only if the caller's accepted route and the freshly resolved
+    /// route still equal the route retained during preparation.
+    pub fn submit_for_route(
+        &self,
+        job: &mut PreparedComfyJob,
+        accepted_route: &ResolvedProfileRoute,
+        context: &OperationContext<'_>,
+    ) -> Result<(), ComfyFailure> {
+        self.submit_inner(job, accepted_route, context)
+    }
+
+    fn submit_inner(
+        &self,
+        job: &mut PreparedComfyJob,
+        accepted_route: &ResolvedProfileRoute,
+        context: &OperationContext<'_>,
+    ) -> Result<(), ComfyFailure> {
         self.check_owner(job, false)?;
         if job.attempted {
             return Err(no_dispatch(ComfyErrorKind::AlreadyAttempted));
         }
         active(context, DispatchDisposition::NoDispatch)?;
-        validate_workflow(&job.catalog, &job.request)?;
+        if accepted_route != &job.accepted_route {
+            return Err(no_dispatch(ComfyErrorKind::InvalidRequest));
+        }
+        validate_workflow(&job.catalog, &job.request, Some(&job.accepted_route))?;
+        active(context, DispatchDisposition::NoDispatch)?;
         let InferenceRequest::Media {
             input: MediaInput::Workflow { graph, .. },
             ..
@@ -194,7 +251,10 @@ impl ComfyAdapter {
         if !status.is_success() {
             return Err(uncertain(ComfyErrorKind::Rejected));
         }
-        if body.get("prompt_id").and_then(Value::as_str) != Some(job.id()) {
+        let ack = serde_json::from_slice::<NativeJsonObject<NativeSubmitAck>>(&body)
+            .map_err(|_| uncertain(ComfyErrorKind::Protocol))?
+            .0;
+        if ack.prompt_id.len() != 36 || ack.prompt_id != job.id() {
             return Err(uncertain(ComfyErrorKind::Protocol));
         }
         Ok(())
@@ -236,9 +296,10 @@ impl ComfyAdapter {
         if !status.is_success() {
             return Err(uncertain(ComfyErrorKind::Rejected));
         }
-        body.get("cancelled")
-            .and_then(Value::as_bool)
-            .ok_or_else(|| uncertain(ComfyErrorKind::Protocol))
+        let response = serde_json::from_slice::<NativeJsonObject<NativeCancelAck>>(&body)
+            .map_err(|_| uncertain(ComfyErrorKind::Protocol))?
+            .0;
+        Ok(response.cancelled)
     }
 
     fn check_owner(&self, job: &PreparedComfyJob, attempted: bool) -> Result<(), ComfyFailure> {
@@ -253,7 +314,7 @@ impl ComfyAdapter {
         path: &str,
         payload: Option<&Value>,
         context: &OperationContext<'_>,
-    ) -> Result<(reqwest::StatusCode, Value), ComfyFailure> {
+    ) -> Result<(reqwest::StatusCode, Vec<u8>), ComfyFailure> {
         active(context, DispatchDisposition::NoDispatch)?;
         if tokio::runtime::Handle::try_current().is_ok() {
             return Err(no_dispatch(ComfyErrorKind::Configuration));
@@ -323,30 +384,28 @@ impl ComfyAdapter {
                 bytes.extend_from_slice(&chunk);
             }
             active(context, DispatchDisposition::Uncertain)?;
-            // Non-success bodies can be HTML or contain prompts/credentials.
-            let body = if status.is_success() {
-                serde_json::from_slice(&bytes).map_err(|_| uncertain(ComfyErrorKind::Protocol))?
-            } else {
-                Value::Null
-            };
-            Ok((status, body))
+            Ok((status, bytes))
         })
     }
 }
 
-fn validate_workflow(catalog: &Catalog, request: &InferenceRequest) -> Result<(), ComfyFailure> {
+fn validate_workflow(
+    catalog: &Catalog,
+    request: &InferenceRequest,
+    accepted_route: Option<&ResolvedProfileRoute>,
+) -> Result<ResolvedProfileRoute, ComfyFailure> {
     let error = no_dispatch(ComfyErrorKind::InvalidRequest);
     let refreshed = catalog.refresh().map_err(|_| error)?;
-    let original = catalog.inspect(request.profile()).ok_or(error)?;
-    let current = request.validate(&refreshed).map_err(|_| error)?;
-    if current.runtime != original.runtime
-        || current.runtime.lane != Lane::Media
+    request.validate(&refreshed).map_err(|_| error)?;
+    let current = resolve_profile_route(&refreshed, request.profile()).map_err(|_| error)?;
+    if current.runtime.lane != Lane::Media
         || current.runtime.as_str() != "ComfyUI"
+        || accepted_route.is_some_and(|accepted| accepted != &current)
         || !matches!(request, InferenceRequest::Media { input: MediaInput::Workflow { graph, .. }, .. } if graph.as_object().is_some_and(|o| !o.is_empty()))
     {
         return Err(error);
     }
-    Ok(())
+    Ok(current)
 }
 
 fn canonical_uuid(id: &str) -> bool {
@@ -360,6 +419,288 @@ fn canonical_uuid(id: &str) -> bool {
         })
 }
 
+#[derive(Deserialize)]
+struct NativeSubmitAck {
+    prompt_id: String,
+}
+
+#[derive(Deserialize)]
+struct NativeCancelAck {
+    cancelled: bool,
+}
+
+/// Deserialize a typed DTO only from a JSON object, never from a sequence.
+/// The wrapped struct still performs field-level duplicate/type validation.
+struct NativeJsonObject<T>(T);
+
+impl<'de, T> Deserialize<'de> for NativeJsonObject<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct ObjectVisitor<T>(std::marker::PhantomData<fn() -> T>);
+
+        impl<'de, T> Visitor<'de> for ObjectVisitor<T>
+        where
+            T: Deserialize<'de>,
+        {
+            type Value = NativeJsonObject<T>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a JSON object")
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                T::deserialize(MapAccessDeserializer::new(map)).map(NativeJsonObject)
+            }
+        }
+
+        deserializer.deserialize_map(ObjectVisitor(std::marker::PhantomData))
+    }
+}
+
+/// Typed representation of the installed `/api/jobs/{id}` response. Unknown
+/// source metadata such as priority, timestamps, workflow, and preview fields
+/// is intentionally ignored; semantic fields remain typed so duplicates and
+/// wrong JSON shapes fail closed.
+#[derive(Deserialize)]
+struct NativeJobStatus {
+    id: String,
+    status: String,
+    #[serde(default)]
+    execution_status: Option<NativeJsonObject<NativeExecutionStatus>>,
+    #[serde(default)]
+    outputs: Option<NativeObject<NativeObject<NativeOutputField>>>,
+}
+
+#[derive(Deserialize)]
+struct NativeExecutionStatus {
+    #[serde(default)]
+    status_str: Option<String>,
+    #[serde(default)]
+    completed: Option<bool>,
+    #[serde(default)]
+    messages: Option<NativeMessages>,
+}
+
+struct NativeMessages(Vec<NativeStatusMessage>);
+
+impl<'de> Deserialize<'de> for NativeMessages {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct NativeMessagesVisitor;
+
+        impl<'de> Visitor<'de> for NativeMessagesVisitor {
+            type Value = NativeMessages;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a bounded Comfy execution message list")
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut messages = Vec::new();
+                while let Some(message) = sequence.next_element::<NativeStatusMessage>()? {
+                    if messages.len() >= MAX_NATIVE_MESSAGES {
+                        return Err(A::Error::custom("too many native execution messages"));
+                    }
+                    messages.push(message);
+                }
+                Ok(NativeMessages(messages))
+            }
+        }
+
+        deserializer.deserialize_seq(NativeMessagesVisitor)
+    }
+}
+
+struct NativeStatusMessage(String);
+
+impl<'de> Deserialize<'de> for NativeStatusMessage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct NativeStatusMessageVisitor;
+
+        impl<'de> Visitor<'de> for NativeStatusMessageVisitor {
+            type Value = NativeStatusMessage;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a two-element Comfy execution message")
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let event = sequence
+                    .next_element::<String>()?
+                    .ok_or_else(|| A::Error::invalid_length(0, &self))?;
+                sequence
+                    .next_element::<NativeObject<IgnoredAny>>()?
+                    .ok_or_else(|| A::Error::invalid_length(1, &self))?;
+                if sequence.next_element::<IgnoredAny>()?.is_some() {
+                    return Err(A::Error::invalid_length(3, &self));
+                }
+                Ok(NativeStatusMessage(event))
+            }
+        }
+
+        deserializer.deserialize_seq(NativeStatusMessageVisitor)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum NativeOutputItem {
+    File(NativeJsonObject<NativeOutputFile>),
+    Text(String),
+}
+
+#[derive(Deserialize)]
+struct NativeOutputFile {
+    #[serde(default)]
+    filename: Option<String>,
+    #[serde(default)]
+    subfolder: Option<String>,
+    #[serde(default, rename = "type")]
+    storage_type: Option<String>,
+}
+
+enum NativeOutputField {
+    Items(Vec<NativeOutputItem>),
+    Other,
+}
+
+impl<'de> Deserialize<'de> for NativeOutputField {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct NativeOutputFieldVisitor;
+
+        impl<'de> Visitor<'de> for NativeOutputFieldVisitor {
+            type Value = NativeOutputField;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a Comfy output list or non-list output metadata")
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut items = Vec::new();
+                while let Some(item) = sequence.next_element::<NativeOutputItem>()? {
+                    if items.len() >= MAX_NATIVE_OUTPUT_ITEMS {
+                        return Err(A::Error::custom("too many native output items"));
+                    }
+                    items.push(item);
+                }
+                Ok(NativeOutputField::Items(items))
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                while map.next_entry::<String, IgnoredAny>()?.is_some() {}
+                Ok(NativeOutputField::Other)
+            }
+
+            fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
+                Ok(NativeOutputField::Other)
+            }
+
+            fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
+                Ok(NativeOutputField::Other)
+            }
+
+            fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
+                Ok(NativeOutputField::Other)
+            }
+
+            fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(NativeOutputField::Other)
+            }
+
+            fn visit_str<E>(self, _: &str) -> Result<Self::Value, E> {
+                Ok(NativeOutputField::Other)
+            }
+
+            fn visit_string<E>(self, _: String) -> Result<Self::Value, E> {
+                Ok(NativeOutputField::Other)
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(NativeOutputField::Other)
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E> {
+                Ok(NativeOutputField::Other)
+            }
+        }
+
+        deserializer.deserialize_any(NativeOutputFieldVisitor)
+    }
+}
+
+/// A JSON object that rejects duplicate keys and has a bounded entry count.
+/// Used for dynamic node/media maps and message payload objects.
+struct NativeObject<T>(BTreeMap<String, T>);
+
+impl<'de, T> Deserialize<'de> for NativeObject<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct NativeObjectVisitor<T>(std::marker::PhantomData<fn() -> T>);
+
+        impl<'de, T> Visitor<'de> for NativeObjectVisitor<T>
+        where
+            T: Deserialize<'de>,
+        {
+            type Value = NativeObject<T>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("an object with unique keys")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut entries = BTreeMap::new();
+                while let Some((key, value)) = map.next_entry::<String, T>()? {
+                    if entries.len() >= MAX_NATIVE_OBJECT_ENTRIES {
+                        return Err(A::Error::custom("too many native object entries"));
+                    }
+                    if entries.insert(key, value).is_some() {
+                        return Err(A::Error::custom("duplicate native object key"));
+                    }
+                }
+                Ok(NativeObject(entries))
+            }
+        }
+
+        deserializer.deserialize_map(NativeObjectVisitor(std::marker::PhantomData))
+    }
+}
+
 fn safe_relative(path: &str, empty: bool) -> bool {
     (empty && path.is_empty())
         || (!path.is_empty()
@@ -371,65 +712,83 @@ fn safe_relative(path: &str, empty: bool) -> bool {
                 .all(|part| !part.is_empty() && part != "." && part != ".." && part.len() <= 128))
 }
 
-fn parse_snapshot(body: &Value, id: &str) -> Result<ComfySnapshot, ComfyFailure> {
+fn parse_snapshot(body: &[u8], id: &str) -> Result<ComfySnapshot, ComfyFailure> {
     let error = uncertain(ComfyErrorKind::Protocol);
-    if body.get("id").and_then(Value::as_str) != Some(id) {
+    let body = serde_json::from_slice::<NativeJsonObject<NativeJobStatus>>(body)
+        .map_err(|_| uncertain(ComfyErrorKind::Protocol))?
+        .0;
+    if body.id.len() != 36 || !canonical_uuid(&body.id) || body.id != id || body.status.len() > 32 {
         return Err(error);
     }
-    let state = match body.get("status").and_then(Value::as_str) {
-        Some("pending") => ComfyJobState::Pending,
-        Some("in_progress") => ComfyJobState::Running,
-        Some("completed") => ComfyJobState::Completed,
-        Some("failed") => ComfyJobState::Failed,
-        Some("cancelled") => ComfyJobState::Cancelled,
+    let state = match body.status.as_str() {
+        "pending" => ComfyJobState::Pending,
+        "in_progress" => ComfyJobState::Running,
+        "completed" => ComfyJobState::Completed,
+        "failed" => ComfyJobState::Failed,
+        "cancelled" => ComfyJobState::Cancelled,
         _ => return Err(error),
     };
     if matches!(
         state,
         ComfyJobState::Completed | ComfyJobState::Failed | ComfyJobState::Cancelled
     ) {
-        let native = body.get("execution_status").ok_or(error)?;
+        let native = &body.execution_status.as_ref().ok_or(error)?.0;
         let success = state == ComfyJobState::Completed;
-        if native.get("completed").and_then(Value::as_bool) != Some(success)
-            || native.get("status_str").and_then(Value::as_str)
-                != Some(if success { "success" } else { "error" })
+        let status_str = native.status_str.as_deref().ok_or(error)?;
+        let completed = native.completed.ok_or(error)?;
+        let messages = &native.messages.as_ref().ok_or(error)?.0;
+        if status_str.len() > 32
+            || completed != success
+            || status_str != if success { "success" } else { "error" }
         {
             return Err(error);
         }
-        let messages = native
-            .get("messages")
-            .and_then(Value::as_array)
-            .ok_or(error)?;
+        if messages.iter().any(|message| {
+            message.0.is_empty() || message.0.len() > 128 || message.0.chars().any(char::is_control)
+        }) {
+            return Err(error);
+        }
         let interrupted = messages
             .iter()
-            .any(|m| m.get(0).and_then(Value::as_str) == Some("execution_interrupted"));
+            .any(|message| message.0 == "execution_interrupted");
         if interrupted != (state == ComfyJobState::Cancelled) {
             return Err(error);
         }
     }
     let mut artifacts = Vec::new();
-    if let Some(outputs) = body.get("outputs") {
-        for (node_id, node) in outputs.as_object().ok_or(error)? {
+    if let Some(outputs) = body.outputs {
+        for (node_id, node) in outputs.0 {
             if node_id.is_empty() || node_id.len() > 128 || node_id.chars().any(char::is_control) {
                 return Err(error);
             }
-            for (media_type, items) in node.as_object().ok_or(error)? {
+            for (media_type, output) in node.0 {
                 if media_type.is_empty()
                     || media_type.len() > 128
                     || media_type.chars().any(char::is_control)
                 {
                     return Err(error);
                 }
-                let Some(items) = items.as_array() else {
+                let NativeOutputField::Items(items) = output else {
                     continue;
                 };
                 for item in items {
-                    let Some(filename) = item.get("filename") else {
+                    let item = match item {
+                        NativeOutputItem::File(item) => item,
+                        // Text outputs are valid native metadata, but are not
+                        // returned as downloadable artifacts. Keep them
+                        // bounded by the same response limit and discard them.
+                        NativeOutputItem::Text(text) => {
+                            if text.len() > MAX_RESPONSE {
+                                return Err(uncertain(ComfyErrorKind::TooLarge));
+                            }
+                            continue;
+                        }
+                    };
+                    let Some(filename) = item.0.filename.as_deref() else {
                         continue;
                     };
-                    let filename = filename.as_str().ok_or(error)?;
-                    let subfolder = item.get("subfolder").and_then(Value::as_str).ok_or(error)?;
-                    let storage_type = item.get("type").and_then(Value::as_str).ok_or(error)?;
+                    let subfolder = item.0.subfolder.as_deref().ok_or(error)?;
+                    let storage_type = item.0.storage_type.as_deref().ok_or(error)?;
                     if !safe_relative(filename, false)
                         || filename.contains('/')
                         || !safe_relative(subfolder, true)
@@ -443,9 +802,9 @@ fn parse_snapshot(body: &Value, id: &str) -> Result<ComfySnapshot, ComfyFailure>
                     artifacts.push(ComfyArtifact {
                         node_id: node_id.clone(),
                         media_type: media_type.clone(),
-                        filename: filename.into(),
-                        subfolder: subfolder.into(),
-                        storage_type: storage_type.into(),
+                        filename: filename.to_owned(),
+                        subfolder: subfolder.to_owned(),
+                        storage_type: storage_type.to_owned(),
                     });
                 }
             }
@@ -536,6 +895,9 @@ mod tests {
         };
         serde_json::json!({"id":ID,"status":state,"execution_status":{"status_str":if success {"success"} else {"error"},"completed":success,"messages":[[event,{"prompt_id":ID}]]},"outputs":{},"workflow":{"prompt":{"secret":"MUST_NOT_LEAK"}}})
     }
+    fn snapshot(value: &Value) -> Result<ComfySnapshot, ComfyFailure> {
+        parse_snapshot(&serde_json::to_vec(value).unwrap(), ID)
+    }
     type Recorded = Vec<(String, Value)>;
     fn fixture(
         replies: Vec<(u16, String, Duration)>,
@@ -588,7 +950,11 @@ mod tests {
                     },
                 ));
                 std::thread::sleep(delay);
-                let _ = write!(stream,"HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len());
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
             }
             recorded
         });
@@ -754,6 +1120,35 @@ mod tests {
         assert_eq!(server.join().unwrap().len(), 1);
     }
 
+    #[test]
+    fn duplicate_native_ack_fields_are_rejected_without_replay() {
+        let duplicate_prompt_id = format!(r#"{{"prompt_id":"{ID}","prompt_id":"{ID}"}}"#);
+        let (endpoint, server) = fixture(vec![
+            (200, duplicate_prompt_id, Duration::ZERO),
+            (
+                200,
+                r#"{"cancelled":true,"cancelled":false}"#.into(),
+                Duration::ZERO,
+            ),
+        ]);
+        let adapter = adapter(&endpoint);
+        let mut job = prepared(&adapter);
+        assert_eq!(
+            adapter.submit(&mut job, &context()).unwrap_err(),
+            uncertain(ComfyErrorKind::Protocol)
+        );
+        assert!(job.submission_attempted());
+        assert_eq!(
+            adapter.submit(&mut job, &context()).unwrap_err().kind,
+            ComfyErrorKind::AlreadyAttempted
+        );
+        assert_eq!(
+            adapter.cancel(&job, &context()).unwrap_err(),
+            uncertain(ComfyErrorKind::Protocol)
+        );
+        assert_eq!(server.join().unwrap().len(), 2);
+    }
+
     struct Flag(Arc<AtomicBool>);
     impl Cancellation for Flag {
         fn is_cancelled(&self) -> bool {
@@ -857,15 +1252,15 @@ mod tests {
             ("failed", ComfyJobState::Failed),
             ("cancelled", ComfyJobState::Cancelled),
         ] {
-            assert_eq!(parse_snapshot(&terminal(label), ID).unwrap().state, state);
+            assert_eq!(snapshot(&terminal(label)).unwrap().state, state);
         }
         for label in ["pending", "in_progress"] {
-            assert!(parse_snapshot(&serde_json::json!({"id":ID,"status":label}), ID).is_ok());
+            assert!(snapshot(&serde_json::json!({"id":ID,"status":label})).is_ok());
         }
-        assert!(parse_snapshot(&serde_json::json!({"id":ID,"status":"completed"}), ID).is_err());
+        assert!(snapshot(&serde_json::json!({"id":ID,"status":"completed"})).is_err());
         let mut bad = terminal("completed");
         bad["id"] = Value::String("wrong".into());
-        assert!(parse_snapshot(&bad, ID).is_err());
+        assert!(snapshot(&bad).is_err());
         for name in [
             "../out.png",
             "/out.png",
@@ -879,7 +1274,7 @@ mod tests {
         ] {
             let mut bad = terminal("completed");
             bad["outputs"] = serde_json::json!({"9":{"images":[{"filename":name,"subfolder":"","type":"output"}]}});
-            assert!(parse_snapshot(&bad, ID).is_err());
+            assert!(snapshot(&bad).is_err());
         }
         for folder in [
             "..",
@@ -894,13 +1289,127 @@ mod tests {
         }
         let mut bad = terminal("cancelled");
         bad["execution_status"]["messages"] = serde_json::json!([]);
-        assert!(parse_snapshot(&bad, ID).is_err());
+        assert!(snapshot(&bad).is_err());
         let mut many = terminal("completed");
         many["outputs"] = serde_json::json!({"9":{"images":vec![serde_json::json!({"filename":"a.png","subfolder":"","type":"output"});129]}});
+        assert_eq!(snapshot(&many).unwrap_err().kind, ComfyErrorKind::TooLarge);
+    }
+
+    #[test]
+    fn native_status_dtos_reject_duplicate_semantics_and_wrong_shapes() {
+        for body in [
+            format!(r#"{{"id":"{ID}","id":"{ID}","status":"pending"}}"#),
+            format!(r#"{{"id":"{ID}","status":"pending","status":"in_progress"}}"#),
+            format!(r#"{{"id":"{ID}","status":"pending","outputs":[]}}"#),
+            format!(r#"{{"id":"{ID}","status":"pending","execution_status":[]}}"#),
+            format!(r#"{{"id":["{ID}"],"status":"pending"}}"#),
+            format!(
+                r#"{{"id":"{ID}","status":"completed","execution_status":{{"status_str":"success","completed":true,"completed":false,"messages":[]}}}}"#
+            ),
+            format!(
+                r#"{{"id":"{ID}","status":"completed","execution_status":["success",true,[]]}}"#
+            ),
+            format!(
+                r#"{{"id":"{ID}","status":"completed","execution_status":{{"status_str":"success","completed":true,"messages":[["execution_success",[]]]}}}}"#
+            ),
+            format!(
+                r#"{{"id":"{ID}","status":"completed","execution_status":{{"status_str":"success","completed":true,"messages":[["execution_success",{{}}]]}},"outputs":{{"9":{{"images":[["a.png","","output"]]}}}}}}"#
+            ),
+        ] {
+            assert_eq!(
+                parse_snapshot(body.as_bytes(), ID).unwrap_err(),
+                uncertain(ComfyErrorKind::Protocol)
+            );
+        }
         assert_eq!(
-            parse_snapshot(&many, ID).unwrap_err().kind,
-            ComfyErrorKind::TooLarge
+            parse_snapshot(format!(r#"["{ID}","pending"]"#).as_bytes(), ID).unwrap_err(),
+            uncertain(ComfyErrorKind::Protocol)
         );
+
+        assert!(
+            serde_json::from_str::<NativeJsonObject<NativeSubmitAck>>(&format!(r#"["{ID}"]"#))
+                .is_err()
+        );
+        assert!(serde_json::from_str::<NativeJsonObject<NativeCancelAck>>("[true]").is_err());
+
+        let duplicate_artifact = format!(
+            r#"{{"id":"{ID}","status":"completed","execution_status":{{"status_str":"success","completed":true,"messages":[["execution_success",{{}}]]}},"outputs":{{"9":{{"images":[{{"filename":"first.png","filename":"second.png","subfolder":"","type":"output"}}]}}}}}}"#
+        );
+        assert_eq!(
+            parse_snapshot(duplicate_artifact.as_bytes(), ID).unwrap_err(),
+            uncertain(ComfyErrorKind::Protocol)
+        );
+
+        let duplicate_execution = format!(
+            r#"{{"id":"{ID}","status":"completed","execution_status":{{"status_str":"success","status_str":"error","completed":true,"messages":[]}}}}"#
+        );
+        assert_eq!(
+            parse_snapshot(duplicate_execution.as_bytes(), ID).unwrap_err(),
+            uncertain(ComfyErrorKind::Protocol)
+        );
+
+        let mut installed = terminal("completed");
+        installed["priority"] = serde_json::json!([0.5, ID]);
+        installed["outputs"] = serde_json::json!({
+            "9": {
+                "images": [{
+                    "filename": "out.png",
+                    "subfolder": "run",
+                    "type": "output",
+                    "mediaType": "images",
+                    "extension_metadata": {"retained_by_native": true}
+                }],
+                "animated": true
+            }
+        });
+        let parsed = snapshot(&installed).unwrap();
+        assert_eq!(parsed.state, ComfyJobState::Completed);
+        assert_eq!(parsed.artifacts.len(), 1);
+        assert_eq!(parsed.artifacts[0].filename, "out.png");
+    }
+
+    #[test]
+    fn caller_and_refreshed_full_route_must_match_before_submit() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let media = tempfile::tempdir().unwrap();
+        let manifest = media.path().join("media-runtimes.json");
+        let original = std::fs::read(root.join("toolkits/l2m2/media-runtimes.json")).unwrap();
+        std::fs::write(&manifest, &original).unwrap();
+        let catalog =
+            Catalog::load_from_roots(root, media.path(), root.join("toolkits/l3ds")).unwrap();
+        let request = request();
+        let route = resolve_profile_route(&catalog, request.profile()).unwrap();
+        let adapter = adapter("http://127.0.0.1:9");
+        let mut job = adapter
+            .prepare_for_route(&catalog, &request, &route, ID)
+            .unwrap();
+
+        let mut caller_route_mismatch = route.clone();
+        caller_route_mismatch.tasks.clear();
+        assert_eq!(
+            adapter
+                .submit_for_route(&mut job, &caller_route_mismatch, &context())
+                .unwrap_err(),
+            no_dispatch(ComfyErrorKind::InvalidRequest)
+        );
+        assert!(!job.submission_attempted());
+
+        let mut native: Value = serde_json::from_slice(&original).unwrap();
+        let profile = native["profiles"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|profile| profile["id"] == "qwen-image-2.1")
+            .unwrap();
+        profile["script"] = Value::String("media-models/changed-route.sh".into());
+        std::fs::write(&manifest, native.to_string()).unwrap();
+        assert_eq!(
+            adapter
+                .submit_for_route(&mut job, &route, &context())
+                .unwrap_err(),
+            no_dispatch(ComfyErrorKind::InvalidRequest)
+        );
+        assert!(!job.submission_attempted());
     }
 
     #[test]

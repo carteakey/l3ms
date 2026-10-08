@@ -5,7 +5,7 @@
 //! admission, and GPU residency before execution. Completion releases only the
 //! request reservation, never proves that a resident model released VRAM.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -21,7 +21,7 @@ use super::ipc::{
     ResponseMessage,
 };
 use super::requests::{InferenceRequest, MediaInput};
-use super::routes::{resolve_profile_route, ResolvedProfileRoute};
+use super::routes::{resolve_profile_route, NativeRoute, ResolvedProfileRoute};
 use super::runtime::{Cancellation, ResourceClaim};
 use crate::job_history::{CrossToolkitJobStart, CrossToolkitJobUpdate, JobHistory, JobRecord};
 
@@ -268,6 +268,7 @@ pub struct CoordinatorCore {
     next_runtime_close_generation: u64,
     admission_owner_identity: Arc<()>,
     cpu_decisions_only: bool,
+    managed_language_model_tasks: Option<BTreeMap<String, BTreeSet<String>>>,
 }
 
 impl CoordinatorCore {
@@ -302,6 +303,7 @@ impl CoordinatorCore {
             next_runtime_close_generation: 1,
             admission_owner_identity: Arc::new(()),
             cpu_decisions_only: false,
+            managed_language_model_tasks: None,
         })
     }
 
@@ -411,6 +413,38 @@ impl CoordinatorCore {
         &self.catalog
     }
 
+    /// Validate the explicit startup path before its managed worker touches
+    /// retained native ownership. Generic `confirm_reconciled` stays a
+    /// compatibility boundary; callers that opt into a concrete executor use
+    /// this stricter gate and later provide that executor's exact readiness
+    /// observation.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn require_managed_language_startup(
+        &self,
+        runtime: &RuntimeIdentity,
+        expected_gpu: u32,
+    ) -> Result<()> {
+        ensure!(
+            self.admission == AdmissionState::ReconciliationRequired,
+            "managed language startup requires unresolved startup admission"
+        );
+        ensure!(
+            !self.cpu_decisions_only && self.active.is_empty() && self.pending.is_empty(),
+            "managed language startup requires empty reservations"
+        );
+        ensure!(
+            runtime.lane == Lane::Language
+                && runtime.as_str() == "llama-swap"
+                && self.bindings.len() == 1
+                && matches!(
+                    self.bindings.get(runtime),
+                    Some(ResourceClaim::ExclusiveGpu(gpu)) if *gpu == expected_gpu
+                ),
+            "managed language startup must bind its configured exclusive GPU"
+        );
+        Ok(())
+    }
+
     /// Opt into child-owned CPU local decisions only. The daemon must retain
     /// host ownership and use the bounded CPU worker, which disables CUDA and
     /// never downloads models. This is not reconciliation for resident engines.
@@ -455,6 +489,95 @@ impl CoordinatorCore {
         );
         self.catalog = refreshed;
         self.cpu_decisions_only = true;
+        self.admission = AdmissionState::Ready;
+        Ok(())
+    }
+
+    /// Complete first startup reconciliation for the concrete managed
+    /// llama-swap language session. The caller must hold the listener's host
+    /// guard and obtain `readiness` from the one-shot activation followed by
+    /// read-only owner/router reconciliation; this method validates that the
+    /// observation names a currently declared language model before opening
+    /// global admission. It deliberately does not make CPU-only readiness a
+    /// substitute for resident-engine ownership.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn confirm_managed_language_ready(
+        &mut self,
+        runtime: &RuntimeIdentity,
+        expected_gpu: u32,
+        startup_profile: &ProfileKey,
+        supported_model_tasks: BTreeMap<String, BTreeSet<String>>,
+        readiness: &super::engine_health::RouterModelReadinessObservation,
+    ) -> Result<()> {
+        ensure!(
+            self.admission == AdmissionState::ReconciliationRequired,
+            "coordinator readiness was already resolved"
+        );
+        ensure!(
+            !self.cpu_decisions_only && self.active.is_empty() && self.pending.is_empty(),
+            "managed language readiness requires empty reconciled reservations"
+        );
+        ensure!(
+            runtime.lane == Lane::Language
+                && runtime.as_str() == "llama-swap"
+                && self.bindings.len() == 1
+                && matches!(
+                    self.bindings.get(runtime),
+                    Some(ResourceClaim::ExclusiveGpu(gpu)) if *gpu == expected_gpu
+                ),
+            "managed language session must bind one exclusive llama-swap runtime"
+        );
+
+        let refreshed = self.catalog.refresh()?;
+        let route = resolve_profile_route(&refreshed, startup_profile)?;
+        ensure!(
+            !supported_model_tasks.is_empty(),
+            "managed model list is empty"
+        );
+        for (model, tasks) in &supported_model_tasks {
+            ensure!(
+                super::catalog::ProfileId::new(model.clone()).is_ok()
+                    && !tasks.is_empty()
+                    && tasks
+                        .iter()
+                        .all(|task| matches!(task.as_str(), "chat" | "embeddings")),
+                "managed model/task declaration is invalid"
+            );
+        }
+        ensure!(
+            startup_profile.lane == Lane::Language
+                && route.runtime == *runtime
+                && matches!(
+                    &route.native_route,
+                    NativeRoute::LlamaSwapModel { model_id, .. }
+                        if readiness.matches_model(model_id.as_str())
+                            && supported_model_tasks.get(model_id.as_str()).is_some_and(|tasks|
+                                route.tasks.iter().all(|task| tasks.contains(task.as_str())))
+                ),
+            "native readiness does not match the configured language profile"
+        );
+        ensure!(
+            refreshed
+                .list()
+                .iter()
+                .filter(|profile| profile.runtime == *runtime)
+                .all(|profile| {
+                    resolve_profile_route(&refreshed, &profile.key).is_ok_and(|candidate| {
+                        matches!(candidate.native_route, NativeRoute::LlamaSwapModel { .. })
+                    })
+                }),
+            "bound language runtime contains an unsupported native route"
+        );
+        ensure!(
+            self.history
+                .records()
+                .iter()
+                .all(|job| !retained_job_may_be_unresolved(job)),
+            "retained history still requires native cleanup reconciliation"
+        );
+
+        self.catalog = refreshed;
+        self.managed_language_model_tasks = Some(supported_model_tasks);
         self.admission = AdmissionState::Ready;
         Ok(())
     }
@@ -694,6 +817,20 @@ impl CoordinatorCore {
             .bindings
             .get(&route.runtime)
             .ok_or(SubmissionError::Unavailable)?;
+        if self
+            .managed_language_model_tasks
+            .as_ref()
+            .is_some_and(|supported| {
+                let NativeRoute::LlamaSwapModel { model_id, .. } = &route.native_route else {
+                    return true;
+                };
+                !supported
+                    .get(model_id.as_str())
+                    .is_some_and(|tasks| tasks.contains(request.task()))
+            })
+        {
+            return Err(SubmissionError::Unavailable);
+        }
         if self.runtime_admission_closures.contains_key(&route.runtime) {
             return Err(SubmissionError::RuntimeAdmissionClosed);
         }
@@ -936,6 +1073,22 @@ impl CoordinatorCore {
                 return Err(DispatchBeginError::RouteChanged);
             }
         };
+        if self
+            .managed_language_model_tasks
+            .as_ref()
+            .is_some_and(|supported| {
+                let NativeRoute::LlamaSwapModel { model_id, .. } = &current_route.native_route
+                else {
+                    return true;
+                };
+                !supported
+                    .get(model_id.as_str())
+                    .is_some_and(|tasks| tasks.contains(ticket.request.task()))
+            })
+        {
+            self.quarantine();
+            return Err(DispatchBeginError::RouteChanged);
+        }
         if self.cpu_decisions_only
             && (!cpu_decision_route(&current_route) || ticket.resource != ResourceClaim::None)
         {
@@ -1452,6 +1605,172 @@ mod tests {
             .find(|job| job["request_id"] == request_id)
             .and_then(|job| job["result_state"].as_str())
             .map(str::to_owned)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn managed_language_core(
+        root: &Path,
+        data: &Path,
+        bindings: BTreeMap<RuntimeIdentity, ResourceClaim>,
+    ) -> CoordinatorCore {
+        let language = root.join("language");
+        let media = root.join("media");
+        let decisions = root.join("decisions");
+        std::fs::create_dir_all(&language).unwrap();
+        std::fs::create_dir_all(&media).unwrap();
+        std::fs::create_dir_all(&decisions).unwrap();
+        std::fs::write(
+            language.join("llama-swap.yaml"),
+            "models:\n  fixture-model:\n    cmd: llama-server\n",
+        )
+        .unwrap();
+        std::fs::write(
+            media.join("media-runtimes.json"),
+            r#"{"schema_version":1,"profiles":[]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            decisions.join("decision-runtimes.json"),
+            r#"{"version":"1.0","profiles":[]}"#,
+        )
+        .unwrap();
+        let catalog = Catalog::load_from_roots(&language, &media, &decisions).unwrap();
+        CoordinatorCore::load(catalog, bindings, data, root, 8).unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn managed_tasks() -> BTreeMap<String, BTreeSet<String>> {
+        BTreeMap::from([("fixture-model".into(), BTreeSet::from(["chat".into()]))])
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn managed_startup_gate_requires_the_exact_single_language_gpu_binding() {
+        let root = TempDir::new().unwrap();
+        let data = TempDir::new().unwrap();
+        let runtime = RuntimeIdentity::new(Lane::Language, "llama-swap").unwrap();
+        let core = managed_language_core(
+            root.path(),
+            data.path(),
+            BTreeMap::from([(runtime.clone(), ResourceClaim::ExclusiveGpu(2))]),
+        );
+
+        core.require_managed_language_startup(&runtime, 2).unwrap();
+        assert!(core.require_managed_language_startup(&runtime, 1).is_err());
+        assert!(core
+            .require_managed_language_startup(
+                &RuntimeIdentity::new(Lane::Language, "other-runtime").unwrap(),
+                2,
+            )
+            .is_err());
+        assert!(core
+            .require_managed_language_startup(
+                &RuntimeIdentity::new(Lane::Media, "llama-swap").unwrap(),
+                2,
+            )
+            .is_err());
+
+        let extra_runtime = RuntimeIdentity::new(Lane::Decisions, "nagi").unwrap();
+        let multiple_data = TempDir::new().unwrap();
+        let multiple = managed_language_core(
+            root.path(),
+            multiple_data.path(),
+            BTreeMap::from([
+                (runtime.clone(), ResourceClaim::ExclusiveGpu(2)),
+                (extra_runtime, ResourceClaim::None),
+            ]),
+        );
+        assert!(multiple
+            .require_managed_language_startup(&runtime, 2)
+            .is_err());
+        assert_eq!(core.admission(), AdmissionState::ReconciliationRequired);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn managed_readiness_requires_exact_route_clean_history_and_fresh_source() {
+        let runtime = RuntimeIdentity::new(Lane::Language, "llama-swap").unwrap();
+        let profile = ProfileKey::new(Lane::Language, "fixture-model").unwrap();
+        let readiness =
+            super::super::engine_health::RouterModelReadinessObservation::test_for_model(
+                "fixture-model",
+            );
+
+        let root = TempDir::new().unwrap();
+        let data = TempDir::new().unwrap();
+        let mut core = managed_language_core(
+            root.path(),
+            data.path(),
+            BTreeMap::from([(runtime.clone(), ResourceClaim::ExclusiveGpu(2))]),
+        );
+        core.require_managed_language_startup(&runtime, 2).unwrap();
+        assert!(core
+            .confirm_managed_language_ready(
+                &runtime,
+                2,
+                &profile,
+                managed_tasks(),
+                &super::super::engine_health::RouterModelReadinessObservation::test_for_model(
+                    "other-model",
+                ),
+            )
+            .is_err());
+        core.confirm_managed_language_ready(&runtime, 2, &profile, managed_tasks(), &readiness)
+            .unwrap();
+        assert_eq!(core.admission(), AdmissionState::Ready);
+
+        let drift_root = TempDir::new().unwrap();
+        let drift_data = TempDir::new().unwrap();
+        let mut drifted = managed_language_core(
+            drift_root.path(),
+            drift_data.path(),
+            BTreeMap::from([(runtime.clone(), ResourceClaim::ExclusiveGpu(2))]),
+        );
+        std::fs::write(
+            drift_root.path().join("language/llama-swap.yaml"),
+            "models:\n  replacement-model:\n    cmd: llama-server\n",
+        )
+        .unwrap();
+        assert!(drifted
+            .confirm_managed_language_ready(&runtime, 2, &profile, managed_tasks(), &readiness,)
+            .is_err());
+        assert_eq!(drifted.admission(), AdmissionState::ReconciliationRequired);
+
+        let retained_root = TempDir::new().unwrap();
+        let retained_data = TempDir::new().unwrap();
+        let mut retained = managed_language_core(
+            retained_root.path(),
+            retained_data.path(),
+            BTreeMap::from([(runtime.clone(), ResourceClaim::ExclusiveGpu(2))]),
+        );
+        retained
+            .history
+            .begin_cross_toolkit(CrossToolkitJobStart {
+                toolkit: "l3ms".into(),
+                profile: Some("fixture-model".into()),
+                task: Some("chat".into()),
+                request_id: Some("retained-queued".into()),
+            })
+            .unwrap();
+        assert!(retained
+            .confirm_managed_language_ready(&runtime, 2, &profile, managed_tasks(), &readiness,)
+            .is_err());
+        assert_eq!(retained.admission(), AdmissionState::ReconciliationRequired);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn generic_reconciliation_remains_compatible_for_one_llama_swap_binding() {
+        let root = TempDir::new().unwrap();
+        let data = TempDir::new().unwrap();
+        let runtime = RuntimeIdentity::new(Lane::Language, "llama-swap").unwrap();
+        let mut core = managed_language_core(
+            root.path(),
+            data.path(),
+            BTreeMap::from([(runtime, ResourceClaim::ExclusiveGpu(2))]),
+        );
+        core.confirm_reconciled().unwrap();
+        assert_eq!(core.admission(), AdmissionState::Ready);
     }
 
     #[test]

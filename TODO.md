@@ -79,6 +79,16 @@ See the [migration status](docs/migration/status.md),
   internal daemon and shared client; reconnect/restart fixtures pass. Native
   event production and terminal retention are connected for CPU decisions;
   general managed-engine/media dispatch remains pending.
+  The opt-in concrete managed-language session now composes the listener-owned
+  host lock, service WAL, isolated router, one-shot activation, read-only selected
+  model readiness, fresh accepted-route dispatch and bounded native results.
+  Language integration fixtures pass; full daemon/native-engine composition,
+  real model acceptance and multi-runtime switching remain required. For Comfy,
+  persist its candidate UUID as dispatch intent before POST, separately from a
+  verified `backend_id`; attach that ID only after exact acknowledgment or a
+  positive read-only native observation. Neither 404 nor cancel dispatch proves
+  non-submission/completion. Per-job Breeze/GPU-decision ownership must use the
+  exact-service cgroup path, not process-group cleanup alone.
   CPU-only worker and restricted core admission are now connected to an opt-in
   foreground daemon with responsive private status/cancel/result queries,
   quota-before-acknowledgment, cancellation and bounded shutdown fixtures.
@@ -131,9 +141,11 @@ See the [migration status](docs/migration/status.md),
   restart, timeout, contention, and rollback paths before enabling public actions.
 - [ ] Complete visual/keyboard/mobile review of the three-lane site and verify
   generated data against native manifests; do not publish before the audit gate.
-  Nine data-contract tests and shipped-JavaScript DOM fixtures pass locally;
-  CI now runs both. No browser is available in this session, so real rendering,
-  mobile layout and browser accessibility/keyboard acceptance remain pending.
+  Ten data/contrast tests and shipped-JavaScript DOM fixtures pass locally;
+  CI runs both. The opt-in real Firefox probe passes desktop/mobile lane layout,
+  pointer, keyboard and focus checks, console capture and disposable-profile
+  cleanup. Signal / 03 styling is implemented and visually checked on the site.
+  Comprehensive accessibility and public-link/export review remain pending.
   Committed serving source ed7538a is synchronized; imported metrics are not
   monorepo live acceptance. New source-referenced benchmark harnesses were not
   committed and remain an explicit import/validation gap.
@@ -148,8 +160,12 @@ Pi delegation remains deferred at the owner's request.
 
 ## Speculative / research
 
-There are no uncommitted ideas at this time. Add future possibilities here
-only until they are explicitly chosen and promoted to Linear.
+- Native Rust/GPUI frontend, separate from the coordinator and optional for CLI
+  builds. Carry the Signal / 03 design tokens into a bounded read-only prototype
+  after full-port acceptance; measure GPU footprint, then establish client/IME/
+  keyboard parity before replacing any existing UI. See
+  [interface direction](docs/interface-direction.md). This recommendation is not
+  an implemented native app or a new full-port completion requirement.
 
 ## ✅ Done
 

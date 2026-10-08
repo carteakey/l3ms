@@ -35,7 +35,7 @@ const MAX_COORDINATOR_NATIVE_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
     about = "L3MS launcher (TUI + interactive model and bench CLI)",
     group(
         ArgGroup::new("action")
-            .args(["run", "bench", "list", "quickstart", "settings", "export_profile", "import_profile", "compare_results", "coordinator_status", "coordinator_cancel", "request_results", "request_submit", "request_output", "coordinator_cpu_daemon", "coordinator_http_gateway"])
+            .args(["run", "bench", "list", "quickstart", "settings", "export_profile", "import_profile", "compare_results", "coordinator_status", "coordinator_cancel", "request_results", "request_submit", "request_output", "coordinator_cpu_daemon", "coordinator_managed_session", "coordinator_http_gateway"])
             .multiple(false)
     )
 )]
@@ -109,6 +109,10 @@ struct Cli {
     /// Run an explicitly configured foreground CPU-local coordinator session.
     #[arg(long, value_name = "CONFIG")]
     coordinator_cpu_daemon: Option<PathBuf>,
+
+    /// Run one explicitly configured foreground managed language session.
+    #[arg(long, value_name = "CONFIG")]
+    coordinator_managed_session: Option<PathBuf>,
 
     /// Run an authenticated loopback HTTP gateway to an existing coordinator.
     #[arg(long, value_name = "CONFIG")]
@@ -199,6 +203,9 @@ fn dispatch(cli: Cli) -> Result<u8> {
     }
     if let Some(config_path) = coordinator_cpu_daemon_action(&cli)? {
         return run_cpu_coordinator_action(config_path);
+    }
+    if let Some(config_path) = coordinator_managed_session_action(&cli)? {
+        return run_managed_session_action(config_path);
     }
     let output_spec = coordinator_output_spec(&cli)?;
 
@@ -368,6 +375,26 @@ fn coordinator_cpu_daemon_action(cli: &Cli) -> Result<Option<&Path>> {
     Ok(Some(config_path))
 }
 
+fn coordinator_managed_session_action(cli: &Cli) -> Result<Option<&Path>> {
+    let Some(config_path) = cli.coordinator_managed_session.as_deref() else {
+        return Ok(None);
+    };
+    if cli.coordinator_socket_dir.is_some()
+        || cli.coordinator_status.is_some()
+        || cli.coordinator_cancel.is_some()
+        || cli.request_results.is_some()
+        || cli.request_submit.is_some()
+        || cli.request_output.is_some()
+        || cli.request_lane.is_some()
+        || cli.after_cursor.is_some()
+        || cli.result_page_bytes.is_some()
+        || cli.extra.is_some()
+    {
+        bail!("--coordinator-managed-session cannot be combined with other coordinator options");
+    }
+    Ok(Some(config_path))
+}
+
 fn coordinator_output_spec(cli: &Cli) -> Result<Option<(&str, crate::control::catalog::Lane)>> {
     match (cli.request_output.as_deref(), cli.request_lane) {
         (None, None) => Ok(None),
@@ -409,6 +436,26 @@ fn run_cpu_coordinator_action(_: &Path) -> Result<u8> {
 #[cfg(target_os = "linux")]
 fn run_cpu_coordinator(config_path: &Path) -> Result<crate::control::daemon::RunReport> {
     crate::control::coordinator_launch::run(config_path)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))
+}
+
+#[cfg(target_os = "linux")]
+fn run_managed_session_action(config_path: &Path) -> Result<u8> {
+    let report = run_managed_session(config_path)?;
+    println!("{}", cpu_coordinator_report_json(report));
+    Ok(u8::from(
+        report.stopped == crate::control::daemon::StopReason::WorkerUncertain,
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_managed_session_action(_: &Path) -> Result<u8> {
+    bail!("managed coordinator sessions are supported only on Linux");
+}
+
+#[cfg(target_os = "linux")]
+fn run_managed_session(config_path: &Path) -> Result<crate::control::daemon::RunReport> {
+    crate::control::coordinator_launch::run_managed_session(config_path)
         .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
 

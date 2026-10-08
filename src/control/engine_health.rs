@@ -108,9 +108,9 @@ where
     serde_json::from_slice::<JsonObject<T>>(bytes).map(|object| object.0)
 }
 
-/// Only the two native endpoints supported by this production slice.
-/// `LlamaServer` is intentionally not the llama-swap router: llama-swap's
-/// `/v1/models` and per-model load semantics are a separate lifecycle contract.
+/// Native backends with a bounded health endpoint in this slice. The enum is
+/// also the explicit backend gate for the one-shot llama-swap activation seam;
+/// that router is separate from a direct `LlamaServer` probe.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeEngineKind {
     LlamaServer,
@@ -135,6 +135,7 @@ pub enum NativeHealthFailureKind {
     OwnerUnverified,
     NotRunning,
     WrongServiceRole,
+    WrongNativeBackend,
     SocketUnavailable,
     PeerMismatch,
     Io,
@@ -171,6 +172,9 @@ impl fmt::Display for NativeHealthFailure {
             NativeHealthFailureKind::NotRunning => "owned engine supervisor is not running",
             NativeHealthFailureKind::WrongServiceRole => {
                 "owned service is not an isolated engine supervisor"
+            }
+            NativeHealthFailureKind::WrongNativeBackend => {
+                "native engine backend is unsupported for this operation"
             }
             NativeHealthFailureKind::SocketUnavailable => "pinned engine socket is unavailable",
             NativeHealthFailureKind::PeerMismatch => {
@@ -233,6 +237,15 @@ impl RouterModelReadinessObservation {
     pub fn matches_model(&self, model_id: &str) -> bool {
         self.selected_model.as_str() == model_id
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_for_model(model_id: &str) -> Self {
+        Self {
+            selected_model: validated_selected_model(model_id)
+                .expect("test model ID must be valid"),
+            observed_at: Instant::now(),
+        }
+    }
 }
 
 impl fmt::Debug for RouterModelReadinessObservation {
@@ -240,6 +253,76 @@ impl fmt::Debug for RouterModelReadinessObservation {
         formatter
             .debug_struct("RouterModelReadinessObservation")
             .field("observed_at", &"<point-in-time>")
+            .finish()
+    }
+}
+
+/// Whether a one-shot activation request is known not to have crossed the
+/// transport boundary or may have reached llama-swap.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ActivationDisposition {
+    NoDispatch,
+    Unconfirmed,
+}
+
+/// A fixed, redacted result category for an activation attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RouterModelActivationFailure {
+    disposition: ActivationDisposition,
+    kind: NativeHealthFailureKind,
+}
+
+impl RouterModelActivationFailure {
+    fn new(disposition: ActivationDisposition, kind: NativeHealthFailureKind) -> Self {
+        Self { disposition, kind }
+    }
+
+    pub fn disposition(&self) -> ActivationDisposition {
+        self.disposition
+    }
+
+    pub fn kind(&self) -> NativeHealthFailureKind {
+        self.kind
+    }
+}
+
+impl fmt::Display for RouterModelActivationFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self.disposition {
+            ActivationDisposition::NoDispatch => "llama-swap model activation was not dispatched",
+            ActivationDisposition::Unconfirmed => {
+                "llama-swap model activation outcome is unconfirmed"
+            }
+        })
+    }
+}
+
+impl Error for RouterModelActivationFailure {}
+
+/// A bounded acknowledgment from one forwarded llama-server health request.
+/// It is not a readiness, admission, manager-generation, or resource-release
+/// proof; the caller must reconcile through the read-only `/running` probe.
+#[derive(Eq, PartialEq)]
+pub struct RouterModelActivationAck {
+    selected_model: ProfileId,
+    acknowledged_at: Instant,
+}
+
+impl RouterModelActivationAck {
+    pub fn acknowledged_at(&self) -> Instant {
+        self.acknowledged_at
+    }
+
+    pub fn matches_model(&self, model_id: &str) -> bool {
+        self.selected_model.as_str() == model_id
+    }
+}
+
+impl fmt::Debug for RouterModelActivationAck {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RouterModelActivationAck")
+            .field("acknowledged_at", &"<point-in-time>")
             .finish()
     }
 }
@@ -319,6 +402,103 @@ pub fn probe_llama_swap_router_model_readiness(
         selected_model,
         observed_at: Instant::now(),
     })
+}
+
+/// Make exactly one side-effectful llama-swap request for a model whose
+/// accepted backend contract is llama-server. The routed `/health` request may
+/// cause llama-swap to start the model; a successful response is only an
+/// acknowledgment from that forwarded native endpoint. It is not router
+/// readiness or evidence that the model remains running. Callers must not
+/// retry an `Unconfirmed` outcome and may reconcile only through the
+/// read-only `/running` probe.
+pub fn activate_llama_swap_model_once(
+    owner: &ManagedRuntimeOwner<'_>,
+    service: &OwnedService,
+    socket_directory: &Path,
+    backend: NativeEngineKind,
+    selected_model: &str,
+    context: &OperationContext<'_>,
+) -> Result<RouterModelActivationAck, RouterModelActivationFailure> {
+    let no_dispatch = |error: NativeHealthFailure| {
+        RouterModelActivationFailure::new(ActivationDisposition::NoDispatch, error.kind())
+    };
+    let unconfirmed = |error: NativeHealthFailure| {
+        RouterModelActivationFailure::new(ActivationDisposition::Unconfirmed, error.kind())
+    };
+
+    check_active(context).map_err(no_dispatch)?;
+    if backend != NativeEngineKind::LlamaServer {
+        return Err(RouterModelActivationFailure::new(
+            ActivationDisposition::NoDispatch,
+            NativeHealthFailureKind::WrongNativeBackend,
+        ));
+    }
+    let selected_model = validated_selected_model(selected_model).map_err(no_dispatch)?;
+    let mut stream =
+        connect_owned_supervisor(owner, service, socket_directory, context).map_err(no_dispatch)?;
+    require_running(owner, service, context).map_err(no_dispatch)?;
+    check_active(context).map_err(no_dispatch)?;
+
+    if let Err((error, wrote_any_bytes)) =
+        request_llama_swap_model_health_once(&mut stream, &selected_model, context)
+    {
+        return Err(activation_write_failure(error, wrote_any_bytes));
+    }
+
+    let response =
+        read_response(&mut stream, context, NativeContentType::Json, false).map_err(unconfirmed)?;
+    validate_native_response(
+        NativeEngineKind::LlamaServer,
+        response.status,
+        &response.body,
+    )
+    .map_err(unconfirmed)?;
+    check_active(context).map_err(unconfirmed)?;
+    require_running(owner, service, context).map_err(unconfirmed)?;
+    check_active(context).map_err(unconfirmed)?;
+    Ok(RouterModelActivationAck {
+        selected_model,
+        acknowledged_at: Instant::now(),
+    })
+}
+
+fn request_llama_swap_model_health_once(
+    stream: &mut UnixStream,
+    selected_model: &ProfileId,
+    context: &OperationContext<'_>,
+) -> Result<(), (NativeHealthFailure, bool)> {
+    let mut request = Vec::with_capacity(384);
+    request.extend_from_slice(b"GET /upstream/");
+    append_percent_encoded_path_segment(&mut request, selected_model.as_str());
+    request.extend_from_slice(
+        b"/health HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
+    );
+    write_all_bounded_tracking(stream, &request, context)
+}
+
+fn activation_write_failure(
+    error: NativeHealthFailure,
+    wrote_any_bytes: bool,
+) -> RouterModelActivationFailure {
+    let disposition = if wrote_any_bytes {
+        ActivationDisposition::Unconfirmed
+    } else {
+        ActivationDisposition::NoDispatch
+    };
+    RouterModelActivationFailure::new(disposition, error.kind())
+}
+
+fn append_percent_encoded_path_segment(output: &mut Vec<u8>, value: &str) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            output.push(byte);
+        } else {
+            output.push(b'%');
+            output.push(HEX[usize::from(byte >> 4)]);
+            output.push(HEX[usize::from(byte & 0x0f)]);
+        }
+    }
 }
 
 fn validated_selected_model(value: &str) -> Result<ProfileId, NativeHealthFailure> {
@@ -899,22 +1079,39 @@ fn validate_router_model_readiness(
 
 fn write_all_bounded(
     stream: &mut UnixStream,
-    mut bytes: &[u8],
+    bytes: &[u8],
     context: &OperationContext<'_>,
 ) -> Result<(), NativeHealthFailure> {
+    write_all_bounded_tracking(stream, bytes, context).map_err(|(error, _)| error)
+}
+
+fn write_all_bounded_tracking(
+    stream: &mut UnixStream,
+    mut bytes: &[u8],
+    context: &OperationContext<'_>,
+) -> Result<(), (NativeHealthFailure, bool)> {
+    let mut wrote_any_bytes = false;
     while !bytes.is_empty() {
-        check_active(context)?;
+        check_active(context).map_err(|error| (error, wrote_any_bytes))?;
         match stream.write(bytes) {
-            Ok(0) => return Err(failure(NativeHealthFailureKind::Io)),
-            Ok(count) => bytes = &bytes[count..],
+            Ok(0) => {
+                return Err((failure(NativeHealthFailureKind::Io), wrote_any_bytes));
+            }
+            Ok(count) => {
+                wrote_any_bytes = true;
+                bytes = &bytes[count..];
+            }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                wait_for_io(stream, libc::POLLOUT, context)?
+                wait_for_io(stream, libc::POLLOUT, context)
+                    .map_err(|error| (error, wrote_any_bytes))?;
             }
-            Err(_) => return Err(failure(NativeHealthFailureKind::Io)),
+            Err(_) => {
+                return Err((failure(NativeHealthFailureKind::Io), wrote_any_bytes));
+            }
         }
     }
-    check_active(context)
+    check_active(context).map_err(|error| (error, wrote_any_bytes))
 }
 
 fn read_some(
@@ -1396,6 +1593,89 @@ mod tests {
         assert_eq!(error.kind(), NativeHealthFailureKind::Cancelled);
         signal.join().unwrap();
         server.join().unwrap();
+    }
+
+    #[test]
+    fn activation_request_is_one_encoded_private_socket_get_and_ack_is_redacted() {
+        let fixture = Fixture::new();
+        let listener = fixture.listener.try_clone().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0u8; 1];
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+                assert!(request.len() <= 1024);
+            }
+            request
+        });
+        let mut stream = fixture.connect(&context(Duration::from_secs(2))).unwrap();
+        let selected_model = validated_selected_model("private.model-id").unwrap();
+        request_llama_swap_model_health_once(
+            &mut stream,
+            &selected_model,
+            &context(Duration::from_secs(2)),
+        )
+        .unwrap();
+        let request = server.join().unwrap();
+        assert_eq!(
+            request,
+            b"GET /upstream/private.model-id/health HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+        );
+
+        let mut encoded = Vec::new();
+        append_percent_encoded_path_segment(&mut encoded, "model/with?reserved%chars");
+        assert_eq!(encoded, b"model%2Fwith%3Freserved%25chars");
+
+        let acknowledgment = RouterModelActivationAck {
+            selected_model: validated_selected_model("private.model-id").unwrap(),
+            acknowledged_at: Instant::now(),
+        };
+        assert!(acknowledgment.matches_model("private.model-id"));
+        assert!(!acknowledgment.matches_model("another-model"));
+        assert!(!format!("{acknowledgment:?}").contains("private.model-id"));
+
+        let failure = RouterModelActivationFailure::new(
+            ActivationDisposition::Unconfirmed,
+            NativeHealthFailureKind::Io,
+        );
+        assert_eq!(
+            failure.to_string(),
+            "llama-swap model activation outcome is unconfirmed"
+        );
+        assert_eq!(failure.disposition(), ActivationDisposition::Unconfirmed);
+        assert_eq!(failure.kind(), NativeHealthFailureKind::Io);
+        assert!(!format!("{failure:?}").contains("private.model-id"));
+    }
+
+    #[test]
+    fn activation_write_progress_distinguishes_no_dispatch_from_uncertain() {
+        let (mut stream, _peer) = UnixStream::pair().unwrap();
+        let cancellation = TestCancellation(Arc::new(AtomicBool::new(true)));
+        let cancelled_context =
+            OperationContext::new(Instant::now() + Duration::from_secs(2), &cancellation);
+        let (error, wrote_any_bytes) =
+            write_all_bounded_tracking(&mut stream, b"GET /health", &cancelled_context)
+                .unwrap_err();
+        assert!(!wrote_any_bytes);
+        let failure = activation_write_failure(error, wrote_any_bytes);
+        assert_eq!(failure.disposition(), ActivationDisposition::NoDispatch);
+        assert_eq!(failure.kind(), NativeHealthFailureKind::Cancelled);
+
+        let (mut stream, _peer) = UnixStream::pair().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        let request = vec![b'x'; 1024 * 1024];
+        let (error, wrote_any_bytes) =
+            write_all_bounded_tracking(&mut stream, &request, &context(Duration::from_millis(50)))
+                .unwrap_err();
+        assert!(wrote_any_bytes);
+        let failure = activation_write_failure(error, wrote_any_bytes);
+        assert_eq!(failure.disposition(), ActivationDisposition::Unconfirmed);
+        assert!(matches!(
+            failure.kind(),
+            NativeHealthFailureKind::DeadlineExceeded | NativeHealthFailureKind::Io
+        ));
     }
 
     #[test]

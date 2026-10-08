@@ -108,6 +108,14 @@ impl LocalListener {
             }
         }
     }
+
+    /// Borrow the host/device guard retained for this listener's full
+    /// lifetime. Managed execution owners must receive this exact guard;
+    /// acquiring a second lock would neither strengthen nor replace the
+    /// listener's ownership.
+    pub(crate) fn ownership_guard(&self) -> &CoordinatorLock {
+        &self._ownership
+    }
 }
 impl Drop for LocalListener {
     fn drop(&mut self) {

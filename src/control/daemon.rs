@@ -14,6 +14,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, TryRecvError, TrySendError};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use super::catalog::{Catalog, RuntimeIdentity};
@@ -27,10 +29,14 @@ use super::ipc::{
     ResponseErrorCode, ResponseMessage, ResultsQuery,
 };
 use super::local_ipc::{private_directory, LocalIpcError, LocalListener};
+#[cfg(target_os = "linux")]
+use super::managed_session::{ManagedJobKey, ManagedWorkerCommand};
 use super::process::ProcessFailureDisposition;
 use super::result_buffer::{
     ResultBuffer, ResultBufferError, ResultEvent, ResultFailureCode, ResultTerminal,
 };
+#[cfg(target_os = "linux")]
+use super::runtime::Cancellation;
 use super::runtime::{OperationContext, RecoveryPolicy, ResourceClaim};
 
 const CPU_ACCEPT_POLL: Duration = Duration::from_millis(25);
@@ -57,6 +63,7 @@ pub enum DaemonError {
     HistoryConflict,
     CpuDecisionsUnavailable,
     DecisionWorkerUnavailable,
+    ManagedSessionUnavailable,
     ResultBufferInvariant,
 }
 impl std::fmt::Display for DaemonError {
@@ -182,6 +189,374 @@ impl ControlDaemon {
             }
         }
         Ok(report)
+    }
+
+    /// Opt in to the concrete, single-supervisor llama-swap language path.
+    /// The main thread retains history, durable reservations, results and IPC;
+    /// one scoped worker borrows this listener's exact host guard for the
+    /// complete owner/activation/inference/cleanup lifetime.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn run_managed_language(
+        mut self,
+        config: super::managed_session::ManagedSessionConfig,
+        context: &OperationContext<'_>,
+    ) -> Result<RunReport, DaemonError> {
+        let mut report = RunReport {
+            completed_exchanges: 0,
+            failed_connections: 0,
+            stopped: StopReason::ConnectionLimit,
+        };
+        if let Some(reason) = stop_reason(context) {
+            report.stopped = reason;
+            return Ok(report);
+        }
+        let expected_gpu = config.gpu.expected_index();
+        self.core
+            .require_managed_language_startup(&config.runtime, expected_gpu)
+            .map_err(|_| DaemonError::ManagedSessionUnavailable)?;
+
+        let runtime = config.runtime.clone();
+        let startup_profile = config.startup_profile.clone();
+        let supported_model_tasks = config.supported_model_tasks.clone();
+        let session_cancellation = super::managed_session::ManagedWorkerCancellation::new();
+        let worker_cancel = session_cancellation.clone();
+        let (command_sender, command_receiver) = mpsc::sync_channel(1);
+        let (event_sender, event_receiver) = mpsc::sync_channel(1);
+        let session_deadline = context.deadline();
+        let mut fatal_error = None;
+
+        std::thread::scope(|scope| {
+            let ControlDaemon {
+                core,
+                results,
+                listener,
+                peer_timeout,
+                max_connections,
+            } = &mut self;
+            let host_guard = listener.ownership_guard();
+            let catalog = core.catalog().clone();
+            let worker = scope.spawn(move || {
+                super::managed_session::run_worker(
+                    config,
+                    catalog,
+                    host_guard,
+                    session_deadline,
+                    worker_cancel,
+                    command_receiver,
+                    event_sender,
+                )
+            });
+
+            let mut worker_ready = false;
+            let mut worker_finished = false;
+            let mut worker_shutdown_sent = false;
+            let mut stop_cleanup_started = false;
+            let mut stopping = false;
+            let mut handled_connections = 0usize;
+            let mut accepted_result_ids = BTreeSet::new();
+            let mut active_slot: Option<ManagedJobKey> = None;
+            let mut cleanup_ack_pending = false;
+
+            loop {
+                if !stopping {
+                    if let Some(reason) = stop_reason(context) {
+                        report.stopped = reason;
+                        stopping = true;
+                    } else if handled_connections >= *max_connections {
+                        stopping = true;
+                    }
+                }
+
+                match event_receiver.try_recv() {
+                    Ok(super::managed_session::ManagedWorkerEvent::Ready(readiness)) => {
+                        if !managed_ready_may_open_admission(
+                            stopping,
+                            session_cancellation.is_cancelled(),
+                        ) {
+                            // A shutdown may race with the final startup
+                            // observation. Do not reopen admission after the
+                            // listener has already committed to stop.
+                        } else if worker_ready
+                            || core
+                                .confirm_managed_language_ready(
+                                    &runtime,
+                                    expected_gpu,
+                                    &startup_profile,
+                                    supported_model_tasks.clone(),
+                                    &readiness,
+                                )
+                                .is_err()
+                        {
+                            core.quarantine();
+                            report.stopped = StopReason::WorkerUncertain;
+                            stopping = true;
+                        } else {
+                            worker_ready = true;
+                        }
+                    }
+                    Ok(super::managed_session::ManagedWorkerEvent::StartupFailed) => {
+                        core.quarantine();
+                        report.stopped = StopReason::WorkerUncertain;
+                        stopping = true;
+                        worker_finished = true;
+                    }
+                    Ok(super::managed_session::ManagedWorkerEvent::Append {
+                        key,
+                        event,
+                        reply,
+                    }) => {
+                        let appended = if active_slot.as_ref() == Some(&key) {
+                            results.append(&key.request_id, event).is_ok()
+                        } else {
+                            false
+                        };
+                        if !appended {
+                            core.quarantine();
+                            report.stopped = StopReason::WorkerUncertain;
+                            stopping = true;
+                        }
+                        let _ = reply.send(appended);
+                    }
+                    Ok(super::managed_session::ManagedWorkerEvent::JobFinished(completion)) => {
+                        let stop_session = completion.stop_session;
+                        match consume_managed_completion(
+                            core,
+                            results,
+                            completion,
+                            &mut active_slot,
+                            &mut accepted_result_ids,
+                            &mut cleanup_ack_pending,
+                        ) {
+                            Ok(()) => {}
+                            Err(error) => {
+                                fatal_error = Some(error);
+                                report.stopped = StopReason::WorkerUncertain;
+                                stopping = true;
+                            }
+                        }
+                        if cleanup_ack_pending {
+                            stopping = true;
+                        }
+                        if stop_session {
+                            report.stopped = StopReason::WorkerUncertain;
+                            stopping = true;
+                        }
+                    }
+                    Ok(super::managed_session::ManagedWorkerEvent::Stopped { cleanup_proven }) => {
+                        worker_finished = true;
+                        stopping = true;
+                        if !cleanup_proven {
+                            core.quarantine();
+                            report.stopped = StopReason::WorkerUncertain;
+                        }
+                        if cleanup_ack_pending && cleanup_proven {
+                            if let Some(slot) = active_slot.clone() {
+                                if core.acknowledge_reconciled_cleanup(slot.job_id).is_ok() {
+                                    active_slot = None;
+                                    if results
+                                        .terminal(&slot.request_id, ResultTerminal::Interrupted)
+                                        .is_ok()
+                                    {
+                                        accepted_result_ids.remove(&slot.request_id);
+                                        cleanup_ack_pending = false;
+                                    } else {
+                                        core.quarantine();
+                                        report.stopped = StopReason::WorkerUncertain;
+                                    }
+                                } else {
+                                    core.quarantine();
+                                    report.stopped = StopReason::WorkerUncertain;
+                                }
+                            }
+                        }
+                    }
+                    Err(TryRecvError::Disconnected) if worker.is_finished() => {
+                        worker_finished = true;
+                        core.quarantine();
+                        report.stopped = StopReason::WorkerUncertain;
+                        if active_slot.is_some() {
+                            if let Some(slot) = active_slot.as_ref() {
+                                let _ = core.complete(
+                                    slot.job_id,
+                                    Completion::Uncertain,
+                                    Vec::new(),
+                                    Instant::now(),
+                                );
+                            }
+                        }
+                        stopping = true;
+                    }
+                    Err(TryRecvError::Empty | TryRecvError::Disconnected) => {}
+                }
+
+                if let Err(error) = settle_managed_terminal_result_slots(
+                    core,
+                    results,
+                    &mut accepted_result_ids,
+                    active_slot.as_ref(),
+                ) {
+                    fatal_error = Some(error);
+                    report.stopped = StopReason::WorkerUncertain;
+                    stopping = true;
+                }
+
+                // Any transition to stopping (including worker/protocol
+                // failures discovered above) closes intake, cancels queued
+                // durable submissions, and interrupts the one active ticket.
+                // This is deliberately centralized so no failure branch can
+                // skip cancellation merely because `stopping` was already
+                // set in the same loop iteration.
+                if stopping && !stop_cleanup_started {
+                    stop_cleanup_started = true;
+                    session_cancellation.cancel();
+                    let mut cleanup_uncertain = false;
+                    if let Some(slot) = active_slot.as_ref() {
+                        if core.cancel_request(&slot.request_id).is_err() {
+                            cleanup_uncertain = true;
+                        }
+                    }
+                    if cancel_managed_queued(
+                        core,
+                        results,
+                        &mut accepted_result_ids,
+                        active_slot.as_ref(),
+                    )
+                    .is_err()
+                    {
+                        cleanup_uncertain = true;
+                    }
+                    if cleanup_uncertain {
+                        core.quarantine();
+                        report.stopped = StopReason::WorkerUncertain;
+                    }
+                }
+
+                if !stopping && worker_ready && active_slot.is_none() {
+                    match core.reserve_next(Instant::now()) {
+                        Ok(Some(ticket)) => {
+                            let key = ManagedJobKey {
+                                job_id: ticket.job_id,
+                                request_id: ticket.request_id.clone(),
+                            };
+                            match core.begin_dispatch(&ticket, Instant::now()) {
+                                Ok(()) => {
+                                    active_slot = Some(key);
+                                    if command_sender
+                                        .try_send(ManagedWorkerCommand::Dispatch(Box::new(ticket)))
+                                        .is_err()
+                                    {
+                                        core.quarantine();
+                                        report.stopped = StopReason::WorkerUncertain;
+                                        stopping = true;
+                                    }
+                                }
+                                Err(error) => {
+                                    let (completion, terminal) = dispatch_error_result(error);
+                                    if core
+                                        .complete(
+                                            ticket.job_id,
+                                            completion,
+                                            Vec::new(),
+                                            Instant::now(),
+                                        )
+                                        .is_err()
+                                        || results.terminal(&ticket.request_id, terminal).is_err()
+                                    {
+                                        core.quarantine();
+                                        report.stopped = StopReason::WorkerUncertain;
+                                        stopping = true;
+                                    } else {
+                                        accepted_result_ids.remove(&ticket.request_id);
+                                    }
+                                    if core.admission() != super::inference::AdmissionState::Ready {
+                                        report.stopped = StopReason::WorkerUncertain;
+                                        stopping = true;
+                                    }
+                                }
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(_) => {
+                            core.quarantine();
+                            report.stopped = StopReason::WorkerUncertain;
+                            stopping = true;
+                        }
+                    }
+                }
+
+                if stopping && active_slot.is_none() && !worker_shutdown_sent && !worker_finished {
+                    worker_shutdown_sent = true;
+                    match command_sender.try_send(ManagedWorkerCommand::Shutdown) {
+                        Ok(()) => {}
+                        Err(TrySendError::Disconnected(_)) if worker.is_finished() => {
+                            worker_finished = true;
+                        }
+                        Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
+                            core.quarantine();
+                            report.stopped = StopReason::WorkerUncertain;
+                        }
+                    }
+                }
+                if stopping && worker_finished {
+                    break;
+                }
+
+                if stopping {
+                    thread::sleep(CPU_JOIN_POLL);
+                    continue;
+                }
+
+                let accept_deadline = (Instant::now() + CPU_ACCEPT_POLL).min(context.deadline());
+                let accept_cancel = ForwardCancellation(context);
+                let accept_context = OperationContext::new(accept_deadline, &accept_cancel);
+                let mut peer = match listener.accept(&accept_context) {
+                    Ok(peer) => {
+                        handled_connections += 1;
+                        peer
+                    }
+                    Err(LocalIpcError::PeerDenied) => {
+                        handled_connections += 1;
+                        report.failed_connections += 1;
+                        continue;
+                    }
+                    Err(LocalIpcError::Deadline) => continue,
+                    Err(LocalIpcError::Cancelled) => continue,
+                    Err(error) => {
+                        fatal_error = Some(DaemonError::Transport(error));
+                        report.stopped = StopReason::WorkerUncertain;
+                        stopping = true;
+                        continue;
+                    }
+                };
+                let peer_deadline = (Instant::now() + *peer_timeout).min(context.deadline());
+                let peer_cancel = ForwardCancellation(context);
+                let peer_context = OperationContext::new(peer_deadline, &peer_cancel);
+                if serve_managed_connection(
+                    core,
+                    results,
+                    &mut peer,
+                    &peer_context,
+                    &mut accepted_result_ids,
+                )
+                .is_ok()
+                {
+                    report.completed_exchanges += 1;
+                } else {
+                    report.failed_connections += 1;
+                }
+            }
+
+            if worker.join().is_err() {
+                core.quarantine();
+                report.stopped = StopReason::WorkerUncertain;
+                fatal_error = Some(DaemonError::ManagedSessionUnavailable);
+            }
+            if let Some(error) = fatal_error {
+                Err(error)
+            } else {
+                Ok(report)
+            }
+        })
     }
 
     /// Opt-in, bounded execution for declared CPU-local Nagi/Laya decision
@@ -835,6 +1210,264 @@ impl ControlDaemon {
     }
 }
 
+fn serve_managed_connection(
+    core: &mut CoordinatorCore,
+    results: &mut ResultBuffer,
+    connection: &mut super::local_ipc::LocalConnection,
+    context: &OperationContext<'_>,
+    accepted_result_ids: &mut BTreeSet<String>,
+) -> Result<(), LocalIpcError> {
+    let request = connection.read_incoming_request(context)?;
+    if context.is_cancelled() {
+        return Err(LocalIpcError::Cancelled);
+    }
+    if context.remaining().is_zero() {
+        return Err(LocalIpcError::Deadline);
+    }
+
+    let reservation = match &request {
+        IncomingRequest::Control(ClientRequest::Submit {
+            request_id,
+            request,
+            ..
+        }) => Some((request_id.clone(), request.lane())),
+        _ => None,
+    };
+    if let Some((request_id, _)) = &reservation {
+        if let Err(error) = results.can_begin_reserved(request_id) {
+            let code = match error {
+                ResultBufferError::InvalidRequestId => ResponseErrorCode::InvalidRequest,
+                ResultBufferError::DuplicateRequest => ResponseErrorCode::DuplicateRequest,
+                ResultBufferError::CapacityExceeded => ResponseErrorCode::QueueFull,
+                _ => ResponseErrorCode::Internal,
+            };
+            return connection.write_response(
+                &ResponseEnvelope::v1(ResponseMessage::Error {
+                    request_id: Some(request_id.clone()),
+                    code,
+                }),
+                context,
+            );
+        }
+    }
+
+    let response = match request {
+        IncomingRequest::Control(request) => core.handle_client_request(request, Instant::now()),
+        IncomingRequest::Results(query) => managed_results_query(core, results, query),
+    };
+    if let (
+        Some((expected_request_id, lane)),
+        ResponseMessage::Accepted {
+            request_id,
+            operation: AcceptedOperation::Submit,
+            state: RequestStatus::Queued,
+        },
+    ) = (reservation, &response.message)
+    {
+        if &expected_request_id != request_id || results.begin_reserved(request_id, lane).is_err() {
+            core.quarantine();
+            let _ = core.cancel_request(request_id);
+            return connection.write_response(
+                &ResponseEnvelope::v1(ResponseMessage::Error {
+                    request_id: Some(request_id.clone()),
+                    code: ResponseErrorCode::Internal,
+                }),
+                context,
+            );
+        }
+        accepted_result_ids.insert(request_id.clone());
+    }
+    connection.write_response(&response, context)
+}
+
+fn managed_results_query(
+    core: &CoordinatorCore,
+    results: &ResultBuffer,
+    query: ResultsQuery,
+) -> ResponseEnvelope {
+    let Some(state) = core.authoritative_request_status(&query.request_id) else {
+        return results_error(query.request_id, ResponseErrorCode::Internal);
+    };
+    let page = match results.page(
+        &query.request_id,
+        query.after_cursor,
+        query.byte_budget as usize,
+    ) {
+        Ok(page) => page,
+        Err(error) => {
+            let code = match error {
+                ResultBufferError::InvalidRequestId
+                | ResultBufferError::InvalidCursor
+                | ResultBufferError::InvalidPageBudget
+                | ResultBufferError::PageBudgetTooSmall => ResponseErrorCode::InvalidRequest,
+                _ => ResponseErrorCode::Internal,
+            };
+            return results_error(query.request_id, code);
+        }
+    };
+    ResponseEnvelope::v2_results(ResponseMessage::Results {
+        request_id: query.request_id,
+        after_cursor: query.after_cursor,
+        byte_budget: query.byte_budget,
+        state,
+        page,
+    })
+}
+
+fn settle_managed_terminal_result_slots(
+    core: &mut CoordinatorCore,
+    results: &mut ResultBuffer,
+    accepted_result_ids: &mut BTreeSet<String>,
+    active_slot: Option<&super::managed_session::ManagedJobKey>,
+) -> Result<(), DaemonError> {
+    let mut terminal = Vec::new();
+    for request_id in accepted_result_ids.iter() {
+        if active_slot.is_some_and(|slot| slot.request_id == *request_id) {
+            continue;
+        }
+        let state = core.authoritative_request_status(request_id);
+        let result = match state {
+            Some(RequestStatus::Queued | RequestStatus::Running) => continue,
+            Some(RequestStatus::Succeeded) => ResultTerminal::Succeeded,
+            Some(RequestStatus::Failed) => ResultTerminal::Failed(ResultFailureCode::TimedOut),
+            Some(RequestStatus::Cancelled) => ResultTerminal::Cancelled,
+            Some(RequestStatus::Interrupted | RequestStatus::NotFound) | None => {
+                core.quarantine();
+                continue;
+            }
+        };
+        terminal.push((request_id.clone(), result));
+    }
+    for (request_id, result) in terminal {
+        results
+            .terminal(&request_id, result)
+            .map_err(|_| DaemonError::ResultBufferInvariant)?;
+        accepted_result_ids.remove(&request_id);
+    }
+    Ok(())
+}
+
+fn cancel_managed_queued(
+    core: &mut CoordinatorCore,
+    results: &mut ResultBuffer,
+    accepted_result_ids: &mut BTreeSet<String>,
+    active_slot: Option<&super::managed_session::ManagedJobKey>,
+) -> Result<(), DaemonError> {
+    let queued = accepted_result_ids
+        .iter()
+        .filter(|request_id| !active_slot.is_some_and(|slot| slot.request_id == **request_id))
+        .filter(|request_id| {
+            core.authoritative_request_status(request_id) == Some(RequestStatus::Queued)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut failure = None;
+    for request_id in queued {
+        if core.cancel_request(&request_id).is_err() {
+            core.quarantine();
+            failure = Some(DaemonError::HistoryUnavailable);
+            continue;
+        }
+        if results
+            .terminal(&request_id, ResultTerminal::Cancelled)
+            .is_err()
+        {
+            failure = Some(DaemonError::ResultBufferInvariant);
+        }
+        accepted_result_ids.remove(&request_id);
+    }
+    failure.map_or(Ok(()), Err)
+}
+
+fn consume_managed_completion(
+    core: &mut CoordinatorCore,
+    results: &mut ResultBuffer,
+    completion: super::managed_session::ManagedJobCompletion,
+    active_slot: &mut Option<super::managed_session::ManagedJobKey>,
+    accepted_result_ids: &mut BTreeSet<String>,
+    cleanup_ack_pending: &mut bool,
+) -> Result<(), DaemonError> {
+    let Some(active) = active_slot.as_ref() else {
+        core.quarantine();
+        return Err(DaemonError::ManagedSessionUnavailable);
+    };
+    if active != &completion.key {
+        core.quarantine();
+        return Err(DaemonError::ManagedSessionUnavailable);
+    }
+    let slot = active.clone();
+
+    if completion.completion == Completion::Uncertain {
+        if core
+            .complete(
+                slot.job_id,
+                Completion::Uncertain,
+                Vec::new(),
+                Instant::now(),
+            )
+            .is_err()
+        {
+            core.quarantine();
+            return Err(DaemonError::HistoryUnavailable);
+        }
+        if completion.cleanup_proven {
+            core.acknowledge_reconciled_cleanup(slot.job_id)
+                .map_err(|_| DaemonError::HistoryUnavailable)?;
+            results
+                .terminal(&slot.request_id, ResultTerminal::Interrupted)
+                .map_err(|_| DaemonError::ResultBufferInvariant)?;
+            accepted_result_ids.remove(&slot.request_id);
+            *active_slot = None;
+        }
+        return Ok(());
+    }
+
+    if core
+        .complete(
+            slot.job_id,
+            completion.completion,
+            Vec::new(),
+            Instant::now(),
+        )
+        .is_err()
+    {
+        core.quarantine();
+        if core
+            .complete(
+                slot.job_id,
+                Completion::Uncertain,
+                Vec::new(),
+                Instant::now(),
+            )
+            .is_err()
+        {
+            return Err(DaemonError::HistoryUnavailable);
+        }
+        if completion.cleanup_proven {
+            core.acknowledge_reconciled_cleanup(slot.job_id)
+                .map_err(|_| DaemonError::HistoryUnavailable)?;
+            *active_slot = None;
+            results
+                .terminal(&slot.request_id, ResultTerminal::Interrupted)
+                .map_err(|_| DaemonError::ResultBufferInvariant)?;
+            accepted_result_ids.remove(&slot.request_id);
+        } else {
+            *cleanup_ack_pending = true;
+        }
+        return Ok(());
+    }
+
+    *active_slot = None;
+    results
+        .terminal(&slot.request_id, completion.result_terminal)
+        .map_err(|_| DaemonError::ResultBufferInvariant)?;
+    accepted_result_ids.remove(&slot.request_id);
+    if completion.stop_session {
+        core.quarantine();
+    }
+    Ok(())
+}
+
 struct CpuDecisionSlot {
     job_id: u64,
     request_id: String,
@@ -948,6 +1581,10 @@ fn stop_reason(context: &OperationContext<'_>) -> Option<StopReason> {
     }
 }
 
+fn managed_ready_may_open_admission(stopping: bool, session_cancelled: bool) -> bool {
+    !stopping && !session_cancelled
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -967,6 +1604,14 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use tempfile::TempDir;
+
+    #[test]
+    fn managed_late_ready_cannot_reopen_admission_after_stopping_begins() {
+        assert!(managed_ready_may_open_admission(false, false));
+        assert!(!managed_ready_may_open_admission(true, false));
+        assert!(!managed_ready_may_open_admission(false, true));
+        assert!(!managed_ready_may_open_admission(true, true));
+    }
 
     struct Fixture {
         socket: TempDir,
@@ -1019,6 +1664,82 @@ mod tests {
         locks: TempDir,
         data: TempDir,
         standalone: TempDir,
+    }
+
+    #[test]
+    fn managed_uncertain_completion_retains_reservation_until_cleanup_is_proven() {
+        use crate::control::catalog::{Lane, ProfileKey};
+        use crate::control::managed_session::{ManagedJobCompletion, ManagedJobKey};
+        use crate::control::requests::{ChatRole, ChatTurn, InferenceRequest};
+
+        for cleanup_proven in [false, true] {
+            let fixture = CpuFixture::new("# not executed\n");
+            let catalog = Catalog::load(fixture.root.path()).unwrap();
+            let runtime = RuntimeIdentity::new(Lane::Language, "llama-swap").unwrap();
+            let mut core = CoordinatorCore::load(
+                catalog,
+                BTreeMap::from([(runtime, ResourceClaim::ExclusiveGpu(0))]),
+                fixture.data.path(),
+                fixture.root.path(),
+                8,
+            )
+            .unwrap();
+            // This fixture exercises completion accounting, not native readiness.
+            core.confirm_reconciled().unwrap();
+            let request_id = "uncertain-language";
+            let job_id = core
+                .submit(
+                    request_id.into(),
+                    InferenceRequest::Chat {
+                        profile: ProfileKey::new(Lane::Language, "fixture").unwrap(),
+                        turns: vec![ChatTurn {
+                            role: ChatRole::User,
+                            content: "fixture".into(),
+                        }],
+                        max_tokens: 64,
+                    },
+                    Duration::from_secs(30),
+                    Instant::now(),
+                )
+                .unwrap();
+            let ticket = core.reserve_next(Instant::now()).unwrap().unwrap();
+            core.begin_dispatch(&ticket, Instant::now()).unwrap();
+            let key = ManagedJobKey {
+                job_id,
+                request_id: request_id.into(),
+            };
+            let mut active = Some(key.clone());
+            let mut accepted = BTreeSet::from([request_id.into()]);
+            let mut results = ResultBuffer::new();
+            results.begin(request_id, Lane::Language).unwrap();
+            let mut cleanup_pending = false;
+            consume_managed_completion(
+                &mut core,
+                &mut results,
+                ManagedJobCompletion {
+                    key,
+                    completion: Completion::Uncertain,
+                    result_terminal: ResultTerminal::Interrupted,
+                    cleanup_proven,
+                    stop_session: true,
+                },
+                &mut active,
+                &mut accepted,
+                &mut cleanup_pending,
+            )
+            .unwrap();
+            assert_eq!(core.active_count(), usize::from(!cleanup_proven));
+            assert_eq!(active.is_some(), !cleanup_proven);
+            assert_eq!(accepted.contains(request_id), !cleanup_proven);
+            assert_eq!(
+                core.authoritative_request_status(request_id),
+                Some(RequestStatus::Interrupted)
+            );
+            assert_ne!(
+                core.admission(),
+                crate::control::inference::AdmissionState::Ready
+            );
+        }
     }
 
     impl CpuFixture {
