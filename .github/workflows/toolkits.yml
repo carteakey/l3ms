@@ -41,12 +41,14 @@ jobs:
       - name: List media profiles without starting a runtime
         run: ./target/release/l2m2 --list
       - name: Check Python syntax
-        run: python3 -m compileall -q model_downloader media-models
+        run: python3 -m compileall -q model_downloader media-models maintenance
       - name: Run README Python checks
         run: |
           # unittest discovery imports test_resume.py but does not execute its download helpers.
           python3 -m unittest discover -s model_downloader -p 'test_*.py'
           python3 -m unittest discover -s media-models -p 'test_*.py'
+      - name: Check bounded acceptance harness without services or models
+        run: python3 maintenance/probe-breeze-acceptance.py --self-test
       - name: Check shell syntax
         run: |
           for script in media-models/*.sh maintenance/*.sh; do
@@ -77,8 +79,13 @@ jobs:
       - name: List decision profiles without running an engine
         run: ./target/release/l3ds --list
       - name: Check Python syntax
-        run: python3 -m compileall -q decision-models
+        run: python3 -m compileall -q decision-models maintenance
       - name: Check decision runner fail-closed behavior
         run: python3 -m unittest discover -s decision-models -p 'test_*.py'
+      - name: Check acquisition, relocation and coordinator harness offline
+        run: python3 -m unittest discover -s maintenance -p 'test_*.py'
       - name: Check setup shell syntax
-        run: bash -n maintenance/setup-env.sh
+        run: |
+          for script in maintenance/*.sh; do
+            bash -n "$script"
+          done

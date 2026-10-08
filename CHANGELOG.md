@@ -10,6 +10,9 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Add an opt-in bounded native Breeze acceptance harness and CI-only safety
+  fixtures, preserving exact service/config state and refusing unsafe cleanup
+  or unknown GPU claimants; live preflight refusals are not inference passes.
 - Preserve the full accepted Breeze route through bounded speech preparation
   and execution; refreshed device/runtime/entrypoint/task drift now rejects
   before spawning instead of substituting a new route for an old reservation.

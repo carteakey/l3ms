@@ -56,6 +56,15 @@ existing service was stopped in this continuation; nothing was pushed/published.
 The [managed foreground integration contract](managed-session-contract.md)
 records the concrete remaining orchestration and ingress gates.
 
+Root verification after accepted-route Breeze protection: **689 passed,
+1 ignored**, strict all-target Clippy and formatting pass. Both toolkit Rust
+suites (4 media, 2 decision), strict Clippy/formatting, 16 media Python,
+14 downloader Python, 14 decision runner Python and 15 decision-maintenance
+regressions pass. The bounded native TTS harness passed 17 offline safety tests;
+two live preflights refused before any service stop or inference. The current
+GPU listing includes KDE's existing compositor, so its background allowance
+was asked explicitly rather than assumed. See [Breeze evidence](breeze-acceptance.md).
+
 Linear tracking: [CAR-215](https://linear.app/carteakey/issue/CAR-215/consolidate-l3ms-l2m2-and-l3ds-into-the-local-3-mode-model-stack)
 is the parent; [CAR-216](https://linear.app/carteakey/issue/CAR-216/import-l2m2-and-l3ds-into-the-l3ms-monorepo-with-verified-standalone)
 covers Phases 0–3, CAR-217 Phases 4–5, CAR-218 Phases 6–7, CAR-219 Phase 8,

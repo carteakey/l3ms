@@ -119,7 +119,11 @@ See the [migration status](docs/migration/status.md),
   coordinated language → media → language pilot in an agreed maintenance window.
   Record before/after service/GPU state, artifacts, cancellation, and restoration.
   Bounded maintenance/restoration was approved on 2026-10-07; permanent cutover
-  remains outside that approval. Follow the
+  remains outside that approval. Native harness preflights safely refused before
+  any service stop: the absent Comfy unit is now handled, but NVIDIA lists the
+  existing KDE compositor as a compute claimant. Explicit background-compositor
+  allowance is awaiting the owner's choice; no TTS inference pass is claimed.
+  See [Breeze evidence](docs/migration/breeze-acceptance.md). Follow the
   [managed session contract](docs/migration/managed-session-contract.md).
 - [ ] Finish import/standalone compatibility and CI checks; exercise crash,
   restart, timeout, contention, and rollback paths before enabling public actions.
