@@ -10,6 +10,9 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Retain exact-generation stop receipts across read-only cgroup observation
+  retries, with retained-intent and manager revalidation; cancellation and a
+  foreign intent ledger cannot cause a repeated Stop or discard the receipt.
 - Establish the Signal / 03 dashboard style: graphite instrument panels,
   restrained phosphor/mineral/amber accents, slanted branding, explicit keyboard
   focus and reduced-motion support. Record a separate GPUI frontend direction;

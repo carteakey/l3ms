@@ -612,6 +612,53 @@ impl<'host> ManagedRuntimeOwner<'host> {
         observe_stopped_receipt(receipt, probe, context)
     }
 
+    /// Revalidate an existing stop receipt and retry only the read-only
+    /// cgroup observation. This never issues another stop. The original WAL
+    /// intent must still be retained and the manager must still show the same
+    /// inactive generation (or the unit must remain absent).
+    pub fn observe_stopped(
+        &mut self,
+        receipt: StoppedService,
+        probe: &CgroupReleaseProbe,
+        context: &OperationContext<'_>,
+    ) -> Result<StoppedServiceObservation, StopAndObserveError> {
+        let fail = |kind, receipt| StopAndObserveError {
+            kind,
+            receipt: Some(Box::new(receipt)),
+        };
+        if let Err(kind) = check_context(context) {
+            return Err(fail(StopAndObserveErrorKind::Stop(kind), receipt));
+        }
+        let records = match self.store.list() {
+            Ok(records) => records,
+            Err(_) => {
+                return Err(fail(
+                    StopAndObserveErrorKind::Stop(ManagedServiceErrorKind::UnitStateUnverifiable),
+                    receipt,
+                ));
+            }
+        };
+        if !records
+            .iter()
+            .any(|record| record == receipt.intent_record())
+        {
+            return Err(fail(
+                StopAndObserveErrorKind::Stop(ManagedServiceErrorKind::OwnershipMismatch),
+                receipt,
+            ));
+        }
+        if let Err(kind) = check_context(context) {
+            return Err(fail(StopAndObserveErrorKind::Stop(kind), receipt));
+        }
+        if let Err(kind) = self.controller.verify_stopped_receipt(&receipt, context) {
+            return Err(fail(StopAndObserveErrorKind::Stop(kind), receipt));
+        }
+        if let Err(kind) = check_context(context) {
+            return Err(fail(StopAndObserveErrorKind::Stop(kind), receipt));
+        }
+        observe_stopped_receipt(receipt, probe, context)
+    }
+
     /// Stop a recovered supervisor generation and continue through the same
     /// generation-bound cgroup observation path used by ordinary ownership.
     pub fn stop_stop_only_and_observe(
@@ -1848,15 +1895,90 @@ sys.exit(23)
         assert!(error.receipt().is_some());
         assert!(!format!("{error:?}").contains(handle.unit_name()));
         let receipt = error.into_receipt().unwrap();
+        let retry = owner
+            .observe_stopped(receipt, &probe, &fixture.context())
+            .unwrap_err();
         assert_eq!(
-            probe.observe(&receipt, &fixture.context()).unwrap_err(),
-            CgroupReleaseErrorKind::CgroupNotEmpty
+            retry.kind(),
+            StopAndObserveErrorKind::Observation(CgroupReleaseErrorKind::CgroupNotEmpty)
         );
+        let receipt = retry.into_receipt().unwrap();
+        fs::write(
+            fixture.cgroup_leaf(&handle).join("cgroup.events"),
+            "populated 0\nfrozen 0\n",
+        )
+        .unwrap();
+        let observed = owner
+            .observe_stopped(receipt, &probe, &fixture.context())
+            .unwrap();
+        assert_eq!(observed.receipt().intent_record(), handle.intent_record());
         assert_eq!(
             fs::read_to_string(fixture.root.path().join("stops")).unwrap(),
             "stop\n"
         );
         assert_eq!(owner.store.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn cancelled_observation_retry_retains_receipt_without_repeating_stop() {
+        struct Cancel;
+        impl Cancellation for Cancel {
+            fn is_cancelled(&self) -> bool {
+                true
+            }
+        }
+        let fixture = Fixture::new();
+        let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+        let mut owner = fixture.owner(&guard);
+        let handle = fixture.start(&mut owner);
+        let probe = fixture.cgroup_probe(&handle, Some("populated 0\nfrozen 0\n"));
+        let receipt = owner.stop(&handle, &fixture.context()).unwrap();
+        let cancelled = OperationContext::new(Instant::now() + Duration::from_secs(3), &Cancel);
+        let error = owner
+            .observe_stopped(receipt, &probe, &cancelled)
+            .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            StopAndObserveErrorKind::Stop(ManagedServiceErrorKind::Cancelled)
+        );
+        let receipt = error.into_receipt().unwrap();
+        assert_eq!(receipt.intent_record(), handle.intent_record());
+        owner
+            .observe_stopped(receipt, &probe, &fixture.context())
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(fixture.root.path().join("stops")).unwrap(),
+            "stop\n"
+        );
+        assert_eq!(owner.store.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn observation_retry_rejects_unretained_receipt_without_another_stop() {
+        let fixture = Fixture::new();
+        let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+        let mut owner = fixture.owner(&guard);
+        let handle = fixture.start(&mut owner);
+        let probe = fixture.cgroup_probe(&handle, Some("populated 0\nfrozen 0\n"));
+        let receipt = owner.stop(&handle, &fixture.context()).unwrap();
+        let other = Fixture::new();
+        let mut wrong_owner = other.owner(&guard);
+        let error = wrong_owner
+            .observe_stopped(receipt, &probe, &fixture.context())
+            .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            StopAndObserveErrorKind::Stop(ManagedServiceErrorKind::OwnershipMismatch)
+        );
+        let receipt = error.into_receipt().unwrap();
+        owner
+            .observe_stopped(receipt, &probe, &fixture.context())
+            .unwrap();
+        assert!(!other.root.path().join("stops").exists());
+        assert_eq!(
+            fs::read_to_string(fixture.root.path().join("stops")).unwrap(),
+            "stop\n"
+        );
     }
 
     #[test]
