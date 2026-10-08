@@ -1,8 +1,9 @@
 # Managed foreground session: remaining integration contract
 
 This records the managed integration contract, not deployed functionality or live
-acceptance. The branch has a concrete managed-language executor under verification
-alongside the existing CPU-decision executor. Original repositories and services
+acceptance. The branch has a concrete managed-language executor with opt-in
+allowlisted local-job composition under verification, alongside the existing
+CPU-decision executor. Original repositories and services
 are preserved; migration work stays on
 `feature/l3ms-monorepo`.
 
@@ -98,7 +99,8 @@ activation implementation.
 
 `l3ms --coordinator-managed-session /absolute/path/private-session.json` uses a
 separate schema from `--coordinator-cpu-daemon`. It does not adopt the running
-legacy service or enable ComfyUI, TTS, GPU decisions or arbitrary native engines.
+legacy service or enable ComfyUI or arbitrary native engines. Existing configs
+remain language-only; local TTS/decisions require the explicit opt-in below.
 Do not run it against an occupied GPU as a substitute for a maintenance plan.
 
 Its schema version is `1`; `backend_contract` must be
@@ -122,6 +124,36 @@ owner-controlled file (0600) and specify these fields explicitly:
   `max_connections` (1–4096), `session_timeout_seconds` and
   `request_timeout_seconds` (1–3600 each), `activation_timeout_seconds`
   (1–500), and `stop_timeout_seconds` / `recovery_timeout_seconds` (1–300 each).
+
+Optional local-job fields must be declared together: a nonempty
+`local_job_profiles` array (at most 128 unique full profile keys) and an existing
+absolute `job_directory_root`. Omitting both keeps language-only behavior.
+The root must be current-user owned, 0700, nonsymlinked and separate from
+history/WAL/transport roots; its captured device/inode must remain unchanged.
+Only `media:breeze-tts-2` with explicit CUDA/audio.cpp and local Nagi/Laya
+decision routes with explicit CPU or CUDA are supported. Profiles sharing one
+runtime cannot declare conflicting resource claims. Native catalog/request
+validation remains authoritative; an allowlist is not permission to substitute
+routes or fall back to CPU/hosted inference.
+
+CUDA local work stops and releases the resident router before a new owned
+one-shot service starts. CPU local work preserves the resident router. Native
+results stay unpublished until exact Stop, fresh cgroup/device release checks,
+fresh artifact validation and service-intent retirement. Stop is sent once;
+bounded retries retain its generation receipt and only reobserve. A fresh
+language launch can follow proven cleanup, not an uncertain native attempt.
+Retained job intents still block startup rather than being adopted/replayed;
+durable mixed-runtime crash recovery remains a prerequisite for deployment.
+
+Breeze result pages and durable history carry relative `LocalJob` references
+prefixed by the private job-directory name, not private absolute paths.
+The current HTTP gateway forwards coordinator envelopes and references only;
+it does **not** serve artifact bytes. `artifact_root` settings alone do not
+establish a retrieval route or a matching pinned root. Byte retrieval still
+needs request/job-bound reference authorization, no-follow root/file access,
+bounded reads and drift rejection. Do not expose the private job directory
+through a generic static file server. Optional native decision latency/usage
+also remain absent from client result pages, despite retention in job packets.
 
 The dedicated router file is strict duplicate-free JSON, which is also a YAML
 subset accepted by the router. It must be separate from the original

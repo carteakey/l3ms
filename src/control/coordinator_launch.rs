@@ -241,9 +241,8 @@ impl ManagedConfig {
 }
 
 /// Run a strict managed language session with optional allowlisted local jobs.
-/// This is separate from
-/// the CPU-only schema and never opts media or decision runtimes into this
-/// executor.
+/// This is separate from the CPU-only schema. Local media/decision execution
+/// requires an explicit profile allowlist and pinned private job root.
 pub fn run_managed_session(config_path: &Path) -> Result<RunReport, LaunchError> {
     let config: ManagedConfig = read_private_json_object(config_path)?;
     config.validate()?;
