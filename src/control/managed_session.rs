@@ -1,8 +1,11 @@
-//! Concrete managed foreground language-session configuration and executor.
+//! Concrete managed foreground language/local-job configuration and executor.
 //!
 //! This first resident-engine path is deliberately specific: one llama-swap
 //! v247 router, llama-server-compatible model routes, one configured NVIDIA
 //! GPU, one private isolated supervisor, and the peer-authenticated Unix relay.
+//! Explicitly allowlisted Breeze and local Nagi/Laya jobs use separate owned
+//! one-shot services. CUDA jobs release the resident router first; CPU jobs
+//! do not acquire its GPU. Publication follows exact Stop and release proof.
 //! It does not manage ComfyUI, arbitrary HTTP engines, ambient credentials, or
 //! direct clients. Model activation is a separate one-shot operation from
 //! read-only readiness and inference dispatch.
@@ -23,7 +26,7 @@ use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
 
-use super::catalog::{Catalog, Lane, ProfileKey, RuntimeIdentity};
+use super::catalog::{Catalog, Device, Lane, ProfileKey, RuntimeIdentity};
 use super::cgroup_release::CgroupReleaseProbe;
 use super::cuda_device::CudaDevice;
 use super::engine_health::{
@@ -78,10 +81,57 @@ pub(crate) struct ManagedSessionConfig {
     private_router_config_bytes: Vec<u8>,
     pub(crate) supported_model_tasks: BTreeMap<String, BTreeSet<String>>,
     pub(crate) gpu: GpuProbeConfig,
-    launch: Option<IsolatedEngineLaunch>,
+    pub(crate) local_job_profiles: BTreeSet<ProfileKey>,
+    job_directory_root: Option<PathBuf>,
+    job_directory_identity: Option<(u64, u64)>,
+    launch_plan: RouterLaunchPlan,
     pub(crate) activation_timeout: Duration,
     pub(crate) request_timeout: Duration,
     pub(crate) recovery: RecoveryPolicy,
+}
+
+/// Immutable declared launch inputs, not a prepared manager operation or an
+/// owned handle. A proven transition may build a new launch; an uncertain
+/// start/stop must never use this to retry. Coordinator identity is captured
+/// afresh by the owner for every separately authorized launch.
+struct RouterLaunchPlan {
+    executable: PathBuf,
+    working_directory: PathBuf,
+    router_config: PathBuf,
+    repository_root: PathBuf,
+    helper_executable: PathBuf,
+    port: u16,
+    stop_timeout: Duration,
+    device: CudaDevice,
+}
+
+impl RouterLaunchPlan {
+    fn build(
+        &self,
+        runtime: &RuntimeIdentity,
+        transport: &Path,
+    ) -> Result<IsolatedEngineLaunch, ManagedConfigError> {
+        let port = BackendPort::new(self.port).map_err(|_| ManagedConfigError::InvalidLaunch)?;
+        let arguments = [
+            OsString::from("-config"),
+            self.router_config.clone().into_os_string(),
+            OsString::from("-listen"),
+            OsString::from(format!("127.0.0.1:{}", port.get())),
+        ];
+        let recipe = LaunchRecipe::new(&self.executable, &self.working_directory, arguments)
+            .map_err(|_| ManagedConfigError::InvalidLaunch)?;
+        IsolatedEngineLaunch::new(
+            runtime.clone(),
+            recipe,
+            &self.helper_executable,
+            transport,
+            self.port,
+            self.stop_timeout,
+        )
+        .and_then(|launch| launch.with_stack_root(&self.repository_root))
+        .map(|launch| launch.with_cuda_device(self.device.clone()))
+        .map_err(|_| ManagedConfigError::InvalidLaunch)
+    }
 }
 
 /// Named construction seam keeps the validated contract explicit without a
@@ -96,6 +146,8 @@ pub(crate) struct ManagedSessionConfigInput {
     pub(crate) coordinator_id: String,
     pub(crate) startup_profile: String,
     pub(crate) supported_model_tasks: BTreeMap<String, BTreeSet<String>>,
+    pub(crate) local_job_profiles: Vec<String>,
+    pub(crate) job_directory_root: Option<PathBuf>,
     pub(crate) gpu_uuid: String,
     pub(crate) gpu_index: u32,
     pub(crate) gpu_idle_mib: u64,
@@ -121,6 +173,7 @@ pub(crate) enum ManagedConfigError {
     StartupModelMissing,
     InvalidLaunch,
     InvalidGpu,
+    InvalidLocalJobs,
 }
 
 fn cuda_device_for_gpu_config(gpu: &GpuProbeConfig) -> Result<CudaDevice, ManagedConfigError> {
@@ -177,35 +230,62 @@ impl ManagedSessionConfig {
         let gpu = GpuProbeConfig::new(input.gpu_uuid, input.gpu_index, input.gpu_idle_mib)
             .map_err(|_| ManagedConfigError::InvalidGpu)?;
         let cuda_device = cuda_device_for_gpu_config(&gpu)?;
-        let port =
-            BackendPort::new(input.router_port).map_err(|_| ManagedConfigError::InvalidLaunch)?;
-        let arguments = [
-            OsString::from("-config"),
-            router_config.clone().into_os_string(),
-            OsString::from("-listen"),
-            OsString::from(format!("127.0.0.1:{}", port.get())),
-        ];
-        let recipe = LaunchRecipe::new(
-            input.router_executable,
-            input.router_working_directory,
-            arguments,
-        )
-        .map_err(|_| ManagedConfigError::InvalidLaunch)?;
+        let mut local_job_profiles = BTreeSet::new();
+        if input.local_job_profiles.len() > 128 {
+            return Err(ManagedConfigError::InvalidLocalJobs);
+        }
+        for profile in &input.local_job_profiles {
+            let key: ProfileKey = profile
+                .parse()
+                .map_err(|_| ManagedConfigError::InvalidLocalJobs)?;
+            if !local_job_profiles.insert(key.clone())
+                || !supported_local_job_route(
+                    &resolve_profile_route(catalog, &key)
+                        .map_err(|_| ManagedConfigError::InvalidLocalJobs)?,
+                )
+            {
+                return Err(ManagedConfigError::InvalidLocalJobs);
+            }
+        }
+        if local_job_profiles.is_empty() != input.job_directory_root.is_none() {
+            return Err(ManagedConfigError::InvalidLocalJobs);
+        }
+        let job_directory_identity = if let Some(path) = &input.job_directory_root {
+            let pinned = super::owned_job_store::OwnedJobStore::open(path)
+                .map_err(|_| ManagedConfigError::InvalidLocalJobs)?;
+            for reserved in [
+                &input.data_directory,
+                &input.standalone_data_directory,
+                &input.service_intent_directory,
+                &input.transport_directory,
+            ] {
+                let reserved = reserved
+                    .canonicalize()
+                    .map_err(|_| ManagedConfigError::InvalidLocalJobs)?;
+                if path.starts_with(&reserved) || reserved.starts_with(path) {
+                    return Err(ManagedConfigError::InvalidLocalJobs);
+                }
+            }
+            Some((pinned.directory_device(), pinned.directory_inode()))
+        } else {
+            None
+        };
         let helper_executable = std::env::current_exe()
             .map_err(|_| ManagedConfigError::InvalidLaunch)?
             .canonicalize()
             .map_err(|_| ManagedConfigError::InvalidLaunch)?;
-        let launch = IsolatedEngineLaunch::new(
-            runtime.clone(),
-            recipe,
+        let launch_plan = RouterLaunchPlan {
+            executable: input.router_executable,
+            working_directory: input.router_working_directory,
+            router_config: router_config.clone(),
+            repository_root: input.repository_root.clone(),
             helper_executable,
-            &input.transport_directory,
-            input.router_port,
-            input.stop_timeout,
-        )
-        .and_then(|launch| launch.with_stack_root(&input.repository_root))
-        .map(|launch| launch.with_cuda_device(cuda_device))
-        .map_err(|_| ManagedConfigError::InvalidLaunch)?;
+            port: input.router_port,
+            stop_timeout: input.stop_timeout,
+            device: cuda_device,
+        };
+        // Validate the complete declaration now, without manager dispatch.
+        launch_plan.build(&runtime, &input.transport_directory)?;
 
         Ok(Self {
             repository_root: input.repository_root,
@@ -221,11 +301,20 @@ impl ManagedSessionConfig {
             private_router_config_bytes: router_snapshot.bytes,
             supported_model_tasks: input.supported_model_tasks,
             gpu,
-            launch: Some(launch),
+            local_job_profiles,
+            job_directory_root: input.job_directory_root,
+            job_directory_identity,
+            launch_plan,
             activation_timeout: input.activation_timeout,
             request_timeout: input.request_timeout,
             recovery: input.recovery,
         })
+    }
+
+    fn prepare_router_launch(&self) -> Result<IsolatedEngineLaunch, ManagedConfigError> {
+        self.verify_private_router_config_unchanged()?;
+        self.launch_plan
+            .build(&self.runtime, &self.transport_directory)
     }
 
     fn verify_private_router_config_unchanged(&self) -> Result<(), ManagedConfigError> {
@@ -236,6 +325,23 @@ impl ManagedSessionConfig {
             return Err(ManagedConfigError::InvalidRouterConfig);
         }
         Ok(())
+    }
+}
+
+fn supported_local_job_route(route: &ResolvedProfileRoute) -> bool {
+    match (&route.native_route, &route.device) {
+        (NativeRoute::DecisionRunner { profile_type, .. }, Some(Device::Cpu | Device::Cuda)) => {
+            route.profile.lane == Lane::Decisions
+                && route.runtime.lane == Lane::Decisions
+                && matches!(route.runtime.as_str(), "nagi" | "laya")
+                && profile_type == "local"
+        }
+        (NativeRoute::MediaScript { .. }, Some(Device::Cuda)) => {
+            route.profile.to_string() == "media:breeze-tts-2"
+                && route.runtime.lane == Lane::Media
+                && route.runtime.as_str() == "audio.cpp"
+        }
+        _ => false,
     }
 }
 
@@ -280,6 +386,7 @@ pub(crate) struct ManagedJobCompletion {
     pub(crate) cleanup_proven: bool,
     /// A model/config/transport failure may end an otherwise cleaned session.
     pub(crate) stop_session: bool,
+    pub(crate) artifacts: Vec<String>,
 }
 
 pub(crate) enum ManagedWorkerEvent {
@@ -301,7 +408,7 @@ pub(crate) enum ManagedWorkerEvent {
 /// exact listener-owned `CoordinatorLock` remains borrowed. The main thread
 /// owns history, reservations, queue scheduling and result-buffer mutation.
 pub(crate) fn run_worker(
-    mut config: ManagedSessionConfig,
+    config: ManagedSessionConfig,
     catalog: Catalog,
     host_guard: &super::ownership::CoordinatorLock,
     session_deadline: std::time::Instant,
@@ -356,9 +463,12 @@ pub(crate) fn run_worker(
         send_worker_event_bounded(&events, ManagedWorkerEvent::StartupFailed, config.recovery);
         return;
     }
-    let Some(launch) = config.launch.take() else {
-        send_worker_event_bounded(&events, ManagedWorkerEvent::StartupFailed, config.recovery);
-        return;
+    let launch = match config.prepare_router_launch() {
+        Ok(launch) => launch,
+        Err(_) => {
+            send_worker_event_bounded(&events, ManagedWorkerEvent::StartupFailed, config.recovery);
+            return;
+        }
     };
     let service = match owner.start_isolated_engine(launch, &startup_context) {
         Ok(service) => service,
@@ -432,30 +542,69 @@ pub(crate) fn run_worker(
         return;
     }
 
+    let mut resident = Some(service);
     loop {
         match commands.recv_timeout(WORKER_POLL) {
             Ok(ManagedWorkerCommand::Dispatch(ticket)) => {
-                let completion = ManagedTicketExecutor {
-                    config: &config,
-                    catalog: &catalog,
-                    adapter: &adapter,
-                    owner: &mut owner,
-                    service: &service,
-                    session_cancellation: &cancellation,
-                    session_deadline,
-                    events: &events,
-                }
-                .execute(*ticket);
+                let local_ticket = config.local_job_profiles.contains(ticket.request.profile());
+                let completion = if local_ticket {
+                    ManagedLocalTicketExecutor {
+                        config: &config,
+                        owner: &mut owner,
+                        resident: &mut resident,
+                        cgroups: &cgroups,
+                        gpu: &gpu,
+                        session_cancellation: &cancellation,
+                        session_deadline,
+                        events: &events,
+                    }
+                    .execute(*ticket)
+                } else {
+                    if resident.is_none() {
+                        let launched = config.prepare_router_launch().ok().and_then(|launch| {
+                            let context = OperationContext::new(
+                                ticket.deadline.min(session_deadline),
+                                &cancellation,
+                            );
+                            observe_gpu_idle_retry(&gpu, &context, config.recovery).ok()?;
+                            owner.start_isolated_engine(launch, &context).ok()
+                        });
+                        let Some(launched) = launched else {
+                            send_worker_event_bounded(
+                                &events,
+                                ManagedWorkerEvent::JobFinished(uncertain_managed_completion(
+                                    &ticket,
+                                )),
+                                config.recovery,
+                            );
+                            return;
+                        };
+                        resident = Some(launched);
+                    }
+                    ManagedTicketExecutor {
+                        config: &config,
+                        catalog: &catalog,
+                        adapter: &adapter,
+                        owner: &mut owner,
+                        service: resident.as_ref().expect("language launch established"),
+                        session_cancellation: &cancellation,
+                        session_deadline,
+                        events: &events,
+                    }
+                    .execute(*ticket)
+                };
                 let must_stop = completion.stop_session
                     || completion.completion == Completion::Uncertain
                     || cancellation.is_cancelled();
                 let completion = if must_stop {
-                    let clean =
-                        stop_owned_service(&mut owner, &service, &cgroups, &gpu, config.recovery);
+                    let resident_clean =
+                        stop_resident(&mut resident, &mut owner, &cgroups, &gpu, config.recovery);
+                    let clean = resident_clean && (!local_ticket || completion.cleanup_proven);
                     let ManagedJobCompletion {
                         key,
                         completion: prior_completion,
                         result_terminal: prior_terminal,
+                        artifacts,
                         ..
                     } = completion;
                     ManagedJobCompletion {
@@ -476,15 +625,16 @@ pub(crate) fn run_worker(
                         },
                         cleanup_proven: clean,
                         stop_session: true,
+                        artifacts,
                     }
                 } else {
                     completion
                 };
                 let should_return =
                     deliver_job_finished(&events, completion, config.recovery, || {
-                        let _ = stop_owned_service(
+                        let _ = stop_resident(
+                            &mut resident,
                             &mut owner,
-                            &service,
                             &cgroups,
                             &gpu,
                             config.recovery,
@@ -496,7 +646,7 @@ pub(crate) fn run_worker(
             }
             Ok(ManagedWorkerCommand::Shutdown) => {
                 let cleanup_proven =
-                    stop_owned_service(&mut owner, &service, &cgroups, &gpu, config.recovery);
+                    stop_resident(&mut resident, &mut owner, &cgroups, &gpu, config.recovery);
                 send_worker_event_bounded(
                     &events,
                     ManagedWorkerEvent::Stopped { cleanup_proven },
@@ -507,7 +657,7 @@ pub(crate) fn run_worker(
             Err(RecvTimeoutError::Timeout) => {
                 if cancellation.is_cancelled() || std::time::Instant::now() >= session_deadline {
                     let cleanup_proven =
-                        stop_owned_service(&mut owner, &service, &cgroups, &gpu, config.recovery);
+                        stop_resident(&mut resident, &mut owner, &cgroups, &gpu, config.recovery);
                     send_worker_event_bounded(
                         &events,
                         ManagedWorkerEvent::Stopped { cleanup_proven },
@@ -517,7 +667,7 @@ pub(crate) fn run_worker(
                 }
             }
             Err(RecvTimeoutError::Disconnected) => {
-                let _ = stop_owned_service(&mut owner, &service, &cgroups, &gpu, config.recovery);
+                let _ = stop_resident(&mut resident, &mut owner, &cgroups, &gpu, config.recovery);
                 return;
             }
         }
@@ -582,6 +732,285 @@ fn recovery_context(policy: RecoveryPolicy) -> OperationContext<'static> {
         .checked_add(policy.timeout())
         .unwrap_or_else(std::time::Instant::now);
     OperationContext::new(deadline, &NEVER_CANCEL)
+}
+
+fn uncertain_managed_completion(ticket: &DispatchTicket) -> ManagedJobCompletion {
+    ManagedJobCompletion {
+        key: ManagedJobKey {
+            job_id: ticket.job_id,
+            request_id: ticket.request_id.clone(),
+        },
+        completion: Completion::Uncertain,
+        result_terminal: ResultTerminal::Interrupted,
+        cleanup_proven: false,
+        stop_session: true,
+        artifacts: Vec::new(),
+    }
+}
+
+fn stop_resident(
+    resident: &mut Option<super::managed_service::OwnedService>,
+    owner: &mut ManagedRuntimeOwner<'_>,
+    cgroups: &CgroupReleaseProbe,
+    gpu: &NvidiaSmiGpuProbe,
+    recovery: RecoveryPolicy,
+) -> bool {
+    resident
+        .take()
+        .is_none_or(|service| stop_owned_service(owner, &service, cgroups, gpu, recovery))
+}
+
+struct ManagedLocalTicketExecutor<'executor, 'host> {
+    config: &'executor ManagedSessionConfig,
+    owner: &'executor mut ManagedRuntimeOwner<'host>,
+    resident: &'executor mut Option<super::managed_service::OwnedService>,
+    cgroups: &'executor CgroupReleaseProbe,
+    gpu: &'executor NvidiaSmiGpuProbe,
+    session_cancellation: &'executor ManagedWorkerCancellation,
+    session_deadline: std::time::Instant,
+    events: &'executor SyncSender<ManagedWorkerEvent>,
+}
+
+impl ManagedLocalTicketExecutor<'_, '_> {
+    fn execute(&mut self, ticket: DispatchTicket) -> ManagedJobCompletion {
+        use super::service_owner::{
+            DeviceSelection, JobExecutionBounds, OwnedJobFinalizeErrorKind, OwnedJobRequestSpec,
+            ReleasedNativeOutcome,
+        };
+        let mut outcome = uncertain_managed_completion(&ticket);
+        if !self
+            .config
+            .local_job_profiles
+            .contains(ticket.request.profile())
+            || !supported_local_job_route(&ticket.route)
+        {
+            return outcome;
+        }
+        // One worker owns native ingress and the daemon has one active slot.
+        // CPU decisions need no GPU transition; CUDA jobs must release the
+        // resident language engine before creating a native child.
+        if ticket.route.device == Some(Device::Cuda)
+            && !stop_resident(
+                self.resident,
+                self.owner,
+                self.cgroups,
+                self.gpu,
+                self.config.recovery,
+            )
+        {
+            return outcome;
+        }
+        let cancellation = RequestAndSessionCancellation {
+            request: &ticket.cancellation,
+            session: self.session_cancellation,
+        };
+        let deadline = std::time::Instant::now()
+            .checked_add(self.config.request_timeout)
+            .unwrap_or(ticket.deadline)
+            .min(ticket.deadline)
+            .min(self.session_deadline);
+        let context = OperationContext::new(deadline, &cancellation);
+        if context.is_cancelled() || context.remaining().is_zero() {
+            outcome.completion = if context.is_cancelled() {
+                Completion::Cancelled
+            } else {
+                Completion::Failed
+            };
+            outcome.result_terminal = if context.is_cancelled() {
+                ResultTerminal::Cancelled
+            } else {
+                ResultTerminal::Failed(ResultFailureCode::TimedOut)
+            };
+            outcome.cleanup_proven = true;
+            outcome.stop_session = self.session_cancellation.is_cancelled();
+            return outcome;
+        }
+        if ticket.route.device == Some(Device::Cuda)
+            && observe_gpu_idle_retry(self.gpu, &context, self.config.recovery).is_err()
+        {
+            // A previous job's idle snapshot is never activation authority.
+            // Do not stop an unrelated claimant or launch into its allocation.
+            return outcome;
+        }
+        let Some(directory) = allocate_local_job_directory(self.config, ticket.job_id) else {
+            return outcome;
+        };
+        let device = match ticket.route.device {
+            Some(Device::Cpu) => DeviceSelection::Cpu,
+            Some(Device::Cuda) => match DeviceSelection::nvidia(
+                self.config.gpu.gpu_uuid(),
+                self.config.gpu.expected_index(),
+                self.config.gpu.max_idle_mib(),
+            ) {
+                Ok(device) => device,
+                Err(_) => return outcome,
+            },
+            _ => return outcome,
+        };
+        let Ok(bounds) = JobExecutionBounds::new(context.remaining(), self.config.recovery) else {
+            return outcome;
+        };
+        let job = match self.owner.start_owned_local_job_request(
+            &directory,
+            OwnedJobRequestSpec {
+                job_id: ticket.job_id,
+                request_id: &ticket.request_id,
+                repository_root: &self.config.repository_root,
+                request: &ticket.request,
+                accepted_route: &ticket.route,
+                device,
+                bounds,
+            },
+            self.config.launch_plan.stop_timeout,
+            &context,
+        ) {
+            Ok(job) => job,
+            Err(error) => {
+                if error.intent_record().is_none() {
+                    outcome.completion = Completion::Failed;
+                    outcome.result_terminal = ResultTerminal::Failed(ResultFailureCode::Internal);
+                    outcome.cleanup_proven = true;
+                    outcome.stop_session = false;
+                }
+                return outcome;
+            }
+        };
+        while !context.is_cancelled() && !context.remaining().is_zero() {
+            if job.observe_native_result().is_ok() {
+                break;
+            }
+            thread::sleep(WORKER_POLL.min(context.remaining()));
+        }
+        let cancelled = context.is_cancelled();
+        let timed_out = context.remaining().is_zero();
+        let Ok(cgroups) = CgroupReleaseProbe::production() else {
+            return outcome;
+        };
+        let mut finalizer = self.owner.begin_owned_job_finalization(job, cgroups);
+        let cleanup = recovery_context(self.config.recovery);
+        let released = loop {
+            match finalizer.finalize(&cleanup) {
+                Ok(result) => break Some(result),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        OwnedJobFinalizeErrorKind::AlreadyReleased
+                            | OwnedJobFinalizeErrorKind::InvalidAssociation
+                            | OwnedJobFinalizeErrorKind::StopUncertain
+                            | OwnedJobFinalizeErrorKind::Stop(_)
+                            | OwnedJobFinalizeErrorKind::RetirementUncertain
+                    ) =>
+                {
+                    break None
+                }
+                Err(_) => {
+                    if cleanup.remaining().is_zero() {
+                        break None;
+                    }
+                    thread::sleep(WORKER_POLL.min(cleanup.remaining()));
+                }
+            }
+        };
+        let Some(released) = released else {
+            return outcome;
+        };
+        outcome.cleanup_proven = true;
+        outcome.stop_session = self.session_cancellation.is_cancelled();
+        if cancelled || timed_out {
+            outcome.completion = if cancelled {
+                Completion::Cancelled
+            } else {
+                Completion::Failed
+            };
+            outcome.result_terminal = if cancelled {
+                ResultTerminal::Cancelled
+            } else {
+                ResultTerminal::Failed(ResultFailureCode::TimedOut)
+            };
+            return outcome;
+        }
+        let event = match released {
+            ReleasedNativeOutcome::Decision(native) => match native.result {
+                InferenceResult::Decision { answers } => ResultEvent::DecisionAnswers(answers),
+                _ => return outcome,
+            },
+            ReleasedNativeOutcome::Breeze { mode: _, artifacts } => {
+                let Some(prefix) = directory.file_name().and_then(|name| name.to_str()) else {
+                    return outcome;
+                };
+                let mut located = Vec::with_capacity(artifacts.len());
+                for artifact in artifacts {
+                    let path = format!("{prefix}/{}", artifact.relative_path);
+                    let Ok(reference) =
+                        super::result_buffer::MediaArtifact::new(artifact.kind, path.clone())
+                    else {
+                        return outcome;
+                    };
+                    outcome.artifacts.push(path);
+                    located.push(reference);
+                }
+                ResultEvent::MediaArtifacts(located)
+            }
+            ReleasedNativeOutcome::Failed(failure) => {
+                (outcome.completion, outcome.result_terminal) = released_native_failure(failure);
+                return outcome;
+            }
+        };
+        // Publication uses an independent bound after the job is released,
+        // never a request deadline that expired during cleanup.
+        if publish_result_event(self.events, &outcome.key, event, &cleanup).is_err() {
+            outcome.stop_session = true;
+            return outcome;
+        }
+        outcome.completion = Completion::Succeeded;
+        outcome.result_terminal = ResultTerminal::Succeeded;
+        outcome
+    }
+}
+
+/// Release proof permits resource accounting, not rewriting the native
+/// attempt's outcome. In particular an uncertain attempt stays interrupted.
+fn released_native_failure(
+    failure: super::owned_job_store::NativeJobFailure,
+) -> (Completion, ResultTerminal) {
+    use super::owned_job_store::NativeJobFailure;
+    match failure {
+        NativeJobFailure::Uncertain => (Completion::Uncertain, ResultTerminal::Interrupted),
+        NativeJobFailure::Cancelled => (Completion::Cancelled, ResultTerminal::Cancelled),
+        failure => (
+            Completion::Failed,
+            ResultTerminal::Failed(match failure {
+                NativeJobFailure::NotDispatched | NativeJobFailure::Unavailable => {
+                    ResultFailureCode::Unavailable
+                }
+                NativeJobFailure::TimedOut => ResultFailureCode::TimedOut,
+                NativeJobFailure::InvalidOutput => ResultFailureCode::InvalidOutput,
+                NativeJobFailure::Internal => ResultFailureCode::Internal,
+                NativeJobFailure::Cancelled | NativeJobFailure::Uncertain => unreachable!(),
+            }),
+        ),
+    }
+}
+
+fn allocate_local_job_directory(config: &ManagedSessionConfig, job_id: u64) -> Option<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    static NEXT_DIRECTORY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let root = config.job_directory_root.as_ref()?;
+    let pinned = super::owned_job_store::OwnedJobStore::open(root).ok()?;
+    if Some((pinned.directory_device(), pinned.directory_inode())) != config.job_directory_identity
+    {
+        return None;
+    }
+    let nonce = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+    let path = root.join(format!("job-{job_id}-{}-{nonce}", std::process::id()));
+    fs::DirBuilder::new().mode(0o700).create(&path).ok()?;
+    let rechecked = super::owned_job_store::OwnedJobStore::open(root).ok()?;
+    if Some((rechecked.directory_device(), rechecked.directory_inode()))
+        != config.job_directory_identity
+    {
+        return None;
+    }
+    Some(path)
 }
 
 fn reconcile_retained_services(
@@ -765,6 +1194,7 @@ impl ManagedTicketExecutor<'_, '_> {
             result_terminal: ResultTerminal::Failed(ResultFailureCode::Internal),
             cleanup_proven: false,
             stop_session: false,
+            artifacts: Vec::new(),
         };
         let NativeRoute::LlamaSwapModel { model_id, .. } = &ticket.route.native_route else {
             outcome.stop_session = true;
@@ -1236,6 +1666,50 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    #[test]
+    fn proven_release_does_not_reclassify_native_failure_or_uncertainty() {
+        use super::super::owned_job_store::NativeJobFailure;
+        for (native, completion, terminal) in [
+            (
+                NativeJobFailure::Uncertain,
+                Completion::Uncertain,
+                ResultTerminal::Interrupted,
+            ),
+            (
+                NativeJobFailure::Cancelled,
+                Completion::Cancelled,
+                ResultTerminal::Cancelled,
+            ),
+            (
+                NativeJobFailure::TimedOut,
+                Completion::Failed,
+                ResultTerminal::Failed(ResultFailureCode::TimedOut),
+            ),
+            (
+                NativeJobFailure::Unavailable,
+                Completion::Failed,
+                ResultTerminal::Failed(ResultFailureCode::Unavailable),
+            ),
+            (
+                NativeJobFailure::NotDispatched,
+                Completion::Failed,
+                ResultTerminal::Failed(ResultFailureCode::Unavailable),
+            ),
+            (
+                NativeJobFailure::InvalidOutput,
+                Completion::Failed,
+                ResultTerminal::Failed(ResultFailureCode::InvalidOutput),
+            ),
+            (
+                NativeJobFailure::Internal,
+                Completion::Failed,
+                ResultTerminal::Failed(ResultFailureCode::Internal),
+            ),
+        ] {
+            assert_eq!(released_native_failure(native), (completion, terminal));
+        }
+    }
+
     fn private_file(directory: &Path, name: &str, body: &str) -> PathBuf {
         let path = directory.join(name);
         fs::write(&path, body).unwrap();
@@ -1383,6 +1857,7 @@ mod tests {
             result_terminal: ResultTerminal::Succeeded,
             cleanup_proven: false,
             stop_session: false,
+            artifacts: Vec::new(),
         };
         assert!(deliver_job_finished(&sender, completion, recovery, || {
             cleanup_calls += 1
@@ -1400,6 +1875,7 @@ mod tests {
             result_terminal: ResultTerminal::Interrupted,
             cleanup_proven: false,
             stop_session: true,
+            artifacts: Vec::new(),
         };
         assert!(deliver_job_finished(&sender, completion, recovery, || {
             cleanup_calls += 1

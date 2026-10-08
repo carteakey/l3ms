@@ -25,6 +25,9 @@ use super::routes::{resolve_profile_route, NativeRoute, ResolvedProfileRoute};
 use super::runtime::{Cancellation, ResourceClaim};
 use crate::job_history::{CrossToolkitJobStart, CrossToolkitJobUpdate, JobHistory, JobRecord};
 
+#[cfg(target_os = "linux")]
+use super::requests::{SpeechInput, SpeechMode};
+
 const MAX_CAPACITY: usize = 128;
 const MAX_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -384,6 +387,8 @@ pub struct CoordinatorCore {
     dispatch_permit_owner_identity: Arc<()>,
     cpu_decisions_only: bool,
     managed_language_model_tasks: Option<BTreeMap<String, BTreeSet<String>>>,
+    managed_local_job_profiles: Option<BTreeSet<ProfileKey>>,
+    managed_stack_gpu_index: Option<u32>,
 }
 
 impl CoordinatorCore {
@@ -420,6 +425,8 @@ impl CoordinatorCore {
             dispatch_permit_owner_identity: Arc::new(()),
             cpu_decisions_only: false,
             managed_language_model_tasks: None,
+            managed_local_job_profiles: None,
+            managed_stack_gpu_index: None,
         })
     }
 
@@ -527,6 +534,42 @@ impl CoordinatorCore {
 
     pub fn catalog(&self) -> &Catalog {
         &self.catalog
+    }
+
+    fn managed_request_allowed(
+        &self,
+        catalog: &Catalog,
+        route: &ResolvedProfileRoute,
+        request: &InferenceRequest,
+        resource: ResourceClaim,
+    ) -> bool {
+        if let Some(allowed_local_profiles) = self.managed_local_job_profiles.as_ref() {
+            self.managed_stack_gpu_index
+                .zip(self.managed_language_model_tasks.as_ref())
+                .is_some_and(|(gpu, supported)| {
+                    validate_managed_stack_request(
+                        catalog,
+                        route,
+                        request,
+                        supported,
+                        allowed_local_profiles,
+                        gpu,
+                    )
+                    .is_ok_and(|expected| expected == resource)
+                })
+        } else {
+            !self
+                .managed_language_model_tasks
+                .as_ref()
+                .is_some_and(|supported| {
+                    let NativeRoute::LlamaSwapModel { model_id, .. } = &route.native_route else {
+                        return true;
+                    };
+                    !supported
+                        .get(model_id.as_str())
+                        .is_some_and(|tasks| tasks.contains(request.task()))
+                })
+        }
     }
 
     /// Validate the explicit startup path before its managed worker touches
@@ -694,6 +737,102 @@ impl CoordinatorCore {
 
         self.catalog = refreshed;
         self.managed_language_model_tasks = Some(supported_model_tasks);
+        self.admission = AdmissionState::Ready;
+        Ok(())
+    }
+
+    /// Validate the configured full managed stack before a worker begins
+    /// reconciliation. Unlike the language-only gate above, this accepts an
+    /// exact set of local Breeze and CPU/CUDA Nagi/Laya routes, with each
+    /// runtime bound to the resource declared by its profile. Entrypoints are
+    /// checked through the inert native-command preparer; no script is run.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn require_managed_stack_startup(
+        &self,
+        runtime: &RuntimeIdentity,
+        expected_gpu: u32,
+        startup_profile: &ProfileKey,
+        supported_model_tasks: &BTreeMap<String, BTreeSet<String>>,
+        allowed_local_profiles: &BTreeSet<ProfileKey>,
+    ) -> Result<()> {
+        ensure!(
+            self.admission == AdmissionState::ReconciliationRequired,
+            "managed stack startup requires unresolved startup admission"
+        );
+        ensure!(
+            !self.cpu_decisions_only && self.active.is_empty() && self.pending.is_empty(),
+            "managed stack startup requires empty reservations"
+        );
+        let (_, expected_bindings) = validate_managed_stack_configuration(
+            &self.catalog,
+            runtime,
+            expected_gpu,
+            startup_profile,
+            supported_model_tasks,
+            allowed_local_profiles,
+        )?;
+        ensure!(
+            self.bindings == expected_bindings,
+            "managed stack runtime bindings do not match the configured routes"
+        );
+        Ok(())
+    }
+
+    /// Open admission only after the configured stack has been freshly
+    /// validated, the startup language model has a real router observation,
+    /// and retained history contains no unresolved ownership. This remains
+    /// separate from generic reconciliation and from language-only readiness.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn confirm_managed_stack_ready(
+        &mut self,
+        runtime: &RuntimeIdentity,
+        expected_gpu: u32,
+        startup_profile: &ProfileKey,
+        supported_model_tasks: BTreeMap<String, BTreeSet<String>>,
+        allowed_local_profiles: BTreeSet<ProfileKey>,
+        readiness: &super::engine_health::RouterModelReadinessObservation,
+    ) -> Result<()> {
+        ensure!(
+            self.admission == AdmissionState::ReconciliationRequired,
+            "coordinator readiness was already resolved"
+        );
+        ensure!(
+            !self.cpu_decisions_only && self.active.is_empty() && self.pending.is_empty(),
+            "managed stack readiness requires empty reconciled reservations"
+        );
+        let (refreshed, expected_bindings) = validate_managed_stack_configuration(
+            &self.catalog,
+            runtime,
+            expected_gpu,
+            startup_profile,
+            &supported_model_tasks,
+            &allowed_local_profiles,
+        )?;
+        ensure!(
+            self.bindings == expected_bindings,
+            "managed stack runtime bindings do not match the configured routes"
+        );
+        let startup_route = resolve_profile_route(&refreshed, startup_profile)?;
+        ensure!(
+            matches!(
+                &startup_route.native_route,
+                NativeRoute::LlamaSwapModel { model_id, .. }
+                    if readiness.matches_model(model_id.as_str())
+            ),
+            "router readiness does not match the configured startup model"
+        );
+        ensure!(
+            self.history
+                .records()
+                .iter()
+                .all(|job| !retained_job_may_be_unresolved(job)),
+            "retained history still requires native cleanup reconciliation"
+        );
+
+        self.catalog = refreshed;
+        self.managed_language_model_tasks = Some(supported_model_tasks);
+        self.managed_local_job_profiles = Some(allowed_local_profiles);
+        self.managed_stack_gpu_index = Some(expected_gpu);
         self.admission = AdmissionState::Ready;
         Ok(())
     }
@@ -937,18 +1076,7 @@ impl CoordinatorCore {
             .bindings
             .get(&route.runtime)
             .ok_or(SubmissionError::Unavailable)?;
-        if self
-            .managed_language_model_tasks
-            .as_ref()
-            .is_some_and(|supported| {
-                let NativeRoute::LlamaSwapModel { model_id, .. } = &route.native_route else {
-                    return true;
-                };
-                !supported
-                    .get(model_id.as_str())
-                    .is_some_and(|tasks| tasks.contains(request.task()))
-            })
-        {
+        if !self.managed_request_allowed(&self.catalog, &route, &request, resource) {
             return Err(SubmissionError::Unavailable);
         }
         if self.runtime_admission_closures.contains_key(&route.runtime) {
@@ -1195,19 +1323,12 @@ impl CoordinatorCore {
                 return Err(DispatchBeginError::RouteChanged);
             }
         };
-        if self
-            .managed_language_model_tasks
-            .as_ref()
-            .is_some_and(|supported| {
-                let NativeRoute::LlamaSwapModel { model_id, .. } = &current_route.native_route
-                else {
-                    return true;
-                };
-                !supported
-                    .get(model_id.as_str())
-                    .is_some_and(|tasks| tasks.contains(ticket.request.task()))
-            })
-        {
+        if !self.managed_request_allowed(
+            &self.catalog,
+            &current_route,
+            &ticket.request,
+            ticket.resource,
+        ) {
             self.quarantine();
             return Err(DispatchBeginError::RouteChanged);
         }
@@ -1653,6 +1774,230 @@ impl CoordinatorCore {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn validate_managed_stack_configuration(
+    catalog: &Catalog,
+    runtime: &RuntimeIdentity,
+    expected_gpu: u32,
+    startup_profile: &ProfileKey,
+    supported_model_tasks: &BTreeMap<String, BTreeSet<String>>,
+    allowed_local_profiles: &BTreeSet<ProfileKey>,
+) -> Result<(Catalog, BTreeMap<RuntimeIdentity, ResourceClaim>)> {
+    ensure!(
+        runtime.lane == Lane::Language && runtime.as_str() == "llama-swap",
+        "managed stack requires the configured llama-swap language runtime"
+    );
+    ensure!(
+        startup_profile.lane == Lane::Language,
+        "managed stack startup profile must be a language profile"
+    );
+    ensure!(
+        !supported_model_tasks.is_empty(),
+        "managed model list is empty"
+    );
+    ensure!(
+        !allowed_local_profiles.is_empty(),
+        "managed local profile allowlist is empty"
+    );
+
+    let refreshed = catalog.refresh()?;
+    ensure!(
+        refreshed
+            .list()
+            .iter()
+            .filter(|profile| profile.runtime == *runtime)
+            .all(|profile| {
+                resolve_profile_route(&refreshed, &profile.key).is_ok_and(|route| {
+                    matches!(route.native_route, NativeRoute::LlamaSwapModel { .. })
+                })
+            }),
+        "configured language runtime contains an unsupported route"
+    );
+
+    for (model, tasks) in supported_model_tasks {
+        ensure!(
+            super::catalog::ProfileId::new(model.clone()).is_ok()
+                && !tasks.is_empty()
+                && tasks
+                    .iter()
+                    .all(|task| matches!(task.as_str(), "chat" | "embeddings")),
+            "managed model/task declaration is invalid"
+        );
+        let profile = ProfileKey::new(Lane::Language, model.clone())?;
+        let route = resolve_profile_route(&refreshed, &profile)?;
+        ensure!(
+            route.runtime == *runtime
+                && matches!(
+                    &route.native_route,
+                    NativeRoute::LlamaSwapModel { model_id, .. }
+                        if model_id.as_str() == model
+                )
+                && route.tasks.iter().all(|task| tasks.contains(task.as_str())),
+            "managed model/task declaration does not match its native route"
+        );
+    }
+
+    let startup_route = resolve_profile_route(&refreshed, startup_profile)?;
+    ensure!(
+        startup_route.runtime == *runtime
+            && matches!(
+                &startup_route.native_route,
+                NativeRoute::LlamaSwapModel { model_id, .. }
+                    if model_id.as_str() == startup_profile.profile_id.as_str()
+                        && supported_model_tasks.get(model_id.as_str()).is_some_and(|tasks|
+                            startup_route.tasks.iter().all(|task| tasks.contains(task.as_str())))
+            ),
+        "managed startup profile is not in the supported language model set"
+    );
+
+    let mut expected_bindings =
+        BTreeMap::from([(runtime.clone(), ResourceClaim::ExclusiveGpu(expected_gpu))]);
+    for profile in allowed_local_profiles {
+        let route = resolve_profile_route(&refreshed, profile)?;
+        let request = representative_managed_local_request(profile)?;
+        let claim = validate_managed_local_route(&refreshed, &route, &request, expected_gpu)?;
+        if let Some(existing) = expected_bindings.get(&route.runtime) {
+            ensure!(
+                *existing == claim,
+                "profiles on one managed runtime require conflicting resource claims"
+            );
+        } else {
+            expected_bindings.insert(route.runtime, claim);
+        }
+    }
+
+    Ok((refreshed, expected_bindings))
+}
+
+#[cfg(target_os = "linux")]
+fn representative_managed_local_request(profile: &ProfileKey) -> Result<InferenceRequest> {
+    match profile.lane {
+        Lane::Media if profile.profile_id.as_str() == "breeze-tts-2" => {
+            Ok(InferenceRequest::Media {
+                profile: profile.clone(),
+                input: MediaInput::Speech(SpeechInput {
+                    text: "managed-stack native route validation".into(),
+                    mode: SpeechMode::Standard,
+                    instruction: None,
+                    voice_reference: None,
+                    reference_text: None,
+                }),
+            })
+        }
+        Lane::Decisions => Ok(InferenceRequest::Decision {
+            profile: profile.clone(),
+            state: serde_json::json!({}),
+            questions: serde_json::json!({
+                "route": {"type": "choice", "options": ["continue", "stop"]}
+            })
+            .as_object()
+            .cloned()
+            .context("build local decision route validation request")?,
+        }),
+        _ => anyhow::bail!("managed local profile is outside the explicit allowlist kinds"),
+    }
+}
+
+fn validate_managed_stack_request(
+    catalog: &Catalog,
+    route: &ResolvedProfileRoute,
+    request: &InferenceRequest,
+    supported_model_tasks: &BTreeMap<String, BTreeSet<String>>,
+    allowed_local_profiles: &BTreeSet<ProfileKey>,
+    expected_gpu: u32,
+) -> Result<ResourceClaim> {
+    if let NativeRoute::LlamaSwapModel { model_id, .. } = &route.native_route {
+        ensure!(
+            route.profile.lane == Lane::Language
+                && route.runtime.lane == Lane::Language
+                && route.runtime.as_str() == "llama-swap"
+                && request.lane() == Lane::Language
+                && supported_model_tasks
+                    .get(model_id.as_str())
+                    .is_some_and(|tasks| tasks.contains(request.task())),
+            "language request is outside the configured managed model/task set"
+        );
+        return Ok(ResourceClaim::ExclusiveGpu(expected_gpu));
+    }
+    ensure!(
+        allowed_local_profiles.contains(&route.profile),
+        "local profile is outside the configured managed allowlist"
+    );
+    validate_managed_local_route(catalog, route, request, expected_gpu)
+}
+
+fn validate_managed_local_route(
+    catalog: &Catalog,
+    route: &ResolvedProfileRoute,
+    request: &InferenceRequest,
+    expected_gpu: u32,
+) -> Result<ResourceClaim> {
+    ensure!(
+        request.profile() == &route.profile && request.validate(catalog).is_ok(),
+        "managed local request does not match a valid current route"
+    );
+    match (
+        &route.profile.lane,
+        route.profile.profile_id.as_str(),
+        &route.native_route,
+    ) {
+        (Lane::Media, "breeze-tts-2", NativeRoute::MediaScript { .. }) => {
+            ensure!(
+                route.runtime.lane == Lane::Media
+                    && route.runtime.as_str() == "audio.cpp"
+                    && route.device == Some(Device::Cuda)
+                    && matches!(
+                        request,
+                        InferenceRequest::Media {
+                            input: MediaInput::Speech(_),
+                            ..
+                        }
+                    ),
+                "managed Breeze route must be CUDA audio.cpp speech"
+            );
+            let recipe =
+                super::native_commands::prepare_native_command_for_route(catalog, request, route)?;
+            ensure!(
+                matches!(
+                    recipe.expectation,
+                    super::native_commands::NativeOutputExpectation::BreezeSpeech { .. }
+                ),
+                "managed Breeze profile did not prepare a speech command"
+            );
+            Ok(ResourceClaim::ExclusiveGpu(expected_gpu))
+        }
+        (Lane::Decisions, _, NativeRoute::DecisionRunner { profile_type, .. }) => {
+            ensure!(
+                route.runtime.lane == Lane::Decisions
+                    && matches!(route.runtime.as_str(), "nagi" | "laya")
+                    && profile_type == "local"
+                    && matches!(request, InferenceRequest::Decision { .. }),
+                "managed decision route must be a local Nagi/Laya request"
+            );
+            let claim = match route.device.as_ref() {
+                Some(Device::Cpu) => ResourceClaim::None,
+                Some(Device::Cuda) => ResourceClaim::ExclusiveGpu(expected_gpu),
+                _ => anyhow::bail!("managed local decision route has no explicit CPU/CUDA device"),
+            };
+            let recipe =
+                super::native_commands::prepare_native_command_for_route(catalog, request, route)?;
+            ensure!(
+                matches!(
+                    recipe.expectation,
+                    super::native_commands::NativeOutputExpectation::DecisionJsonStdout {
+                        engine,
+                        profile_type: prepared_type,
+                        ..
+                    } if engine == route.runtime.as_str() && prepared_type == "local"
+                ),
+                "managed decision route did not prepare its local native runner"
+            );
+            Ok(claim)
+        }
+        _ => anyhow::bail!("managed local route is not an admitted Breeze or local decision"),
+    }
+}
+
 fn wire_error(request_id: String, code: ResponseErrorCode) -> ResponseMessage {
     ResponseMessage::Error {
         request_id: Some(request_id),
@@ -2070,8 +2415,545 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    fn managed_stack_core(
+        root: &Path,
+        data: &Path,
+        bindings: BTreeMap<RuntimeIdentity, ResourceClaim>,
+    ) -> CoordinatorCore {
+        use std::os::unix::fs::PermissionsExt;
+
+        let language = root.join("language");
+        let media = root.join("media");
+        let decisions = root.join("decisions");
+        std::fs::create_dir_all(&language).unwrap();
+        std::fs::create_dir_all(media.join("media-models")).unwrap();
+        std::fs::create_dir_all(decisions.join("decision-models")).unwrap();
+        std::fs::create_dir_all(decisions.join(".venv/bin")).unwrap();
+        std::fs::write(
+            language.join("llama-swap.yaml"),
+            "models:\n  fixture-model:\n    cmd: llama-server\n",
+        )
+        .unwrap();
+        std::fs::write(
+            media.join("media-runtimes.json"),
+            serde_json::json!({
+                "schema_version": 1,
+                "profiles": [
+                    {
+                        "id": "breeze-tts-2",
+                        "name": "Breeze fixture",
+                        "runtime": "audio.cpp",
+                        "device": "cuda",
+                        "tasks": ["tts", "design", "clon"],
+                        "script": "media-models/generate-breeze-tts-2.sh"
+                    },
+                    {
+                        "id": "other-audio",
+                        "name": "Other fixture script",
+                        "runtime": "audio.cpp",
+                        "device": "cuda",
+                        "tasks": ["tts"],
+                        "script": "media-models/other.sh"
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            decisions.join("decision-runtimes.json"),
+            serde_json::json!({
+                "version": "1.0",
+                "profiles": [
+                    {
+                        "id": "nagi-cpu",
+                        "name": "Nagi CPU fixture",
+                        "engine": "nagi",
+                        "type": "local",
+                        "device": "cpu",
+                        "model": "fixture/nagi",
+                        "entrypoint": "decision-models/runner.py"
+                    },
+                    {
+                        "id": "nagi-cpu-alt",
+                        "name": "Nagi CPU alternate fixture",
+                        "engine": "nagi",
+                        "type": "local",
+                        "device": "cpu",
+                        "model": "fixture/nagi-alt",
+                        "entrypoint": "decision-models/runner.py"
+                    },
+                    {
+                        "id": "nagi-cuda",
+                        "name": "Nagi CUDA fixture",
+                        "engine": "nagi",
+                        "type": "local",
+                        "device": "cuda",
+                        "model": "fixture/nagi-cuda",
+                        "entrypoint": "decision-models/runner.py"
+                    },
+                    {
+                        "id": "laya-cuda",
+                        "name": "Laya CUDA fixture",
+                        "engine": "laya",
+                        "type": "local",
+                        "device": "cuda",
+                        "model": "fixture/laya",
+                        "entrypoint": "decision-models/runner.py"
+                    },
+                    {
+                        "id": "jev-api",
+                        "name": "Hosted fixture",
+                        "engine": "jev",
+                        "type": "api",
+                        "device": "remote",
+                        "model": "fixture/hosted",
+                        "entrypoint": "decision-models/runner.py"
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            media.join("media-models/generate-breeze-tts-2.sh"),
+            "#!/bin/bash\ntouch managed-media-script-executed\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::write(media.join("media-models/other.sh"), "#!/bin/bash\nexit 0\n").unwrap();
+        std::fs::write(
+            decisions.join("decision-models/runner.py"),
+            "# inert fixture; startup validation must not execute this file\n",
+        )
+        .unwrap();
+        let python = decisions.join(".venv/bin/python");
+        std::fs::write(
+            &python,
+            "#!/bin/sh\ntouch managed-decision-runner-executed\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let catalog = Catalog::load_from_roots(&language, &media, &decisions).unwrap();
+        CoordinatorCore::load(catalog, bindings, data, root, 8).unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
     fn managed_tasks() -> BTreeMap<String, BTreeSet<String>> {
         BTreeMap::from([("fixture-model".into(), BTreeSet::from(["chat".into()]))])
+    }
+
+    #[cfg(target_os = "linux")]
+    fn managed_stack_bindings() -> BTreeMap<RuntimeIdentity, ResourceClaim> {
+        BTreeMap::from([
+            (
+                RuntimeIdentity::new(Lane::Language, "llama-swap").unwrap(),
+                ResourceClaim::ExclusiveGpu(2),
+            ),
+            (
+                RuntimeIdentity::new(Lane::Media, "audio.cpp").unwrap(),
+                ResourceClaim::ExclusiveGpu(2),
+            ),
+            (
+                RuntimeIdentity::new(Lane::Decisions, "nagi").unwrap(),
+                ResourceClaim::None,
+            ),
+            (
+                RuntimeIdentity::new(Lane::Decisions, "laya").unwrap(),
+                ResourceClaim::ExclusiveGpu(2),
+            ),
+        ])
+    }
+
+    #[cfg(target_os = "linux")]
+    fn managed_local_profiles() -> BTreeSet<ProfileKey> {
+        BTreeSet::from([
+            ProfileKey::new(Lane::Media, "breeze-tts-2").unwrap(),
+            ProfileKey::new(Lane::Decisions, "nagi-cpu").unwrap(),
+            ProfileKey::new(Lane::Decisions, "nagi-cpu-alt").unwrap(),
+            ProfileKey::new(Lane::Decisions, "laya-cuda").unwrap(),
+        ])
+    }
+
+    #[cfg(target_os = "linux")]
+    fn managed_stack_speech() -> InferenceRequest {
+        InferenceRequest::Media {
+            profile: ProfileKey::new(Lane::Media, "breeze-tts-2").unwrap(),
+            input: MediaInput::Speech(SpeechInput {
+                text: "small model-free admission test".into(),
+                mode: SpeechMode::Standard,
+                instruction: None,
+                voice_reference: None,
+                reference_text: None,
+            }),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn managed_local_decision(profile_id: &str) -> InferenceRequest {
+        InferenceRequest::Decision {
+            profile: ProfileKey::new(Lane::Decisions, profile_id).unwrap(),
+            state: serde_json::json!({"fixture": true}),
+            questions: serde_json::json!({
+                "route": {"type": "choice", "options": ["continue", "stop"]}
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn confirm_managed_stack(core: &mut CoordinatorCore) -> Result<()> {
+        let runtime = RuntimeIdentity::new(Lane::Language, "llama-swap")?;
+        let startup = ProfileKey::new(Lane::Language, "fixture-model")?;
+        core.confirm_managed_stack_ready(
+            &runtime,
+            2,
+            &startup,
+            managed_tasks(),
+            managed_local_profiles(),
+            &super::super::engine_health::RouterModelReadinessObservation::test_for_model(
+                "fixture-model",
+            ),
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn managed_stack_startup_requires_exact_supported_routes_and_resource_claims() {
+        let root = TempDir::new().unwrap();
+        let data = TempDir::new().unwrap();
+        let runtime = RuntimeIdentity::new(Lane::Language, "llama-swap").unwrap();
+        let startup = ProfileKey::new(Lane::Language, "fixture-model").unwrap();
+        let allowed = managed_local_profiles();
+        let core = managed_stack_core(root.path(), data.path(), managed_stack_bindings());
+
+        core.require_managed_stack_startup(&runtime, 2, &startup, &managed_tasks(), &allowed)
+            .unwrap();
+        assert!(!root
+            .path()
+            .join("media/managed-media-script-executed")
+            .exists());
+        assert!(!root
+            .path()
+            .join("decisions/managed-decision-runner-executed")
+            .exists());
+        assert!(core
+            .require_managed_stack_startup(&runtime, 1, &startup, &managed_tasks(), &allowed)
+            .is_err());
+
+        let wrong_cpu_data = TempDir::new().unwrap();
+        let wrong_cpu_fallback = BTreeMap::from([
+            (runtime.clone(), ResourceClaim::ExclusiveGpu(2)),
+            (
+                RuntimeIdentity::new(Lane::Media, "audio.cpp").unwrap(),
+                ResourceClaim::ExclusiveGpu(2),
+            ),
+            (
+                RuntimeIdentity::new(Lane::Decisions, "nagi").unwrap(),
+                ResourceClaim::ExclusiveGpu(2),
+            ),
+            (
+                RuntimeIdentity::new(Lane::Decisions, "laya").unwrap(),
+                ResourceClaim::ExclusiveGpu(2),
+            ),
+        ]);
+        let cpu_claim_mismatch =
+            managed_stack_core(root.path(), wrong_cpu_data.path(), wrong_cpu_fallback);
+        assert!(cpu_claim_mismatch
+            .require_managed_stack_startup(&runtime, 2, &startup, &managed_tasks(), &allowed)
+            .is_err());
+
+        let mut conflicting = allowed.clone();
+        conflicting.insert(ProfileKey::new(Lane::Decisions, "nagi-cuda").unwrap());
+        assert!(core
+            .require_managed_stack_startup(&runtime, 2, &startup, &managed_tasks(), &conflicting)
+            .is_err());
+
+        let missing_runtime_data = TempDir::new().unwrap();
+        let missing_runtime = managed_stack_core(
+            root.path(),
+            missing_runtime_data.path(),
+            BTreeMap::from([
+                (runtime.clone(), ResourceClaim::ExclusiveGpu(2)),
+                (
+                    RuntimeIdentity::new(Lane::Media, "audio.cpp").unwrap(),
+                    ResourceClaim::ExclusiveGpu(2),
+                ),
+                (
+                    RuntimeIdentity::new(Lane::Decisions, "nagi").unwrap(),
+                    ResourceClaim::None,
+                ),
+            ]),
+        );
+        assert!(missing_runtime
+            .require_managed_stack_startup(&runtime, 2, &startup, &managed_tasks(), &allowed)
+            .is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn managed_stack_readiness_opens_only_for_observed_language_and_local_allowlist() {
+        let root = TempDir::new().unwrap();
+        let data = TempDir::new().unwrap();
+        let runtime = RuntimeIdentity::new(Lane::Language, "llama-swap").unwrap();
+        let startup = ProfileKey::new(Lane::Language, "fixture-model").unwrap();
+        let mut core = managed_stack_core(root.path(), data.path(), managed_stack_bindings());
+        core.require_managed_stack_startup(
+            &runtime,
+            2,
+            &startup,
+            &managed_tasks(),
+            &managed_local_profiles(),
+        )
+        .unwrap();
+        assert!(core
+            .confirm_managed_stack_ready(
+                &runtime,
+                2,
+                &startup,
+                managed_tasks(),
+                managed_local_profiles(),
+                &super::super::engine_health::RouterModelReadinessObservation::test_for_model(
+                    "other-model",
+                ),
+            )
+            .is_err());
+        confirm_managed_stack(&mut core).unwrap();
+        assert_eq!(core.admission(), AdmissionState::Ready);
+
+        let now = Instant::now();
+        let language_id = core
+            .submit_checked(
+                "stack-language".into(),
+                InferenceRequest::Chat {
+                    profile: ProfileKey::new(Lane::Language, "fixture-model").unwrap(),
+                    turns: vec![ChatTurn {
+                        role: ChatRole::User,
+                        content: "model-free admission request".into(),
+                    }],
+                    max_tokens: 8,
+                },
+                Duration::from_secs(30),
+                now,
+            )
+            .unwrap();
+        let language_ticket = core.reserve_next(now).unwrap().unwrap();
+        assert_eq!(language_ticket.resource, ResourceClaim::ExclusiveGpu(2));
+        core.begin_dispatch(&language_ticket, now + Duration::from_millis(1))
+            .unwrap();
+        core.complete(
+            language_id,
+            Completion::Succeeded,
+            Vec::new(),
+            now + Duration::from_millis(2),
+        )
+        .unwrap();
+
+        let speech_id = core
+            .submit_checked(
+                "stack-speech".into(),
+                managed_stack_speech(),
+                Duration::from_secs(30),
+                now + Duration::from_millis(3),
+            )
+            .unwrap();
+        let speech_ticket = core
+            .reserve_next(now + Duration::from_millis(3))
+            .unwrap()
+            .unwrap();
+        core.begin_dispatch(&speech_ticket, now + Duration::from_millis(4))
+            .unwrap();
+        core.complete(
+            speech_id,
+            Completion::Succeeded,
+            Vec::new(),
+            now + Duration::from_millis(5),
+        )
+        .unwrap();
+
+        let decision_id = core
+            .submit_checked(
+                "stack-cpu-decision".into(),
+                managed_local_decision("nagi-cpu"),
+                Duration::from_secs(30),
+                now + Duration::from_millis(6),
+            )
+            .unwrap();
+        let decision_ticket = core
+            .reserve_next(now + Duration::from_millis(6))
+            .unwrap()
+            .unwrap();
+        assert_eq!(decision_ticket.resource, ResourceClaim::None);
+        core.begin_dispatch(&decision_ticket, now + Duration::from_millis(7))
+            .unwrap();
+        core.complete(
+            decision_id,
+            Completion::Succeeded,
+            Vec::new(),
+            now + Duration::from_millis(8),
+        )
+        .unwrap();
+
+        let cuda_decision_id = core
+            .submit_checked(
+                "stack-cuda-decision".into(),
+                managed_local_decision("laya-cuda"),
+                Duration::from_secs(30),
+                now + Duration::from_millis(9),
+            )
+            .unwrap();
+        let cuda_decision_ticket = core
+            .reserve_next(now + Duration::from_millis(9))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            cuda_decision_ticket.resource,
+            ResourceClaim::ExclusiveGpu(2)
+        );
+        core.begin_dispatch(&cuda_decision_ticket, now + Duration::from_millis(10))
+            .unwrap();
+        core.complete(
+            cuda_decision_id,
+            Completion::Succeeded,
+            Vec::new(),
+            now + Duration::from_millis(11),
+        )
+        .unwrap();
+
+        let mismatch = InferenceRequest::Media {
+            profile: ProfileKey::new(Lane::Media, "breeze-tts-2").unwrap(),
+            input: MediaInput::Script {
+                task: Task::new("tts").unwrap(),
+                args: Vec::new(),
+            },
+        };
+        assert_eq!(
+            core.submit_checked(
+                "stack-wrong-media-shape".into(),
+                mismatch,
+                Duration::from_secs(30),
+                now,
+            ),
+            Err(SubmissionError::Unavailable)
+        );
+        let unjoined_comfy = InferenceRequest::Media {
+            profile: ProfileKey::new(Lane::Media, "breeze-tts-2").unwrap(),
+            input: MediaInput::Workflow {
+                task: Task::new("tts").unwrap(),
+                graph: serde_json::json!({"fixture": true}),
+            },
+        };
+        assert_eq!(
+            core.submit_checked(
+                "stack-unjoined-comfy".into(),
+                unjoined_comfy,
+                Duration::from_secs(30),
+                now,
+            ),
+            Err(SubmissionError::Unavailable)
+        );
+        let unlisted = InferenceRequest::Media {
+            profile: ProfileKey::new(Lane::Media, "other-audio").unwrap(),
+            input: MediaInput::Script {
+                task: Task::new("tts").unwrap(),
+                args: Vec::new(),
+            },
+        };
+        assert_eq!(
+            core.submit_checked(
+                "stack-unlisted-media".into(),
+                unlisted,
+                Duration::from_secs(30),
+                now,
+            ),
+            Err(SubmissionError::Unavailable)
+        );
+        assert_eq!(
+            core.submit_checked(
+                "stack-hosted-decision".into(),
+                hosted(),
+                Duration::from_secs(30),
+                now,
+            ),
+            Err(SubmissionError::Unavailable)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn managed_stack_revalidates_route_before_dispatch_and_refuses_unresolved_history() {
+        let root = TempDir::new().unwrap();
+        let data = TempDir::new().unwrap();
+        let runtime = RuntimeIdentity::new(Lane::Language, "llama-swap").unwrap();
+        let startup = ProfileKey::new(Lane::Language, "fixture-model").unwrap();
+        let mut core = managed_stack_core(root.path(), data.path(), managed_stack_bindings());
+        core.history
+            .begin_cross_toolkit(CrossToolkitJobStart {
+                toolkit: "l3ds".into(),
+                profile: Some("nagi-cpu".into()),
+                task: Some("decision".into()),
+                request_id: Some("retained-unresolved".into()),
+            })
+            .unwrap();
+        assert!(core
+            .confirm_managed_stack_ready(
+                &runtime,
+                2,
+                &startup,
+                managed_tasks(),
+                managed_local_profiles(),
+                &super::super::engine_health::RouterModelReadinessObservation::test_for_model(
+                    "fixture-model",
+                ),
+            )
+            .is_err());
+
+        let clean_root = TempDir::new().unwrap();
+        let clean_data = TempDir::new().unwrap();
+        let mut clean = managed_stack_core(
+            clean_root.path(),
+            clean_data.path(),
+            managed_stack_bindings(),
+        );
+        confirm_managed_stack(&mut clean).unwrap();
+        let now = Instant::now();
+        clean
+            .submit_checked(
+                "stack-route-drift".into(),
+                managed_stack_speech(),
+                Duration::from_secs(30),
+                now,
+            )
+            .unwrap();
+        let ticket = clean.reserve_next(now).unwrap().unwrap();
+        std::fs::write(
+            clean_root.path().join("media/media-models/replacement.sh"),
+            "#!/bin/bash\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::write(
+            clean_root.path().join("media/media-runtimes.json"),
+            serde_json::json!({
+                "schema_version": 1,
+                "profiles": [{
+                    "id": "breeze-tts-2",
+                    "name": "Breeze fixture",
+                    "runtime": "audio.cpp",
+                    "device": "cuda",
+                    "tasks": ["tts"],
+                    "script": "media-models/replacement.sh"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            clean.begin_dispatch(&ticket, now + Duration::from_millis(1)),
+            Err(DispatchBeginError::RouteChanged)
+        );
+        assert_eq!(clean.admission(), AdmissionState::ReconciliationRequired);
     }
 
     #[cfg(target_os = "linux")]

@@ -17,18 +17,26 @@ use super::cgroup_release::{
     CgroupObservation, CgroupObservationKind, CgroupReleaseErrorKind, CgroupReleaseProbe,
 };
 use super::cuda_device::CudaDevice;
+use super::decision::NativeDecisionResult;
 use super::engine_helper::{supervisor_arguments, BackendProcessSpec, StackRoot};
 use super::engine_transport::{BackendPort, CoordinatorIdentityDescriptor};
+#[cfg(test)]
+use super::gpu_probe::GpuProbeConfig;
+use super::gpu_probe::{GpuProbeFailureKind, NvidiaSmiGpuProbe};
 use super::managed_service::{
     LaunchRecipe, ManagedServiceController, ManagedServiceErrorKind, ManagedServiceState,
     OwnedLocalJobBinding, OwnedService, ReconcileResult, ServiceIntentRecord, StartDisposition,
     StartFailure, StopOnlyService, StoppedService,
 };
+use super::owned_job_store::{
+    BreezeArtifactKind, NativeJobFailure, NativeJobResult, OwnedJobStore, ValidatedOwnedJob,
+};
 pub use super::owned_job_store::{
     DeviceSelection, JobExecutionBounds, OwnedJobRequestSpec, OwnedJobStoreError,
 };
-use super::owned_job_store::{NativeJobResult, OwnedJobStore, ValidatedOwnedJob};
 use super::ownership::CoordinatorLock;
+use super::requests::SpeechMode;
+use super::result_buffer::{ArtifactKind, MediaArtifact};
 use super::runtime::OperationContext;
 use super::service_intents::{
     ServiceIntentRetireDisposition, ServiceIntentStore, ServiceIntentStoreError,
@@ -148,6 +156,132 @@ impl NativeJobCandidate {
 impl fmt::Debug for NativeJobCandidate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("NativeJobCandidate(<unpublished>)")
+    }
+}
+
+/// Native output that is publishable only after this owner has stopped the
+/// exact job generation, observed its cgroup empty or removed, checked the
+/// configured physical GPU when applicable, and durably retired the intent.
+/// Breeze paths are relative LocalJob references; no output root is included.
+pub(crate) enum ReleasedNativeOutcome {
+    Decision(NativeDecisionResult),
+    Breeze {
+        mode: SpeechMode,
+        artifacts: Vec<MediaArtifact>,
+    },
+    Failed(NativeJobFailure),
+}
+
+impl fmt::Debug for ReleasedNativeOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Decision(_) => formatter.write_str("ReleasedNativeOutcome::Decision(<redacted>)"),
+            Self::Breeze { mode, artifacts } => formatter
+                .debug_struct("ReleasedNativeOutcome::Breeze")
+                .field("mode", mode)
+                .field("artifact_count", &artifacts.len())
+                .field("artifacts", &"<redacted>")
+                .finish(),
+            Self::Failed(failure) => formatter
+                .debug_tuple("ReleasedNativeOutcome::Failed")
+                .field(failure)
+                .finish(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OwnedJobFinalizeErrorKind {
+    AlreadyReleased,
+    InvalidAssociation,
+    StopUncertain,
+    Context(ManagedServiceErrorKind),
+    IntentStore(ServiceIntentStoreError),
+    Stop(ManagedServiceErrorKind),
+    Observation(StopAndObserveErrorKind),
+    Gpu(GpuProbeFailureKind),
+    ArtifactCancelled,
+    ArtifactDeadlineExceeded,
+    Retirement(IntentRetirementErrorKind),
+    RetirementUncertain,
+}
+
+/// Fixed redacted finalization failure. The stateful finalizer retains the
+/// job and any stop receipt so callers can resume without issuing another
+/// Stop or publishing native output early.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) struct OwnedJobFinalizeError {
+    kind: OwnedJobFinalizeErrorKind,
+}
+
+impl OwnedJobFinalizeError {
+    fn new(kind: OwnedJobFinalizeErrorKind) -> Self {
+        Self { kind }
+    }
+
+    pub(crate) fn kind(&self) -> OwnedJobFinalizeErrorKind {
+        self.kind
+    }
+}
+
+impl fmt::Debug for OwnedJobFinalizeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OwnedJobFinalizeError")
+            .field("kind", &self.kind)
+            .field("job", &"<retained privately>")
+            .field("receipt", &"<retained privately>")
+            .finish()
+    }
+}
+
+impl fmt::Display for OwnedJobFinalizeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("owned native job finalization did not complete")
+    }
+}
+
+impl std::error::Error for OwnedJobFinalizeError {}
+
+#[cfg(test)]
+type TestGpuIdleObserver = Box<dyn FnMut(&GpuProbeConfig) -> Result<String, GpuProbeFailureKind>>;
+
+/// Stateful Stop → cgroup/GPU proof → result revalidation → WAL retirement.
+/// The owner remains mutably borrowed and the job remains owned until a
+/// `ReleasedNativeOutcome` is returned exactly once. The caller must keep its
+/// reservation and exclusive ingress held for the finalizer's full lifetime:
+/// the NVIDIA observation is point-in-time, not an admission fence.
+pub(crate) struct OwnedJobFinalizer<'owner, 'host> {
+    owner: &'owner mut ManagedRuntimeOwner<'host>,
+    job: Option<OwnedNativeJob>,
+    cgroup_probe: CgroupReleaseProbe,
+    stop_attempted: bool,
+    stop_uncertain: bool,
+    stopped_receipt: Option<StoppedService>,
+    stopped_observation: Option<StoppedServiceObservation>,
+    pending_outcome: Option<ReleasedNativeOutcome>,
+    retirement_uncertain: bool,
+    released: bool,
+    #[cfg(test)]
+    gpu_idle_observer: Option<TestGpuIdleObserver>,
+}
+
+impl fmt::Debug for OwnedJobFinalizer<'_, '_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OwnedJobFinalizer")
+            .field("job", &"<retained privately>")
+            .field("stop_attempted", &self.stop_attempted)
+            .field("stop_uncertain", &self.stop_uncertain)
+            .field("has_stop_receipt", &self.stopped_receipt.is_some())
+            .field(
+                "has_cgroup_observation",
+                &self.stopped_observation.is_some(),
+            )
+            .field("has_pending_outcome", &self.pending_outcome.is_some())
+            .field("retirement_uncertain", &self.retirement_uncertain)
+            .field("released", &self.released)
+            .finish()
     }
 }
 
@@ -582,6 +716,30 @@ impl<'host> ManagedRuntimeOwner<'host> {
         })
     }
 
+    /// Begin one stateful release protocol for a running native job. The
+    /// finalizer owns the job association and retains its stop receipt across
+    /// read-only retries. It never trusts result readiness as cleanup proof.
+    pub(crate) fn begin_owned_job_finalization<'owner>(
+        &'owner mut self,
+        job: OwnedNativeJob,
+        cgroup_probe: CgroupReleaseProbe,
+    ) -> OwnedJobFinalizer<'owner, 'host> {
+        OwnedJobFinalizer {
+            owner: self,
+            job: Some(job),
+            cgroup_probe,
+            stop_attempted: false,
+            stop_uncertain: false,
+            stopped_receipt: None,
+            stopped_observation: None,
+            pending_outcome: None,
+            retirement_uncertain: false,
+            released: false,
+            #[cfg(test)]
+            gpu_idle_observer: None,
+        }
+    }
+
     fn start_inner(
         &mut self,
         runtime_identity: Option<RuntimeIdentity>,
@@ -908,6 +1066,332 @@ impl<'host> ManagedRuntimeOwner<'host> {
     }
 }
 
+impl OwnedJobFinalizer<'_, '_> {
+    /// Finish native-job cleanup and publish its typed result exactly once.
+    /// Every failure leaves the job association in this finalizer. Once Stop
+    /// succeeds, retries carry the same opaque receipt and perform only
+    /// read-only cgroup/GPU/result checks plus proof-bound WAL retirement.
+    pub(crate) fn finalize(
+        &mut self,
+        context: &OperationContext<'_>,
+    ) -> Result<ReleasedNativeOutcome, OwnedJobFinalizeError> {
+        if self.released {
+            return Err(OwnedJobFinalizeError::new(
+                OwnedJobFinalizeErrorKind::AlreadyReleased,
+            ));
+        }
+        if self.retirement_uncertain {
+            return Err(OwnedJobFinalizeError::new(
+                OwnedJobFinalizeErrorKind::RetirementUncertain,
+            ));
+        }
+        check_context(context)
+            .map_err(|kind| OwnedJobFinalizeError::new(OwnedJobFinalizeErrorKind::Context(kind)))?;
+
+        if self.stopped_observation.is_none() && self.stopped_receipt.is_none() {
+            if self.stop_uncertain || self.stop_attempted {
+                return Err(OwnedJobFinalizeError::new(
+                    OwnedJobFinalizeErrorKind::StopUncertain,
+                ));
+            }
+            self.validate_job_association(context)?;
+            check_context(context).map_err(|kind| {
+                OwnedJobFinalizeError::new(OwnedJobFinalizeErrorKind::Context(kind))
+            })?;
+
+            // Mark before invoking the synchronous manager adapter. A local
+            // error cannot establish that a Stop request never reached the
+            // manager, so this finalizer never repeats the command.
+            self.stop_attempted = true;
+            let job = self.job.as_ref().expect("unfinished finalizer retains job");
+            match self.owner.stop(&job.service, context) {
+                Ok(receipt) => self.stopped_receipt = Some(receipt),
+                Err(kind) => {
+                    self.stop_uncertain = true;
+                    return Err(OwnedJobFinalizeError::new(OwnedJobFinalizeErrorKind::Stop(
+                        kind,
+                    )));
+                }
+            }
+        }
+
+        // A retained observation from an earlier GPU/retirement failure is
+        // not fresh authority for reading artifacts on this attempt. Convert
+        // it back to the same exact Stop receipt and re-observe first.
+        if let Some(previous) = self.stopped_observation.take() {
+            self.stopped_receipt = Some(previous.receipt);
+        }
+        if self.stopped_observation.is_none() {
+            let receipt = self
+                .stopped_receipt
+                .take()
+                .expect("a successful Stop retains its generation receipt");
+            match self
+                .owner
+                .observe_stopped(receipt, &self.cgroup_probe, context)
+            {
+                Ok(observation) => {
+                    self.stopped_observation = Some(observation);
+                }
+                Err(error) => {
+                    let kind = error.kind();
+                    self.stopped_receipt = error.into_receipt();
+                    if self.stopped_receipt.is_none() {
+                        self.stop_uncertain = true;
+                    }
+                    return Err(OwnedJobFinalizeError::new(
+                        OwnedJobFinalizeErrorKind::Observation(kind),
+                    ));
+                }
+            }
+        }
+
+        // Re-observe the configured device and re-read/revalidate native data
+        // on every retirement attempt. A prior WAL failure must not make a
+        // point-in-time GPU observation or an old artifact receipt appear
+        // fresh on a later retry.
+        self.observe_configured_gpu(context)?;
+        check_context(context)
+            .map_err(|kind| OwnedJobFinalizeError::new(OwnedJobFinalizeErrorKind::Context(kind)))?;
+        let outcome = self.read_released_native_outcome(context)?;
+        self.pending_outcome = Some(outcome);
+
+        let stopped = self
+            .stopped_observation
+            .as_ref()
+            .expect("pending publication follows a generation-bound cgroup observation");
+        if let Err(failure) = self
+            .owner
+            .retire_stopped(stopped, &self.cgroup_probe, context)
+        {
+            let kind = failure.kind();
+            if failure.disposition() == IntentRetirementDisposition::DurabilityUncertain {
+                self.retirement_uncertain = true;
+            }
+            return Err(OwnedJobFinalizeError::new(
+                OwnedJobFinalizeErrorKind::Retirement(kind),
+            ));
+        }
+
+        self.stopped_observation.take();
+        self.job.take();
+        self.released = true;
+        Ok(self
+            .pending_outcome
+            .take()
+            .expect("successful retirement has a validated native outcome"))
+    }
+
+    fn validate_job_association(
+        &self,
+        context: &OperationContext<'_>,
+    ) -> Result<(), OwnedJobFinalizeError> {
+        let job = self.job.as_ref().expect("unfinished finalizer retains job");
+        let intent = job.service.intent_record();
+        let Some(binding) = intent.owned_local_job_binding() else {
+            return Err(OwnedJobFinalizeError::new(
+                OwnedJobFinalizeErrorKind::InvalidAssociation,
+            ));
+        };
+        if binding.job_id() != job.job.job_id()
+            || binding.request_id() != job.job.request_id()
+            || binding.runtime_identity() != &job.job.route().runtime
+            || binding.directory_device() != job.store.directory_device()
+            || binding.directory_inode() != job.store.directory_inode()
+        {
+            return Err(OwnedJobFinalizeError::new(
+                OwnedJobFinalizeErrorKind::InvalidAssociation,
+            ));
+        }
+        check_context(context)
+            .map_err(|kind| OwnedJobFinalizeError::new(OwnedJobFinalizeErrorKind::Context(kind)))?;
+        let records = self.owner.store.list().map_err(|kind| {
+            OwnedJobFinalizeError::new(OwnedJobFinalizeErrorKind::IntentStore(kind))
+        })?;
+        if !records.iter().any(|record| record == intent) {
+            return Err(OwnedJobFinalizeError::new(
+                OwnedJobFinalizeErrorKind::InvalidAssociation,
+            ));
+        }
+        Ok(())
+    }
+
+    fn observe_configured_gpu(
+        &mut self,
+        context: &OperationContext<'_>,
+    ) -> Result<(), OwnedJobFinalizeError> {
+        let job = self.job.as_ref().expect("unfinished finalizer retains job");
+        let config = job.job.device().gpu_probe_config().map_err(|_| {
+            OwnedJobFinalizeError::new(OwnedJobFinalizeErrorKind::InvalidAssociation)
+        })?;
+        let Some(config) = config else {
+            return Ok(());
+        };
+
+        let observed_uuid = {
+            #[cfg(test)]
+            if let Some(observer) = self.gpu_idle_observer.as_mut() {
+                observer(&config).map_err(|kind| {
+                    OwnedJobFinalizeError::new(OwnedJobFinalizeErrorKind::Gpu(kind))
+                })?
+            } else {
+                NvidiaSmiGpuProbe::new(config.clone())
+                    .observe_idle(context, job.job.bounds().recovery())
+                    .map_err(|failure| {
+                        OwnedJobFinalizeError::new(OwnedJobFinalizeErrorKind::Gpu(failure.kind()))
+                    })?
+                    .gpu_uuid()
+                    .to_owned()
+            }
+            #[cfg(not(test))]
+            {
+                NvidiaSmiGpuProbe::new(config.clone())
+                    .observe_idle(context, job.job.bounds().recovery())
+                    .map_err(|failure| {
+                        OwnedJobFinalizeError::new(OwnedJobFinalizeErrorKind::Gpu(failure.kind()))
+                    })?
+                    .gpu_uuid()
+                    .to_owned()
+            }
+        };
+        if observed_uuid != config.gpu_uuid() {
+            return Err(OwnedJobFinalizeError::new(OwnedJobFinalizeErrorKind::Gpu(
+                GpuProbeFailureKind::DeviceMismatch,
+            )));
+        }
+        Ok(())
+    }
+
+    fn read_released_native_outcome(
+        &self,
+        context: &OperationContext<'_>,
+    ) -> Result<ReleasedNativeOutcome, OwnedJobFinalizeError> {
+        let job = self.job.as_ref().expect("unfinished finalizer retains job");
+        let result = match job.store.read_result(&job.job) {
+            Ok(result) => result,
+            Err(_) => {
+                return Ok(ReleasedNativeOutcome::Failed(
+                    NativeJobFailure::InvalidOutput,
+                ))
+            }
+        };
+        match result {
+            NativeJobResult::Decision(result) => Ok(ReleasedNativeOutcome::Decision(result)),
+            NativeJobResult::Failed(failure) => Ok(ReleasedNativeOutcome::Failed(failure)),
+            NativeJobResult::Breeze(receipt) => {
+                let Some(binding) = job.service.intent_record().owned_local_job_binding() else {
+                    return Ok(ReleasedNativeOutcome::Failed(
+                        NativeJobFailure::InvalidOutput,
+                    ));
+                };
+                let fresh = match super::media_execution::revalidate_breeze_artifacts(
+                    binding.job_directory(),
+                    receipt.mode(),
+                    context,
+                ) {
+                    Ok(fresh) => fresh,
+                    Err(failure) => {
+                        use super::media_execution::MediaExecutionErrorKind as MediaError;
+                        use super::process::ProcessFailureKind;
+                        return match failure.kind() {
+                            MediaError::Process(ProcessFailureKind::Cancelled) => {
+                                Err(OwnedJobFinalizeError::new(
+                                    OwnedJobFinalizeErrorKind::ArtifactCancelled,
+                                ))
+                            }
+                            MediaError::Process(ProcessFailureKind::DeadlineExceeded) => {
+                                Err(OwnedJobFinalizeError::new(
+                                    OwnedJobFinalizeErrorKind::ArtifactDeadlineExceeded,
+                                ))
+                            }
+                            _ => Ok(ReleasedNativeOutcome::Failed(
+                                NativeJobFailure::InvalidOutput,
+                            )),
+                        };
+                    }
+                };
+                if !breeze_receipt_matches(&receipt, &fresh) {
+                    return Ok(ReleasedNativeOutcome::Failed(
+                        NativeJobFailure::InvalidOutput,
+                    ));
+                }
+                let still_current = matches!(
+                    job.store.read_result(&job.job),
+                    Ok(NativeJobResult::Breeze(current))
+                        if breeze_receipts_equal(&receipt, &current)
+                );
+                if !still_current {
+                    return Ok(ReleasedNativeOutcome::Failed(
+                        NativeJobFailure::InvalidOutput,
+                    ));
+                }
+                let artifacts = fresh
+                    .artifacts()
+                    .iter()
+                    .map(|artifact| {
+                        artifact
+                            .relative_path()
+                            .to_str()
+                            .ok_or(())
+                            .and_then(|path| {
+                                MediaArtifact::new(ArtifactKind::LocalJob, path.to_owned())
+                                    .map_err(|_| ())
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>();
+                match artifacts {
+                    Ok(artifacts) => Ok(ReleasedNativeOutcome::Breeze {
+                        mode: fresh.mode(),
+                        artifacts,
+                    }),
+                    Err(()) => Ok(ReleasedNativeOutcome::Failed(
+                        NativeJobFailure::InvalidOutput,
+                    )),
+                }
+            }
+        }
+    }
+}
+
+fn breeze_receipt_matches(
+    receipt: &super::owned_job_store::BreezeArtifactReceipt,
+    fresh: &super::media_execution::MediaExecutionResult,
+) -> bool {
+    receipt.mode() == fresh.mode()
+        && receipt.artifacts().len() == fresh.artifacts().len()
+        && receipt
+            .artifacts()
+            .iter()
+            .zip(fresh.artifacts())
+            .all(|(candidate, artifact)| {
+                let fresh_kind = match artifact.kind() {
+                    super::media_execution::MediaArtifactKind::FinalWave => {
+                        BreezeArtifactKind::FinalWave
+                    }
+                    super::media_execution::MediaArtifactKind::StreamingChunk => {
+                        BreezeArtifactKind::StreamingChunk
+                    }
+                };
+                candidate.kind() == fresh_kind
+                    && candidate.relative_path() == artifact.relative_path().to_str().unwrap_or("")
+            })
+}
+
+fn breeze_receipts_equal(
+    left: &super::owned_job_store::BreezeArtifactReceipt,
+    right: &super::owned_job_store::BreezeArtifactReceipt,
+) -> bool {
+    left.mode() == right.mode()
+        && left.artifacts().len() == right.artifacts().len()
+        && left
+            .artifacts()
+            .iter()
+            .zip(right.artifacts())
+            .all(|(left, right)| {
+                left.kind() == right.kind() && left.relative_path() == right.relative_path()
+            })
+}
+
 fn check_context(context: &OperationContext<'_>) -> Result<(), ManagedServiceErrorKind> {
     if context.is_cancelled() {
         Err(ManagedServiceErrorKind::Cancelled)
@@ -935,13 +1419,19 @@ fn retirement_context(context: &OperationContext<'_>) -> Result<(), IntentRetire
 
 #[cfg(test)]
 mod tests {
-    use super::super::catalog::{Lane, RuntimeIdentity};
+    use super::super::catalog::{Catalog, Lane, ProfileKey, RuntimeIdentity};
     use super::super::cgroup_release::CgroupObservationKind;
-    use super::super::runtime::{Cancellation, NeverCancel};
+    use super::super::decision::NativeDecisionResult;
+    use super::super::requests::{InferenceRequest, InferenceResult, MediaInput, SpeechInput};
+    use super::super::routes::resolve_profile_route;
+    use super::super::runtime::{Cancellation, NeverCancel, RecoveryPolicy};
     use super::*;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
+    use std::str::FromStr;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
     use std::time::Instant;
 
     struct Fixture {
@@ -949,15 +1439,21 @@ mod tests {
         intents: tempfile::TempDir,
         locks: tempfile::TempDir,
         cgroups: tempfile::TempDir,
+        repo: PathBuf,
+        job_directory: PathBuf,
     }
     impl Fixture {
         fn new() -> Self {
-            let result = Self {
+            let mut result = Self {
                 root: tempfile::tempdir().unwrap(),
                 intents: tempfile::tempdir().unwrap(),
                 locks: tempfile::tempdir().unwrap(),
                 cgroups: tempfile::tempdir().unwrap(),
+                repo: PathBuf::new(),
+                job_directory: PathBuf::new(),
             };
+            result.repo = result.root.path().join("repo");
+            result.job_directory = result.root.path().join("owned-job");
             for directory in [
                 result.root.path(),
                 result.intents.path(),
@@ -966,6 +1462,7 @@ mod tests {
             ] {
                 fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
             }
+            result.create_native_catalog();
             let root_json = serde_json::to_string(result.root.path().to_str().unwrap()).unwrap();
             let intents_json =
                 serde_json::to_string(result.intents.path().to_str().unwrap()).unwrap();
@@ -984,8 +1481,7 @@ if pathlib.Path(sys.argv[0]).name == 'fake-run':
     if (root / 'require-owned-job').exists():
         assert record['schema'] == 4
         assert record['launch_role'] == 'owned_local_job'
-        assert record['runtime_lane'] == 'decisions'
-        assert record['runtime_name'] == 'nagi'
+        assert record['runtime_name'] in ('nagi', 'audio.cpp')
         assert record['owned_local_job']['job_id'] == 17
         assert record['owned_local_job']['request_id'] == 'fixture-owned-job'
         assert '--l3ms-owned-local-job-v1' in args
@@ -1063,6 +1559,69 @@ sys.exit(23)
             }
             result
         }
+
+        fn create_native_catalog(&self) {
+            let media_root = self.repo.join("toolkits/l2m2");
+            let decisions_root = self.repo.join("toolkits/l3ds");
+            fs::create_dir_all(media_root.join("media-models")).unwrap();
+            fs::create_dir_all(decisions_root.join("decision-models")).unwrap();
+            fs::create_dir_all(decisions_root.join(".venv/bin")).unwrap();
+            fs::write(
+                self.repo.join("llama-swap.yaml"),
+                "models:\n  \"fixture-language\":\n    cmd: |\n      llama-server -m /not-loaded.gguf\n",
+            )
+            .unwrap();
+            fs::write(
+                media_root.join("media-runtimes.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "schema_version": 1,
+                    "profiles": [{
+                        "id": "breeze-tts-2",
+                        "name": "Fixture Breeze",
+                        "runtime": "audio.cpp",
+                        "device": "cuda",
+                        "tasks": ["tts", "clon", "design"],
+                        "script": "media-models/generate-breeze-tts-2.sh"
+                    }]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            fs::write(
+                media_root.join("media-models/generate-breeze-tts-2.sh"),
+                "#!/bin/bash\nexit 0\n",
+            )
+            .unwrap();
+            fs::write(
+                decisions_root.join("decision-runtimes.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "version": "test",
+                    "profiles": [{
+                        "id": "nagi-fixture",
+                        "name": "Fixture Nagi",
+                        "engine": "nagi",
+                        "tier": "test",
+                        "type": "local",
+                        "model": "fixture-model",
+                        "device": "cpu",
+                        "entrypoint": "decision-models/runner.py"
+                    }]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            fs::write(
+                decisions_root.join("decision-models/runner.py"),
+                "# fixture only\n",
+            )
+            .unwrap();
+            let python = decisions_root.join(".venv/bin/python");
+            fs::write(&python, "#!/bin/sh\nexit 0\n").unwrap();
+            fs::set_permissions(&python, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::create_dir(&self.job_directory).unwrap();
+            fs::set_permissions(&self.job_directory, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
         fn controller(&self) -> ManagedServiceController {
             ManagedServiceController::with_test_executables(
                 "fixture",
@@ -1085,6 +1644,76 @@ sys.exit(23)
             OperationContext::new(Instant::now() + Duration::from_secs(3), &NeverCancel)
         }
 
+        fn start_decision_job(&self, owner: &mut ManagedRuntimeOwner<'_>) -> OwnedNativeJob {
+            self.start_native_job(owner, self.decision_request(), DeviceSelection::Cpu)
+        }
+
+        fn start_breeze_job(&self, owner: &mut ManagedRuntimeOwner<'_>) -> OwnedNativeJob {
+            self.start_native_job(
+                owner,
+                self.breeze_request(),
+                DeviceSelection::nvidia("GPU-01234567-89ab-cdef-0123-456789abcdef", 0, 256)
+                    .unwrap(),
+            )
+        }
+
+        fn start_native_job(
+            &self,
+            owner: &mut ManagedRuntimeOwner<'_>,
+            request: InferenceRequest,
+            device: DeviceSelection,
+        ) -> OwnedNativeJob {
+            fs::write(self.root.path().join("require-owned-job"), "1").unwrap();
+            let catalog = Catalog::load(&self.repo).unwrap();
+            let route = resolve_profile_route(&catalog, request.profile()).unwrap();
+            owner
+                .start_owned_local_job_request(
+                    &self.job_directory,
+                    OwnedJobRequestSpec {
+                        job_id: 17,
+                        request_id: "fixture-owned-job",
+                        repository_root: &self.repo,
+                        request: &request,
+                        accepted_route: &route,
+                        device,
+                        bounds: JobExecutionBounds::new(
+                            Duration::from_secs(30),
+                            RecoveryPolicy::new(Duration::from_secs(2)).unwrap(),
+                        )
+                        .unwrap(),
+                    },
+                    Duration::from_secs(1),
+                    &self.context(),
+                )
+                .unwrap()
+        }
+
+        fn decision_request(&self) -> InferenceRequest {
+            let mut questions = serde_json::Map::new();
+            questions.insert(
+                "choice".to_owned(),
+                serde_json::json!({"type":"choice", "options":["yes", "no"]}),
+            );
+            InferenceRequest::Decision {
+                profile: ProfileKey::from_str("decisions:nagi-fixture").unwrap(),
+                state: serde_json::json!({"state":"fixture"}),
+                questions,
+            }
+        }
+
+        fn breeze_request(&self) -> InferenceRequest {
+            InferenceRequest::Media {
+                profile: ProfileKey::from_str("media:breeze-tts-2").unwrap(),
+                input: MediaInput::Speech(SpeechInput {
+                    text: "fixture speech".to_owned(),
+                    mode: SpeechMode::Standard,
+                    instruction: None,
+                    voice_reference: None,
+                    reference_text: None,
+                }),
+            }
+        }
+
         fn cgroup_probe(&self, service: &OwnedService, events: Option<&str>) -> CgroupReleaseProbe {
             self.cgroup_probe_for_unit(service.unit_name(), events)
         }
@@ -1100,6 +1729,41 @@ sys.exit(23)
                 fs::write(leaf.join("cgroup.events"), events).unwrap();
             }
             CgroupReleaseProbe::with_test_root(self.cgroups.path()).unwrap()
+        }
+
+        fn cgroup_events_path(&self, service: &OwnedService) -> PathBuf {
+            self.cgroups
+                .path()
+                .join("user.slice")
+                .join(service.unit_name())
+                .join("cgroup.events")
+        }
+
+        fn claim_and_write_result(&self, job: &OwnedNativeJob, result: &NativeJobResult) {
+            job.store.claim_execution(&job.job).unwrap();
+            job.store.write_result(&job.job, result).unwrap();
+        }
+
+        fn empty_cgroup_probe(&self, job: &OwnedNativeJob) -> CgroupReleaseProbe {
+            self.cgroup_probe(job.service(), Some("populated 0\nfrozen 0\n"))
+        }
+
+        fn minimal_wave() -> Vec<u8> {
+            let mut bytes = Vec::with_capacity(46);
+            bytes.extend_from_slice(b"RIFF");
+            bytes.extend_from_slice(&38u32.to_le_bytes());
+            bytes.extend_from_slice(b"WAVEfmt ");
+            bytes.extend_from_slice(&16u32.to_le_bytes());
+            bytes.extend_from_slice(&1u16.to_le_bytes());
+            bytes.extend_from_slice(&1u16.to_le_bytes());
+            bytes.extend_from_slice(&8_000u32.to_le_bytes());
+            bytes.extend_from_slice(&16_000u32.to_le_bytes());
+            bytes.extend_from_slice(&2u16.to_le_bytes());
+            bytes.extend_from_slice(&16u16.to_le_bytes());
+            bytes.extend_from_slice(b"data");
+            bytes.extend_from_slice(&2u32.to_le_bytes());
+            bytes.extend_from_slice(&[0, 0]);
+            bytes
         }
 
         fn install_stale_supervisor_intent(
@@ -2242,5 +2906,495 @@ sys.exit(23)
         assert!(error.receipt().is_none());
         assert!(!fixture.root.path().join("stops").exists());
         assert_eq!(owner.store.list().unwrap().len(), 1);
+    }
+
+    struct FlagCancellation(Arc<AtomicBool>);
+
+    impl Cancellation for FlagCancellation {
+        fn is_cancelled(&self) -> bool {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    fn valid_decision_result() -> NativeJobResult {
+        let mut answers = serde_json::Map::new();
+        answers.insert(
+            "choice".to_owned(),
+            serde_json::json!({"choice":"yes", "confidence":0.8}),
+        );
+        let mut usage = serde_json::Map::new();
+        usage.insert("input_tokens".to_owned(), serde_json::Value::from(7));
+        NativeJobResult::Decision(NativeDecisionResult {
+            result: InferenceResult::Decision { answers },
+            native_latency: Some(Duration::from_micros(23)),
+            native_usage: Some(usage),
+        })
+    }
+
+    #[test]
+    fn finalizer_returns_decision_only_after_release_and_preserves_native_metadata() {
+        let fixture = Fixture::new();
+        let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+        let mut owner = fixture.owner(&guard);
+        let job = fixture.start_decision_job(&mut owner);
+        fixture.claim_and_write_result(&job, &valid_decision_result());
+        let probe = fixture.empty_cgroup_probe(&job);
+        let mut finalizer = owner.begin_owned_job_finalization(job, probe);
+        finalizer.gpu_idle_observer = Some(Box::new(|_| panic!("CPU job must skip GPU probe")));
+
+        let outcome = finalizer.finalize(&fixture.context()).unwrap();
+        let ReleasedNativeOutcome::Decision(native) = outcome else {
+            panic!("decision outcome expected")
+        };
+        assert_eq!(native.native_latency, Some(Duration::from_micros(23)));
+        assert_eq!(
+            native.native_usage.as_ref().unwrap().get("input_tokens"),
+            Some(&serde_json::Value::from(7))
+        );
+        assert!(matches!(
+            native.result,
+            InferenceResult::Decision { answers }
+                if answers.get("choice").and_then(|value| value.get("choice"))
+                    == Some(&serde_json::Value::String("yes".to_owned()))
+        ));
+        assert_eq!(
+            finalizer.finalize(&fixture.context()).unwrap_err().kind(),
+            OwnedJobFinalizeErrorKind::AlreadyReleased
+        );
+        drop(finalizer);
+        assert!(owner.store.list().unwrap().is_empty());
+        assert_eq!(
+            fs::read_to_string(fixture.root.path().join("stops")).unwrap(),
+            "stop\n"
+        );
+    }
+
+    #[test]
+    fn finalizer_retains_one_stop_receipt_across_cgroup_and_cancellation_retries() {
+        let fixture = Fixture::new();
+        let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+        let mut owner = fixture.owner(&guard);
+        let job = fixture.start_decision_job(&mut owner);
+        fixture.claim_and_write_result(
+            &job,
+            &NativeJobResult::Failed(NativeJobFailure::Unavailable),
+        );
+        let events = fixture.cgroup_events_path(job.service());
+        let probe = fixture.cgroup_probe(job.service(), Some("populated 1\nfrozen 0\n"));
+        let flag = Arc::new(AtomicBool::new(false));
+        let cancellation = FlagCancellation(flag.clone());
+        let cancelled =
+            OperationContext::new(Instant::now() + Duration::from_secs(3), &cancellation);
+        let mut finalizer = owner.begin_owned_job_finalization(job, probe);
+
+        let first = finalizer.finalize(&fixture.context()).unwrap_err();
+        assert_eq!(
+            first.kind(),
+            OwnedJobFinalizeErrorKind::Observation(StopAndObserveErrorKind::Observation(
+                CgroupReleaseErrorKind::CgroupNotEmpty
+            ))
+        );
+        assert!(finalizer.stopped_receipt.is_some());
+        assert_eq!(
+            fs::read_to_string(fixture.root.path().join("stops")).unwrap(),
+            "stop\n"
+        );
+
+        fs::write(&events, "populated 0\nfrozen 0\n").unwrap();
+        flag.store(true, Ordering::SeqCst);
+        assert_eq!(
+            finalizer.finalize(&cancelled).unwrap_err().kind(),
+            OwnedJobFinalizeErrorKind::Context(ManagedServiceErrorKind::Cancelled)
+        );
+        assert!(finalizer.stopped_receipt.is_some());
+        flag.store(false, Ordering::SeqCst);
+        assert!(matches!(
+            finalizer.finalize(&fixture.context()).unwrap(),
+            ReleasedNativeOutcome::Failed(NativeJobFailure::Unavailable)
+        ));
+        assert_eq!(
+            fs::read_to_string(fixture.root.path().join("stops")).unwrap(),
+            "stop\n"
+        );
+    }
+
+    #[test]
+    fn uncertain_stop_is_never_issued_twice_by_finalizer() {
+        let fixture = Fixture::new();
+        let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+        let mut owner = fixture.owner(&guard);
+        let job = fixture.start_decision_job(&mut owner);
+        fixture.claim_and_write_result(
+            &job,
+            &NativeJobResult::Failed(NativeJobFailure::Unavailable),
+        );
+        let probe = fixture.empty_cgroup_probe(&job);
+        fs::write(fixture.root.path().join("fail-stop"), "1").unwrap();
+        let mut finalizer = owner.begin_owned_job_finalization(job, probe);
+
+        assert_eq!(
+            finalizer.finalize(&fixture.context()).unwrap_err().kind(),
+            OwnedJobFinalizeErrorKind::Stop(ManagedServiceErrorKind::ManagerCommandFailed)
+        );
+        fs::remove_file(fixture.root.path().join("fail-stop")).unwrap();
+        assert_eq!(
+            finalizer.finalize(&fixture.context()).unwrap_err().kind(),
+            OwnedJobFinalizeErrorKind::StopUncertain
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.root.path().join("stops")).unwrap(),
+            "stop\n"
+        );
+        assert_eq!(owner.store.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn finalizer_rejects_foreign_wal_without_stopping_foreign_job() {
+        let fixture = Fixture::new();
+        let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+        let mut owner = fixture.owner(&guard);
+        let job = fixture.start_decision_job(&mut owner);
+        fixture.claim_and_write_result(
+            &job,
+            &NativeJobResult::Failed(NativeJobFailure::Unavailable),
+        );
+
+        let foreign_path = fixture.root.path().join("foreign-intents");
+        fs::create_dir(&foreign_path).unwrap();
+        fs::set_permissions(&foreign_path, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut foreign_owner = ManagedRuntimeOwner::new(
+            fixture.controller(),
+            ServiceIntentStore::open(&foreign_path).unwrap(),
+            &guard,
+        );
+        let foreign_probe = fixture.empty_cgroup_probe(&job);
+        let mut foreign_finalizer = foreign_owner.begin_owned_job_finalization(job, foreign_probe);
+        assert_eq!(
+            foreign_finalizer
+                .finalize(&fixture.context())
+                .unwrap_err()
+                .kind(),
+            OwnedJobFinalizeErrorKind::InvalidAssociation
+        );
+        assert!(!fixture.root.path().join("stops").exists());
+        drop(foreign_finalizer);
+        drop(foreign_owner);
+        assert_eq!(owner.store.list().unwrap().len(), 1);
+        assert!(!fixture.root.path().join("stops").exists());
+    }
+
+    #[test]
+    fn finalizer_rejects_job_packet_bound_to_another_service() {
+        let fixture = Fixture::new();
+        let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+        let mut owner = fixture.owner(&guard);
+        let started = fixture.start_decision_job(&mut owner);
+        let first_service = started.service;
+
+        let second_directory = fixture.root.path().join("second-owned-job");
+        fs::create_dir(&second_directory).unwrap();
+        fs::set_permissions(&second_directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let second_store = OwnedJobStore::open(&second_directory).unwrap();
+        let request = fixture.decision_request();
+        let catalog = Catalog::load(&fixture.repo).unwrap();
+        let route = resolve_profile_route(&catalog, request.profile()).unwrap();
+        let second_job = second_store
+            .write_request(OwnedJobRequestSpec {
+                job_id: 18,
+                request_id: "fixture-other-job",
+                repository_root: &fixture.repo,
+                request: &request,
+                accepted_route: &route,
+                device: DeviceSelection::Cpu,
+                bounds: JobExecutionBounds::new(
+                    Duration::from_secs(30),
+                    RecoveryPolicy::new(Duration::from_secs(2)).unwrap(),
+                )
+                .unwrap(),
+            })
+            .unwrap();
+        let wrong_association = OwnedNativeJob {
+            service: first_service,
+            store: second_store,
+            job: second_job,
+        };
+        let probe = fixture.cgroup_probe(wrong_association.service(), Some("populated 0\n"));
+        let mut finalizer = owner.begin_owned_job_finalization(wrong_association, probe);
+
+        assert_eq!(
+            finalizer.finalize(&fixture.context()).unwrap_err().kind(),
+            OwnedJobFinalizeErrorKind::InvalidAssociation
+        );
+        assert!(!fixture.root.path().join("stops").exists());
+        assert_eq!(owner.store.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn finalizer_rejects_stale_generation_without_repeating_stop() {
+        let fixture = Fixture::new();
+        let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+        let mut owner = fixture.owner(&guard);
+        let job = fixture.start_decision_job(&mut owner);
+        fixture.claim_and_write_result(
+            &job,
+            &NativeJobResult::Failed(NativeJobFailure::Unavailable),
+        );
+        let original_state_path = fixture.root.path().join("manager-state.json");
+        let original_state = fs::read(&original_state_path).unwrap();
+        let events = fixture.cgroup_events_path(job.service());
+        let probe = fixture.cgroup_probe(job.service(), Some("populated 1\nfrozen 0\n"));
+        let mut finalizer = owner.begin_owned_job_finalization(job, probe);
+        assert!(finalizer.finalize(&fixture.context()).is_err());
+        assert_eq!(
+            fs::read_to_string(fixture.root.path().join("stops")).unwrap(),
+            "stop\n"
+        );
+
+        fs::write(&events, "populated 0\nfrozen 0\n").unwrap();
+        let mut replacement: serde_json::Value = serde_json::from_slice(&original_state).unwrap();
+        replacement["invocation"] = serde_json::Value::String("b".repeat(32));
+        replacement["active"] = serde_json::Value::String("active".to_owned());
+        fs::write(
+            &original_state_path,
+            serde_json::to_vec(&replacement).unwrap(),
+        )
+        .unwrap();
+        let stale = finalizer.finalize(&fixture.context()).unwrap_err();
+        assert!(matches!(
+            stale.kind(),
+            OwnedJobFinalizeErrorKind::Observation(StopAndObserveErrorKind::Stop(_))
+        ));
+        assert!(finalizer.stopped_receipt.is_some());
+        assert_eq!(
+            fs::read_to_string(fixture.root.path().join("stops")).unwrap(),
+            "stop\n"
+        );
+        assert_eq!(owner.store.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn invalid_or_mutated_native_packet_becomes_failure_only_after_release() {
+        let fixture = Fixture::new();
+        let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+        let mut owner = fixture.owner(&guard);
+        let job = fixture.start_decision_job(&mut owner);
+        fixture.claim_and_write_result(&job, &valid_decision_result());
+        fs::write(fixture.job_directory.join("l3ms-job-result.json"), b"{").unwrap();
+        let probe = fixture.empty_cgroup_probe(&job);
+        let mut finalizer = owner.begin_owned_job_finalization(job, probe);
+
+        assert!(matches!(
+            finalizer.finalize(&fixture.context()).unwrap(),
+            ReleasedNativeOutcome::Failed(NativeJobFailure::InvalidOutput)
+        ));
+        drop(finalizer);
+        assert!(owner.store.list().unwrap().is_empty());
+        assert_eq!(
+            fs::read_to_string(fixture.root.path().join("stops")).unwrap(),
+            "stop\n"
+        );
+    }
+
+    #[test]
+    fn finalizer_uses_same_physical_gpu_and_retries_probe_without_repeating_stop() {
+        let fixture = Fixture::new();
+        let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+        let mut owner = fixture.owner(&guard);
+        let job = fixture.start_breeze_job(&mut owner);
+        fixture.claim_and_write_result(
+            &job,
+            &NativeJobResult::Failed(NativeJobFailure::Unavailable),
+        );
+        let events = fixture.cgroup_events_path(job.service());
+        let probe = fixture.empty_cgroup_probe(&job);
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let calls_for_probe = calls.clone();
+        let mut finalizer = owner.begin_owned_job_finalization(job, probe);
+        finalizer.gpu_idle_observer = Some(Box::new(move |config| {
+            calls_for_probe.lock().unwrap().push((
+                config.gpu_uuid().to_owned(),
+                config.expected_index(),
+                config.max_idle_mib(),
+            ));
+            if calls_for_probe.lock().unwrap().len() == 1 {
+                Err(GpuProbeFailureKind::MemoryBusy)
+            } else {
+                Ok(config.gpu_uuid().to_owned())
+            }
+        }));
+
+        assert_eq!(
+            finalizer.finalize(&fixture.context()).unwrap_err().kind(),
+            OwnedJobFinalizeErrorKind::Gpu(GpuProbeFailureKind::MemoryBusy)
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.root.path().join("stops")).unwrap(),
+            "stop\n"
+        );
+        // An earlier empty observation is not release authority on retry.
+        // Recheck the same stopped generation before querying the GPU again.
+        fs::write(&events, "populated 1\nfrozen 0\n").unwrap();
+        assert!(matches!(
+            finalizer.finalize(&fixture.context()).unwrap_err().kind(),
+            OwnedJobFinalizeErrorKind::Observation(_)
+        ));
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        assert_eq!(
+            fs::read_to_string(fixture.root.path().join("stops")).unwrap(),
+            "stop\n"
+        );
+        fs::write(&events, "populated 0\nfrozen 0\n").unwrap();
+        assert!(matches!(
+            finalizer.finalize(&fixture.context()).unwrap(),
+            ReleasedNativeOutcome::Failed(NativeJobFailure::Unavailable)
+        ));
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![
+                (
+                    "GPU-01234567-89ab-cdef-0123-456789abcdef".to_owned(),
+                    0,
+                    256,
+                ),
+                (
+                    "GPU-01234567-89ab-cdef-0123-456789abcdef".to_owned(),
+                    0,
+                    256,
+                ),
+            ]
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.root.path().join("stops")).unwrap(),
+            "stop\n"
+        );
+    }
+
+    #[test]
+    fn finalizer_revalidates_breeze_artifacts_after_stop_and_returns_relative_refs() {
+        let fixture = Fixture::new();
+        let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+        let mut owner = fixture.owner(&guard);
+        let job = fixture.start_breeze_job(&mut owner);
+        job.store.claim_execution(&job.job).unwrap();
+        fs::write(
+            fixture.job_directory.join("result.wav"),
+            Fixture::minimal_wave(),
+        )
+        .unwrap();
+        let candidate = super::super::media_execution::revalidate_breeze_artifacts(
+            &fixture.job_directory,
+            SpeechMode::Standard,
+            &fixture.context(),
+        )
+        .unwrap();
+        let native = NativeJobResult::from_breeze(&candidate).unwrap();
+        job.store.write_result(&job.job, &native).unwrap();
+        let probe = fixture.empty_cgroup_probe(&job);
+        let mut finalizer = owner.begin_owned_job_finalization(job, probe);
+        finalizer.gpu_idle_observer = Some(Box::new(|config| Ok(config.gpu_uuid().to_owned())));
+
+        let ReleasedNativeOutcome::Breeze { mode, artifacts } =
+            finalizer.finalize(&fixture.context()).unwrap()
+        else {
+            panic!("validated Breeze artifact outcome expected")
+        };
+        assert_eq!(mode, SpeechMode::Standard);
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].kind, ArtifactKind::LocalJob);
+        assert_eq!(artifacts[0].relative_path, "result.wav");
+        assert!(!format!("{:?}", artifacts[0]).contains("owned-job"));
+    }
+
+    #[test]
+    fn artifact_mutation_returns_fixed_failure_after_cgroup_gpu_and_wal_cleanup() {
+        let fixture = Fixture::new();
+        let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+        let mut owner = fixture.owner(&guard);
+        let job = fixture.start_breeze_job(&mut owner);
+        job.store.claim_execution(&job.job).unwrap();
+        fs::write(
+            fixture.job_directory.join("result.wav"),
+            Fixture::minimal_wave(),
+        )
+        .unwrap();
+        let candidate = super::super::media_execution::revalidate_breeze_artifacts(
+            &fixture.job_directory,
+            SpeechMode::Standard,
+            &fixture.context(),
+        )
+        .unwrap();
+        let native = NativeJobResult::from_breeze(&candidate).unwrap();
+        job.store.write_result(&job.job, &native).unwrap();
+        fs::write(
+            fixture.job_directory.join("result.wav"),
+            b"invalid but regular artifact bytes",
+        )
+        .unwrap();
+        let probe = fixture.empty_cgroup_probe(&job);
+        let mut finalizer = owner.begin_owned_job_finalization(job, probe);
+        finalizer.gpu_idle_observer = Some(Box::new(|config| Ok(config.gpu_uuid().to_owned())));
+
+        assert!(matches!(
+            finalizer.finalize(&fixture.context()).unwrap(),
+            ReleasedNativeOutcome::Failed(NativeJobFailure::InvalidOutput)
+        ));
+        drop(finalizer);
+        assert!(owner.store.list().unwrap().is_empty());
+        assert_eq!(
+            fs::read_to_string(fixture.root.path().join("stops")).unwrap(),
+            "stop\n"
+        );
+    }
+
+    #[test]
+    fn retirement_failure_retains_pending_outcome_receipt_and_job_for_readonly_retry() {
+        let fixture = Fixture::new();
+        let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+        let mut owner = fixture.owner(&guard);
+        let job = fixture.start_breeze_job(&mut owner);
+        fixture.claim_and_write_result(
+            &job,
+            &NativeJobResult::Failed(NativeJobFailure::Unavailable),
+        );
+        let intent_path = fixture
+            .intents
+            .path()
+            .join(format!("{}.json", job.service().unit_name()));
+        let probe = fixture.empty_cgroup_probe(&job);
+        let mut finalizer = owner.begin_owned_job_finalization(job, probe);
+        let mut first_probe = true;
+        let probe_intent_path = intent_path.clone();
+        finalizer.gpu_idle_observer = Some(Box::new(move |config| {
+            if first_probe {
+                fs::set_permissions(&probe_intent_path, fs::Permissions::from_mode(0o400)).unwrap();
+                first_probe = false;
+            }
+            Ok(config.gpu_uuid().to_owned())
+        }));
+
+        let error = finalizer.finalize(&fixture.context()).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            OwnedJobFinalizeErrorKind::Retirement(_)
+        ));
+        assert!(finalizer.stopped_observation.is_some());
+        assert!(finalizer.pending_outcome.is_some());
+        assert!(!finalizer.released);
+        assert_eq!(
+            fs::read_to_string(fixture.root.path().join("stops")).unwrap(),
+            "stop\n"
+        );
+
+        fs::set_permissions(&intent_path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(matches!(
+            finalizer.finalize(&fixture.context()).unwrap(),
+            ReleasedNativeOutcome::Failed(NativeJobFailure::Unavailable)
+        ));
+        drop(finalizer);
+        assert!(owner.store.list().unwrap().is_empty());
+        assert_eq!(
+            fs::read_to_string(fixture.root.path().join("stops")).unwrap(),
+            "stop\n"
+        );
     }
 }

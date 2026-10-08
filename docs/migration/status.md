@@ -10,6 +10,35 @@ runtime check.
 
 ## Current resumed checkpoint — 2026-10-08
 
+The subsequent managed-stack composition passes **795 root tests, 1 ignored**,
+strict all-target Clippy, formatting and whitespace checks. It adds opt-in `local_job_profiles` and
+`job_directory_root` to the private managed-session JSON. Omitting both keeps
+the existing language-only behavior. The root must already exist with owner-only
+0700 permissions, remain pinned and not overlap coordinator/standalone history,
+transport or intent roots. Only explicit local Breeze CUDA and local Nagi/Laya
+CPU/CUDA routes are accepted; there is no hosted or generic-script fallback.
+This remains experimental branch functionality, not an installation/cutover.
+
+The local worker owns a fresh per-job service, releases the resident language
+router before CUDA work, preserves it for CPU work and can construct a fresh
+language launch after proven local cleanup. Every CUDA activation requires a
+fresh physical-device idle observation. Finalization sends Stop once and retains
+its exact-generation receipt across read-only retries. Every retry freshly
+checks cgroup release, then the selected GPU, result packet and Breeze artifacts;
+publication requires successful proof-bound intent retirement. Regression
+coverage includes a cgroup becoming populated after a failed GPU check, without
+another Stop or premature output. Native uncertainty remains interrupted even
+when resource cleanup is proven. Relative Breeze artifact references also reach
+durable completion history; they do not expose the private absolute job root.
+
+Remaining gates: full injected mixed-worker lifecycle tests; crash-safe
+multi-runtime recovery and durable cleanup/history association; Comfy
+generation-bound dispatch/transport and artifact integration; optional native
+decision latency/usage delivery to clients; HTTP artifact-root integration; and
+real model/GPU switching, cancellation and exact service restoration acceptance.
+Current startup still refuses retained foreign/job intents rather than adopting
+or replaying them. No live service or original checkout changed in this slice.
+
 The owned-job handoff passes **779 root tests, 1 ignored**, strict all-target
 Clippy, formatting and whitespace checks. It composes pinned private packets, explicit accepted
 routes/devices, payload-free schema-4 service intents and an internal one-shot

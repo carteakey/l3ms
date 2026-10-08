@@ -211,13 +211,24 @@ impl ControlDaemon {
             return Ok(report);
         }
         let expected_gpu = config.gpu.expected_index();
-        self.core
-            .require_managed_language_startup(&config.runtime, expected_gpu)
-            .map_err(|_| DaemonError::ManagedSessionUnavailable)?;
+        if config.local_job_profiles.is_empty() {
+            self.core
+                .require_managed_language_startup(&config.runtime, expected_gpu)
+        } else {
+            self.core.require_managed_stack_startup(
+                &config.runtime,
+                expected_gpu,
+                &config.startup_profile,
+                &config.supported_model_tasks,
+                &config.local_job_profiles,
+            )
+        }
+        .map_err(|_| DaemonError::ManagedSessionUnavailable)?;
 
         let runtime = config.runtime.clone();
         let startup_profile = config.startup_profile.clone();
         let supported_model_tasks = config.supported_model_tasks.clone();
+        let local_job_profiles = config.local_job_profiles.clone();
         let session_cancellation = super::managed_session::ManagedWorkerCancellation::new();
         let worker_cancel = session_cancellation.clone();
         let (command_sender, command_receiver) = mpsc::sync_channel(1);
@@ -277,15 +288,25 @@ impl ControlDaemon {
                             // observation. Do not reopen admission after the
                             // listener has already committed to stop.
                         } else if worker_ready
-                            || core
-                                .confirm_managed_language_ready(
+                            || (if local_job_profiles.is_empty() {
+                                core.confirm_managed_language_ready(
                                     &runtime,
                                     expected_gpu,
                                     &startup_profile,
                                     supported_model_tasks.clone(),
                                     &readiness,
                                 )
-                                .is_err()
+                            } else {
+                                core.confirm_managed_stack_ready(
+                                    &runtime,
+                                    expected_gpu,
+                                    &startup_profile,
+                                    supported_model_tasks.clone(),
+                                    local_job_profiles.clone(),
+                                    &readiness,
+                                )
+                            })
+                            .is_err()
                         {
                             core.quarantine();
                             report.stopped = StopReason::WorkerUncertain;
@@ -1426,7 +1447,7 @@ fn consume_managed_completion(
         .complete(
             slot.job_id,
             completion.completion,
-            Vec::new(),
+            completion.artifacts.clone(),
             Instant::now(),
         )
         .is_err()
@@ -1722,6 +1743,7 @@ mod tests {
                     result_terminal: ResultTerminal::Interrupted,
                     cleanup_proven,
                     stop_session: true,
+                    artifacts: Vec::new(),
                 },
                 &mut active,
                 &mut accepted,

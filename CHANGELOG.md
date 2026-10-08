@@ -10,6 +10,12 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Compose opt-in allowlisted Breeze/local Nagi/Laya jobs with the managed
+  language worker and coordinator admission. Finalization retains one exact
+  Stop receipt, freshly checks cgroup/device release and artifacts on retries,
+  and retires the service intent before publishing. Preserve native failure
+  categories and legacy language-only configuration defaults. Crash recovery,
+  Comfy worker integration and real mixed-runtime acceptance remain unfinished.
 - Add pinned private request/result packets and durable one-shot execution
   claims for owned Breeze/local-decision jobs. Bind payload-free job metadata
   to exact runtime launches, preserve legacy intent schemas and restore new

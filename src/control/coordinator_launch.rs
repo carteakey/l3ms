@@ -178,6 +178,10 @@ struct ManagedConfig {
     coordinator_id: String,
     startup_profile: String,
     supported_model_tasks: BTreeMap<String, std::collections::BTreeSet<String>>,
+    #[serde(default)]
+    local_job_profiles: Vec<String>,
+    #[serde(default)]
+    job_directory_root: Option<PathBuf>,
     private_router_config: PathBuf,
     router_executable: PathBuf,
     router_working_directory: PathBuf,
@@ -236,7 +240,8 @@ impl ManagedConfig {
     }
 }
 
-/// Run a strict, one-runtime managed language session. This is separate from
+/// Run a strict managed language session with optional allowlisted local jobs.
+/// This is separate from
 /// the CPU-only schema and never opts media or decision runtimes into this
 /// executor.
 pub fn run_managed_session(config_path: &Path) -> Result<RunReport, LaunchError> {
@@ -263,6 +268,8 @@ pub fn run_managed_session(config_path: &Path) -> Result<RunReport, LaunchError>
             coordinator_id: config.coordinator_id,
             startup_profile: config.startup_profile,
             supported_model_tasks: config.supported_model_tasks,
+            local_job_profiles: config.local_job_profiles,
+            job_directory_root: config.job_directory_root,
             gpu_uuid: config.gpu_uuid,
             gpu_index: config.gpu_index,
             gpu_idle_mib: config.gpu_idle_mib,
@@ -288,6 +295,21 @@ pub fn run_managed_session(config_path: &Path) -> Result<RunReport, LaunchError>
         managed.runtime.clone(),
         ResourceClaim::ExclusiveGpu(config.gpu_index),
     );
+    for profile in &managed.local_job_profiles {
+        let route = super::routes::resolve_profile_route(&catalog, profile)
+            .map_err(|_| LaunchError::InvalidConfig)?;
+        let resource = match route.device {
+            Some(super::catalog::Device::Cpu) => ResourceClaim::None,
+            Some(super::catalog::Device::Cuda) => ResourceClaim::ExclusiveGpu(config.gpu_index),
+            _ => return Err(LaunchError::InvalidConfig),
+        };
+        if bindings
+            .insert(route.runtime, resource)
+            .is_some_and(|previous| previous != resource)
+        {
+            return Err(LaunchError::InvalidConfig);
+        }
+    }
     let daemon = ControlDaemon::bind(
         DaemonConfig {
             socket_directory: config.socket_directory,
@@ -449,6 +471,45 @@ mod tests {
         fs::write(&path, b"secret-config-body").unwrap();
         let error = read_config(&path).err().unwrap();
         assert!(!format!("{error:?} {error}").contains("secret-config-body"));
+    }
+
+    #[test]
+    fn legacy_managed_config_keeps_local_jobs_disabled_unless_explicitly_declared() {
+        let mut value = serde_json::json!({
+            "schema_version": 1,
+            "backend_contract": "llama_swap_v247_llama_server",
+            "repository_root": "/repo", "socket_directory": "/socket",
+            "lock_directory": "/locks", "data_directory": "/data",
+            "standalone_data_directory": "/standalone",
+            "service_intent_directory": "/intents", "transport_directory": "/transport",
+            "coordinator_id": "test", "startup_profile": "language:test",
+            "supported_model_tasks": {"test": ["chat"]},
+            "private_router_config": "/router.json", "router_executable": "/router",
+            "router_working_directory": "/repo", "router_port": 8080,
+            "gpu_uuid": "GPU-01234567-89ab-cdef-0123-456789abcdef",
+            "gpu_index": 0, "gpu_idle_mib": 128, "queue_capacity": 8,
+            "peer_timeout_ms": 1000, "max_connections": 8,
+            "session_timeout_seconds": 60, "request_timeout_seconds": 30,
+            "activation_timeout_seconds": 30, "stop_timeout_seconds": 10,
+            "recovery_timeout_seconds": 10
+        });
+        let legacy: ManagedConfig = serde_json::from_value(value.clone()).unwrap();
+        assert!(legacy.local_job_profiles.is_empty());
+        assert!(legacy.job_directory_root.is_none());
+        assert_eq!(legacy.validate(), Ok(()));
+
+        value["local_job_profiles"] = serde_json::json!(["media:breeze-tts-2"]);
+        value["job_directory_root"] = serde_json::json!("/private-jobs");
+        let explicit: ManagedConfig = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(explicit.local_job_profiles, ["media:breeze-tts-2"]);
+        assert_eq!(
+            explicit.job_directory_root,
+            Some(PathBuf::from("/private-jobs"))
+        );
+        // Parsing is not route/path acceptance: full validation remains in
+        // ManagedSessionConfig against the fresh catalog and pinned roots.
+        value["local_job_profiles"] = serde_json::json!("media:breeze-tts-2");
+        assert!(serde_json::from_value::<ManagedConfig>(value).is_err());
     }
 
     #[test]
