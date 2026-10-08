@@ -26,6 +26,14 @@ cleanup is proven. Late-readiness shutdown coverage remains predicate-level;
 full injected daemon/native-worker lifecycle tests and real managed acceptance
 are still outstanding. No live service was stopped for this checkpoint.
 
+Compatibility rerun at `0e94ede`: both toolkit Rust suites (4 media / 2 decision)
+and strict Clippy pass; Python passes 14 root downloader, 14 media downloader,
+16 media, 14 decision and 15 decision-maintenance tests. All 17 offline Breeze
+harness safety tests pass, as do ten site data/contrast tests and DOM fixtures.
+Read-only host revalidation still finds the original llama-swap service active
+with its original invocation and an active Strata model plus KDE compositor on
+the GPU. No inference, desktop stop or service maintenance was performed.
+
 The site now uses the Signal / 03 visual direction, committed as `6cbef1b`.
 The real Firefox desktop/mobile probe passed again after the theme change;
 root reviewed desktop media and mobile decisions renders. Palette regression
