@@ -18,6 +18,15 @@ available benchmark commands. The dashboard retains their names as
 `originalBenchmark`, links here, and leaves the executable benchmark command
 unrecorded. Importing and validating those harnesses is a remaining parity gate.
 
+A read-only review of the currently uncommitted harnesses confirmed why they
+must not be imported verbatim: the refresh driver uses a fixed shared temporary
+directory, an original-checkout absolute configuration path and broad
+process-name cleanup; the long-horizon driver embeds an authentication token.
+No value is reproduced here and neither harness was executed or copied. Their
+source remains intact in the original checkout. A future import must first
+replace those assumptions with explicit configuration, exact owned-process
+cleanup and secret-free credential handling, then pass offline safety fixtures.
+
 Before any live pilot, recheck current service state, binary flags, model paths,
 GPU ownership and the exact rollback configuration. Imported metadata does not
 prove installation, native health, ingress isolation or GPU release.
