@@ -18,6 +18,27 @@ See the [W3C contrast criterion](https://www.w3.org/WAI/WCAG22/Understanding/con
 Ten data/contrast tests and existing JavaScript DOM fixtures pass. Screenshot
 artifacts and disposable profiles remain in ignored branch-local storage.
 
-Real tab/click/keyboard/focus/overflow checks in isolated Firefox are the next
-gate. Browser screenshots do not prove installed engines, model accuracy,
-coordinated GPU switching or public deployment.
+The opt-in dependency-free browser probe is now available:
+
+```sh
+node docs/probe_dashboard_browser.cjs --run
+```
+
+After root code review and corrections, the root rerun passed real pointer tab
+clicks, ArrowRight/Home/End keyboard navigation and focus assertions. Media and
+decision panels rendered 7 and 6 cards, respectively; neither the document nor
+lane cards overflowed horizontally at 1440px or 390px. A controlled pre-dashboard
+fixture proved that the native event subscription observes both `console.error`
+and an uncaught exception; the dashboard then produced no such events.
+
+The static server and browser automation endpoint were loopback-only. Exact live
+child-handle shutdown and read-only process-tree/group checks verified cleanup
+before removing the fresh profile. Root-run screenshots remain in ignored
+`.toolkit/dashboard-probe-4RkvVF/`; earlier image review covered all four desktop
+and mobile media/decision views. No original browser profile or inference service
+was changed. The harness retains the disposable profile if cleanup is uncertain.
+
+These checks close the specific multi-lane visual/keyboard/mobile gates exercised
+here, not comprehensive screen-reader/accessibility certification or every public
+link's deployment. Browser screenshots do not prove installed engines, model
+accuracy, coordinated GPU switching or public deployment.

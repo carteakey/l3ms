@@ -10,6 +10,9 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Add an opt-in real Firefox dashboard probe for native click/keyboard/focus,
+  desktop/mobile lane layouts and console-error capture, with isolated profiles
+  and conservative process-cleanup verification; no website publication.
 - Raise dashboard secondary-text contrast on every dark panel and add an
   offline contrast regression; visual/browser acceptance remains separately
   recorded from model/runtime acceptance.

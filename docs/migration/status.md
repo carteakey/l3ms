@@ -79,8 +79,11 @@ rerun once its newly added ownership/readiness methods are actually wired.
 Isolated headless Firefox is now available for local visual checks despite the
 unavailable connected browser surface. The root reviewed desktop/mobile initial
 language-panel renders and corrected secondary-text contrast; ten offline
-data/contrast tests and DOM fixtures pass. Real multi-lane interaction and
-comprehensive accessibility remain pending. See [browser evidence](site-browser-acceptance.md).
+data/contrast tests and DOM fixtures pass. Root reran the reviewed opt-in Firefox
+probe: real pointer and keyboard/focus checks, media/decision card counts and
+desktop/mobile horizontal layout checks pass. A controlled error fixture verifies
+console capture; browser cleanup and disposable-profile removal are confirmed.
+Comprehensive accessibility and publication remain pending. See [browser evidence](site-browser-acceptance.md).
 
 Linear tracking: [CAR-215](https://linear.app/carteakey/issue/CAR-215/consolidate-l3ms-l2m2-and-l3ds-into-the-local-3-mode-model-stack)
 is the parent; [CAR-216](https://linear.app/carteakey/issue/CAR-216/import-l2m2-and-l3ds-into-the-l3ms-monorepo-with-verified-standalone)
