@@ -10,6 +10,10 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Establish the Signal / 03 dashboard style: graphite instrument panels,
+  restrained phosphor/mineral/amber accents, slanted branding, explicit keyboard
+  focus and reduced-motion support. Record a separate GPUI frontend direction;
+  no backend rewrite, native dependency or live-service change.
 - Add an opt-in real Firefox dashboard probe for native click/keyboard/focus,
   desktop/mobile lane layouts and console-error capture, with isolated profiles
   and conservative process-cleanup verification; no website publication.

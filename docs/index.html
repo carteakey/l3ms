@@ -4,24 +4,27 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="description" content="L3MS: local language, media, and decision model profiles, with separately labeled benchmark evidence.">
-  <meta name="theme-color" content="#080808">
+  <meta name="theme-color" content="#090e10">
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <title>L3MS // Local 3-Mode Model Stack</title>
   <style>
     :root {
       color-scheme: dark;
-      --bg: #080808;
-      --panel: #111;
-      --panel-light: #181818;
-      --border: #292929;
-      --border-bright: #888;
-      --green: #00ff66;
-      --yellow: #ffff00;
-      --pink: #ff1976;
-      --blue: #00e5ff;
-      --text: #ddd;
-      --muted: #888;
-      --shadow: 3px;
+      /* Signal / 03: phosphor, mineral, and amber; no simulated telemetry. */
+      --bg: #090e10;
+      --panel: #10191c;
+      --panel-light: #192529;
+      --border: #304247;
+      --border-bright: #68858b;
+      --green: #a9e8bd;
+      --yellow: #e8c58a;
+      --pink: #e7a3b6;
+      --blue: #92cfda;
+      --text: #dbe5df;
+      --muted: #a0b2ad;
+      --shadow: 0px;
+      --focus: #d0f7ad;
+      --space-unit: .25rem;
     }
 
     * { box-sizing: border-box; }
@@ -30,21 +33,25 @@
       margin: 0;
       padding: 1rem .6rem 2rem;
       min-height: 100vh;
-      background: var(--bg);
+      background-color: var(--bg);
+      background-image: linear-gradient(#92cfda08 1px, transparent 1px),
+        linear-gradient(90deg, #92cfda08 1px, transparent 1px);
+      background-size: 32px 32px;
       color: var(--text);
       font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
       font-size: 12px;
       line-height: 1.45;
     }
     button, input { font: inherit; }
+    :focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
     button, a { -webkit-tap-highlight-color: transparent; }
     a { color: var(--blue); text-underline-offset: 3px; }
     a:hover { color: var(--green); }
     .container { width: min(1080px, 100%); margin: 0 auto; }
     .surface {
-      border: 2px solid var(--border);
+      border: 1px solid var(--border);
       background: var(--panel);
-      box-shadow: var(--shadow) var(--shadow) 0 var(--border);
+      box-shadow: inset 0 1px 0 #ffffff05;
     }
 
     header {
@@ -54,11 +61,13 @@
       align-items: start;
       padding: 1rem;
       border-color: var(--border-bright) !important;
+      border-top: 3px solid var(--green);
     }
     .brand-title {
       margin: 0;
       color: #fff;
-      font-size: 1.45rem;
+      font-size: 1.7rem;
+      font-style: italic;
       line-height: 1;
       letter-spacing: -1px;
       text-transform: uppercase;
@@ -81,7 +90,7 @@
       gap: .65rem 1rem;
     }
     .system-value { display: block; margin-top: .12rem; color: #fff; font-size: .74rem; font-weight: 700; }
-    .status-dot { display: inline-block; width: 6px; height: 6px; margin-right: .35rem; background: var(--green); }
+    .status-dot { display: inline-block; width: 6px; height: 6px; margin-right: .35rem; border: 1px solid var(--green); }
 
     .intro {
       display: grid;
@@ -97,20 +106,20 @@
 
     .tabs { display: flex; gap: .45rem; margin: 1.15rem 0 .9rem; flex-wrap: wrap; }
     .tab, .filter, .button, .benchmark-selector {
-      border: 2px solid var(--border);
+      border: 1px solid var(--border);
       background: var(--panel);
       color: var(--muted);
       cursor: pointer;
       font-weight: 700;
       text-transform: uppercase;
     }
-    .tab { padding: .48rem .85rem; }
+    .tab { padding: .6rem .85rem; letter-spacing: .035em; }
     .tab:hover, .filter:hover, .button:hover, .benchmark-selector:hover { border-color: #fff; color: #fff; }
     .tab.active {
-      border-color: #fff;
-      background: #fff;
-      color: #000;
-      box-shadow: var(--shadow) var(--shadow) 0 var(--green);
+      border-color: var(--green);
+      background: var(--panel-light);
+      color: var(--green);
+      box-shadow: inset 0 -2px 0 var(--green);
     }
     .tab-panel { display: none; }
     .tab-panel.active { display: block; }
@@ -118,13 +127,12 @@
     .controls { display: flex; justify-content: space-between; gap: 1rem; margin-bottom: .8rem; }
     .search {
       width: min(340px, 100%);
-      border: 2px solid var(--border);
+      border: 1px solid var(--border);
       background: var(--panel);
       color: var(--text);
       padding: .5rem .65rem;
-      outline: none;
     }
-    .search:focus { border-color: #fff; }
+    .search:focus { border-color: var(--focus); }
     .filters { display: flex; gap: .35rem; flex-wrap: wrap; }
     .filter { padding: .35rem .58rem; font-size: .68rem; }
     .filter.active { border-color: var(--green); color: var(--green); }
@@ -214,7 +222,9 @@
     .lane-intro { padding: .9rem; margin-bottom: .8rem; border-left: 4px solid var(--blue); }
     .lane-intro p { margin: .25rem 0 0; color: var(--muted); }
     .lane-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; }
-    .lane-card { min-width: 0; padding: .9rem; }
+    .lane-card { min-width: 0; padding: 1rem; border-top: 2px solid var(--blue); }
+    #decisions-panel .lane-card { border-top-color: var(--yellow); }
+    #decisions-panel .lane-intro { border-left-color: var(--yellow); }
     .lane-card h3 { margin: .28rem 0 .65rem; color: #fff; font-size: .86rem; }
     .lane-card .badge-row { margin: .35rem 0 .7rem; }
     .lane-card .badge { overflow-wrap: anywhere; }
@@ -226,6 +236,10 @@
 
     .empty { padding: 2rem; color: var(--muted); text-align: center; }
     footer { margin-top: 2rem; padding: 1rem 0; border-top: 2px solid var(--border); color: var(--muted); font-size: .66rem; text-align: center; }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+    }
 
     @media (max-width: 760px) {
       body { padding: .65rem .45rem 1.5rem; }
@@ -259,7 +273,7 @@
   <main class="container">
     <header class="surface">
       <div>
-        <h1 class="brand-title">L3MS <span class="accent">//</span> THE STACK</h1>
+        <h1 class="brand-title">L3MS <span class="accent">///</span> THE STACK</h1>
         <span class="eyebrow">Local 3-Mode Model Stack · Language / Media / Decisions</span>
         <nav class="header-links" aria-label="Related resources">
           <a href="https://github.com/carteakey/l3ms">Source</a>

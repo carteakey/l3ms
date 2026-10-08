@@ -37,7 +37,7 @@ def valid_community_run():
 
 
 class DashboardDataTest(unittest.TestCase):
-    def test_muted_text_meets_normal_text_contrast_on_all_panel_backgrounds(self):
+    def test_theme_text_and_accents_meet_contrast_on_all_panel_backgrounds(self):
         html = (ROOT / "docs" / "index.html").read_text()
         colors = dict(re.findall(r"--([a-z-]+):\s*(#[0-9a-fA-F]{3,6});", html))
 
@@ -50,10 +50,11 @@ class DashboardDataTest(unittest.TestCase):
                       else ((channel + 0.055) / 1.055) ** 2.4 for channel in channels]
             return sum(weight * channel for weight, channel in zip((0.2126, 0.7152, 0.0722), linear))
 
-        for background in ("bg", "panel", "panel-light"):
-            with self.subTest(background=background):
-                levels = sorted((luminance(colors["muted"]), luminance(colors[background])))
-                self.assertGreaterEqual((levels[1] + 0.05) / (levels[0] + 0.05), 4.5)
+        for foreground in ("text", "muted", "green", "blue", "yellow", "pink", "focus"):
+            for background in ("bg", "panel", "panel-light"):
+                with self.subTest(foreground=foreground, background=background):
+                    levels = sorted((luminance(colors[foreground]), luminance(colors[background])))
+                    self.assertGreaterEqual((levels[1] + 0.05) / (levels[0] + 0.05), 4.5)
 
     def test_served_generation_profiles_match_dashboard_metadata(self):
         parsed = dashboard.parse_models((ROOT / "llama-swap.yaml").read_text())
