@@ -10,6 +10,13 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Pass an explicit canonical, bounded `L3MS_ROOT` to owned engine backends when
+  selected, keeping legacy helper arguments unchanged and rejecting malformed
+  launch metadata; no arbitrary environment or credential forwarding is added.
+- Make staged Nagi Python environments relocatable so activation and console
+  commands survive the final rename; preserve dependency pins and existing envs.
+  Record real offline native CPU execution and bounded benchmark evidence,
+  separate from routing quality, GPU latency and full-port acceptance.
 - Add bounded native embedding requests, vectors/usage, one-shot language HTTP
   execution, transactional paged results and keyboard text-batch forms while
   preserving existing chat envelopes. General managed language dispatch remains

@@ -16,7 +16,7 @@ use super::catalog::RuntimeIdentity;
 use super::cgroup_release::{
     CgroupObservation, CgroupObservationKind, CgroupReleaseErrorKind, CgroupReleaseProbe,
 };
-use super::engine_helper::{supervisor_arguments, BackendProcessSpec};
+use super::engine_helper::{supervisor_arguments, BackendProcessSpec, StackRoot};
 use super::engine_transport::{BackendPort, CoordinatorIdentityDescriptor};
 use super::managed_service::{
     LaunchRecipe, ManagedServiceController, ManagedServiceErrorKind, ManagedServiceState,
@@ -284,6 +284,7 @@ pub struct IsolatedEngineLaunch {
     helper_executable: PathBuf,
     transport_directory: PathBuf,
     backend_port: BackendPort,
+    stack_root: Option<StackRoot>,
     stop_timeout: Duration,
 }
 
@@ -307,8 +308,21 @@ impl IsolatedEngineLaunch {
             helper_executable: helper_executable.as_ref().to_path_buf(),
             transport_directory: transport_directory.as_ref().to_path_buf(),
             backend_port,
+            stack_root: None,
             stop_timeout,
         })
+    }
+
+    /// Explicitly provide the backend's `L3MS_ROOT`. The directory is
+    /// canonicalized and validated here, then carried through the private
+    /// helper argv; no ambient systemd variable is consulted.
+    pub fn with_stack_root(
+        mut self,
+        path: impl AsRef<Path>,
+    ) -> Result<Self, ManagedServiceErrorKind> {
+        self.stack_root =
+            Some(StackRoot::new(path).map_err(|_| ManagedServiceErrorKind::InvalidRecipe)?);
+        Ok(self)
     }
 }
 
@@ -400,12 +414,15 @@ impl<'host> ManagedRuntimeOwner<'host> {
                 ManagedServiceErrorKind::InvalidRecipe,
             ));
         }
-        let backend = BackendProcessSpec::new(
+        let mut backend = BackendProcessSpec::new(
             launch.backend_recipe.executable(),
             launch.backend_recipe.working_directory(),
             launch.backend_recipe.arguments().iter().cloned(),
         )
         .map_err(|_| OwnerStartError::Preparation(ManagedServiceErrorKind::InvalidRecipe))?;
+        if let Some(stack_root) = launch.stack_root {
+            backend = backend.with_stack_root(stack_root);
+        }
         let helper_arguments = supervisor_arguments(
             &launch.transport_directory,
             launch.backend_port,
@@ -1041,6 +1058,59 @@ sys.exit(23)
         assert_eq!(
             fs::read_to_string(fixture.root.path().join("starts")).unwrap(),
             "start\n"
+        );
+    }
+
+    #[test]
+    fn isolated_engine_stack_root_is_explicit_validated_and_redacted() {
+        let fixture = Fixture::new();
+        let stack_root = fixture.root.path().join("stack-root");
+        fs::create_dir(&stack_root).unwrap();
+        let launch = IsolatedEngineLaunch::new(
+            RuntimeIdentity::new(Lane::Media, "comfyui").unwrap(),
+            fixture.recipe(),
+            std::env::current_exe().unwrap(),
+            fixture.root.path(),
+            8188,
+            Duration::from_secs(1),
+        )
+        .unwrap()
+        .with_stack_root(&stack_root)
+        .unwrap();
+        let debug = format!("{launch:?}");
+        assert_eq!(debug, "IsolatedEngineLaunch([redacted])");
+        assert!(!debug.contains(stack_root.to_str().unwrap()));
+
+        let invalid = IsolatedEngineLaunch::new(
+            RuntimeIdentity::new(Lane::Media, "comfyui").unwrap(),
+            fixture.recipe(),
+            std::env::current_exe().unwrap(),
+            fixture.root.path(),
+            8188,
+            Duration::from_secs(1),
+        )
+        .unwrap()
+        .with_stack_root("relative");
+        assert_eq!(
+            invalid.map(|_| ()),
+            Err(ManagedServiceErrorKind::InvalidRecipe)
+        );
+
+        let file = fixture.root.path().join("not-a-directory");
+        fs::write(&file, b"fixture").unwrap();
+        let invalid = IsolatedEngineLaunch::new(
+            RuntimeIdentity::new(Lane::Media, "comfyui").unwrap(),
+            fixture.recipe(),
+            std::env::current_exe().unwrap(),
+            fixture.root.path(),
+            8188,
+            Duration::from_secs(1),
+        )
+        .unwrap()
+        .with_stack_root(file);
+        assert_eq!(
+            invalid.map(|_| ()),
+            Err(ManagedServiceErrorKind::InvalidRecipe)
         );
     }
 

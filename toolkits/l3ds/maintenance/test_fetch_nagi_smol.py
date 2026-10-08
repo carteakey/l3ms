@@ -106,7 +106,7 @@ class FetcherTests(unittest.TestCase):
                 FETCHER.main()
         return stdout.getvalue()
 
-    def allow_space_check(self) -> mock._patch:
+    def allow_space_check(self):
         return mock.patch.object(
             FETCHER.shutil,
             "disk_usage",
@@ -138,9 +138,10 @@ class FetcherTests(unittest.TestCase):
         def fake_file_digest(handle, algorithm: str) -> FakeDigest:
             self.assertEqual(algorithm, "sha256")
             filename = Path(handle.name).name
-            return FakeDigest(expected_hashes.get(
-                filename, hashlib.sha256(handle.read()).hexdigest()
-            ))
+            expected = expected_hashes.get(filename)
+            if expected is None:
+                expected = hashlib.sha256(handle.read()).hexdigest()
+            return FakeDigest(expected)
 
         with self.allow_space_check(), mock.patch.object(
             FETCHER.hashlib, "file_digest", side_effect=fake_file_digest
@@ -167,6 +168,18 @@ class FetcherTests(unittest.TestCase):
         self.assertTrue(
             all(row["bytes"] > 0 and len(row["sha256"]) == 64 for row in evidence["acquired"])
         )
+        for row in evidence["acquired"]:
+            expected = next(
+                (
+                    digest
+                    for _, _, files in FETCHER.FILES
+                    for filename, digest in files
+                    if filename == row["file"] and digest is not None
+                ),
+                None,
+            )
+            if expected is not None:
+                self.assertEqual(row["sha256"], expected)
 
     def test_upstream_revision_change_refuses_before_any_download(self) -> None:
         calls: list[tuple[str, str, str]] = []
@@ -228,20 +241,25 @@ class FetcherTests(unittest.TestCase):
         self.install_hub_fakes(download_paths=paths, downloads=calls)
         before = {path: path.read_bytes() for path in paths.values()}
 
+        def fake_file_digest(handle, algorithm: str) -> FakeDigest:
+            self.assertEqual(algorithm, "sha256")
+            expected = next(
+                (
+                    digest
+                    for _, _, files in FETCHER.FILES
+                    for filename, digest in files
+                    if filename == Path(handle.name).name and digest is not None
+                ),
+                None,
+            )
+            if expected is None:
+                expected = hashlib.sha256(handle.read()).hexdigest()
+            return FakeDigest(expected)
+
         with self.allow_space_check(), mock.patch.object(
             FETCHER.hashlib,
             "file_digest",
-            side_effect=lambda handle, algorithm: FakeDigest(
-                next(
-                    (
-                        digest
-                        for _, _, files in FETCHER.FILES
-                        for filename, digest in files
-                        if filename == Path(handle.name).name and digest is not None
-                    ),
-                    hashlib.sha256(handle.read()).hexdigest(),
-                )
-            ),
+            side_effect=fake_file_digest,
         ), self.assertRaises(SystemExit) as raised:
             self.run_main(["--download"])
 

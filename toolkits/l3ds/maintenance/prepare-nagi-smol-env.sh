@@ -93,7 +93,7 @@ if [[ "$stage_parent" != "$ROOT_DIR" \
 fi
 echo "Creating a staged CPython 3.12.13 environment."
 echo "Installing the pinned Nagi-Smol dependency closure (model weights excluded)."
-UV_PYTHON_DOWNLOADS=never uv venv --python 3.12.13 "$stage_dir"
+UV_PYTHON_DOWNLOADS=never uv venv --python 3.12.13 --relocatable "$stage_dir"
 uv pip sync \
     --strict \
     --torch-backend cu124 \

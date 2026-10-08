@@ -36,6 +36,7 @@ use super::engine_transport::{
 use super::runtime::{Cancellation, OperationContext};
 
 const ARGUMENT_MARKER: &str = "--l3ms-isolated-engine-supervisor-v1";
+const STACK_ROOT_ARGUMENT: &str = "--l3ms-stack-root";
 const MAX_ARGUMENTS: usize = 4096;
 const MAX_ARGUMENT_BYTES: usize = 64 * 1024;
 const MAX_AGGREGATE_ARGUMENT_BYTES: usize = 256 * 1024;
@@ -96,12 +97,53 @@ pub fn is_helper_entrypoint(first_argument: &OsStr) -> bool {
     first_argument == ARGUMENT_MARKER
 }
 
+/// Canonical, bounded root directory explicitly passed to an isolated
+/// backend. Its path is launch configuration, not ambient manager state.
+pub(crate) struct StackRoot {
+    path: PathBuf,
+}
+
+impl StackRoot {
+    pub(crate) fn new(path: impl AsRef<Path>) -> Result<Self, EngineHelperError> {
+        let supplied_path = path.as_ref();
+        if !supplied_path.is_absolute()
+            || supplied_path.as_os_str().as_bytes().len() > MAX_PATH_BYTES
+        {
+            return Err(EngineHelperError::InvalidArguments);
+        }
+        let path = supplied_path
+            .canonicalize()
+            .map_err(|_| EngineHelperError::InvalidArguments)?;
+        if !path.is_absolute() || path.as_os_str().as_bytes().len() > MAX_PATH_BYTES {
+            return Err(EngineHelperError::InvalidArguments);
+        }
+        let metadata = path
+            .metadata()
+            .map_err(|_| EngineHelperError::InvalidArguments)?;
+        if !metadata.is_dir() {
+            return Err(EngineHelperError::InvalidArguments);
+        }
+        Ok(Self { path })
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl fmt::Debug for StackRoot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("StackRoot([redacted])")
+    }
+}
+
 /// Validated backend process details encoded in the unit's bounded argv.
 /// Debug deliberately omits all launch data.
 pub struct BackendProcessSpec {
     executable: PathBuf,
     working_directory: PathBuf,
     arguments: Vec<OsString>,
+    stack_root: Option<StackRoot>,
 }
 
 impl BackendProcessSpec {
@@ -139,7 +181,13 @@ impl BackendProcessSpec {
             executable,
             working_directory,
             arguments,
+            stack_root: None,
         })
+    }
+
+    pub(crate) fn with_stack_root(mut self, stack_root: StackRoot) -> Self {
+        self.stack_root = Some(stack_root);
+        self
     }
 }
 
@@ -194,6 +242,13 @@ pub fn supervisor_arguments(
     args.push(directory.into_os_string());
     args.push(OsString::from(port));
     args.extend(fields.into_iter().map(OsString::from));
+    if let Some(stack_root) = &backend.stack_root {
+        // Revalidate just before the caller persists and dispatches the
+        // prepared service; the helper validates it again before spawning.
+        let stack_root = StackRoot::new(stack_root.path())?;
+        args.push(OsString::from(STACK_ROOT_ARGUMENT));
+        args.push(stack_root.path().as_os_str().to_os_string());
+    }
     args.push(executable.to_os_string());
     args.push(working_directory.to_os_string());
     args.push(OsString::from(backend.arguments.len().to_string()));
@@ -343,6 +398,22 @@ fn parse_arguments(arguments: Vec<OsString>) -> Result<ParsedConfig, EngineHelpe
         take_number::<u64>(&arguments, &mut cursor)?,
     )
     .map_err(|_| EngineHelperError::InvalidArguments)?;
+    let stack_root = if arguments
+        .get(cursor)
+        .is_some_and(|argument| argument == STACK_ROOT_ARGUMENT)
+    {
+        cursor += 1;
+        let stack_root = StackRoot::new(take_path(&arguments, &mut cursor, MAX_PATH_BYTES)?)?;
+        if arguments
+            .get(cursor)
+            .is_some_and(|argument| argument == STACK_ROOT_ARGUMENT)
+        {
+            return Err(EngineHelperError::InvalidArguments);
+        }
+        Some(stack_root)
+    } else {
+        None
+    };
     let executable = take_path(&arguments, &mut cursor, MAX_PATH_BYTES)?;
     let working_directory = take_path(&arguments, &mut cursor, MAX_PATH_BYTES)?;
     let argument_count = take_number::<usize>(&arguments, &mut cursor)?;
@@ -350,7 +421,10 @@ fn parse_arguments(arguments: Vec<OsString>) -> Result<ParsedConfig, EngineHelpe
         return Err(EngineHelperError::InvalidArguments);
     }
     let backend_arguments = arguments.into_iter().skip(cursor).collect::<Vec<_>>();
-    let backend = BackendProcessSpec::new(executable, working_directory, backend_arguments)?;
+    let mut backend = BackendProcessSpec::new(executable, working_directory, backend_arguments)?;
+    if let Some(stack_root) = stack_root {
+        backend = backend.with_stack_root(stack_root);
+    }
     let directory = transport_directory
         .canonicalize()
         .map_err(|_| EngineHelperError::InvalidArguments)?;
@@ -413,6 +487,9 @@ fn spawn_backend(backend: &BackendProcessSpec) -> Result<Child, EngineHelperErro
         .env_remove("LISTEN_FDS")
         .env_remove("LISTEN_FDNAMES")
         .env_remove("NOTIFY_SOCKET");
+    if let Some(stack_root) = &backend.stack_root {
+        command.env("L3MS_ROOT", stack_root.path());
+    }
     // The child is placed in a dedicated process group and gets a parent-death
     // signal as a second containment layer in addition to systemd's cgroup.
     unsafe {
@@ -897,6 +974,9 @@ mod tests {
             &backend,
         )
         .unwrap();
+        assert!(!arguments
+            .iter()
+            .any(|argument| argument == STACK_ROOT_ARGUMENT));
         assert!(parse_arguments(arguments)
             .unwrap()
             .backend
@@ -935,6 +1015,140 @@ mod tests {
             directory.canonicalize().unwrap()
         );
         std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn stack_root_is_canonical_existing_bounded_directory_and_redacted() {
+        let directory = private_fixture_dir();
+        let root = StackRoot::new(&directory).unwrap();
+        assert_eq!(root.path(), directory.canonicalize().unwrap());
+        assert_eq!(format!("{root:?}"), "StackRoot([redacted])");
+        assert_eq!(
+            StackRoot::new("relative").map(|_| ()),
+            Err(EngineHelperError::InvalidArguments)
+        );
+        let too_long = PathBuf::from(format!("/{}", "x".repeat(MAX_PATH_BYTES)));
+        assert_eq!(
+            StackRoot::new(too_long).map(|_| ()),
+            Err(EngineHelperError::InvalidArguments)
+        );
+        let file = directory.join("not-a-directory");
+        std::fs::write(&file, b"fixture").unwrap();
+        assert_eq!(
+            StackRoot::new(&file).map(|_| ()),
+            Err(EngineHelperError::InvalidArguments)
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn optional_stack_root_flag_roundtrips_and_rejects_duplicates() {
+        let directory = private_fixture_dir();
+        let stack_root_path = directory.join("stack-root");
+        std::fs::create_dir(&stack_root_path).unwrap();
+        let backend = BackendProcessSpec::new(
+            std::env::current_exe().unwrap(),
+            std::env::current_dir().unwrap(),
+            [],
+        )
+        .unwrap()
+        .with_stack_root(StackRoot::new(&stack_root_path).unwrap());
+        assert!(!format!("{backend:?}").contains(stack_root_path.to_str().unwrap()));
+        let arguments = supervisor_arguments(
+            &directory,
+            BackendPort::new(8188).unwrap(),
+            CoordinatorIdentityDescriptor::capture_current().unwrap(),
+            &backend,
+        )
+        .unwrap();
+        let parsed = parse_arguments(arguments.clone()).unwrap();
+        let canonical_stack_root = stack_root_path.canonicalize().unwrap();
+        assert_eq!(
+            parsed.backend.stack_root.as_ref().map(StackRoot::path),
+            Some(canonical_stack_root.as_path())
+        );
+
+        let flag_index = arguments
+            .iter()
+            .position(|argument| argument == STACK_ROOT_ARGUMENT)
+            .unwrap();
+        let mut duplicate = arguments.clone();
+        duplicate.insert(flag_index + 2, OsString::from(STACK_ROOT_ARGUMENT));
+        assert_eq!(
+            parse_arguments(duplicate).map(|_| ()),
+            Err(EngineHelperError::InvalidArguments)
+        );
+
+        let mut missing_root = arguments;
+        missing_root.remove(flag_index + 1);
+        assert_eq!(
+            parse_arguments(missing_root).map(|_| ()),
+            Err(EngineHelperError::InvalidArguments)
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn backend_environment_probe() {
+        if std::env::var_os("L3MS_STACK_ROOT_PROBE").as_deref() != Some(OsStr::new("1")) {
+            return;
+        }
+        let stack_root = StackRoot::new(PathBuf::from(
+            std::env::var_os("L3MS_STACK_ROOT_PROBE_ROOT").expect("probe root supplied"),
+        ))
+        .unwrap();
+        let backend = BackendProcessSpec::new(
+            "/bin/sh",
+            std::env::current_dir().unwrap(),
+            [
+                OsString::from("-c"),
+                OsString::from(r#"printf '%s' "$L3MS_ROOT" > "$L3MS_ROOT/observed""#),
+            ],
+        )
+        .unwrap()
+        .with_stack_root(stack_root);
+        let mut child = spawn_backend(&backend).unwrap();
+        assert!(child.wait().unwrap().success());
+    }
+
+    #[test]
+    fn backend_child_gets_explicit_l3ms_root_over_ambient_value() {
+        let directory = private_fixture_dir();
+        let explicit_root = directory.join("explicit");
+        let ambient_root = directory.join("ambient");
+        std::fs::create_dir(&explicit_root).unwrap();
+        std::fs::create_dir(&ambient_root).unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let listing = Command::new(&executable).arg("--list").output().unwrap();
+        assert!(listing.status.success());
+        let test_listing = String::from_utf8(listing.stdout).unwrap();
+        let test_name = test_listing
+            .lines()
+            .find_map(|line| {
+                line.strip_suffix(": test")
+                    .filter(|name| name.ends_with("::backend_environment_probe"))
+            })
+            .expect("backend environment probe test is listed");
+        let status = Command::new(executable)
+            .arg("--exact")
+            .arg(test_name)
+            .arg("--nocapture")
+            .env("L3MS_ROOT", &ambient_root)
+            .env("L3MS_STACK_ROOT_PROBE", "1")
+            .env("L3MS_STACK_ROOT_PROBE_ROOT", &explicit_root)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(
+            std::fs::read_to_string(explicit_root.join("observed")).unwrap(),
+            explicit_root
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        );
+        assert!(!ambient_root.join("observed").exists());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

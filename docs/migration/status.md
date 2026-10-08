@@ -29,7 +29,7 @@ services and GPU state were unchanged. See [measured launch gate](private-engine
 Real native health, model/TTS execution and coordinated GPU switching remain open.
 
 Combined verification after the embedding/health/drain slice:
-**683 passed, 1 ignored**, strict all-target Clippy, formatting and whitespace
+**688 passed, 1 ignored**, strict all-target Clippy, formatting and whitespace
 checks pass. Typed embedding request/vector/usage contracts, one-shot native
 adapter, transactional paged results and keyboard forms now pass fixtures;
 archived profiles and general managed dispatch remain disabled. Admission close
@@ -43,8 +43,12 @@ maintenance/restoration on 2026-10-07. Pinned dependencies are installed. The
 first staged installation exposed stale activation/console-wrapper paths after
 rename; supported relocatable venv creation and offline exact-pin reinstallation
 repaired the installed environment. Direct Python, activation and `hf --help`
-now work. Minimal revision/checksum-pinned model acquisition is underway; six
-offline acquisition safety tests pass. No real forward-pass claim yet. No
+now work. Minimal revision/checksum-pinned model acquisition completed; six
+offline acquisition safety tests pass. Real offline CPU Nagi execution and
+the bounded ten-iteration native benchmark passed (P50 1.61 s, P95 1.64 s,
+zero option-order flips), without claiming routing accuracy or GPU performance.
+See [Nagi evidence](nagi-acceptance.md). Explicit owned-engine stack-root
+environment handoff and its actual-child fixtures also pass. No
 existing service was stopped in this continuation; nothing was pushed/published.
 The [managed foreground integration contract](managed-session-contract.md)
 records the concrete remaining orchestration and ingress gates.

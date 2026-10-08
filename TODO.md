@@ -109,7 +109,9 @@ See the [migration status](docs/migration/status.md),
 
 - [ ] Complete real local-decision inference without synthetic fallback.
   Isolated environment and required weights were approved on 2026-10-07;
-  pinned dependencies are installed and minimal model acquisition is underway.
+  pinned dependencies and checksum-verified minimal models are installed. Real
+  offline CPU native execution and bounded benchmark passed; private foreground
+  coordinator acceptance, GPU inference and routing-quality validation remain.
 - [ ] Run real Breeze standard/design/clone/streaming TTS acceptance and a
   coordinated language → media → language pilot in an agreed maintenance window.
   Record before/after service/GPU state, artifacts, cancellation, and restoration.
