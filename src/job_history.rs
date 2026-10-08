@@ -138,6 +138,32 @@ impl JobHistory {
 
     pub fn load_in(data_root: &Path, repository_root: &Path) -> Result<(Self, LoadNotice)> {
         let loaded = state_store::load_jobs_in(data_root)?;
+        Self::load_from_loaded(data_root, repository_root, loaded)
+    }
+
+    /// Coordinator-only load that refuses malformed or truncated histories
+    /// before the standalone loader's legacy normalization can rewrite them.
+    pub(crate) fn load_in_strict(
+        data_root: &Path,
+        repository_root: &Path,
+    ) -> Result<(Self, LoadNotice)> {
+        let loaded = state_store::load_jobs_strict_in(data_root)?;
+        anyhow::ensure!(
+            loaded.truncated_rows == 0,
+            "coordinator refused truncated job history"
+        );
+        anyhow::ensure!(
+            loaded.issues.is_empty(),
+            "coordinator refused malformed job history"
+        );
+        Self::load_from_loaded(data_root, repository_root, loaded)
+    }
+
+    fn load_from_loaded(
+        data_root: &Path,
+        repository_root: &Path,
+        loaded: PersistedLoad,
+    ) -> Result<(Self, LoadNotice)> {
         let mut notice = notice_for(&loaded);
         if !notice.is_empty() {
             if let Err(error) = state_store::save_jobs_in(data_root, &loaded.jobs) {
@@ -356,6 +382,56 @@ impl JobHistory {
         }
         job.metadata = metadata;
         Ok(job)
+    }
+
+    /// Persist the one-shot ComfyUI prompt candidate for a running media job.
+    /// The candidate is intent only: it is kept separate from `backend_id`,
+    /// which is written only after a positive native acceptance response.
+    pub fn record_comfy_dispatch_candidate(
+        &mut self,
+        id: u64,
+        candidate_id: String,
+    ) -> Result<&JobRecord> {
+        let job_index = self
+            .jobs
+            .iter()
+            .position(|job| job.id == id)
+            .ok_or_else(|| anyhow::anyhow!("unknown job id {id}"))?;
+        let job = &self.jobs[job_index];
+        anyhow::ensure!(
+            job.kind == "cross-toolkit"
+                && job.status == "running"
+                && job.metadata.toolkit.as_deref() == Some("l2m2")
+                && job.metadata.result_state.as_deref() == Some("running")
+                && job.metadata.profile.is_some()
+                && job.metadata.task.is_some()
+                && job.metadata.request_id.is_some()
+                && job.metadata.backend_id.is_none(),
+            "job {id} is not an unacknowledged running Comfy dispatch"
+        );
+        anyhow::ensure!(
+            job.metadata.comfy_dispatch_candidate.is_none(),
+            "job {id} already has a Comfy dispatch candidate"
+        );
+        anyhow::ensure!(
+            !self.jobs.iter().enumerate().any(|(index, existing)| {
+                index != job_index
+                    && existing.metadata.comfy_dispatch_candidate.as_deref()
+                        == Some(candidate_id.as_str())
+            }),
+            "Comfy dispatch candidate already belongs to another retained job"
+        );
+
+        let mut metadata = job.metadata.clone();
+        metadata.comfy_dispatch_candidate = Some(candidate_id);
+        let errors = state_store::validate_job_metadata(&metadata);
+        anyhow::ensure!(
+            errors.is_empty(),
+            "invalid Comfy dispatch candidate metadata: {}",
+            errors.join("; ")
+        );
+        self.jobs[job_index].metadata = metadata;
+        Ok(&self.jobs[job_index])
     }
 
     pub fn clear_for_recovery(&mut self) {
@@ -722,6 +798,106 @@ mod tests {
     }
 
     #[test]
+    fn comfy_candidate_persists_as_intent_and_restart_never_treats_it_as_acknowledgment() {
+        const CANDIDATE: &str = "123e4567-e89b-12d3-a456-426614174000";
+        let data = TempDir::new().unwrap();
+        let mut history = JobHistory::default();
+        let id = running_comfy_job(&mut history, "req-comfy-1");
+
+        history
+            .record_comfy_dispatch_candidate(id, CANDIDATE.into())
+            .unwrap();
+        let row = history.records().iter().find(|job| job.id == id).unwrap();
+        assert_eq!(
+            row.metadata.comfy_dispatch_candidate.as_deref(),
+            Some(CANDIDATE)
+        );
+        assert!(row.metadata.backend_id.is_none());
+        history.persist_in(data.path()).unwrap();
+
+        let raw = fs::read_to_string(state_store::jobs_path_in(data.path())).unwrap();
+        assert!(raw.contains("\"comfy_dispatch_candidate\""));
+        assert!(raw.contains(CANDIDATE));
+        assert!(!raw.contains("workflow-payload-secret"));
+        assert!(!raw.contains("backend_id"));
+
+        let (restarted, notice) =
+            JobHistory::load_in(data.path(), repository_fixture().path()).unwrap();
+        assert_eq!(notice.reconciled_running, 1);
+        let row = restarted.records().iter().find(|job| job.id == id).unwrap();
+        assert_eq!(row.status, "interrupted");
+        assert_eq!(row.metadata.result_state.as_deref(), Some("interrupted"));
+        assert_eq!(
+            row.metadata.comfy_dispatch_candidate.as_deref(),
+            Some(CANDIDATE)
+        );
+        assert!(row.metadata.backend_id.is_none());
+    }
+
+    #[test]
+    fn comfy_candidate_is_immutable_unique_and_scoped_to_its_running_media_job() {
+        const CANDIDATE: &str = "123e4567-e89b-12d3-a456-426614174000";
+        let mut history = JobHistory::default();
+        let first = running_comfy_job(&mut history, "req-comfy-1");
+        let second = running_comfy_job(&mut history, "req-comfy-2");
+
+        history
+            .record_comfy_dispatch_candidate(first, CANDIDATE.into())
+            .unwrap();
+        assert!(history
+            .record_comfy_dispatch_candidate(first, CANDIDATE.into())
+            .is_err());
+        assert!(history
+            .record_comfy_dispatch_candidate(second, CANDIDATE.into())
+            .is_err());
+        assert!(history
+            .records()
+            .iter()
+            .find(|job| job.id == second)
+            .unwrap()
+            .metadata
+            .comfy_dispatch_candidate
+            .is_none());
+
+        let unrelated = history.begin(
+            "ordinary job".into(),
+            "bench".into(),
+            Vec::new(),
+            "bench".into(),
+            String::new(),
+        );
+        assert!(history
+            .record_comfy_dispatch_candidate(unrelated, CANDIDATE.into())
+            .is_err());
+    }
+
+    #[test]
+    fn comfy_candidate_rejects_noncanonical_uuid_and_never_overwrites_backend_id() {
+        let mut history = JobHistory::default();
+        let id = running_comfy_job(&mut history, "req-comfy-1");
+        assert!(history
+            .record_comfy_dispatch_candidate(id, "123E4567-E89B-12D3-A456-426614174000".into())
+            .is_err());
+        assert!(history.records()[0]
+            .metadata
+            .comfy_dispatch_candidate
+            .is_none());
+
+        history
+            .update_cross_toolkit(
+                id,
+                CrossToolkitJobUpdate {
+                    backend_id: Some("already-acknowledged".into()),
+                    ..CrossToolkitJobUpdate::default()
+                },
+            )
+            .unwrap();
+        assert!(history
+            .record_comfy_dispatch_candidate(id, "123e4567-e89b-12d3-a456-426614174000".into())
+            .is_err());
+    }
+
+    #[test]
     fn cross_toolkit_updates_validate_before_mutation_and_keep_terminal_state() {
         let mut history = JobHistory::default();
         let id = history
@@ -851,6 +1027,27 @@ mod tests {
             script_path: script_path.into(),
             metadata: JobMetadata::default(),
         }
+    }
+
+    fn running_comfy_job(history: &mut JobHistory, request_id: &str) -> u64 {
+        let id = history
+            .begin_cross_toolkit(CrossToolkitJobStart {
+                toolkit: "l2m2".into(),
+                profile: Some("qwen-image-2.1".into()),
+                task: Some("image".into()),
+                request_id: Some(request_id.into()),
+            })
+            .unwrap();
+        history
+            .update_cross_toolkit(
+                id,
+                CrossToolkitJobUpdate {
+                    result_state: Some("running".into()),
+                    ..CrossToolkitJobUpdate::default()
+                },
+            )
+            .unwrap();
+        id
     }
 
     fn repository_fixture() -> TempDir {

@@ -1,5 +1,5 @@
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BTreeSet, BinaryHeap};
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
+use serde::de::{Error as DeError, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -65,6 +66,13 @@ pub struct JobMetadata {
     pub result_state: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_refs: Vec<String>,
+    /// A ComfyUI prompt UUID durably allocated before one POST attempt. This is
+    /// intent only; it is never evidence that the native backend accepted work.
+    /// The exact route/runtime and service-generation binding is not persisted;
+    /// a transient permit binds the route only to its current coordinator.
+    /// Restart must reconcile and must not adopt or replay this identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comfy_dispatch_candidate: Option<String>,
 }
 
 /// A persisted job row in the same field order and string representation as
@@ -200,6 +208,26 @@ pub fn load_jobs_in(data_root: impl AsRef<Path>) -> Result<JobHistoryLoad> {
     };
     let raw: Value = serde_json::from_slice(&bytes)
         .with_context(|| format!("failed to parse job history {}", path.display()))?;
+    load_jobs_from_value(raw, &path)
+}
+
+/// Coordinator-only strict load. Unlike legacy normalization, this rejects
+/// duplicate object keys before serde_json::Value can collapse them.
+pub(crate) fn load_jobs_strict_in(data_root: impl AsRef<Path>) -> Result<JobHistoryLoad> {
+    let path = jobs_path_in(data_root);
+    let Some(bytes) = read_bounded_optional(&path, JOBS_MAX_FILE_BYTES)? else {
+        return Ok(JobHistoryLoad::default());
+    };
+    let mut deserializer = serde_json::Deserializer::from_slice(&bytes);
+    let StrictJsonValue(raw) = StrictJsonValue::deserialize(&mut deserializer)
+        .with_context(|| format!("failed to parse strict job history {}", path.display()))?;
+    deserializer
+        .end()
+        .with_context(|| format!("failed to parse strict job history {}", path.display()))?;
+    load_jobs_from_value(raw, &path)
+}
+
+fn load_jobs_from_value(raw: Value, path: &Path) -> Result<JobHistoryLoad> {
     let rows = raw
         .as_array()
         .ok_or_else(|| anyhow!("job history must be a JSON array: {}", path.display()))?;
@@ -211,6 +239,7 @@ pub fn load_jobs_in(data_root: impl AsRef<Path>) -> Result<JobHistoryLoad> {
         reconciled_running: 0,
         truncated_rows: first,
     };
+    let mut seen_comfy_candidates = BTreeSet::new();
 
     for (source_index, row) in rows.iter().enumerate().skip(first) {
         if !row.is_object() {
@@ -239,6 +268,15 @@ pub fn load_jobs_in(data_root: impl AsRef<Path>) -> Result<JobHistoryLoad> {
             });
             continue;
         }
+        if let Some(candidate) = job.metadata.comfy_dispatch_candidate.as_deref() {
+            if !seen_comfy_candidates.insert(candidate.to_owned()) {
+                result.issues.push(JobRowIssue {
+                    source_index,
+                    error: "duplicate comfy_dispatch_candidate in retained history".to_owned(),
+                });
+                continue;
+            }
+        }
 
         if job.exit == JOB_RUNNING_EXIT {
             job.exit = JOB_INTERRUPTED_EXIT.to_owned();
@@ -256,6 +294,86 @@ pub fn load_jobs_in(data_root: impl AsRef<Path>) -> Result<JobHistoryLoad> {
     Ok(result)
 }
 
+struct StrictJsonValue(Value);
+
+impl<'de> Deserialize<'de> for StrictJsonValue {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(StrictJsonValueVisitor)
+    }
+}
+
+struct StrictJsonValueVisitor;
+
+impl<'de> Visitor<'de> for StrictJsonValueVisitor {
+    type Value = StrictJsonValue;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON value without duplicate object keys")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> std::result::Result<Self::Value, E> {
+        Ok(StrictJsonValue(Value::Bool(value)))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> std::result::Result<Self::Value, E> {
+        Ok(StrictJsonValue(Value::Number(value.into())))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> std::result::Result<Self::Value, E> {
+        Ok(StrictJsonValue(Value::Number(value.into())))
+    }
+
+    fn visit_f64<E>(self, value: f64) -> std::result::Result<Self::Value, E>
+    where
+        E: DeError,
+    {
+        serde_json::Number::from_f64(value)
+            .map(|number| StrictJsonValue(Value::Number(number)))
+            .ok_or_else(|| E::custom("invalid JSON number"))
+    }
+
+    fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E> {
+        Ok(StrictJsonValue(Value::String(value.to_owned())))
+    }
+
+    fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E> {
+        Ok(StrictJsonValue(Value::String(value)))
+    }
+
+    fn visit_unit<E>(self) -> std::result::Result<Self::Value, E> {
+        Ok(StrictJsonValue(Value::Null))
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut values = Vec::new();
+        while let Some(StrictJsonValue(value)) = sequence.next_element()? {
+            values.push(value);
+        }
+        Ok(StrictJsonValue(Value::Array(values)))
+    }
+
+    fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut values = serde_json::Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if values.contains_key(&key) {
+                return Err(A::Error::custom("duplicate JSON object key"));
+            }
+            let StrictJsonValue(value) = map.next_value()?;
+            values.insert(key, value);
+        }
+        Ok(StrictJsonValue(Value::Object(values)))
+    }
+}
+
 /// Persist the configured job history atomically, retaining its most recent
 /// 200 rows in legacy oldest-to-newest order.
 pub fn save_jobs(jobs: &[JobRecord]) -> Result<()> {
@@ -266,6 +384,7 @@ pub fn save_jobs(jobs: &[JobRecord]) -> Result<()> {
 pub fn save_jobs_in(data_root: impl AsRef<Path>, jobs: &[JobRecord]) -> Result<()> {
     let first = jobs.len().saturating_sub(JOBS_MAX);
     let bounded = &jobs[first..];
+    let mut seen_comfy_candidates = BTreeSet::new();
     for (offset, job) in bounded.iter().enumerate() {
         let errors = validate_job_record(job);
         if !errors.is_empty() {
@@ -274,6 +393,13 @@ pub fn save_jobs_in(data_root: impl AsRef<Path>, jobs: &[JobRecord]) -> Result<(
                 first + offset,
                 errors.join("; ")
             ));
+        }
+        if let Some(candidate) = job.metadata.comfy_dispatch_candidate.as_deref() {
+            if !seen_comfy_candidates.insert(candidate) {
+                return Err(anyhow!(
+                    "cannot save duplicate comfy_dispatch_candidate in retained history"
+                ));
+            }
         }
     }
 
@@ -318,10 +444,41 @@ pub fn validate_job_metadata(metadata: &JobMetadata) -> Vec<String> {
         ("task", metadata.task.as_deref()),
         ("request_id", metadata.request_id.as_deref()),
         ("backend_id", metadata.backend_id.as_deref()),
+        (
+            "comfy_dispatch_candidate",
+            metadata.comfy_dispatch_candidate.as_deref(),
+        ),
     ] {
         if let Some(value) = value {
             total_bytes = total_bytes.saturating_add(value.len());
             validate_metadata_identifier(field, value, &mut errors);
+        }
+    }
+
+    if let Some(candidate) = metadata.comfy_dispatch_candidate.as_deref() {
+        if !is_canonical_lower_hex_uuid(candidate) {
+            errors.push("comfy_dispatch_candidate must be a canonical lowercase UUID".to_owned());
+        }
+        if metadata.toolkit.as_deref() != Some("l2m2") {
+            errors.push("comfy_dispatch_candidate requires the l2m2 toolkit".to_owned());
+        }
+        for (field, value) in [
+            ("profile", metadata.profile.as_deref()),
+            ("task", metadata.task.as_deref()),
+            ("request_id", metadata.request_id.as_deref()),
+        ] {
+            if value.is_none() {
+                errors.push(format!("comfy_dispatch_candidate requires {field}"));
+            }
+        }
+        if metadata
+            .backend_id
+            .as_deref()
+            .is_some_and(|backend_id| backend_id != candidate)
+        {
+            errors.push(
+                "backend_id must match comfy_dispatch_candidate when both are present".to_owned(),
+            );
         }
     }
 
@@ -386,6 +543,17 @@ pub fn validate_job_metadata(metadata: &JobMetadata) -> Vec<String> {
         ));
     }
     errors
+}
+
+fn is_canonical_lower_hex_uuid(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+            }
+        })
 }
 
 fn validate_metadata_identifier(field: &str, value: &str, errors: &mut Vec<String>) {
@@ -1178,8 +1346,18 @@ mod tests {
                 "artifacts/transcript.json".into(),
                 "https://store.example/a.wav".into(),
             ],
+            comfy_dispatch_candidate: None,
         };
         assert!(validate_job_metadata(&valid).is_empty());
+
+        let mut candidate = valid.clone();
+        candidate.toolkit = Some("l2m2".into());
+        candidate.profile = Some("qwen-image-2.1".into());
+        candidate.task = Some("image".into());
+        candidate.request_id = Some("req-comfy-1".into());
+        candidate.backend_id = None;
+        candidate.comfy_dispatch_candidate = Some("123e4567-e89b-12d3-a456-426614174000".into());
+        assert!(validate_job_metadata(&candidate).is_empty());
 
         let mut invalid = valid.clone();
         invalid.request_id = Some("Bearer abc123".into());
@@ -1187,6 +1365,25 @@ mod tests {
         invalid.result_state = Some("running shell with args".into());
         invalid.artifact_refs = vec!["https://user:password@store.example/a.wav".into()];
         assert!(!validate_job_metadata(&invalid).is_empty());
+
+        let mut invalid_candidate = candidate.clone();
+        invalid_candidate.comfy_dispatch_candidate =
+            Some("123E4567-E89B-12D3-A456-426614174000".into());
+        assert!(validate_job_metadata(&invalid_candidate)
+            .iter()
+            .any(|error| error.contains("canonical lowercase UUID")));
+
+        invalid_candidate = candidate.clone();
+        invalid_candidate.backend_id = Some("different-native-id".into());
+        assert!(validate_job_metadata(&invalid_candidate)
+            .iter()
+            .any(|error| error.contains("must match comfy_dispatch_candidate")));
+
+        invalid_candidate = candidate.clone();
+        invalid_candidate.profile = None;
+        assert!(validate_job_metadata(&invalid_candidate)
+            .iter()
+            .any(|error| error.contains("requires profile")));
 
         invalid.artifact_refs = vec!["https://store.example/a.wav?token=abc".into()];
         assert!(!validate_job_metadata(&invalid).is_empty());
@@ -1210,6 +1407,49 @@ mod tests {
         assert_eq!(loaded.jobs.len(), 1);
         assert_eq!(loaded.jobs[0].metadata.toolkit.as_deref(), Some("l2m2"));
         assert_eq!(loaded.issues.len(), 1);
+    }
+
+    #[test]
+    fn duplicate_comfy_candidates_are_rejected_on_save_and_load() {
+        const CANDIDATE: &str = "123e4567-e89b-12d3-a456-426614174000";
+        let temp = TempDir::new().unwrap();
+        let make_job = |name: &str| JobRecord {
+            name: name.into(),
+            started: "12:34:56".into(),
+            elapsed: "-".into(),
+            exit: JOB_RUNNING_EXIT.into(),
+            mode: "cross-toolkit".into(),
+            script_path: String::new(),
+            metadata: JobMetadata {
+                toolkit: Some("l2m2".into()),
+                profile: Some("qwen-image-2.1".into()),
+                task: Some("image".into()),
+                request_id: Some(format!("req-{name}")),
+                result_state: Some("running".into()),
+                comfy_dispatch_candidate: Some(CANDIDATE.into()),
+                ..JobMetadata::default()
+            },
+        };
+        assert!(save_jobs_in(temp.path(), &[make_job("one"), make_job("two")]).is_err());
+
+        fs::write(
+            jobs_path_in(temp.path()),
+            format!(
+                r#"[
+                  {{"name":"one","started":"12:34:56","elapsed":"-","exit":"…","mode":"cross-toolkit","script_path":"","toolkit":"l2m2","profile":"qwen-image-2.1","task":"image","request_id":"req-one","result_state":"running","comfy_dispatch_candidate":"{CANDIDATE}"}},
+                  {{"name":"two","started":"12:34:56","elapsed":"-","exit":"…","mode":"cross-toolkit","script_path":"","toolkit":"l2m2","profile":"qwen-image-2.1","task":"image","request_id":"req-two","result_state":"running","comfy_dispatch_candidate":"{CANDIDATE}"}}
+                ]"#
+            ),
+        )
+        .unwrap();
+        let loaded = load_jobs_in(temp.path()).unwrap();
+        assert_eq!(loaded.jobs.len(), 1);
+        assert_eq!(loaded.issues.len(), 1);
+        assert_eq!(loaded.issues[0].source_index, 1);
+        assert_eq!(
+            loaded.jobs[0].metadata.comfy_dispatch_candidate.as_deref(),
+            Some(CANDIDATE)
+        );
     }
 
     #[test]

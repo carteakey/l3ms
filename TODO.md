@@ -84,11 +84,15 @@ See the [migration status](docs/migration/status.md),
   model readiness, fresh accepted-route dispatch and bounded native results.
   Language integration fixtures pass; full daemon/native-engine composition,
   real model acceptance and multi-runtime switching remain required. For Comfy,
-  persist its candidate UUID as dispatch intent before POST, separately from a
-  verified `backend_id`; attach that ID only after exact acknowledgment or a
-  positive read-only native observation. Neither 404 nor cancel dispatch proves
+  candidate UUID persistence and exact-workflow move-only permits now pass
+  joined native HTTP fixtures before POST, separately from a verified
+  `backend_id`; attach that ID only after exact acknowledgment or a positive
+  read-only native observation. Owned-generation recovery and the actual
+  worker/coordinator handoff still need integration. Neither 404 nor cancel dispatch proves
   non-submission/completion. Per-job Breeze/GPU-decision ownership must use the
   exact-service cgroup path, not process-group cleanup alone.
+  Breeze now explicitly declares `device: cuda`; physical UUID selection for
+  resident and per-job native children still requires typed launch integration.
   CPU-only worker and restricted core admission are now connected to an opt-in
   foreground daemon with responsive private status/cancel/result queries,
   quota-before-acknowledgment, cancellation and bounded shutdown fixtures.

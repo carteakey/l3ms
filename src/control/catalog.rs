@@ -933,7 +933,10 @@ mod tests {
             .list()
             .iter()
             .all(|profile| profile.readiness == Readiness::ManifestPresent));
-        assert!(catalog.inspect(&key("media:breeze-tts-2")).is_some());
+        assert_eq!(
+            catalog.inspect(&key("media:breeze-tts-2")).unwrap().device,
+            Some(Device::Cuda)
+        );
         assert!(catalog.inspect(&key("decisions:systemone")).is_some());
     }
 }

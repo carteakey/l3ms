@@ -222,6 +222,25 @@ impl ComfyAdapter {
         self.submit_inner(job, accepted_route, context)
     }
 
+    /// Coordinator dispatch: consume the one-shot permit returned only after
+    /// the candidate UUID was durably recorded for the active accepted route.
+    /// Consuming a permit is not a native acknowledgment. Route/transport
+    /// failures never manufacture another permit or retry the POST.
+    pub fn submit_with_dispatch_permit(
+        &self,
+        job: &mut PreparedComfyJob,
+        permit: super::inference::ComfyDispatchPermit,
+        context: &OperationContext<'_>,
+    ) -> Result<(), ComfyFailure> {
+        if !permit.matches_candidate(job.id(), &job.accepted_route)
+            || !permit.matches_request(permit.request_id(), &job.request, &job.accepted_route)
+        {
+            return Err(no_dispatch(ComfyErrorKind::InvalidOwnership));
+        }
+        let route = job.accepted_route.clone();
+        self.submit_inner(job, &route, context)
+    }
+
     fn submit_inner(
         &self,
         job: &mut PreparedComfyJob,
@@ -902,6 +921,12 @@ mod tests {
     fn fixture(
         replies: Vec<(u16, String, Duration)>,
     ) -> (String, std::thread::JoinHandle<Recorded>) {
+        fixture_with_history(replies, None)
+    }
+    fn fixture_with_history(
+        replies: Vec<(u16, String, Duration)>,
+        history: Option<std::path::PathBuf>,
+    ) -> (String, std::thread::JoinHandle<Recorded>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         listener.set_nonblocking(true).unwrap();
@@ -930,6 +955,21 @@ mod tests {
                     assert!(header.len() < 16384);
                 }
                 let header = String::from_utf8(header).unwrap();
+                if header.starts_with("POST /prompt ") {
+                    if let Some(history) = &history {
+                        let rows: Value =
+                            serde_json::from_slice(&std::fs::read(history).unwrap()).unwrap();
+                        let row = rows
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .find(|row| row["request_id"] == "durable-comfy")
+                            .unwrap();
+                        assert_eq!(row["comfy_dispatch_candidate"], ID);
+                        assert!(row.get("backend_id").is_none());
+                        assert!(!rows.to_string().contains("SENSITIVE_PROMPT"));
+                    }
+                }
                 let length = header
                     .lines()
                     .find_map(|line| {
@@ -962,6 +1002,238 @@ mod tests {
     }
     fn reply(body: Value) -> (u16, String, Duration) {
         (200, body.to_string(), Duration::ZERO)
+    }
+
+    #[test]
+    fn coordinator_candidate_is_durable_before_post_and_lost_ack_is_not_replayed() {
+        use super::super::catalog::RuntimeIdentity;
+        use super::super::inference::CoordinatorCore;
+        use super::super::runtime::ResourceClaim;
+
+        for lost_ack in [false, true] {
+            let data = tempfile::tempdir().unwrap();
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            let catalog = Catalog::load(root).unwrap();
+            let mut core = CoordinatorCore::load(
+                catalog.clone(),
+                BTreeMap::from([(
+                    RuntimeIdentity::new(Lane::Media, "ComfyUI").unwrap(),
+                    ResourceClaim::ExclusiveGpu(0),
+                )]),
+                data.path(),
+                root,
+                8,
+            )
+            .unwrap();
+            // Fixture reconciliation is not a native owner/readiness proof.
+            core.confirm_reconciled().unwrap();
+            let job_id = core
+                .submit(
+                    "durable-comfy".into(),
+                    request(),
+                    Duration::from_secs(10),
+                    Instant::now(),
+                )
+                .unwrap();
+            let ticket = core.reserve_next(Instant::now()).unwrap().unwrap();
+            core.begin_dispatch(&ticket, Instant::now()).unwrap();
+            let permit = core
+                .record_comfy_dispatch_candidate(&ticket, ID.into(), Instant::now())
+                .unwrap();
+            let replies = if lost_ack {
+                vec![
+                    reply(serde_json::json!({"prompt_id":"wrong-ack"})),
+                    reply(serde_json::json!({"id":ID,"status":"pending"})),
+                ]
+            } else {
+                vec![reply(serde_json::json!({"prompt_id":ID}))]
+            };
+            let (endpoint, server) =
+                fixture_with_history(replies, Some(data.path().join("jobs.json")));
+            let adapter = adapter(&endpoint);
+            let mut prepared = adapter
+                .prepare_for_route(&catalog, &ticket.request, &ticket.route, ID)
+                .unwrap();
+            let outcome = adapter.submit_with_dispatch_permit(&mut prepared, permit, &context());
+            if lost_ack {
+                assert_eq!(
+                    outcome.unwrap_err().disposition,
+                    DispatchDisposition::Uncertain
+                );
+                let observation = adapter.status(&prepared, &context()).unwrap();
+                assert_eq!(observation.state, ComfyJobState::Pending);
+            } else {
+                outcome.unwrap();
+            }
+            // Candidate persistence alone never sets an acknowledged backend ID.
+            let rows: Value =
+                serde_json::from_slice(&std::fs::read(data.path().join("jobs.json")).unwrap())
+                    .unwrap();
+            assert!(rows.as_array().unwrap()[0].get("backend_id").is_none());
+            core.attach_backend(job_id, ID.into()).unwrap();
+            assert!(core
+                .record_comfy_dispatch_candidate(&ticket, ID.into(), Instant::now())
+                .is_err());
+            assert_eq!(
+                adapter.submit(&mut prepared, &context()).unwrap_err().kind,
+                ComfyErrorKind::AlreadyAttempted
+            );
+            let recorded = server.join().unwrap();
+            assert_eq!(
+                recorded
+                    .iter()
+                    .filter(|(header, _)| header.starts_with("POST /prompt "))
+                    .count(),
+                1
+            );
+            assert_eq!(recorded.len(), if lost_ack { 2 } else { 1 });
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn coordinator_permit_cannot_submit_another_workflow_or_candidate() {
+        use super::super::catalog::RuntimeIdentity;
+        use super::super::inference::CoordinatorCore;
+        use super::super::runtime::ResourceClaim;
+
+        for changed_graph in [false, true] {
+            let data = tempfile::tempdir().unwrap();
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            let catalog = Catalog::load(root).unwrap();
+            let mut core = CoordinatorCore::load(
+                catalog.clone(),
+                BTreeMap::from([(
+                    RuntimeIdentity::new(Lane::Media, "ComfyUI").unwrap(),
+                    ResourceClaim::ExclusiveGpu(0),
+                )]),
+                data.path(),
+                root,
+                8,
+            )
+            .unwrap();
+            core.confirm_reconciled().unwrap();
+            core.submit(
+                "durable-comfy".into(),
+                request(),
+                Duration::from_secs(10),
+                Instant::now(),
+            )
+            .unwrap();
+            let ticket = core.reserve_next(Instant::now()).unwrap().unwrap();
+            core.begin_dispatch(&ticket, Instant::now()).unwrap();
+            let permit = core
+                .record_comfy_dispatch_candidate(&ticket, ID.into(), Instant::now())
+                .unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let adapter = adapter(&format!("http://{}", listener.local_addr().unwrap()));
+            let mut other_request = request();
+            if changed_graph {
+                let InferenceRequest::Media {
+                    input: MediaInput::Workflow { graph, .. },
+                    ..
+                } = &mut other_request
+                else {
+                    panic!("fixture must be a workflow")
+                };
+                *graph = serde_json::json!({"2":{"class_type":"Other","inputs":{}}});
+            }
+            let other_id = if changed_graph {
+                ID
+            } else {
+                "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+            };
+            let mut prepared = adapter
+                .prepare_for_route(&catalog, &other_request, &ticket.route, other_id)
+                .unwrap();
+            let error = adapter
+                .submit_with_dispatch_permit(&mut prepared, permit, &context())
+                .unwrap_err();
+            assert_eq!(error.disposition, DispatchDisposition::NoDispatch);
+            assert_eq!(error.kind, ComfyErrorKind::InvalidOwnership);
+            assert!(!prepared.submission_attempted());
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            assert!(core
+                .record_comfy_dispatch_candidate(&ticket, ID.into(), Instant::now())
+                .is_err());
+            assert_eq!(core.active_count(), 1);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn coordinator_permit_is_revoked_before_post_when_its_owner_or_reservation_ends() {
+        use super::super::catalog::RuntimeIdentity;
+        use super::super::inference::{Completion, CoordinatorCore};
+        use super::super::runtime::ResourceClaim;
+
+        for action in ["drop", "quarantine", "cancel", "complete", "deadline"] {
+            let data = tempfile::tempdir().unwrap();
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            let catalog = Catalog::load(root).unwrap();
+            let mut core = CoordinatorCore::load(
+                catalog.clone(),
+                BTreeMap::from([(
+                    RuntimeIdentity::new(Lane::Media, "ComfyUI").unwrap(),
+                    ResourceClaim::ExclusiveGpu(0),
+                )]),
+                data.path(),
+                root,
+                8,
+            )
+            .unwrap();
+            core.confirm_reconciled().unwrap();
+            let job_id = core
+                .submit(
+                    "durable-comfy".into(),
+                    request(),
+                    Duration::from_secs(1),
+                    Instant::now(),
+                )
+                .unwrap();
+            let ticket = core.reserve_next(Instant::now()).unwrap().unwrap();
+            core.begin_dispatch(&ticket, Instant::now()).unwrap();
+            let permit = core
+                .record_comfy_dispatch_candidate(&ticket, ID.into(), Instant::now())
+                .unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let adapter = adapter(&format!("http://{}", listener.local_addr().unwrap()));
+            let mut prepared = adapter
+                .prepare_for_route(&catalog, &ticket.request, &ticket.route, ID)
+                .unwrap();
+            match action {
+                "drop" => drop(core),
+                "quarantine" => core.quarantine(),
+                "cancel" => core.cancel_request("durable-comfy").unwrap(),
+                "complete" => {
+                    core.complete(job_id, Completion::Failed, Vec::new(), Instant::now())
+                        .unwrap();
+                }
+                "deadline" => std::thread::sleep(
+                    ticket.deadline.saturating_duration_since(Instant::now())
+                        + Duration::from_millis(5),
+                ),
+                _ => unreachable!(),
+            }
+            let error = adapter
+                .submit_with_dispatch_permit(&mut prepared, permit, &context())
+                .unwrap_err();
+            assert_eq!(
+                error.disposition,
+                DispatchDisposition::NoDispatch,
+                "{action}"
+            );
+            assert!(!prepared.submission_attempted(), "{action}");
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }
     }
 
     #[cfg(target_os = "linux")]

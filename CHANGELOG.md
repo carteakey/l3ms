@@ -10,6 +10,13 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Persist Comfy dispatch candidates separately from verified backend IDs and
+  issue move-only permits bound to the exact accepted workflow. Joined fixtures
+  check persistence before POST and no replay after an uncertain acknowledgment.
+  Reject malformed, duplicate-key or truncated coordinator history before
+  normalization can discard unresolved work; standalone loading stays compatible.
+- Declare Breeze's CUDA device in its native manifest and verify catalog
+  discovery without inferring device requirements from descriptive text.
 - Add an opt-in concrete managed-language foreground session with explicit
   private configuration, listener-shared host ownership, exact router activation
   and readiness, fresh accepted routes, bounded native results and conservative

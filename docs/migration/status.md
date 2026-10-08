@@ -10,6 +10,21 @@ runtime check.
 
 ## Current resumed checkpoint — 2026-10-08
 
+The subsequent Comfy candidate/history slice passes **747 tests, 1 ignored**,
+strict all-target Clippy, formatting and whitespace checks. Joined coordinator/
+native HTTP fixtures verify durable candidate persistence before the first POST,
+exact workflow/UUID permit binding, positive observation after malformed native
+acknowledgment and no resubmission. Candidate intent is distinct from verified
+backend identity; restart interrupts rather than rebuilding a submission permit.
+Unused permits cannot survive coordinator drop/quarantine, reservation completion,
+request cancellation or deadline expiry; socket fixtures verify no POST occurs.
+Coordinator-only strict history loading rejects malformed, duplicate-key,
+duplicate-candidate and truncated source without rewriting it. Legacy standalone
+normalization and omitted metadata shape remain unchanged. Breeze's native
+manifest now declares CUDA explicitly, with a retained private pre-edit snapshot.
+Actual Comfy worker handoff, owned-generation recovery, physical-device launch
+selection and cross-runtime GPU acceptance remain open.
+
 The native managed-language integration passes **734 tests, 1 ignored**, strict
 all-target Clippy, formatting and whitespace checks. This is not a live
 managed-runtime acceptance claim. The new concrete executor is limited to one

@@ -71,6 +71,7 @@
       "id": "breeze-tts-2",
       "name": "Breeze-TTS-2 speech generation & voice cloning",
       "runtime": "audio.cpp",
+      "device": "cuda",
       "variant": "Breeze-TTS-2 Q8_0 GGUF, CUDA, T5Gemma conditioning + Mimi codec",
       "tasks": ["tts", "clon", "design"],
       "inputs": ["text", "audio"],

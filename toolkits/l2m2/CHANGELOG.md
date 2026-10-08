@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Declare Breeze-TTS-2's CUDA device explicitly in its native manifest so
+  accepted routes can validate GPU admission without guessing from prose.
+  This does not pin a physical GPU or prove live inference/release.
+
 - Add a read-only Breeze-TTS-2 readiness check and offline contract tests for
   standard TTS, instruction-led design, cloning, and streaming output routing.
 

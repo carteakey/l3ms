@@ -49,12 +49,28 @@ conflicting work and retains ownership records.
 | Breeze and local decisions | Per-request native executable/Python work, not implicitly a resident HTTP runtime. | Process-group cleanup is not proof that escaping descendants or the GPU are released. |
 
 For Comfy, the supplied UUID is initially a **dispatch candidate**, not a known
-native job. Persist a separate generation-/route-bound dispatch intent before
-the one POST. The existing history `backend_id` records a verified native ID;
+native job. Persist a separate dispatch intent before the one POST. The branch
+now stores `comfy_dispatch_candidate` separately and mints a move-only permit
+after the final dispatch gate and a durable history write. The permit binds the
+live coordinator, job, request, full accepted route and exact workflow graph.
+The existing history `backend_id` records a verified native ID;
 do not populate it from the candidate alone. Attach it only after the exact
 acknowledgment or a positive read-only observation of that UUID. Missing history
-or a 404 is `Unknown`, not evidence of non-submission. Candidate persistence,
-recovery and the worker/coordinator handshake still need implementation.
+or a 404 is `Unknown`, not evidence of non-submission. Joined HTTP fixtures check
+the history write before POST, exact/malformed native acknowledgments,
+read-only observation and no POST replay; another UUID or graph cannot reuse the
+permit. Unused permits expire with the coordinator, reservation, quarantine,
+cancellation or request deadline; they cannot keep their own grant alive.
+Retained histories with malformed/duplicate-key/duplicate-candidate or
+truncated rows fail coordinator startup without being rewritten. Standalone
+history normalization remains compatible.
+
+The candidate row retains job/profile/task/request identifiers, but not a
+service-generation identity or a persisted full-route snapshot. Those owned
+generation/recovery checks and the actual worker/coordinator handoff remain
+required before managed Comfy dispatch is enabled. Restart never reconstructs
+a submission permit or resubmits the workflow from this field. A candidate is
+not evidence of native acceptance, readiness or GPU release.
 
 The manifest currently permits llama-swap model startup up to 500 seconds while
 the old standalone load client allows 60. The managed path needs one explicit

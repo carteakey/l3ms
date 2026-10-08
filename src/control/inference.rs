@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Weak,
 };
 use std::time::{Duration, Instant};
 
@@ -177,6 +177,7 @@ struct Pending {
 }
 
 struct Active {
+    permit_reservation_identity: Arc<()>,
     request_id: String,
     request: InferenceRequest,
     profile: ProfileKey,
@@ -185,6 +186,7 @@ struct Active {
     resource: ResourceClaim,
     cancellation: RequestCancellation,
     cleanup_unresolved: bool,
+    dispatch_validated: bool,
     deadline: Instant,
     reserved: Instant,
     started: Option<Instant>,
@@ -202,6 +204,78 @@ pub struct DispatchTicket {
     pub deadline: Instant,
     pub cancellation: RequestCancellation,
     pub queue_wait: Duration,
+}
+
+/// One-shot capability to submit exactly the ComfyUI candidate persisted for
+/// one accepted dispatch. It retains the request transiently for exact handoff
+/// matching; it is never persisted or exposed in `Debug`.
+pub struct ComfyDispatchPermit {
+    owner_identity: Weak<()>,
+    reservation_identity: Weak<()>,
+    cancellation: RequestCancellation,
+    deadline: Instant,
+    job_id: u64,
+    request_id: String,
+    request: InferenceRequest,
+    candidate_id: String,
+    route: ResolvedProfileRoute,
+}
+
+impl ComfyDispatchPermit {
+    pub fn job_id(&self) -> u64 {
+        self.job_id
+    }
+
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    pub fn candidate_id(&self) -> &str {
+        &self.candidate_id
+    }
+
+    pub fn route(&self) -> &ResolvedProfileRoute {
+        &self.route
+    }
+
+    pub(crate) fn matches_candidate(
+        &self,
+        candidate_id: &str,
+        route: &ResolvedProfileRoute,
+    ) -> bool {
+        self.is_live() && self.candidate_id == candidate_id && self.route == *route
+    }
+
+    pub(crate) fn matches_request(
+        &self,
+        request_id: &str,
+        request: &InferenceRequest,
+        route: &ResolvedProfileRoute,
+    ) -> bool {
+        self.is_live()
+            && self.request_id == request_id
+            && same_request(&self.request, request)
+            && self.route == *route
+    }
+
+    pub(crate) fn belongs_to(&self, owner_identity: &Arc<()>) -> bool {
+        self.owner_identity
+            .upgrade()
+            .is_some_and(|owner| Arc::ptr_eq(&owner, owner_identity))
+    }
+
+    fn is_live(&self) -> bool {
+        self.owner_identity.upgrade().is_some()
+            && self.reservation_identity.upgrade().is_some()
+            && !self.cancellation.is_cancelled()
+            && Instant::now() < self.deadline
+    }
+}
+
+impl std::fmt::Debug for ComfyDispatchPermit {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ComfyDispatchPermit([redacted])")
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -252,6 +326,46 @@ impl std::fmt::Display for DispatchBeginError {
 
 impl std::error::Error for DispatchBeginError {}
 
+/// Fixed refusal categories for pre-POST Comfy candidate persistence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ComfyCandidateError {
+    AdmissionUnavailable,
+    ReservationUnavailable,
+    FinalDispatchGateMissing,
+    TicketMismatch,
+    Cancelled,
+    DeadlineExceeded,
+    CatalogUnavailable,
+    UnsupportedRoute,
+    RouteChanged,
+    BindingChanged,
+    JobAssociationMismatch,
+    CandidateRejected,
+    PersistenceFailed,
+}
+
+impl std::fmt::Display for ComfyCandidateError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::AdmissionUnavailable => "Comfy candidate: admission unavailable",
+            Self::ReservationUnavailable => "Comfy candidate: reservation unavailable",
+            Self::FinalDispatchGateMissing => "Comfy candidate: final dispatch gate missing",
+            Self::TicketMismatch => "Comfy candidate: ticket mismatch",
+            Self::Cancelled => "Comfy candidate: request cancelled",
+            Self::DeadlineExceeded => "Comfy candidate: deadline exceeded",
+            Self::CatalogUnavailable => "Comfy candidate: catalog unavailable",
+            Self::UnsupportedRoute => "Comfy candidate: unsupported route",
+            Self::RouteChanged => "Comfy candidate: route changed",
+            Self::BindingChanged => "Comfy candidate: runtime binding changed",
+            Self::JobAssociationMismatch => "Comfy candidate: job association mismatch",
+            Self::CandidateRejected => "Comfy candidate: candidate rejected",
+            Self::PersistenceFailed => "Comfy candidate: persistence failed",
+        })
+    }
+}
+
+impl std::error::Error for ComfyCandidateError {}
+
 /// One coordinator's bounded queue. Only the future daemon may own this core
 /// and write its history; multiple CLI/TUI processes must use IPC rather than
 /// create competing instances against the same store.
@@ -267,6 +381,7 @@ pub struct CoordinatorCore {
     runtime_admission_closures: BTreeMap<RuntimeIdentity, u64>,
     next_runtime_close_generation: u64,
     admission_owner_identity: Arc<()>,
+    dispatch_permit_owner_identity: Arc<()>,
     cpu_decisions_only: bool,
     managed_language_model_tasks: Option<BTreeMap<String, BTreeSet<String>>>,
 }
@@ -285,7 +400,7 @@ impl CoordinatorCore {
             (1..=MAX_CAPACITY).contains(&capacity),
             "queue capacity must be 1–{MAX_CAPACITY}"
         );
-        let (history, notice) = JobHistory::load_in(data_root.as_ref(), repository_root)?;
+        let (history, notice) = JobHistory::load_in_strict(data_root.as_ref(), repository_root)?;
         ensure!(
             notice.normalization_error.is_none(),
             "could not persist restart reconciliation"
@@ -302,6 +417,7 @@ impl CoordinatorCore {
             runtime_admission_closures: BTreeMap::new(),
             next_runtime_close_generation: 1,
             admission_owner_identity: Arc::new(()),
+            dispatch_permit_owner_identity: Arc::new(()),
             cpu_decisions_only: false,
             managed_language_model_tasks: None,
         })
@@ -658,11 +774,15 @@ impl CoordinatorCore {
             self.active.is_empty(),
             "active reservations still require reconciliation"
         );
+        self.dispatch_permit_owner_identity = Arc::new(());
         self.admission = AdmissionState::Ready;
         Ok(())
     }
 
     pub fn quarantine(&mut self) {
+        // Outstanding pre-POST capabilities must not survive quarantine even
+        // if the caller still holds its original request or route.
+        self.dispatch_permit_owner_identity = Arc::new(());
         self.admission = AdmissionState::ReconciliationRequired;
     }
 
@@ -984,6 +1104,7 @@ impl CoordinatorCore {
         self.active.insert(
             job_id,
             Active {
+                permit_reservation_identity: Arc::new(()),
                 request_id: request_id.clone(),
                 request: accepted_request,
                 profile,
@@ -994,6 +1115,7 @@ impl CoordinatorCore {
                 deadline,
                 reserved: now,
                 cleanup_unresolved: false,
+                dispatch_validated: false,
                 started: None,
                 queue_wait,
             },
@@ -1148,13 +1270,228 @@ impl CoordinatorCore {
         // but never let catalog IO make that timestamp stale at the commit.
         let commit_time = now.max(Instant::now());
         match self.mark_running_checked(ticket.job_id, commit_time) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.active
+                    .get_mut(&ticket.job_id)
+                    .expect("validated active reservation")
+                    .dispatch_validated = true;
+                Ok(())
+            }
             Err(DispatchBeginError::PersistenceFailed) => {
                 self.quarantine();
                 Err(DispatchBeginError::PersistenceFailed)
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// Durably allocate the one-shot native Comfy prompt ID after the final
+    /// dispatch gate and immediately before the caller's single POST attempt.
+    /// This records intent only; it does not acknowledge native acceptance.
+    pub fn record_comfy_dispatch_candidate(
+        &mut self,
+        ticket: &DispatchTicket,
+        candidate_id: String,
+        now: Instant,
+    ) -> std::result::Result<ComfyDispatchPermit, ComfyCandidateError> {
+        if self.admission != AdmissionState::Ready {
+            self.quarantine();
+            return Err(ComfyCandidateError::AdmissionUnavailable);
+        }
+        let Some(active) = self.active.get(&ticket.job_id) else {
+            self.quarantine();
+            return Err(ComfyCandidateError::ReservationUnavailable);
+        };
+        if !active.dispatch_validated {
+            self.quarantine();
+            return Err(ComfyCandidateError::FinalDispatchGateMissing);
+        }
+        if active.started.is_none() {
+            self.quarantine();
+            return Err(ComfyCandidateError::FinalDispatchGateMissing);
+        }
+        if active.cancellation.is_cancelled() || ticket.cancellation.is_cancelled() {
+            self.quarantine();
+            return Err(ComfyCandidateError::Cancelled);
+        }
+        if now >= active.deadline {
+            self.quarantine();
+            return Err(ComfyCandidateError::DeadlineExceeded);
+        }
+
+        let ticket_matches_reservation = ticket.request_id == active.request_id
+            && same_request(&ticket.request, &active.request)
+            && ticket.request.profile() == &active.profile
+            && ticket.request.task() == active.task
+            && ticket.route == active.route
+            && ticket.resource == active.resource
+            && ticket.deadline == active.deadline
+            && ticket.queue_wait == active.queue_wait
+            && ticket.cancellation.same_token_as(&active.cancellation);
+        if !ticket_matches_reservation {
+            self.quarantine();
+            return Err(ComfyCandidateError::TicketMismatch);
+        }
+
+        let request = ticket.request.clone();
+        let request_id = ticket.request_id.clone();
+        let accepted_route = active.route.clone();
+        let resource = active.resource;
+        let is_comfy_workflow = matches!(
+            &request,
+            InferenceRequest::Media {
+                input: MediaInput::Workflow { graph, .. },
+                ..
+            } if graph.as_object().is_some_and(|object| !object.is_empty())
+        );
+        if !is_comfy_workflow
+            || accepted_route.profile.lane != Lane::Media
+            || accepted_route.runtime.lane != Lane::Media
+            || accepted_route.runtime.as_str() != "ComfyUI"
+            || !matches!(
+                &accepted_route.native_route,
+                NativeRoute::MediaScript { .. }
+            )
+        {
+            self.quarantine();
+            return Err(ComfyCandidateError::UnsupportedRoute);
+        }
+
+        let refreshed = match self.catalog.refresh() {
+            Ok(catalog) => catalog,
+            Err(_) => {
+                self.quarantine();
+                return Err(ComfyCandidateError::CatalogUnavailable);
+            }
+        };
+        self.catalog = refreshed;
+        if request.validate(&self.catalog).is_err() {
+            self.quarantine();
+            return Err(ComfyCandidateError::RouteChanged);
+        }
+        let current_route = match resolve_profile_route(&self.catalog, request.profile()) {
+            Ok(route) => route,
+            Err(_) => {
+                self.quarantine();
+                return Err(ComfyCandidateError::RouteChanged);
+            }
+        };
+        if current_route != accepted_route || current_route != ticket.route {
+            self.quarantine();
+            return Err(ComfyCandidateError::RouteChanged);
+        }
+        if !self
+            .bindings
+            .get(&current_route.runtime)
+            .is_some_and(|binding| *binding == resource)
+        {
+            self.quarantine();
+            return Err(ComfyCandidateError::BindingChanged);
+        }
+
+        let profile_id = request.profile().profile_id.as_str();
+        let task = request.task();
+        let association_matches = self
+            .history
+            .records()
+            .iter()
+            .find(|job| job.id == ticket.job_id)
+            .is_some_and(|job| {
+                job.kind == "cross-toolkit"
+                    && job.status == "running"
+                    && job.metadata.toolkit.as_deref() == Some("l2m2")
+                    && job.metadata.profile.as_deref() == Some(profile_id)
+                    && job.metadata.task.as_deref() == Some(task)
+                    && job.metadata.request_id.as_deref() == Some(request_id.as_str())
+                    && job.metadata.result_state.as_deref() == Some("running")
+                    && job.metadata.backend_id.is_none()
+                    && job.metadata.comfy_dispatch_candidate.is_none()
+            });
+        if !association_matches {
+            self.quarantine();
+            return Err(ComfyCandidateError::JobAssociationMismatch);
+        }
+        let commit_time = now.max(Instant::now());
+        if commit_time >= ticket.deadline {
+            self.quarantine();
+            return Err(ComfyCandidateError::DeadlineExceeded);
+        }
+        if ticket.cancellation.is_cancelled() {
+            self.quarantine();
+            return Err(ComfyCandidateError::Cancelled);
+        }
+
+        let mut candidate_history = self.history.clone();
+        if candidate_history
+            .record_comfy_dispatch_candidate(ticket.job_id, candidate_id.clone())
+            .is_err()
+        {
+            self.quarantine();
+            return Err(ComfyCandidateError::CandidateRejected);
+        }
+        if candidate_history.persist_in(&self.data_root).is_err() {
+            self.quarantine();
+            return Err(ComfyCandidateError::PersistenceFailed);
+        }
+        self.history = candidate_history;
+
+        let permit = ComfyDispatchPermit {
+            owner_identity: Arc::downgrade(&self.dispatch_permit_owner_identity),
+            reservation_identity: Arc::downgrade(
+                &self
+                    .active
+                    .get(&ticket.job_id)
+                    .expect("validated active reservation")
+                    .permit_reservation_identity,
+            ),
+            cancellation: ticket.cancellation.clone(),
+            deadline: ticket.deadline,
+            job_id: ticket.job_id,
+            request_id,
+            request,
+            candidate_id,
+            route: accepted_route,
+        };
+        if !self.accepts_comfy_dispatch_permit(&permit) {
+            self.quarantine();
+            return Err(ComfyCandidateError::JobAssociationMismatch);
+        }
+        Ok(permit)
+    }
+
+    /// Check that a pre-POST permit still belongs to this live coordinator and
+    /// to its unresolved reservation. Daemon handoffs call this before moving
+    /// the permit into the Comfy adapter.
+    pub(crate) fn accepts_comfy_dispatch_permit(&self, permit: &ComfyDispatchPermit) -> bool {
+        if self.admission != AdmissionState::Ready
+            || !permit.is_live()
+            || !permit.belongs_to(&self.dispatch_permit_owner_identity)
+        {
+            return false;
+        }
+        let now = Instant::now();
+        let active_matches = self.active.get(&permit.job_id).is_some_and(|active| {
+            active.dispatch_validated
+                && active.started.is_some()
+                && !active.cleanup_unresolved
+                && !active.cancellation.is_cancelled()
+                && now < active.deadline
+                && active.request_id == permit.request_id
+                && same_request(&active.request, &permit.request)
+                && active.route == permit.route
+        });
+        let history_matches = self
+            .history
+            .records()
+            .iter()
+            .find(|job| job.id == permit.job_id)
+            .is_some_and(|job| {
+                job.metadata.request_id.as_deref() == Some(permit.request_id.as_str())
+                    && job.metadata.comfy_dispatch_candidate.as_deref()
+                        == Some(permit.candidate_id.as_str())
+                    && job.metadata.backend_id.is_none()
+            });
+        active_matches && history_matches
     }
 
     /// Persist running state immediately before native inference begins.
@@ -1204,6 +1541,18 @@ impl CoordinatorCore {
                 .is_some_and(|active| active.started.is_some()),
             "request has not started"
         );
+        let candidate = self
+            .history
+            .records()
+            .iter()
+            .find(|job| job.id == job_id)
+            .and_then(|job| job.metadata.comfy_dispatch_candidate.as_deref());
+        if candidate.is_some_and(|candidate| candidate != backend_id) {
+            self.quarantine();
+            return Err(anyhow::anyhow!(
+                "verified backend ID does not match the persisted Comfy candidate; reconcile before more work"
+            ));
+        }
         if let Err(error) = self.persist_update(job_id, "running", Some(backend_id), None) {
             self.quarantine();
             return Err(error.context("backend ID persistence failed; reconcile before more work"));
@@ -1550,6 +1899,43 @@ mod tests {
             CoordinatorCore::load(catalog, bindings, self.root.path(), self.root.path(), 8).unwrap()
         }
 
+        fn new_comfy() -> Self {
+            let fixture = Self::new();
+            fixture.write_comfy_manifest("ComfyUI", "workflows/fixture.json");
+            fixture
+        }
+
+        fn comfy_coordinator(&self) -> CoordinatorCore {
+            let language_root = self.root.path().join("language");
+            let media_root = self.root.path().join("media");
+            let decisions_root = self.root.path().join("decisions");
+            let catalog =
+                Catalog::load_from_roots(language_root, media_root, decisions_root).unwrap();
+            let bindings = BTreeMap::from([(
+                RuntimeIdentity::new(Lane::Media, "ComfyUI").unwrap(),
+                ResourceClaim::ExclusiveGpu(0),
+            )]);
+            CoordinatorCore::load(catalog, bindings, self.root.path(), self.root.path(), 8).unwrap()
+        }
+
+        fn write_comfy_manifest(&self, runtime: &str, script: &str) {
+            std::fs::write(
+                &self.media_manifest,
+                serde_json::json!({
+                    "schema_version": 1,
+                    "profiles": [{
+                        "id": "fixture-profile",
+                        "name": "Fixture Comfy profile",
+                        "runtime": runtime,
+                        "tasks": ["image"],
+                        "script": script
+                    }]
+                })
+                .to_string(),
+            )
+            .unwrap();
+        }
+
         fn rewrite_media(&self, runtime: &str, script: &str) {
             std::fs::write(
                 &self.media_manifest,
@@ -1578,6 +1964,16 @@ mod tests {
             }
         }
 
+        fn comfy_request() -> InferenceRequest {
+            InferenceRequest::Media {
+                profile: ProfileKey::new(Lane::Media, "fixture-profile").unwrap(),
+                input: MediaInput::Workflow {
+                    task: Task::new("image").unwrap(),
+                    graph: serde_json::json!({"1": {"class_type": "FixtureNode", "inputs": {}}}),
+                },
+            }
+        }
+
         fn reserve(
             &self,
             coordinator: &mut CoordinatorCore,
@@ -1595,6 +1991,41 @@ mod tests {
             let ticket = coordinator.reserve_next(now).unwrap().unwrap();
             (id, ticket)
         }
+
+        fn reserve_comfy(
+            &self,
+            coordinator: &mut CoordinatorCore,
+            now: Instant,
+        ) -> (u64, DispatchTicket) {
+            coordinator.confirm_reconciled().unwrap();
+            let id = coordinator
+                .submit(
+                    "comfy-dispatch-fixture".into(),
+                    Self::comfy_request(),
+                    Duration::from_secs(30),
+                    now,
+                )
+                .unwrap();
+            let ticket = coordinator.reserve_next(now).unwrap().unwrap();
+            (id, ticket)
+        }
+    }
+
+    fn started_comfy_dispatch() -> (
+        DispatchFixture,
+        CoordinatorCore,
+        u64,
+        DispatchTicket,
+        Instant,
+    ) {
+        let fixture = DispatchFixture::new_comfy();
+        let mut coordinator = fixture.comfy_coordinator();
+        let now = Instant::now();
+        let (job_id, ticket) = fixture.reserve_comfy(&mut coordinator, now);
+        coordinator
+            .begin_dispatch(&ticket, now + Duration::from_millis(1))
+            .unwrap();
+        (fixture, coordinator, job_id, ticket, now)
     }
 
     fn persisted_state(data_root: &Path, request_id: &str) -> Option<String> {
@@ -2463,6 +2894,307 @@ mod tests {
                 .any(|job| job.id == job_id
                     && job.metadata.result_state.as_deref() == Some("running"))
         );
+    }
+
+    #[test]
+    fn comfy_candidate_is_persisted_after_the_final_gate_before_a_permit_is_returned() {
+        const CANDIDATE: &str = "123e4567-e89b-12d3-a456-426614174000";
+        let (fixture, coordinator, job_id, ticket, now) = started_comfy_dispatch();
+        let mut coordinator = coordinator;
+        let permit = coordinator
+            .record_comfy_dispatch_candidate(&ticket, CANDIDATE.into(), now)
+            .unwrap();
+
+        assert_eq!(permit.job_id(), job_id);
+        assert_eq!(permit.request_id(), "comfy-dispatch-fixture");
+        assert_eq!(permit.candidate_id(), CANDIDATE);
+        assert_eq!(permit.route(), &ticket.route);
+        assert!(coordinator.accepts_comfy_dispatch_permit(&permit));
+        assert_eq!(coordinator.active_count(), 1);
+        assert_eq!(coordinator.admission(), AdmissionState::Ready);
+
+        let rows: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(fixture.root.path().join("jobs.json")).unwrap())
+                .unwrap();
+        let row = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["request_id"] == "comfy-dispatch-fixture")
+            .unwrap();
+        assert_eq!(row["comfy_dispatch_candidate"], CANDIDATE);
+        assert!(row.get("backend_id").is_none());
+        assert!(!rows.to_string().contains("FixtureNode"));
+    }
+
+    #[test]
+    fn comfy_candidate_requires_begin_dispatch_and_rejects_wrong_route_job_or_uuid() {
+        const CANDIDATE: &str = "123e4567-e89b-12d3-a456-426614174000";
+
+        let fixture = DispatchFixture::new_comfy();
+        let mut coordinator = fixture.comfy_coordinator();
+        let now = Instant::now();
+        let (job_id, ticket) = fixture.reserve_comfy(&mut coordinator, now);
+        assert!(matches!(
+            coordinator.record_comfy_dispatch_candidate(&ticket, CANDIDATE.into(), now),
+            Err(ComfyCandidateError::FinalDispatchGateMissing)
+        ));
+        assert_eq!(coordinator.active_count(), 1);
+        assert!(coordinator
+            .history()
+            .records()
+            .iter()
+            .find(|job| job.id == job_id)
+            .unwrap()
+            .metadata
+            .comfy_dispatch_candidate
+            .is_none());
+
+        for scenario in ["wrong-route", "wrong-job", "invalid-uuid"] {
+            let (_fixture, mut coordinator, job_id, mut ticket, now) = started_comfy_dispatch();
+            let (candidate, expected) = match scenario {
+                "wrong-route" => {
+                    ticket.route.native_route = NativeRoute::MediaScript {
+                        path: PathBuf::from("workflows/other.json"),
+                    };
+                    (CANDIDATE, ComfyCandidateError::TicketMismatch)
+                }
+                "wrong-job" => {
+                    ticket.job_id = ticket.job_id.saturating_add(1);
+                    (CANDIDATE, ComfyCandidateError::ReservationUnavailable)
+                }
+                _ => (
+                    "123E4567-E89B-12D3-A456-426614174000",
+                    ComfyCandidateError::CandidateRejected,
+                ),
+            };
+            assert!(
+                matches!(
+                    coordinator.record_comfy_dispatch_candidate(
+                        &ticket,
+                        candidate.into(),
+                        now
+                    ),
+                    Err(error) if error == expected
+                ),
+                "scenario {scenario}"
+            );
+            assert_eq!(
+                coordinator.admission(),
+                AdmissionState::ReconciliationRequired
+            );
+            assert_eq!(coordinator.active_count(), 1);
+            assert!(coordinator
+                .history()
+                .records()
+                .iter()
+                .find(|job| job.id == job_id)
+                .unwrap()
+                .metadata
+                .comfy_dispatch_candidate
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn comfy_candidate_refreshes_exact_route_and_rejects_non_comfy_media() {
+        const CANDIDATE: &str = "123e4567-e89b-12d3-a456-426614174000";
+
+        let (fixture, mut coordinator, _job_id, ticket, now) = started_comfy_dispatch();
+        fixture.write_comfy_manifest("comfyui", "workflows/fixture.json");
+        assert!(matches!(
+            coordinator.record_comfy_dispatch_candidate(&ticket, CANDIDATE.into(), now),
+            Err(ComfyCandidateError::RouteChanged)
+        ));
+        assert_eq!(coordinator.active_count(), 1);
+        assert_eq!(
+            coordinator.admission(),
+            AdmissionState::ReconciliationRequired
+        );
+
+        let fixture = DispatchFixture::new();
+        let mut coordinator = fixture.coordinator();
+        let now = Instant::now();
+        let (job_id, ticket) = fixture.reserve(&mut coordinator, now);
+        coordinator.begin_dispatch(&ticket, now).unwrap();
+        assert!(matches!(
+            coordinator.record_comfy_dispatch_candidate(&ticket, CANDIDATE.into(), now),
+            Err(ComfyCandidateError::UnsupportedRoute)
+        ));
+        assert_eq!(coordinator.active_count(), 1);
+        assert!(coordinator
+            .history()
+            .records()
+            .iter()
+            .find(|job| job.id == job_id)
+            .unwrap()
+            .metadata
+            .comfy_dispatch_candidate
+            .is_none());
+    }
+
+    #[test]
+    fn comfy_candidate_persistence_failure_quarantines_without_releasing_reservation() {
+        const CANDIDATE: &str = "123e4567-e89b-12d3-a456-426614174000";
+        let (fixture, mut coordinator, job_id, ticket, now) = started_comfy_dispatch();
+        let jobs_path = fixture.root.path().join("jobs.json");
+        std::fs::remove_file(&jobs_path).unwrap();
+        std::fs::create_dir(&jobs_path).unwrap();
+
+        assert!(matches!(
+            coordinator.record_comfy_dispatch_candidate(&ticket, CANDIDATE.into(), now),
+            Err(ComfyCandidateError::PersistenceFailed)
+        ));
+        assert_eq!(
+            coordinator.admission(),
+            AdmissionState::ReconciliationRequired
+        );
+        assert_eq!(coordinator.active_count(), 1);
+        assert!(coordinator
+            .history()
+            .records()
+            .iter()
+            .find(|job| job.id == job_id)
+            .unwrap()
+            .metadata
+            .comfy_dispatch_candidate
+            .is_none());
+    }
+
+    #[test]
+    fn verified_comfy_backend_id_is_explicit_and_must_match_the_candidate() {
+        const CANDIDATE: &str = "123e4567-e89b-12d3-a456-426614174000";
+
+        let (_fixture, mut coordinator, job_id, ticket, now) = started_comfy_dispatch();
+        coordinator
+            .record_comfy_dispatch_candidate(&ticket, CANDIDATE.into(), now)
+            .unwrap();
+        assert!(coordinator
+            .attach_backend(job_id, "another-id".into())
+            .is_err());
+        let record = coordinator
+            .history()
+            .records()
+            .iter()
+            .find(|job| job.id == job_id)
+            .unwrap();
+        assert_eq!(
+            record.metadata.comfy_dispatch_candidate.as_deref(),
+            Some(CANDIDATE)
+        );
+        assert!(record.metadata.backend_id.is_none());
+        assert_eq!(coordinator.active_count(), 1);
+
+        let (_fixture, mut coordinator, job_id, ticket, now) = started_comfy_dispatch();
+        coordinator
+            .record_comfy_dispatch_candidate(&ticket, CANDIDATE.into(), now)
+            .unwrap();
+        coordinator
+            .attach_backend(job_id, CANDIDATE.into())
+            .unwrap();
+        let record = coordinator
+            .history()
+            .records()
+            .iter()
+            .find(|job| job.id == job_id)
+            .unwrap();
+        assert_eq!(record.metadata.backend_id.as_deref(), Some(CANDIDATE));
+        assert_eq!(
+            record.metadata.comfy_dispatch_candidate.as_deref(),
+            Some(CANDIDATE)
+        );
+    }
+
+    #[test]
+    fn coordinator_strict_load_rejects_malformed_duplicate_or_truncated_history_unchanged() {
+        const CANDIDATE: &str = "123e4567-e89b-12d3-a456-426614174000";
+        let fixture = DispatchFixture::new_comfy();
+        let catalog = Catalog::load_from_roots(
+            fixture.root.path().join("language"),
+            fixture.root.path().join("media"),
+            fixture.root.path().join("decisions"),
+        )
+        .unwrap();
+        let bindings = BTreeMap::from([(
+            RuntimeIdentity::new(Lane::Media, "ComfyUI").unwrap(),
+            ResourceClaim::ExclusiveGpu(0),
+        )]);
+        let malformed = serde_json::json!([{
+            "name": "malformed",
+            "started": "12:34:56",
+            "elapsed": "-",
+            "exit": "…",
+            "mode": "cross-toolkit",
+            "script_path": "",
+            "toolkit": "l2m2",
+            "profile": "fixture-profile",
+            "task": "image",
+            "request_id": "req-malformed",
+            "comfy_dispatch_candidate": "123E4567-E89B-12D3-A456-426614174000"
+        }]);
+        let duplicate = serde_json::json!([
+            {
+                "name": "first",
+                "started": "12:34:56",
+                "elapsed": "-",
+                "exit": "…",
+                "mode": "cross-toolkit",
+                "script_path": "",
+                "toolkit": "l2m2",
+                "profile": "fixture-profile",
+                "task": "image",
+                "request_id": "req-first",
+                "result_state": "running",
+                "comfy_dispatch_candidate": CANDIDATE
+            },
+            {
+                "name": "second",
+                "started": "12:34:56",
+                "elapsed": "-",
+                "exit": "…",
+                "mode": "cross-toolkit",
+                "script_path": "",
+                "toolkit": "l2m2",
+                "profile": "fixture-profile",
+                "task": "image",
+                "request_id": "req-second",
+                "result_state": "running",
+                "comfy_dispatch_candidate": CANDIDATE
+            }
+        ]);
+        let truncated = (0..=crate::state_store::JOBS_MAX)
+            .map(|index| {
+                serde_json::json!({
+                    "name": format!("legacy-{index}"),
+                    "started": "12:34:56",
+                    "elapsed": "0s",
+                    "exit": "0"
+                })
+            })
+            .collect::<Vec<_>>();
+        let duplicate_candidate_key = br#"[{"name":"duplicate-candidate-key","started":"12:34:56","elapsed":"-","exit":"0","toolkit":"l2m2","profile":"fixture-profile","task":"image","request_id":"req-a","comfy_dispatch_candidate":"123e4567-e89b-12d3-a456-426614174000","comfy_dispatch_candidate":"123e4567-e89b-12d3-a456-426614174000"}]"#.to_vec();
+        let duplicate_request_key = br#"[{"name":"duplicate-request-key","started":"12:34:56","elapsed":"-","exit":"0","toolkit":"l2m2","profile":"fixture-profile","task":"image","request_id":"req-a","request_id":"req-b","comfy_dispatch_candidate":"123e4567-e89b-12d3-a456-426614174000"}]"#.to_vec();
+        let cases = vec![
+            serde_json::to_vec(&malformed).unwrap(),
+            serde_json::to_vec(&duplicate).unwrap(),
+            serde_json::to_vec(&serde_json::Value::Array(truncated)).unwrap(),
+            duplicate_candidate_key,
+            duplicate_request_key,
+        ];
+
+        for bytes in cases {
+            let data = TempDir::new().unwrap();
+            std::fs::write(data.path().join("jobs.json"), &bytes).unwrap();
+            assert!(CoordinatorCore::load(
+                catalog.clone(),
+                bindings.clone(),
+                data.path(),
+                fixture.root.path(),
+                8,
+            )
+            .is_err());
+            assert_eq!(std::fs::read(data.path().join("jobs.json")).unwrap(), bytes);
+        }
     }
 
     #[test]
