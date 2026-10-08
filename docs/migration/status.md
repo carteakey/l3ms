@@ -65,6 +65,17 @@ two live preflights refused before any service stop or inference. The current
 GPU listing includes KDE's existing compositor, so its background allowance
 was asked explicitly rather than assumed. See [Breeze evidence](breeze-acceptance.md).
 
+The incremental language/readiness/client slice passes **714 tests, 1 ignored**.
+Native chat deltas, optional completion-token usage and native stream completion
+are retained separately from durable outer job completion. Explicit workbench
+observations resume the last verified cursor, with transactional rollback on a
+failed later page; no automatic polling or inference replay is introduced.
+Owned llama-swap readiness now checks plaintext router `/health` and the exact
+selected model state `ready` in `/running`, with bounded chunked-response support
+and object-only native JSON parsing. These are fixtures, not real managed-model
+acceptance. Foreground owner integration is in progress; strict Clippy must be
+rerun once its newly added ownership/readiness methods are actually wired.
+
 Linear tracking: [CAR-215](https://linear.app/carteakey/issue/CAR-215/consolidate-l3ms-l2m2-and-l3ds-into-the-local-3-mode-model-stack)
 is the parent; [CAR-216](https://linear.app/carteakey/issue/CAR-216/import-l2m2-and-l3ds-into-the-l3ms-monorepo-with-verified-standalone)
 covers Phases 0–3, CAR-217 Phases 4–5, CAR-218 Phases 6–7, CAR-219 Phase 8,

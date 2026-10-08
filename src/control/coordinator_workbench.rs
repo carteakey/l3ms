@@ -424,20 +424,35 @@ impl Cancellation for WorkerStop {
 }
 
 fn work_loop(actions: Receiver<Action>, events: SyncSender<WorkbenchEvent>, stop: Arc<AtomicBool>) {
+    let mut output_cache = None;
     while let Ok(action) = actions.recv() {
         if stop.load(Ordering::Acquire) {
             break;
         }
         let request_id = action.request_id().to_owned();
-        let outcome = catch_unwind(AssertUnwindSafe(|| execute(action, Arc::clone(&stop))))
-            .unwrap_or(WorkbenchEvent::WorkerFailed { request_id });
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            execute(action, Arc::clone(&stop), &mut output_cache)
+        }))
+        .unwrap_or(WorkbenchEvent::WorkerFailed { request_id });
         if events.send(outcome).is_err() {
             break;
         }
     }
 }
 
-fn execute(action: Action, stop: Arc<AtomicBool>) -> WorkbenchEvent {
+// Exactly one bounded native consumer is retained, in memory only. Its cursor
+// is valid only for this caller ID/lane/endpoint; another observation drops it.
+struct OutputCache {
+    socket_directory: PathBuf,
+    request: RetainedRequest,
+    consumer: super::result_consumer::ResultConsumer,
+}
+
+fn execute(
+    action: Action,
+    stop: Arc<AtomicBool>,
+    output_cache: &mut Option<OutputCache>,
+) -> WorkbenchEvent {
     let cancellation = WorkerStop(stop);
     let context = OperationContext::new(Instant::now() + ACTION_TIMEOUT, &cancellation);
     match action {
@@ -445,6 +460,7 @@ fn execute(action: Action, stop: Arc<AtomicBool>) -> WorkbenchEvent {
             socket_directory,
             prepared,
         } => {
+            *output_cache = None;
             let request_id = prepared.request.request_id.clone();
             let outcome = match client::exchange(&socket_directory, prepared.envelope, &context) {
                 Ok(ResponseMessage::Accepted {
@@ -464,6 +480,11 @@ fn execute(action: Action, stop: Arc<AtomicBool>) -> WorkbenchEvent {
             socket_directory,
             request,
         } => {
+            if !output_cache.as_ref().is_some_and(|cached| {
+                cached.socket_directory == socket_directory && cached.request == request
+            }) {
+                *output_cache = None;
+            }
             let RetainedRequest { request_id, lane } = request;
             let status_envelope = RequestEnvelope::v1(WireRequestMessage::Status {
                 request_id: request_id.clone(),
@@ -472,6 +493,7 @@ fn execute(action: Action, stop: Arc<AtomicBool>) -> WorkbenchEvent {
                 Err(error) => Err(ObserveFailure::Exchange(error)),
                 Ok(ResponseMessage::Error { code, .. }) => Err(ObserveFailure::Rejected(code)),
                 Ok(ResponseMessage::Status { state, .. }) if state == RequestStatus::NotFound => {
+                    *output_cache = None;
                     Ok(Observation {
                         status: state,
                         output: None,
@@ -481,37 +503,63 @@ fn execute(action: Action, stop: Arc<AtomicBool>) -> WorkbenchEvent {
                     })
                 }
                 Ok(ResponseMessage::Status { state, .. }) => {
-                    match client::read_native_results(
-                        &socket_directory,
-                        &request_id,
-                        lane,
-                        &context,
-                    ) {
-                        Ok(consumer) => Ok(Observation {
-                            status: state,
-                            output: Some(consumer.output().clone()),
-                            output_complete: consumer.is_complete(),
-                            results_available: true,
-                            results_state: ResultReadState::Available,
-                        }),
+                    let read = match output_cache.as_mut() {
+                        Some(cached) => client::read_native_results_into(
+                            &socket_directory,
+                            &mut cached.consumer,
+                            &context,
+                        )
+                        .map(|()| cached.consumer.clone()),
+                        None => client::read_native_results(
+                            &socket_directory,
+                            &request_id,
+                            lane,
+                            &context,
+                        ),
+                    };
+                    match read {
+                        Ok(consumer) => {
+                            let observation = Observation {
+                                status: state,
+                                output: Some(consumer.output().clone()),
+                                output_complete: consumer.is_complete(),
+                                results_available: true,
+                                results_state: ResultReadState::Available,
+                            };
+                            *output_cache = Some(OutputCache {
+                                socket_directory,
+                                request: RetainedRequest {
+                                    request_id: request_id.clone(),
+                                    lane,
+                                },
+                                consumer,
+                            });
+                            Ok(observation)
+                        }
                         Err(client::NativeReadError::Assembly(
                             super::result_consumer::ConsumeError::Unknown,
-                        )) => Ok(Observation {
-                            status: state,
-                            output: None,
-                            output_complete: false,
-                            results_available: false,
-                            results_state: ResultReadState::Unknown,
-                        }),
+                        )) => {
+                            *output_cache = None;
+                            Ok(Observation {
+                                status: state,
+                                output: None,
+                                output_complete: false,
+                                results_available: false,
+                                results_state: ResultReadState::Unknown,
+                            })
+                        }
                         Err(client::NativeReadError::Assembly(
                             super::result_consumer::ConsumeError::Expired,
-                        )) => Ok(Observation {
-                            status: state,
-                            output: None,
-                            output_complete: false,
-                            results_available: false,
-                            results_state: ResultReadState::Expired,
-                        }),
+                        )) => {
+                            *output_cache = None;
+                            Ok(Observation {
+                                status: state,
+                                output: None,
+                                output_complete: false,
+                                results_available: false,
+                                results_state: ResultReadState::Expired,
+                            })
+                        }
                         Err(_) => Ok(Observation {
                             status: state,
                             output: None,
@@ -625,6 +673,87 @@ mod tests {
             prepare_submission(&path, &catalog, &wrong).unwrap_err(),
             PreparationError::SelectedProfileMismatch
         );
+    }
+
+    #[test]
+    fn repeated_explicit_observation_resumes_cursor_without_resubmitting() {
+        let directory = private_socket_directory();
+        let socket = directory.path().to_owned();
+        let listener = UnixListener::bind(socket.join("coordinator.sock")).unwrap();
+        std::fs::set_permissions(
+            socket.join("coordinator.sock"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let server = thread::spawn(move || {
+            let mut buffer = ResultBuffer::new();
+            buffer.begin("observe-stream", Lane::Language).unwrap();
+            for (cursor, text) in [(0, "first"), (1, "second")] {
+                buffer
+                    .append("observe-stream", ResultEvent::ChatContent(text.into()))
+                    .unwrap();
+                let mut stream = listener.accept().unwrap().0;
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let ipc::IncomingRequest::Control(ClientRequest::Status { request_id }) =
+                    ipc::read_incoming_request(&mut stream).unwrap()
+                else {
+                    panic!("observe must not submit")
+                };
+                ipc::write_response(
+                    &mut stream,
+                    &ResponseEnvelope::v1(ResponseMessage::Status {
+                        request_id,
+                        state: RequestStatus::Running,
+                    }),
+                )
+                .unwrap();
+                let mut stream = listener.accept().unwrap().0;
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let ipc::IncomingRequest::Results(query) =
+                    ipc::read_incoming_request(&mut stream).unwrap()
+                else {
+                    panic!("observe must query results")
+                };
+                assert_eq!(query.after_cursor, cursor);
+                let page = buffer
+                    .page("observe-stream", cursor, MAX_PAGE_BYTES)
+                    .unwrap();
+                ipc::write_response(
+                    &mut stream,
+                    &ResponseEnvelope::v2_results(ResponseMessage::Results {
+                        request_id: query.request_id,
+                        state: RequestStatus::Running,
+                        after_cursor: query.after_cursor,
+                        byte_budget: query.byte_budget,
+                        page,
+                    }),
+                )
+                .unwrap();
+            }
+        });
+        let mut worker = CoordinatorWorkbench::start().unwrap();
+        for expected in ["first", "firstsecond"] {
+            worker
+                .observe(socket.clone(), "observe-stream".into(), Lane::Language)
+                .unwrap();
+            let WorkbenchEvent::Observed {
+                outcome: Ok(observation),
+                ..
+            } = receive_event(&mut worker)
+            else {
+                panic!("expected successful incremental observation")
+            };
+            assert!(!observation.output_complete);
+            let Some(NativeOutput::Language { content, .. }) = observation.output else {
+                panic!("expected native chat output")
+            };
+            assert_eq!(content, expected);
+        }
+        server.join().unwrap();
     }
 
     #[test]

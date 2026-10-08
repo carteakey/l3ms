@@ -10,6 +10,13 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Preserve incremental native chat deltas, token usage and stream completion
+  separately from durable job completion, with bounded transactional result
+  publication. Explicit workbench observations resume their verified cursor
+  without inference replay or automatic polling.
+- Verify owned llama-swap readiness using router liveness and the selected
+  model's exact `/running` ready state, not the ambiguous model-list loaded
+  status. Bound chunked router responses and reject malformed native shapes.
 - Add an opt-in bounded native Breeze acceptance harness and CI-only safety
   fixtures, preserving exact service/config state and refusing unsafe cleanup
   or unknown GPU claimants; live preflight refusals are not inference passes.

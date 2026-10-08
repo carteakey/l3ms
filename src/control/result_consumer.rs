@@ -154,6 +154,8 @@ pub struct ResultConsumer {
     pending: Option<Pending>,
     language_task: Option<LanguageTask>,
     embedding_complete: bool,
+    chat_completion_tokens: Option<u64>,
+    chat_stream_completed: bool,
     output: NativeOutput,
 }
 
@@ -199,12 +201,20 @@ impl ResultConsumer {
             pending: None,
             language_task: None,
             embedding_complete: false,
+            chat_completion_tokens: None,
+            chat_stream_completed: false,
             output,
         })
     }
 
     pub fn cursor(&self) -> u64 {
         self.cursor
+    }
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+    pub fn lane(&self) -> Lane {
+        self.lane
     }
     pub fn latest_cursor(&self) -> u64 {
         self.latest
@@ -217,6 +227,16 @@ impl ResultConsumer {
     }
     pub fn output(&self) -> &NativeOutput {
         &self.output
+    }
+    /// Native chat completion usage, if supplied by the backend. This is
+    /// separate from the compatibility-stable `NativeOutput::Language` JSON.
+    pub fn chat_completion_tokens(&self) -> Option<u64> {
+        self.chat_completion_tokens
+    }
+    /// Whether the backend emitted its native stream-complete marker. This
+    /// does not mean the coordinator job is terminal or resources are free.
+    pub fn chat_stream_completed(&self) -> bool {
+        self.chat_stream_completed
     }
 
     /// Consume exactly the page requested after `cursor()`. Empty polls are
@@ -278,10 +298,43 @@ impl ResultConsumer {
     fn append(&mut self, cursor: u64, event: &PageEvent) -> Result<(), ConsumeError> {
         match event {
             PageEvent::ChatContent { .. } | PageEvent::ChatReasoning { .. } => {
+                if self.lane != Lane::Language {
+                    return Err(ConsumeError::WrongLane);
+                }
                 if self.language_task == Some(LanguageTask::Embeddings) {
                     return Err(ConsumeError::WrongLane);
                 }
+                if self.chat_stream_completed {
+                    return Err(ConsumeError::InvalidSequence);
+                }
                 self.language_task = Some(LanguageTask::Chat);
+            }
+            PageEvent::ChatUsage { completion_tokens } => {
+                if self.lane != Lane::Language {
+                    return Err(ConsumeError::WrongLane);
+                }
+                if self.language_task == Some(LanguageTask::Embeddings)
+                    || self.chat_stream_completed
+                    || self.chat_completion_tokens.is_some()
+                {
+                    return Err(ConsumeError::InvalidSequence);
+                }
+                self.language_task = Some(LanguageTask::Chat);
+                self.chat_completion_tokens = Some(*completion_tokens);
+                return Ok(());
+            }
+            PageEvent::ChatStreamComplete => {
+                if self.lane != Lane::Language {
+                    return Err(ConsumeError::WrongLane);
+                }
+                if self.language_task == Some(LanguageTask::Embeddings)
+                    || self.chat_stream_completed
+                {
+                    return Err(ConsumeError::InvalidSequence);
+                }
+                self.language_task = Some(LanguageTask::Chat);
+                self.chat_stream_completed = true;
+                return Ok(());
             }
             PageEvent::EmbeddingJsonPart {
                 result_id,
@@ -566,6 +619,150 @@ mod tests {
             serde_json::to_string(&embeddings).unwrap(),
             r#"{"lane":"language","task":"embeddings","vectors":[[0.5]],"usage":{"prompt_tokens":0,"total_tokens":0}}"#
         );
+    }
+
+    #[test]
+    fn chat_events_are_visible_before_outer_terminal_and_late_pages_roll_back() {
+        use super::super::result_buffer::CursorEvent;
+
+        let mut consumer = ResultConsumer::new("incremental-chat", Lane::Language).unwrap();
+        consumer
+            .consume(&ResultPage {
+                request_id: "incremental-chat".into(),
+                availability: Availability::Available,
+                events: vec![CursorEvent {
+                    cursor: 1,
+                    event: PageEvent::ChatContent {
+                        text: "visible".into(),
+                    },
+                }],
+                next_cursor: 1,
+                latest_cursor: 3,
+                terminal: None,
+            })
+            .unwrap();
+        let NativeOutput::Language { content, .. } = consumer.output() else {
+            panic!("wrong lane")
+        };
+        assert_eq!(content, "visible");
+        assert_eq!(consumer.terminal(), None);
+        assert!(!consumer.is_complete());
+
+        consumer
+            .consume(&ResultPage {
+                request_id: "incremental-chat".into(),
+                availability: Availability::Available,
+                events: vec![CursorEvent {
+                    cursor: 2,
+                    event: PageEvent::ChatUsage {
+                        completion_tokens: 17,
+                    },
+                }],
+                next_cursor: 2,
+                latest_cursor: 3,
+                terminal: None,
+            })
+            .unwrap();
+        assert_eq!(consumer.chat_completion_tokens(), Some(17));
+        assert!(!consumer.chat_stream_completed());
+
+        consumer
+            .consume(&ResultPage {
+                request_id: "incremental-chat".into(),
+                availability: Availability::Available,
+                events: vec![CursorEvent {
+                    cursor: 3,
+                    event: PageEvent::ChatStreamComplete,
+                }],
+                next_cursor: 3,
+                latest_cursor: 3,
+                terminal: None,
+            })
+            .unwrap();
+        assert!(consumer.chat_stream_completed());
+        assert_eq!(consumer.terminal(), None);
+        assert!(!consumer.is_complete());
+
+        let before = serde_json::to_vec(consumer.output()).unwrap();
+        let late_delta = ResultPage {
+            request_id: "incremental-chat".into(),
+            availability: Availability::Available,
+            events: vec![CursorEvent {
+                cursor: 4,
+                event: PageEvent::ChatContent {
+                    text: "late".into(),
+                },
+            }],
+            next_cursor: 4,
+            latest_cursor: 4,
+            terminal: None,
+        };
+        assert_eq!(
+            consumer.consume(&late_delta),
+            Err(ConsumeError::InvalidSequence)
+        );
+        assert_eq!(consumer.cursor(), 3);
+        assert_eq!(consumer.chat_completion_tokens(), Some(17));
+        assert!(consumer.chat_stream_completed());
+        assert_eq!(serde_json::to_vec(consumer.output()).unwrap(), before);
+    }
+
+    #[test]
+    fn duplicate_chat_usage_across_pages_rolls_back_cursor_and_usage() {
+        use super::super::result_buffer::CursorEvent;
+
+        let mut consumer = ResultConsumer::new("duplicate-usage", Lane::Language).unwrap();
+        let usage_page = |cursor, tokens| ResultPage {
+            request_id: "duplicate-usage".into(),
+            availability: Availability::Available,
+            events: vec![CursorEvent {
+                cursor,
+                event: PageEvent::ChatUsage {
+                    completion_tokens: tokens,
+                },
+            }],
+            next_cursor: cursor,
+            latest_cursor: 2,
+            terminal: None,
+        };
+        consumer.consume(&usage_page(1, 3)).unwrap();
+        assert_eq!(consumer.chat_completion_tokens(), Some(3));
+        assert_eq!(
+            consumer.consume(&usage_page(2, 4)),
+            Err(ConsumeError::InvalidSequence)
+        );
+        assert_eq!(consumer.cursor(), 1);
+        assert_eq!(consumer.chat_completion_tokens(), Some(3));
+    }
+
+    #[test]
+    fn chat_stream_markers_are_rejected_transactionally_for_nonlanguage_lanes() {
+        use super::super::result_buffer::CursorEvent;
+
+        for lane in [Lane::Decisions, Lane::Media] {
+            for event in [
+                PageEvent::ChatUsage {
+                    completion_tokens: 9,
+                },
+                PageEvent::ChatStreamComplete,
+            ] {
+                let mut consumer = ResultConsumer::new("wrong-chat-lane", lane).unwrap();
+                let before = serde_json::to_vec(consumer.output()).unwrap();
+                let page = ResultPage {
+                    request_id: "wrong-chat-lane".into(),
+                    availability: Availability::Available,
+                    events: vec![CursorEvent { cursor: 1, event }],
+                    next_cursor: 1,
+                    latest_cursor: 1,
+                    terminal: None,
+                };
+                assert_eq!(consumer.consume(&page), Err(ConsumeError::WrongLane));
+                assert_eq!(consumer.cursor(), 0);
+                assert_eq!(consumer.chat_completion_tokens(), None);
+                assert!(!consumer.chat_stream_completed());
+                assert_eq!(serde_json::to_vec(consumer.output()).unwrap(), before);
+            }
+        }
     }
 
     #[test]

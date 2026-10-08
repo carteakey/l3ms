@@ -18,6 +18,7 @@ use super::requests::{
     ChatRole, EmbeddingUsage, InferenceRequest, InferenceResult, MAX_EMBEDDING_INPUTS,
     MAX_EMBEDDING_JSON_BYTES,
 };
+use super::result_buffer::{ResultBuffer, ResultEvent};
 use super::routes::{resolve_profile_route, NativeRoute};
 use super::runtime::OperationContext;
 use crate::chat::ChatRequest;
@@ -47,6 +48,7 @@ pub enum LanguageErrorKind {
     Rejected,
     Protocol,
     TooLarge,
+    ResultPublication,
 }
 
 /// Deliberately omits endpoints, native payloads, response bodies and source
@@ -71,6 +73,24 @@ impl Error for LanguageFailure {}
 pub enum ChatDelta<'a> {
     Content(&'a str),
     Reasoning(&'a str),
+}
+
+/// Incremental native chat information produced before the full response is
+/// available. Stream completion is a backend marker only; it is not the
+/// coordinator job's terminal state.
+pub enum ChatStreamEvent<'a> {
+    Delta(ChatDelta<'a>),
+    Usage { completion_tokens: u64 },
+    StreamComplete,
+}
+
+/// A streaming consumer may stop for cancellation or because publication to
+/// the already-reserved result slot failed. Either outcome after dispatch is
+/// uncertain and never triggers an automatic retry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChatEventCallbackError {
+    Cancelled,
+    Publication,
 }
 
 /// Caller-configured connection; neither endpoint discovery nor credential
@@ -131,6 +151,28 @@ impl LanguageAdapter {
         context: &OperationContext<'_>,
         mut on_delta: impl FnMut(ChatDelta<'_>) -> bool,
     ) -> Result<InferenceResult, LanguageFailure> {
+        self.execute_with_events(catalog, request, context, |event| match event {
+            ChatStreamEvent::Delta(delta) => {
+                if on_delta(delta) {
+                    Ok(())
+                } else {
+                    Err(ChatEventCallbackError::Cancelled)
+                }
+            }
+            ChatStreamEvent::Usage { .. } | ChatStreamEvent::StreamComplete => Ok(()),
+        })
+    }
+
+    /// Run one bounded chat request and expose deltas, optional token usage,
+    /// and the native stream-complete marker as the response arrives. Callbacks
+    /// run synchronously on the adapter thread and must return promptly.
+    pub fn execute_with_events(
+        &self,
+        catalog: &Catalog,
+        request: &InferenceRequest,
+        context: &OperationContext<'_>,
+        mut on_event: impl FnMut(ChatStreamEvent<'_>) -> Result<(), ChatEventCallbackError>,
+    ) -> Result<InferenceResult, LanguageFailure> {
         check_context(context, DispatchDisposition::NoDispatch)?;
         if tokio::runtime::Handle::try_current().is_ok() {
             return Err(failure(
@@ -154,7 +196,53 @@ impl LanguageAdapter {
                     LanguageErrorKind::Configuration,
                 )
             })?;
-        runtime.block_on(self.execute_async(&native, context, &mut on_delta))
+        runtime.block_on(self.execute_async(&native, context, &mut on_event))
+    }
+
+    /// Execute chat once while publishing native deltas into an already-made
+    /// full-reservation result slot. Preflight is read-only; it neither creates
+    /// a result nor admits work. This method never marks the outer result
+    /// terminal: its coordinator must durably record terminal state separately.
+    /// Any failure after HTTP dispatch is uncertain and must not be retried.
+    pub fn execute_chat_into_result_buffer(
+        &self,
+        catalog: &Catalog,
+        request: &InferenceRequest,
+        request_id: &str,
+        result_buffer: &mut ResultBuffer,
+        context: &OperationContext<'_>,
+    ) -> Result<InferenceResult, LanguageFailure> {
+        if !matches!(request, InferenceRequest::Chat { .. }) {
+            return Err(failure(
+                DispatchDisposition::NoDispatch,
+                LanguageErrorKind::InvalidRequest,
+            ));
+        }
+        result_buffer
+            .can_append_reserved_chat_stream(request_id)
+            .map_err(|_| {
+                failure(
+                    DispatchDisposition::NoDispatch,
+                    LanguageErrorKind::ResultPublication,
+                )
+            })?;
+        self.execute_with_events(catalog, request, context, |event| {
+            let result_event = match event {
+                ChatStreamEvent::Delta(ChatDelta::Content(text)) => {
+                    ResultEvent::ChatContent(text.to_owned())
+                }
+                ChatStreamEvent::Delta(ChatDelta::Reasoning(text)) => {
+                    ResultEvent::ChatReasoning(text.to_owned())
+                }
+                ChatStreamEvent::Usage { completion_tokens } => {
+                    ResultEvent::ChatUsage { completion_tokens }
+                }
+                ChatStreamEvent::StreamComplete => ResultEvent::ChatStreamComplete,
+            };
+            result_buffer
+                .append(request_id, result_event)
+                .map_err(|_| ChatEventCallbackError::Publication)
+        })
     }
 
     /// Run one bounded OpenAI-compatible embeddings request. This is an
@@ -303,7 +391,7 @@ impl LanguageAdapter {
         &self,
         request: &ChatRequest,
         context: &OperationContext<'_>,
-        on_delta: &mut impl FnMut(ChatDelta<'_>) -> bool,
+        on_event: &mut impl FnMut(ChatStreamEvent<'_>) -> Result<(), ChatEventCallbackError>,
     ) -> Result<InferenceResult, LanguageFailure> {
         check_context(context, DispatchDisposition::NoDispatch)?;
         let client = self.http_client(context)?;
@@ -361,11 +449,25 @@ impl LanguageAdapter {
                 }
             };
             let Some(bytes) = bytes else {
-                // EOF without [DONE] is not proof of a completed backend job.
-                return Err(failure(
-                    DispatchDisposition::Uncertain,
-                    LanguageErrorKind::Protocol,
-                ));
+                // EOF without [DONE], or a partial final line, is not proof of
+                // a completed backend stream. We defer publishing StreamComplete
+                // until EOF so late malformed/data records cannot expose it.
+                if !line.is_empty()
+                    || !output.done_marker_seen
+                    || (output.content.is_empty() && output.reasoning.is_empty())
+                {
+                    return Err(failure(
+                        DispatchDisposition::Uncertain,
+                        LanguageErrorKind::Protocol,
+                    ));
+                }
+                check_context(context, DispatchDisposition::Uncertain)?;
+                notify_chat_event(on_event, ChatStreamEvent::StreamComplete)?;
+                return Ok(InferenceResult::Chat {
+                    content: output.content,
+                    reasoning: output.reasoning,
+                    completion_tokens: output.completion_tokens,
+                });
             };
             wire_bytes = wire_bytes.saturating_add(bytes.len());
             if wire_bytes > MAX_WIRE_BYTES {
@@ -384,22 +486,8 @@ impl LanguageAdapter {
                 }
                 line.push(byte);
                 if byte == b'\n' {
-                    let done = output.consume_line(&line, on_delta)?;
+                    output.consume_line(&line, on_event)?;
                     line.clear();
-                    if done {
-                        check_context(context, DispatchDisposition::Uncertain)?;
-                        if output.content.is_empty() && output.reasoning.is_empty() {
-                            return Err(failure(
-                                DispatchDisposition::Uncertain,
-                                LanguageErrorKind::Protocol,
-                            ));
-                        }
-                        return Ok(InferenceResult::Chat {
-                            content: output.content,
-                            reasoning: output.reasoning,
-                            completion_tokens: output.completion_tokens,
-                        });
-                    }
                 }
             }
         }
@@ -441,6 +529,21 @@ impl LanguageAdapter {
 
 fn failure(disposition: DispatchDisposition, kind: LanguageErrorKind) -> LanguageFailure {
     LanguageFailure { disposition, kind }
+}
+
+fn notify_chat_event(
+    on_event: &mut impl FnMut(ChatStreamEvent<'_>) -> Result<(), ChatEventCallbackError>,
+    event: ChatStreamEvent<'_>,
+) -> Result<(), LanguageFailure> {
+    on_event(event).map_err(|error| {
+        failure(
+            DispatchDisposition::Uncertain,
+            match error {
+                ChatEventCallbackError::Cancelled => LanguageErrorKind::Cancelled,
+                ChatEventCallbackError::Publication => LanguageErrorKind::ResultPublication,
+            },
+        )
+    })
 }
 
 fn transport_failure(error: reqwest::Error) -> LanguageFailure {
@@ -554,79 +657,153 @@ struct EmbeddingDatum {
     embedding: Vec<f32>,
 }
 
+/// Strictly types the known chat SSE envelope while leaving unknown provider
+/// metadata (including tool-call extensions we do not execute) ignored. Derive
+/// deserialization rejects duplicate known fields instead of accepting the
+/// last value selected by `serde_json::Value`.
+#[derive(Deserialize)]
+struct NativeChatChunk {
+    #[serde(default)]
+    choices: Vec<NativeChatChoice>,
+    #[serde(default)]
+    usage: Option<NativeChatUsage>,
+    #[serde(default, deserialize_with = "deserialize_present")]
+    error: Option<Value>,
+}
+
+#[derive(Deserialize)]
+struct NativeChatChoice {
+    #[serde(default)]
+    delta: Option<NativeChatDelta>,
+}
+
+#[derive(Deserialize)]
+struct NativeChatDelta {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct NativeChatUsage {
+    #[serde(default, deserialize_with = "deserialize_present")]
+    completion_tokens: Option<u64>,
+}
+
+fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
 #[derive(Default)]
 struct Output {
     content: String,
     reasoning: String,
     completion_tokens: Option<u64>,
+    done_marker_seen: bool,
 }
 
 impl Output {
     fn consume_line(
         &mut self,
         line: &[u8],
-        on_delta: &mut impl FnMut(ChatDelta<'_>) -> bool,
-    ) -> Result<bool, LanguageFailure> {
+        on_event: &mut impl FnMut(ChatStreamEvent<'_>) -> Result<(), ChatEventCallbackError>,
+    ) -> Result<(), LanguageFailure> {
         let protocol = failure(DispatchDisposition::Uncertain, LanguageErrorKind::Protocol);
         let line = std::str::from_utf8(line)
             .map_err(|_| protocol)?
             .trim_end_matches(['\r', '\n']);
+        if self.done_marker_seen {
+            return if line.is_empty() {
+                Ok(())
+            } else {
+                Err(protocol)
+            };
+        }
         let Some(data) = line.strip_prefix("data:") else {
-            return Ok(false);
+            return Ok(());
         };
         let data = data.trim();
         if data == "[DONE]" {
-            return Ok(true);
+            self.done_marker_seen = true;
+            return Ok(());
         }
-        let event: Value = serde_json::from_str(data).map_err(|_| protocol)?;
-        if !event.is_object() {
+        let shape: Value = serde_json::from_str(data).map_err(|_| protocol)?;
+        let Some(object) = shape.as_object() else {
             return Err(protocol);
-        }
-        if event.get("error").is_some() {
-            return Err(protocol);
-        }
-        if let Some(tokens) = event.pointer("/usage/completion_tokens") {
-            self.completion_tokens = Some(tokens.as_u64().ok_or(protocol)?);
-        }
-        for (field, reasoning) in [("content", false), ("reasoning_content", true)] {
-            let Some(value) = event.pointer(&format!("/choices/0/delta/{field}")) else {
-                continue;
+        };
+        if let Some(choices) = object.get("choices") {
+            let Some(choices) = choices.as_array() else {
+                return Err(protocol);
             };
-            if value.is_null() {
-                continue;
+            for choice in choices {
+                let Some(choice) = choice.as_object() else {
+                    return Err(protocol);
+                };
+                if let Some(delta) = choice.get("delta") {
+                    if !delta.is_null() && !delta.is_object() {
+                        return Err(protocol);
+                    }
+                }
             }
-            let delta = value.as_str().ok_or(protocol)?;
-            if self
-                .content
-                .len()
-                .saturating_add(self.reasoning.len())
-                .saturating_add(delta.len())
-                > MAX_OUTPUT_BYTES
-            {
+        }
+        if let Some(usage) = object.get("usage") {
+            if !usage.is_null() && !usage.is_object() {
+                return Err(protocol);
+            }
+        }
+        let event: NativeChatChunk = serde_json::from_str(data).map_err(|_| protocol)?;
+        if event.error.is_some() {
+            return Err(protocol);
+        }
+        // Validate the complete native SSE record before publishing anything
+        // from it. A valid usage field must not leak from a record whose later
+        // delta field is malformed.
+        let completion_tokens = event
+            .usage
+            .as_ref()
+            .and_then(|usage| usage.completion_tokens);
+        if completion_tokens.is_some() && self.completion_tokens.is_some() {
+            return Err(protocol);
+        }
+        let delta = event
+            .choices
+            .first()
+            .and_then(|choice| choice.delta.as_ref());
+        let content_delta = delta.and_then(|delta| delta.content.as_deref());
+        let reasoning_delta = delta.and_then(|delta| delta.reasoning_content.as_deref());
+        let mut staged_output_bytes = self.content.len().saturating_add(self.reasoning.len());
+        for delta in [content_delta, reasoning_delta].into_iter().flatten() {
+            if !delta.is_empty() {
+                staged_output_bytes = staged_output_bytes.saturating_add(delta.len());
+            }
+            if staged_output_bytes > MAX_OUTPUT_BYTES {
                 return Err(failure(
                     DispatchDisposition::Uncertain,
                     LanguageErrorKind::TooLarge,
                 ));
             }
-            if !delta.is_empty() {
-                if reasoning {
-                    self.reasoning.push_str(delta);
-                } else {
-                    self.content.push_str(delta);
-                }
-                if !on_delta(if reasoning {
-                    ChatDelta::Reasoning(delta)
-                } else {
-                    ChatDelta::Content(delta)
-                }) {
-                    return Err(failure(
-                        DispatchDisposition::Uncertain,
-                        LanguageErrorKind::Cancelled,
-                    ));
-                }
-            }
         }
-        Ok(false)
+        if let Some(completion_tokens) = completion_tokens {
+            self.completion_tokens = Some(completion_tokens);
+            notify_chat_event(on_event, ChatStreamEvent::Usage { completion_tokens })?;
+        }
+        if let Some(delta) = content_delta {
+            self.content.push_str(delta);
+            notify_chat_event(on_event, ChatStreamEvent::Delta(ChatDelta::Content(delta)))?;
+        }
+        if let Some(delta) = reasoning_delta {
+            self.reasoning.push_str(delta);
+            notify_chat_event(
+                on_event,
+                ChatStreamEvent::Delta(ChatDelta::Reasoning(delta)),
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -718,36 +895,48 @@ mod tests {
     fn stream_parser_keeps_reasoning_separate_and_bounds_combined_output() {
         let mut output = Output::default();
         let mut deltas = Vec::new();
-        let mut callback = |delta: ChatDelta<'_>| {
-            match delta {
-                ChatDelta::Content(text) => deltas.push(("content", text.to_owned())),
-                ChatDelta::Reasoning(text) => deltas.push(("reasoning", text.to_owned())),
-            };
-            true
+        let mut usage = Vec::new();
+        let mut callback = |event: ChatStreamEvent<'_>| {
+            match event {
+                ChatStreamEvent::Delta(ChatDelta::Content(text)) => {
+                    deltas.push(("content", text.to_owned()))
+                }
+                ChatStreamEvent::Delta(ChatDelta::Reasoning(text)) => {
+                    deltas.push(("reasoning", text.to_owned()))
+                }
+                ChatStreamEvent::Usage { completion_tokens } => usage.push(completion_tokens),
+                ChatStreamEvent::StreamComplete => unreachable!("completion is deferred to EOF"),
+            }
+            Ok(())
         };
-        assert!(!output
+        output
             .consume_line(
                 b"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think\"}}]}\n",
-                &mut callback
+                &mut callback,
             )
-            .unwrap());
-        assert!(!output.consume_line(b"data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}],\"usage\":{\"completion_tokens\":7}}\r\n", &mut callback).unwrap());
-        assert!(output
+            .unwrap();
+        output.consume_line(b"data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}],\"usage\":{\"completion_tokens\":7}}\r\n", &mut callback).unwrap();
+        output
             .consume_line(b"data: [DONE]\n", &mut callback)
-            .unwrap());
+            .unwrap();
         assert_eq!(output.content, "answer");
         assert_eq!(output.reasoning, "think");
         assert_eq!(output.completion_tokens, Some(7));
+        assert_eq!(usage, [7]);
+        assert!(output.done_marker_seen);
         assert_eq!(
             deltas,
             [("reasoning", "think".into()), ("content", "answer".into())]
         );
-        output.content = "x".repeat(MAX_OUTPUT_BYTES);
+        let mut bounded = Output {
+            content: "x".repeat(MAX_OUTPUT_BYTES),
+            ..Output::default()
+        };
         assert_eq!(
-            output
+            bounded
                 .consume_line(
                     b"data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n",
-                    &mut |_| true
+                    &mut |_| Ok(())
                 )
                 .unwrap_err()
                 .kind,
@@ -764,7 +953,7 @@ mod tests {
             b"data: {\"choices\":[{\"delta\":{\"content\":42}}]}\n",
         ] {
             let error = Output::default()
-                .consume_line(line, &mut |_| true)
+                .consume_line(line, &mut |_| Ok(()))
                 .unwrap_err();
             assert_eq!(error.kind, LanguageErrorKind::Protocol);
             assert!(!error.to_string().contains("secret"));
@@ -772,11 +961,127 @@ mod tests {
         let error = Output::default()
             .consume_line(
                 b"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n",
-                &mut |_| false,
+                &mut |_| Err(ChatEventCallbackError::Cancelled),
             )
-            .unwrap_err();
+            .err()
+            .unwrap();
         assert_eq!(error.disposition, DispatchDisposition::Uncertain);
         assert_eq!(error.kind, LanguageErrorKind::Cancelled);
+    }
+
+    #[test]
+    fn one_malformed_sse_record_does_not_publish_earlier_usage_fields() {
+        let mut output = Output::default();
+        let mut published = Vec::new();
+        let error = output
+            .consume_line(
+                b"data: {\"usage\":{\"completion_tokens\":9},\"choices\":[{\"delta\":{\"content\":42}}]}\n",
+                &mut |event| {
+                    published.push(match event {
+                        ChatStreamEvent::Usage { .. } => "usage",
+                        ChatStreamEvent::Delta(_) => "delta",
+                        ChatStreamEvent::StreamComplete => "complete",
+                    });
+                    Ok(())
+                },
+            )
+            .err()
+            .unwrap();
+        assert_eq!(error.kind, LanguageErrorKind::Protocol);
+        assert!(published.is_empty());
+        assert_eq!(output.completion_tokens, None);
+        assert!(output.content.is_empty());
+    }
+
+    #[test]
+    fn typed_chat_sse_rejects_wrong_type_and_duplicate_known_fields() {
+        for line in [
+            br#"data: []"#.as_slice(),
+            br#"data: {"usage":42,"choices":[]}"#.as_slice(),
+            br#"data: {"usage":[],"choices":[]}"#,
+            br#"data: {"choices":42}"#,
+            br#"data: {"choices":[[]]}"#,
+            br#"data: {"choices":[{"delta":false}]}"#,
+            br#"data: {"choices":[{"delta":[]}] }"#,
+            br#"data: {"choices":[{"delta":{"content":42}}]}"#,
+            br#"data: {"usage":{"completion_tokens":"many"},"choices":[]}"#,
+            br#"data: {"choices":[],"choices":[]}"#,
+            br#"data: {"usage":{"completion_tokens":1},"usage":{"completion_tokens":2},"choices":[]}"#,
+            br#"data: {"usage":{"completion_tokens":1,"completion_tokens":2},"choices":[]}"#,
+            br#"data: {"choices":[{"delta":{"content":"a","content":"b"}}]}"#,
+        ] {
+            let mut output = Output::default();
+            let mut published = 0;
+            let input = [line, b"\n"].concat();
+            let error = output
+                .consume_line(&input, &mut |_| {
+                    published += 1;
+                    Ok(())
+                })
+                .err()
+                .unwrap();
+            assert_eq!(error.disposition, DispatchDisposition::Uncertain);
+            assert_eq!(error.kind, LanguageErrorKind::Protocol);
+            assert_eq!(published, 0);
+            assert!(output.content.is_empty());
+            assert!(output.reasoning.is_empty());
+            assert_eq!(output.completion_tokens, None);
+        }
+
+        let mut usage_only = Output::default();
+        let mut usage_seen = None;
+        usage_only
+            .consume_line(
+                b"data: {\"usage\":{\"completion_tokens\":5},\"choices\":[]}\n",
+                &mut |event| {
+                    if let ChatStreamEvent::Usage { completion_tokens } = event {
+                        usage_seen = Some(completion_tokens);
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(usage_seen, Some(5));
+
+        let mut extension = Output::default();
+        extension
+            .consume_line(
+                br#"data: {"provider_metadata":{"x":1},"choices":[{"delta":{"tool_calls":[{"id":"fixture"}],"content":"kept"}}]}"#,
+                &mut |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(extension.content, "kept");
+    }
+
+    #[test]
+    fn malformed_native_container_after_a_delta_is_uncertain_and_not_complete() {
+        let mut output = Output::default();
+        let mut delta_count = 0;
+        let mut complete_count = 0;
+        let mut callback = |event: ChatStreamEvent<'_>| {
+            match event {
+                ChatStreamEvent::Delta(_) => delta_count += 1,
+                ChatStreamEvent::Usage { .. } => {}
+                ChatStreamEvent::StreamComplete => complete_count += 1,
+            }
+            Ok(())
+        };
+        output
+            .consume_line(
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"first\"}}]}\n",
+                &mut callback,
+            )
+            .unwrap();
+        let error = output
+            .consume_line(b"data: {\"choices\":[[]]}\n", &mut callback)
+            .err()
+            .unwrap();
+        assert_eq!(error.disposition, DispatchDisposition::Uncertain);
+        assert_eq!(error.kind, LanguageErrorKind::Protocol);
+        assert_eq!(delta_count, 1);
+        assert_eq!(complete_count, 0);
+        assert_eq!(output.content, "first");
+        assert!(!output.done_marker_seen);
     }
 
     #[test]
@@ -1151,7 +1456,17 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
+            let accept_deadline = Instant::now() + Duration::from_secs(2);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(accepted) => break accepted,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < accept_deadline, "request not received");
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(_) => panic!("fixture listener failed"),
+                }
+            };
             stream
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .unwrap();
@@ -1181,6 +1496,307 @@ mod tests {
         assert_eq!(reasoning, "reason only");
         assert_eq!(completion_tokens, Some(9));
         server.join().unwrap();
+    }
+
+    #[test]
+    fn chat_events_are_observable_before_server_sends_done() {
+        use std::sync::mpsc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (release_tx, release_rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let _ = read_request(&mut stream);
+            let prefix = "data: {\"choices\":[{\"delta\":{\"content\":\"early\"}}]}\n\n";
+            let suffix = "data: {\"usage\":{\"completion_tokens\":4}}\n\ndata: [DONE]\n\n";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                prefix.len() + suffix.len(),
+                prefix
+            )
+            .unwrap();
+            stream.flush().unwrap();
+            release_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("test must observe a delta before releasing [DONE]");
+            stream.write_all(suffix.as_bytes()).unwrap();
+        });
+
+        let adapter = LanguageAdapter::new(&endpoint, None).unwrap();
+        let (event_tx, event_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            adapter.execute_with_events(
+                &catalog(),
+                &request(),
+                &OperationContext::new(Instant::now() + Duration::from_secs(3), &NeverCancel),
+                |event| {
+                    let label = match event {
+                        ChatStreamEvent::Delta(ChatDelta::Content(text)) => {
+                            format!("delta:{text}")
+                        }
+                        ChatStreamEvent::Delta(ChatDelta::Reasoning(_)) => "reasoning".into(),
+                        ChatStreamEvent::Usage { .. } => "usage".into(),
+                        ChatStreamEvent::StreamComplete => "stream_complete".into(),
+                    };
+                    event_tx.send(label).unwrap();
+                    Ok(())
+                },
+            )
+        });
+        assert_eq!(
+            event_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            "delta:early"
+        );
+        release_tx.send(()).unwrap();
+        assert!(matches!(
+            worker.join().unwrap(),
+            Ok(InferenceResult::Chat { .. })
+        ));
+        assert_eq!(
+            event_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            "usage"
+        );
+        assert_eq!(
+            event_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            "stream_complete"
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn reserved_chat_bridge_publishes_incrementally_without_terminalizing_job() {
+        use super::super::catalog::Lane;
+        use super::super::result_buffer::{Availability, ResultBuffer, MAX_PAGE_BYTES};
+        use super::super::result_consumer::{NativeOutput, ResultConsumer};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let accept_deadline = Instant::now() + Duration::from_secs(2);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(accepted) => break accepted,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < accept_deadline, "request not received");
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(_) => panic!("fixture listener failed"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let _ = read_request(&mut stream);
+            let body = "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thought\"}}],\"usage\":{\"completion_tokens\":11}}\n\ndata: [DONE]\n\n";
+            write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+        });
+        let id = "stream-bridge";
+        let mut buffer = ResultBuffer::new();
+        buffer.begin_reserved(id, Lane::Language).unwrap();
+        let result = LanguageAdapter::new(&endpoint, None)
+            .unwrap()
+            .execute_chat_into_result_buffer(
+                &catalog(),
+                &request(),
+                id,
+                &mut buffer,
+                &OperationContext::new(Instant::now() + Duration::from_secs(2), &NeverCancel),
+            )
+            .unwrap();
+        assert!(matches!(
+            result,
+            InferenceResult::Chat {
+                completion_tokens: Some(11),
+                ..
+            }
+        ));
+        let page = buffer.page(id, 0, MAX_PAGE_BYTES).unwrap();
+        assert_eq!(page.availability, Availability::Available);
+        assert_eq!(page.terminal, None);
+        let mut consumer = ResultConsumer::new(id, Lane::Language).unwrap();
+        consumer.consume(&page).unwrap();
+        assert_eq!(consumer.chat_completion_tokens(), Some(11));
+        assert!(consumer.chat_stream_completed());
+        assert_eq!(consumer.terminal(), None);
+        assert!(!consumer.is_complete());
+        assert_eq!(
+            serde_json::to_string(consumer.output()).unwrap(),
+            r#"{"lane":"language","content":"answer","reasoning":"thought"}"#
+        );
+        assert!(matches!(
+            consumer.output(),
+            NativeOutput::Language { content, reasoning }
+                if content == "answer" && reasoning == "thought"
+        ));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn failure_after_delta_preserves_partial_result_without_done_or_retry() {
+        use super::super::catalog::Lane;
+        use super::super::result_buffer::{PageEvent, ResultBuffer, MAX_PAGE_BYTES};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let accept_deadline = Instant::now() + Duration::from_secs(2);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(accepted) => break accepted,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < accept_deadline, "request not received");
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(_) => panic!("fixture listener failed"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let _ = read_request(&mut stream);
+            let body = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\ndata: [DONE]\n\ndata: malformed-secret\n\n";
+            write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+            stream.flush().unwrap();
+            drop(stream);
+            let retry_deadline = Instant::now() + Duration::from_millis(100);
+            while Instant::now() < retry_deadline {
+                match listener.accept() {
+                    Ok(_) => panic!("chat adapter retried a dispatched request"),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(_) => panic!("fixture listener failed"),
+                }
+            }
+        });
+        let id = "late-sse-failure";
+        let mut buffer = ResultBuffer::new();
+        buffer.begin_reserved(id, Lane::Language).unwrap();
+        let error = LanguageAdapter::new(&endpoint, None)
+            .unwrap()
+            .execute_chat_into_result_buffer(
+                &catalog(),
+                &request(),
+                id,
+                &mut buffer,
+                &OperationContext::new(Instant::now() + Duration::from_secs(2), &NeverCancel),
+            )
+            .err()
+            .unwrap();
+        assert_eq!(error.disposition, DispatchDisposition::Uncertain);
+        assert_eq!(error.kind, LanguageErrorKind::Protocol);
+        assert!(!error.to_string().contains("malformed-secret"));
+        let page = buffer.page(id, 0, MAX_PAGE_BYTES).unwrap();
+        assert_eq!(page.terminal, None);
+        assert!(page.events.iter().any(|item| matches!(
+            &item.event,
+            PageEvent::ChatContent { text } if text == "partial"
+        )));
+        assert!(!page
+            .events
+            .iter()
+            .any(|item| matches!(&item.event, PageEvent::ChatStreamComplete)));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn cancellation_and_deadline_after_delta_keep_partial_chat_unterminalized() {
+        use super::super::catalog::Lane;
+        use super::super::result_buffer::{PageEvent, ResultBuffer, MAX_PAGE_BYTES};
+
+        for cancel in [true, false] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let flag = Arc::new(AtomicBool::new(false));
+            let server_flag = Arc::clone(&flag);
+            let server = std::thread::spawn(move || {
+                let accept_deadline = Instant::now() + Duration::from_secs(2);
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(accepted) => break accepted,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < accept_deadline, "request not received");
+                            std::thread::sleep(Duration::from_millis(2));
+                        }
+                        Err(_) => panic!("fixture listener failed"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let _ = read_request(&mut stream);
+                write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {{\"choices\":[{{\"delta\":{{\"content\":\"partial\"}}}}]}}\n\n").unwrap();
+                stream.flush().unwrap();
+                if cancel {
+                    std::thread::sleep(Duration::from_millis(200));
+                    server_flag.store(true, Ordering::Release);
+                }
+                std::thread::sleep(Duration::from_millis(450));
+                drop(stream);
+                let retry_deadline = Instant::now() + Duration::from_millis(100);
+                while Instant::now() < retry_deadline {
+                    match listener.accept() {
+                        Ok(_) => panic!("chat adapter retried a dispatched request"),
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(2));
+                        }
+                        Err(_) => panic!("fixture listener failed"),
+                    }
+                }
+            });
+            let id = if cancel {
+                "cancel-stream"
+            } else {
+                "deadline-stream"
+            };
+            let mut buffer = ResultBuffer::new();
+            buffer.begin_reserved(id, Lane::Language).unwrap();
+            let cancellation = Flag(flag);
+            let deadline = Instant::now()
+                + if cancel {
+                    Duration::from_secs(2)
+                } else {
+                    Duration::from_millis(300)
+                };
+            let error = LanguageAdapter::new(&endpoint, None)
+                .unwrap()
+                .execute_chat_into_result_buffer(
+                    &catalog(),
+                    &request(),
+                    id,
+                    &mut buffer,
+                    &OperationContext::new(deadline, &cancellation),
+                )
+                .err()
+                .unwrap();
+            assert_eq!(error.disposition, DispatchDisposition::Uncertain);
+            assert_eq!(
+                error.kind,
+                if cancel {
+                    LanguageErrorKind::Cancelled
+                } else {
+                    LanguageErrorKind::Deadline
+                }
+            );
+            let page = buffer.page(id, 0, MAX_PAGE_BYTES).unwrap();
+            assert_eq!(page.terminal, None);
+            assert!(page.events.iter().any(|item| matches!(
+                &item.event,
+                PageEvent::ChatContent { text } if text == "partial"
+            )));
+            assert!(!page
+                .events
+                .iter()
+                .any(|item| matches!(&item.event, PageEvent::ChatStreamComplete)));
+            server.join().unwrap();
+        }
     }
 
     #[test]

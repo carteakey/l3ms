@@ -12,9 +12,10 @@ existing Linear migration issues rather than replacing their acceptance criteria
 
 Latest offline checkpoint: opt-in CPU daemon dispatch and foreground launch,
 one-shot Submit, private native HTTP and shared result reassembly on
-`feature/l3ms-monorepo`; 617 root tests passed,
+`feature/l3ms-monorepo`; 714 root tests passed,
 1 ignored. This is offline implementation evidence, not live cutover acceptance.
-Strict denied-warning Clippy, formatting and whitespace checks pass. Managed
+Formatting and whitespace checks pass; the new managed-owner integration is
+still being wired and strict Clippy must be rerun on that completed slice. Managed
 engine supervisor/lifecycle integration is still unfinished.
 The repeat-run fixture `ETXTBSY` race is corrected with test-only fork/write
 serialization; production launch failures remain fail-closed without retries.
@@ -98,8 +99,9 @@ See the [migration status](docs/migration/status.md),
   discovery (implemented from active command flags) and typed embedding request/result/adapter support (the shared
   language contract now preserves typed vectors/native usage and bounded pages;
   keyboard batch forms and adapter fixtures pass, production dispatch pending).
-  Connect incremental language
-  stream events, task-aware artifact access and visible runtime recovery/status;
+  Incremental native chat deltas/usage/stream completion and cursor-resuming
+  explicit observations pass fixtures without resubmission or automatic polling.
+  Connect them to managed dispatch, task-aware artifact access and visible runtime recovery/status;
   native envelope forwarding and JSON output panels alone are not full parity.
 - [ ] Add HTTP ingress to that coordinator only after local operation is proven;
   verify authentication and cancellation/reconnect behavior across clients.

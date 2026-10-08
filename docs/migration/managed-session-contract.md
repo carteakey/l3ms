@@ -51,6 +51,24 @@ The manifest currently permits llama-swap model startup up to 500 seconds while
 the old standalone load client allows 60. The managed path needs one explicit
 bounded activation horizon and reconciliation, not repeated load requests.
 
+Read-only readiness must use the selected model's exact `ready` process state
+from `/running`, plus router plaintext `/health`. Installed llama-swap v247
+(`40027d62fdc0cf08131973c02db2d4a7de172df1`) exposes that state in
+[its running-model handler](https://github.com/mostlygeek/llama-swap/blob/40027d62fdc0cf08131973c02db2d4a7de172df1/internal/server/api.go).
+`/v1/models` collapses starting/ready processes into `loaded` and cannot prove
+readiness. Forwarding `/upstream/{id}/health` can itself load/switch, so it is
+not a read-only reconciliation probe. A failed/lost load acknowledgment must
+never cause a second activation request merely to check status.
+
+There is no dedicated router `/upstream/{id}/load` API in installed v247:
+generic upstream routes forward the remaining path to the native backend.
+For an explicitly declared llama-server-compatible backend, the planned
+activation request is one side-effectful `/upstream/{encoded-id}/health` GET,
+which can start/swap that model before forwarding native health. It must not
+be used as a read-only probe. Other backend health contracts stay gated until
+declared and verified; the old standalone load client is not the managed
+activation implementation.
+
 ## Explicit configuration, no ambient assumptions
 
 Keep the CPU launcher schema unchanged. A separate strict private configuration
@@ -63,6 +81,13 @@ Pass canonical `L3MS_ROOT` through a bounded non-secret launch environment; do n
 assume the user's shell environment reaches the systemd user manager. Preserve
 literal argv and native manifest authority. Credentials must not enter argv,
 history or logs. Installed services require separately verified deployment paths.
+
+The initial private-router implementation requires an explicitly prepared,
+existing dedicated configuration without `apiKeys`; it does not strip authentication
+from the deployed configuration or inherit the shell/user manager's secrets.
+The original authenticated public/loopback router remains unchanged. This private
+configuration is valid only with verified coordinator-only Unix ingress and the
+owned network namespace; it must never be reused for a public router listener.
 
 Exclusive coordinated ingress is valid only while engines and their children
 remain inside the owned private namespace and access is restricted to the captured

@@ -81,10 +81,25 @@ pub fn read_native_results(
 ) -> Result<super::result_consumer::ResultConsumer, NativeReadError> {
     let mut consumer = super::result_consumer::ResultConsumer::new(request_id, lane)
         .map_err(NativeReadError::Assembly)?;
+    read_native_results_into(socket_directory, &mut consumer, context)?;
+    Ok(consumer)
+}
+
+/// Resume an explicit read-only observation from the consumer's last verified
+/// cursor. The whole poll is transactional: a failed later page leaves the
+/// caller's prior output/cursor unchanged. Native output remains bounded by the
+/// consumer, and at most 128 fresh read-only exchanges share one context. This
+/// does not submit, retry inference, automatically poll or reclaim an endpoint.
+pub fn read_native_results_into(
+    socket_directory: &Path,
+    consumer: &mut super::result_consumer::ResultConsumer,
+    context: &OperationContext<'_>,
+) -> Result<(), NativeReadError> {
+    let mut staged = consumer.clone();
     for _ in 0..128 {
         let request = RequestEnvelope::v2_results(
-            request_id,
-            consumer.cursor(),
+            staged.request_id(),
+            staged.cursor(),
             super::result_buffer::MAX_PAGE_BYTES as u32,
         );
         let response =
@@ -92,9 +107,10 @@ pub fn read_native_results(
         let ResponseMessage::Results { page, .. } = response else {
             return Err(NativeReadError::Rejected);
         };
-        consumer.consume(&page).map_err(NativeReadError::Assembly)?;
-        if consumer.cursor() == consumer.latest_cursor() {
-            return Ok(consumer);
+        staged.consume(&page).map_err(NativeReadError::Assembly)?;
+        if staged.cursor() == staged.latest_cursor() {
+            *consumer = staged;
+            return Ok(());
         }
     }
     Err(NativeReadError::PageLimit)
@@ -254,6 +270,7 @@ fn fixed_transport_error(error: LocalIpcError, phase: Phase) -> ClientError {
 mod tests {
     use super::*;
 
+    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixListener;
     use std::thread;
@@ -298,6 +315,78 @@ mod tests {
             .terminal(request_id, ResultTerminal::Succeeded)
             .unwrap();
         buffer.page(request_id, 0, MAX_PAGE_BYTES).unwrap()
+    }
+
+    #[test]
+    fn native_reader_resumes_verified_cursor_and_rolls_back_a_failed_later_page() {
+        let directory = private_directory();
+        let listener = listener(directory.path());
+        let mut initial = ResultBuffer::new();
+        initial.begin("resume-read", Lane::Language).unwrap();
+        initial
+            .append("resume-read", ResultEvent::ChatContent("first".into()))
+            .unwrap();
+        let mut consumer =
+            super::super::result_consumer::ResultConsumer::new("resume-read", Lane::Language)
+                .unwrap();
+        consumer
+            .consume(&initial.page("resume-read", 0, MAX_PAGE_BYTES).unwrap())
+            .unwrap();
+        let prior_cursor = consumer.cursor();
+        let server = thread::spawn(move || {
+            let mut buffer = initial;
+            buffer
+                .append("resume-read", ResultEvent::ChatContent("second".into()))
+                .unwrap();
+            // Force another page after the first valid response, then send an
+            // inconsistent cursor. Neither output nor cursor may be committed.
+            for step in 0..2 {
+                let mut stream = listener.accept().unwrap().0;
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let ipc::IncomingRequest::Results(query) =
+                    ipc::read_incoming_request(&mut stream).unwrap()
+                else {
+                    panic!("resume must only query results")
+                };
+                assert_eq!(query.after_cursor, prior_cursor + step);
+                let mut page = buffer
+                    .page("resume-read", query.after_cursor, MAX_PAGE_BYTES)
+                    .unwrap();
+                if step == 0 {
+                    page.latest_cursor += 1;
+                } else {
+                    page.latest_cursor = 0;
+                }
+                let response = ResponseEnvelope::v2_results(ResponseMessage::Results {
+                    request_id: query.request_id,
+                    state: RequestStatus::Running,
+                    after_cursor: query.after_cursor,
+                    byte_budget: query.byte_budget,
+                    page,
+                });
+                // Bypass the server-side validator deliberately: this fixture
+                // tests a malformed peer response, not the writer's refusal.
+                let payload = serde_json::to_vec(&response).unwrap();
+                stream
+                    .write_all(&(payload.len() as u32).to_be_bytes())
+                    .unwrap();
+                stream.write_all(&payload).unwrap();
+            }
+        });
+        assert!(
+            read_native_results_into(directory.path(), &mut consumer, &context(&NeverCancel))
+                .is_err()
+        );
+        assert_eq!(consumer.cursor(), prior_cursor);
+        let super::super::result_consumer::NativeOutput::Language { content, .. } =
+            consumer.output()
+        else {
+            panic!("wrong lane")
+        };
+        assert_eq!(content, "first");
+        server.join().unwrap();
     }
 
     #[test]

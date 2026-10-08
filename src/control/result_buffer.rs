@@ -52,6 +52,8 @@ pub enum ResultBufferError {
     EventTooLarge,
     InvalidArtifactPath,
     InvalidEmbedding,
+    InvalidChatEvent,
+    ReservationRequired,
     InvalidCursor,
     InvalidPageBudget,
     PageBudgetTooSmall,
@@ -72,6 +74,8 @@ impl fmt::Display for ResultBufferError {
             Self::EventTooLarge => "result event exceeds the bounded result limit",
             Self::InvalidArtifactPath => "media artifact reference is invalid",
             Self::InvalidEmbedding => "embedding result is invalid or too large",
+            Self::InvalidChatEvent => "chat stream event sequence is invalid",
+            Self::ReservationRequired => "chat streaming requires a reserved result slot",
             Self::InvalidCursor => "result cursor is invalid",
             Self::InvalidPageBudget => "result page byte budget is invalid",
             Self::PageBudgetTooSmall => "result page budget cannot hold the next event",
@@ -175,6 +179,10 @@ impl fmt::Debug for MediaArtifact {
 pub enum ResultEvent {
     ChatContent(String),
     ChatReasoning(String),
+    ChatUsage {
+        completion_tokens: u64,
+    },
+    ChatStreamComplete,
     Embeddings {
         vectors: Vec<Vec<f32>>,
         usage: EmbeddingUsage,
@@ -196,6 +204,11 @@ impl fmt::Debug for ResultEvent {
                 .field("bytes", &text.len())
                 .field("text", &"<redacted>")
                 .finish(),
+            Self::ChatUsage { completion_tokens } => formatter
+                .debug_struct("ChatUsage")
+                .field("completion_tokens", completion_tokens)
+                .finish(),
+            Self::ChatStreamComplete => formatter.write_str("ChatStreamComplete"),
             Self::Embeddings { vectors, usage } => formatter
                 .debug_struct("Embeddings")
                 .field("vector_count", &vectors.len())
@@ -229,6 +242,12 @@ pub enum PageEvent {
     ChatReasoning {
         text: String,
     },
+    ChatUsage {
+        completion_tokens: u64,
+    },
+    /// Native stream completion only. This is not the coordinator's terminal
+    /// job state and carries no lifecycle/GPU-release meaning.
+    ChatStreamComplete,
     EmbeddingJsonPart {
         result_id: u64,
         part_index: u32,
@@ -262,6 +281,11 @@ impl fmt::Debug for PageEvent {
                 .field("bytes", &text.len())
                 .field("text", &"<redacted>")
                 .finish(),
+            Self::ChatUsage { completion_tokens } => formatter
+                .debug_struct("ChatUsage")
+                .field("completion_tokens", completion_tokens)
+                .finish(),
+            Self::ChatStreamComplete => formatter.write_str("ChatStreamComplete"),
             Self::EmbeddingJsonPart {
                 result_id,
                 part_index,
@@ -390,10 +414,14 @@ impl ResultPage {
                     return Err(ResultBufferError::InvalidCursor);
                 }
                 let mut previous = 0;
+                let mut chat_usage_seen = false;
+                let mut chat_stream_complete = false;
                 for item in &self.events {
                     let lane = match &item.event {
                         PageEvent::ChatContent { .. }
                         | PageEvent::ChatReasoning { .. }
+                        | PageEvent::ChatUsage { .. }
+                        | PageEvent::ChatStreamComplete
                         | PageEvent::EmbeddingJsonPart { .. } => Lane::Language,
                         PageEvent::DecisionJsonPart { .. } => Lane::Decisions,
                         PageEvent::MediaArtifactBatch { .. } => Lane::Media,
@@ -417,6 +445,23 @@ impl ResultPage {
                         return Err(ResultBufferError::InvalidCursor);
                     }
                     match &item.event {
+                        PageEvent::ChatContent { .. } | PageEvent::ChatReasoning { .. } => {
+                            if chat_stream_complete {
+                                return Err(ResultBufferError::InvalidChatEvent);
+                            }
+                        }
+                        PageEvent::ChatUsage { .. } => {
+                            if chat_stream_complete || chat_usage_seen {
+                                return Err(ResultBufferError::InvalidChatEvent);
+                            }
+                            chat_usage_seen = true;
+                        }
+                        PageEvent::ChatStreamComplete => {
+                            if chat_stream_complete {
+                                return Err(ResultBufferError::InvalidChatEvent);
+                            }
+                            chat_stream_complete = true;
+                        }
                         PageEvent::DecisionJsonPart {
                             result_id,
                             part_index,
@@ -462,7 +507,6 @@ impl ResultPage {
                                 MAX_ARTIFACTS_PER_APPEND as u32,
                             )?;
                         }
-                        PageEvent::ChatContent { .. } | PageEvent::ChatReasoning { .. } => {}
                     }
                     previous = item.cursor;
                 }
@@ -543,6 +587,34 @@ impl ResultBuffer {
         self.begin_with_budget(request_id, lane, MAX_JOB_EVENT_BYTES)
     }
 
+    /// Read-only preflight for the incremental language chat publisher. The
+    /// caller must already have durably accepted the request and created its
+    /// reserved result slot; this check neither admits work nor changes quota.
+    pub fn can_append_reserved_chat_stream(
+        &self,
+        request_id: &str,
+    ) -> Result<(), ResultBufferError> {
+        validate_id(request_id)?;
+        let job = self.job(request_id)?;
+        if job.lane != Lane::Language {
+            return Err(ResultBufferError::WrongLane);
+        }
+        if job.terminal.is_some() {
+            return Err(ResultBufferError::AlreadyTerminal);
+        }
+        if job.latest_cursor != 0
+            || job.language_kind.is_some()
+            || job.chat_usage_seen
+            || job.chat_stream_complete
+        {
+            return Err(ResultBufferError::InvalidChatEvent);
+        }
+        if job.reserved_bytes != MAX_JOB_EVENT_BYTES {
+            return Err(ResultBufferError::ReservationRequired);
+        }
+        Ok(())
+    }
+
     fn check_begin(&self, request_id: &str, reserved: usize) -> Result<(), ResultBufferError> {
         validate_id(request_id)?;
         if self.jobs.contains_key(request_id) || self.tombstones.contains_key(request_id) {
@@ -593,6 +665,8 @@ impl ResultBuffer {
             chat_raw_bytes,
             terminal,
             reserved_bytes,
+            chat_usage_seen,
+            chat_stream_complete,
         ) = {
             let job = self.job(request_id)?;
             (
@@ -603,6 +677,8 @@ impl ResultBuffer {
                 job.chat_raw_bytes,
                 job.terminal,
                 job.reserved_bytes,
+                job.chat_usage_seen,
+                job.chat_stream_complete,
             )
         };
         if terminal.is_some() {
@@ -623,6 +699,14 @@ impl ResultBuffer {
         ) {
             return Err(ResultBufferError::WrongLane);
         }
+        if incoming_language_kind == Some(LanguageResultKind::Chat)
+            && (chat_stream_complete
+                || (matches!(&event, ResultEvent::ChatUsage { .. }) && chat_usage_seen))
+        {
+            return Err(ResultBufferError::InvalidChatEvent);
+        }
+        let chat_usage_event = matches!(&event, ResultEvent::ChatUsage { .. });
+        let chat_stream_complete_event = matches!(&event, ResultEvent::ChatStreamComplete);
         let added_chat_bytes = event.raw_chat_bytes();
         let new_chat_raw_bytes = chat_raw_bytes
             .checked_add(added_chat_bytes)
@@ -688,6 +772,12 @@ impl ResultBuffer {
         job.events.extend(staged_records);
         if incoming_language_kind.is_some() {
             job.language_kind = incoming_language_kind;
+        }
+        if chat_usage_event {
+            job.chat_usage_seen = true;
+        }
+        if chat_stream_complete_event {
+            job.chat_stream_complete = true;
         }
         job.latest_cursor = last_cursor;
         job.event_bytes += staged_bytes;
@@ -874,6 +964,8 @@ struct ResultEntry {
     latest_cursor: u64,
     event_bytes: usize,
     chat_raw_bytes: usize,
+    chat_usage_seen: bool,
+    chat_stream_complete: bool,
     terminal: Option<ResultTerminal>,
 }
 
@@ -898,6 +990,8 @@ impl ResultEntry {
             latest_cursor: 0,
             event_bytes: 0,
             chat_raw_bytes: 0,
+            chat_usage_seen: false,
+            chat_stream_complete: false,
             terminal: None,
         }
     }
@@ -912,7 +1006,10 @@ struct Tombstone {
 impl ResultEvent {
     fn language_kind(&self) -> Option<LanguageResultKind> {
         match self {
-            Self::ChatContent(_) | Self::ChatReasoning(_) => Some(LanguageResultKind::Chat),
+            Self::ChatContent(_)
+            | Self::ChatReasoning(_)
+            | Self::ChatUsage { .. }
+            | Self::ChatStreamComplete => Some(LanguageResultKind::Chat),
             Self::Embeddings { .. } => Some(LanguageResultKind::Embeddings),
             Self::DecisionAnswers(_) | Self::MediaArtifacts(_) => None,
         }
@@ -920,9 +1017,11 @@ impl ResultEvent {
 
     fn lane(&self) -> Lane {
         match self {
-            Self::ChatContent(_) | Self::ChatReasoning(_) | Self::Embeddings { .. } => {
-                Lane::Language
-            }
+            Self::ChatContent(_)
+            | Self::ChatReasoning(_)
+            | Self::ChatUsage { .. }
+            | Self::ChatStreamComplete
+            | Self::Embeddings { .. } => Lane::Language,
             Self::DecisionAnswers(_) => Lane::Decisions,
             Self::MediaArtifacts(_) => Lane::Media,
         }
@@ -931,7 +1030,11 @@ impl ResultEvent {
     fn raw_chat_bytes(&self) -> usize {
         match self {
             Self::ChatContent(text) | Self::ChatReasoning(text) => text.len(),
-            Self::Embeddings { .. } | Self::DecisionAnswers(_) | Self::MediaArtifacts(_) => 0,
+            Self::ChatUsage { .. }
+            | Self::ChatStreamComplete
+            | Self::Embeddings { .. }
+            | Self::DecisionAnswers(_)
+            | Self::MediaArtifacts(_) => 0,
         }
     }
 }
@@ -950,6 +1053,10 @@ fn prepare_events(
             .into_iter()
             .map(|text| PageEvent::ChatReasoning { text })
             .collect()),
+        ResultEvent::ChatUsage { completion_tokens } => {
+            Ok(vec![PageEvent::ChatUsage { completion_tokens }])
+        }
+        ResultEvent::ChatStreamComplete => Ok(vec![PageEvent::ChatStreamComplete]),
         ResultEvent::Embeddings { vectors, usage } => {
             let json = serialize_embedding_payload(&vectors, &usage)
                 .map_err(|_| ResultBufferError::InvalidEmbedding)?;
@@ -1208,6 +1315,7 @@ fn validate_page_event(item: &CursorEvent) -> Result<(), ResultBufferError> {
                 return Err(ResultBufferError::EventTooLarge);
             }
         }
+        PageEvent::ChatUsage { .. } | PageEvent::ChatStreamComplete => {}
         PageEvent::DecisionJsonPart {
             result_id,
             part_index,
@@ -1377,6 +1485,89 @@ mod tests {
         assert_eq!(buffer.total_reserved_bytes, 0);
     }
 
+    #[test]
+    fn chat_stream_preflight_is_read_only_and_native_done_is_not_job_terminal() {
+        let mut buffer = ResultBuffer::new();
+        buffer.begin("unreserved-chat", Lane::Language).unwrap();
+        assert_eq!(
+            buffer.can_append_reserved_chat_stream("unreserved-chat"),
+            Err(ResultBufferError::ReservationRequired)
+        );
+        buffer
+            .begin_reserved("stream-chat", Lane::Language)
+            .unwrap();
+        let reserved_before = buffer.total_reserved_bytes;
+        buffer
+            .can_append_reserved_chat_stream("stream-chat")
+            .unwrap();
+        buffer
+            .can_append_reserved_chat_stream("stream-chat")
+            .unwrap();
+        assert_eq!(buffer.total_reserved_bytes, reserved_before);
+        assert_eq!(
+            buffer
+                .page("stream-chat", 0, MAX_PAGE_BYTES)
+                .unwrap()
+                .latest_cursor,
+            0
+        );
+
+        buffer
+            .append("stream-chat", ResultEvent::ChatContent("first".into()))
+            .unwrap();
+        assert_eq!(
+            buffer.can_append_reserved_chat_stream("stream-chat"),
+            Err(ResultBufferError::InvalidChatEvent)
+        );
+        buffer
+            .append(
+                "stream-chat",
+                ResultEvent::ChatUsage {
+                    completion_tokens: u64::MAX,
+                },
+            )
+            .unwrap();
+        let before_duplicate_usage = buffer.page("stream-chat", 0, MAX_PAGE_BYTES).unwrap();
+        assert_eq!(
+            buffer.append(
+                "stream-chat",
+                ResultEvent::ChatUsage {
+                    completion_tokens: 1,
+                }
+            ),
+            Err(ResultBufferError::InvalidChatEvent)
+        );
+        assert_eq!(
+            buffer.page("stream-chat", 0, MAX_PAGE_BYTES).unwrap(),
+            before_duplicate_usage
+        );
+        buffer
+            .append("stream-chat", ResultEvent::ChatStreamComplete)
+            .unwrap();
+        let completed_stream = buffer.page("stream-chat", 0, MAX_PAGE_BYTES).unwrap();
+        assert_eq!(completed_stream.terminal, None);
+        assert!(matches!(
+            &completed_stream.events.last().unwrap().event,
+            PageEvent::ChatStreamComplete
+        ));
+        for late_event in [
+            ResultEvent::ChatContent("late".into()),
+            ResultEvent::ChatUsage {
+                completion_tokens: 2,
+            },
+            ResultEvent::ChatStreamComplete,
+        ] {
+            assert_eq!(
+                buffer.append("stream-chat", late_event),
+                Err(ResultBufferError::InvalidChatEvent)
+            );
+        }
+        assert_eq!(
+            buffer.page("stream-chat", 0, MAX_PAGE_BYTES).unwrap(),
+            completed_stream
+        );
+    }
+
     fn request_id(index: usize) -> String {
         format!("result:{index}")
     }
@@ -1412,6 +1603,52 @@ mod tests {
             terminal: None,
         };
         assert_eq!(page.validate(), Err(ResultBufferError::WrongLane));
+    }
+
+    #[test]
+    fn decoded_chat_page_rejects_duplicate_and_post_complete_events() {
+        let page = |events: Vec<CursorEvent>| ResultPage {
+            request_id: request_id(22),
+            availability: Availability::Available,
+            next_cursor: events.len() as u64,
+            latest_cursor: events.len() as u64,
+            events,
+            terminal: None,
+        };
+        let late_delta = page(vec![
+            CursorEvent {
+                cursor: 1,
+                event: PageEvent::ChatStreamComplete,
+            },
+            CursorEvent {
+                cursor: 2,
+                event: PageEvent::ChatContent {
+                    text: "late".into(),
+                },
+            },
+        ]);
+        assert_eq!(
+            late_delta.validate(),
+            Err(ResultBufferError::InvalidChatEvent)
+        );
+        let duplicate_usage = page(vec![
+            CursorEvent {
+                cursor: 1,
+                event: PageEvent::ChatUsage {
+                    completion_tokens: 1,
+                },
+            },
+            CursorEvent {
+                cursor: 2,
+                event: PageEvent::ChatUsage {
+                    completion_tokens: 2,
+                },
+            },
+        ]);
+        assert_eq!(
+            duplicate_usage.validate(),
+            Err(ResultBufferError::InvalidChatEvent)
+        );
     }
 
     #[test]
