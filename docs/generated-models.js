@@ -419,7 +419,7 @@ window.L3MS_DASHBOARD = {
         "image"
       ],
       "modes": [],
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L95",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L96",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/blender-mcp-setup.md",
       "experimentUrl": null
     },
@@ -432,7 +432,7 @@ window.L3MS_DASHBOARD = {
         "image"
       ],
       "modes": [],
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L117",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L118",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/qwen-image-2.1-setup.md",
       "experimentUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/experiments/qwen-vs-krea2-comparison.md"
     },
@@ -445,7 +445,7 @@ window.L3MS_DASHBOARD = {
         "image"
       ],
       "modes": [],
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L138",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L139",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/krea-2-setup.md",
       "experimentUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/experiments/qwen-vs-krea2-comparison.md"
     }
