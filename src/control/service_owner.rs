@@ -16,6 +16,7 @@ use super::catalog::RuntimeIdentity;
 use super::cgroup_release::{
     CgroupObservation, CgroupObservationKind, CgroupReleaseErrorKind, CgroupReleaseProbe,
 };
+use super::cuda_device::CudaDevice;
 use super::engine_helper::{supervisor_arguments, BackendProcessSpec, StackRoot};
 use super::engine_transport::{BackendPort, CoordinatorIdentityDescriptor};
 use super::managed_service::{
@@ -285,6 +286,7 @@ pub struct IsolatedEngineLaunch {
     transport_directory: PathBuf,
     backend_port: BackendPort,
     stack_root: Option<StackRoot>,
+    cuda_device: Option<CudaDevice>,
     stop_timeout: Duration,
 }
 
@@ -309,6 +311,7 @@ impl IsolatedEngineLaunch {
             transport_directory: transport_directory.as_ref().to_path_buf(),
             backend_port,
             stack_root: None,
+            cuda_device: None,
             stop_timeout,
         })
     }
@@ -323,6 +326,12 @@ impl IsolatedEngineLaunch {
         self.stack_root =
             Some(StackRoot::new(path).map_err(|_| ManagedServiceErrorKind::InvalidRecipe)?);
         Ok(self)
+    }
+
+    /// Explicitly bind this launch to one validated physical CUDA device.
+    pub fn with_cuda_device(mut self, cuda_device: CudaDevice) -> Self {
+        self.cuda_device = Some(cuda_device);
+        self
     }
 }
 
@@ -422,6 +431,9 @@ impl<'host> ManagedRuntimeOwner<'host> {
         .map_err(|_| OwnerStartError::Preparation(ManagedServiceErrorKind::InvalidRecipe))?;
         if let Some(stack_root) = launch.stack_root {
             backend = backend.with_stack_root(stack_root);
+        }
+        if let Some(cuda_device) = launch.cuda_device {
+            backend = backend.with_cuda_device(cuda_device);
         }
         let helper_arguments = supervisor_arguments(
             &launch.transport_directory,
@@ -1159,6 +1171,27 @@ sys.exit(23)
             invalid.map(|_| ()),
             Err(ManagedServiceErrorKind::InvalidRecipe)
         );
+    }
+
+    #[test]
+    fn isolated_engine_launch_accepts_only_typed_cuda_selection_and_redacts_it() {
+        const UUID: &str = "GPU-01234567-89ab-cdef-0123-456789abcdef";
+        let fixture = Fixture::new();
+        let launch = IsolatedEngineLaunch::new(
+            RuntimeIdentity::new(Lane::Media, "comfyui").unwrap(),
+            fixture.recipe(),
+            std::env::current_exe().unwrap(),
+            fixture.root.path(),
+            8188,
+            Duration::from_secs(1),
+        )
+        .unwrap()
+        .with_cuda_device(CudaDevice::new(UUID).unwrap());
+        assert_eq!(
+            launch.cuda_device.as_ref().map(CudaDevice::gpu_uuid),
+            Some(UUID)
+        );
+        assert_eq!(format!("{launch:?}"), "IsolatedEngineLaunch([redacted])");
     }
 
     #[test]

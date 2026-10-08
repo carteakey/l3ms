@@ -29,6 +29,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use super::cuda_device::CudaDevice;
 use super::engine_transport::{
     BackendPort, CoordinatorIdentityDescriptor, EngineTransport, EngineTransportError,
     NoDispatchReason, RelayFailure,
@@ -37,6 +38,7 @@ use super::runtime::{Cancellation, OperationContext};
 
 const ARGUMENT_MARKER: &str = "--l3ms-isolated-engine-supervisor-v1";
 const STACK_ROOT_ARGUMENT: &str = "--l3ms-stack-root";
+const CUDA_DEVICE_ARGUMENT: &str = "--l3ms-cuda-device";
 const MAX_ARGUMENTS: usize = 4096;
 const MAX_ARGUMENT_BYTES: usize = 64 * 1024;
 const MAX_AGGREGATE_ARGUMENT_BYTES: usize = 256 * 1024;
@@ -144,6 +146,7 @@ pub struct BackendProcessSpec {
     working_directory: PathBuf,
     arguments: Vec<OsString>,
     stack_root: Option<StackRoot>,
+    cuda_device: Option<CudaDevice>,
 }
 
 impl BackendProcessSpec {
@@ -182,11 +185,18 @@ impl BackendProcessSpec {
             working_directory,
             arguments,
             stack_root: None,
+            cuda_device: None,
         })
     }
 
     pub(crate) fn with_stack_root(mut self, stack_root: StackRoot) -> Self {
         self.stack_root = Some(stack_root);
+        self
+    }
+
+    /// Explicitly select exactly one full physical GPU UUID for the backend.
+    pub fn with_cuda_device(mut self, cuda_device: CudaDevice) -> Self {
+        self.cuda_device = Some(cuda_device);
         self
     }
 }
@@ -248,6 +258,10 @@ pub fn supervisor_arguments(
         let stack_root = StackRoot::new(stack_root.path())?;
         args.push(OsString::from(STACK_ROOT_ARGUMENT));
         args.push(stack_root.path().as_os_str().to_os_string());
+    }
+    if let Some(cuda_device) = &backend.cuda_device {
+        args.push(OsString::from(CUDA_DEVICE_ARGUMENT));
+        args.push(OsString::from(cuda_device.gpu_uuid()));
     }
     args.push(executable.to_os_string());
     args.push(working_directory.to_os_string());
@@ -414,6 +428,16 @@ fn parse_arguments(arguments: Vec<OsString>) -> Result<ParsedConfig, EngineHelpe
     } else {
         None
     };
+    let cuda_device = if arguments
+        .get(cursor)
+        .is_some_and(|argument| argument == CUDA_DEVICE_ARGUMENT)
+    {
+        cursor += 1;
+        let uuid = take_utf8(&arguments, &mut cursor)?;
+        Some(CudaDevice::new(uuid).map_err(|_| EngineHelperError::InvalidArguments)?)
+    } else {
+        None
+    };
     let executable = take_path(&arguments, &mut cursor, MAX_PATH_BYTES)?;
     let working_directory = take_path(&arguments, &mut cursor, MAX_PATH_BYTES)?;
     let argument_count = take_number::<usize>(&arguments, &mut cursor)?;
@@ -424,6 +448,9 @@ fn parse_arguments(arguments: Vec<OsString>) -> Result<ParsedConfig, EngineHelpe
     let mut backend = BackendProcessSpec::new(executable, working_directory, backend_arguments)?;
     if let Some(stack_root) = stack_root {
         backend = backend.with_stack_root(stack_root);
+    }
+    if let Some(cuda_device) = cuda_device {
+        backend = backend.with_cuda_device(cuda_device);
     }
     let directory = transport_directory
         .canonicalize()
@@ -477,6 +504,12 @@ fn validate_activation_values(
 fn spawn_backend(backend: &BackendProcessSpec) -> Result<Child, EngineHelperError> {
     let expected_parent_pid = unsafe { libc::getpid() };
     let mut command = Command::new(&backend.executable);
+    if backend.cuda_device.is_some() {
+        // An explicit physical selection is intended to be the backend's
+        // complete CUDA visibility policy, not an addition to inherited
+        // ordinal/list/MIG settings or unrelated ambient launch options.
+        command.env_clear();
+    }
     command
         .args(&backend.arguments)
         .current_dir(&backend.working_directory)
@@ -489,6 +522,9 @@ fn spawn_backend(backend: &BackendProcessSpec) -> Result<Child, EngineHelperErro
         .env_remove("NOTIFY_SOCKET");
     if let Some(stack_root) = &backend.stack_root {
         command.env("L3MS_ROOT", stack_root.path());
+    }
+    if let Some(cuda_device) = &backend.cuda_device {
+        cuda_device.apply_to(&mut command);
     }
     // The child is placed in a dedicated process group and gets a parent-death
     // signal as a second containment layer in addition to systemd's cgroup.
@@ -977,6 +1013,9 @@ mod tests {
         assert!(!arguments
             .iter()
             .any(|argument| argument == STACK_ROOT_ARGUMENT));
+        assert!(!arguments
+            .iter()
+            .any(|argument| argument == CUDA_DEVICE_ARGUMENT));
         assert!(parse_arguments(arguments)
             .unwrap()
             .backend
@@ -1089,6 +1128,92 @@ mod tests {
     }
 
     #[test]
+    fn optional_cuda_device_flag_roundtrips_strictly_after_other_launch_metadata() {
+        const UUID: &str = "GPU-01234567-89ab-cdef-0123-456789abcdef";
+        let directory = private_fixture_dir();
+        let stack_root_path = directory.join("stack-root");
+        std::fs::create_dir(&stack_root_path).unwrap();
+        let backend = BackendProcessSpec::new(
+            std::env::current_exe().unwrap(),
+            std::env::current_dir().unwrap(),
+            [],
+        )
+        .unwrap()
+        .with_stack_root(StackRoot::new(&stack_root_path).unwrap())
+        .with_cuda_device(CudaDevice::new(UUID).unwrap());
+        let arguments = supervisor_arguments(
+            &directory,
+            BackendPort::new(8188).unwrap(),
+            CoordinatorIdentityDescriptor::capture_current().unwrap(),
+            &backend,
+        )
+        .unwrap();
+        let parsed = parse_arguments(arguments.clone()).unwrap();
+        assert_eq!(
+            parsed
+                .backend
+                .cuda_device
+                .as_ref()
+                .map(CudaDevice::gpu_uuid),
+            Some(UUID)
+        );
+
+        let device_index = arguments
+            .iter()
+            .position(|argument| argument == CUDA_DEVICE_ARGUMENT)
+            .unwrap();
+        assert_eq!(
+            arguments[device_index + 1].to_str(),
+            Some(UUID),
+            "the UUID follows its typed marker"
+        );
+        let stack_index = arguments
+            .iter()
+            .position(|argument| argument == STACK_ROOT_ARGUMENT)
+            .unwrap();
+        assert!(stack_index < device_index);
+
+        let mut duplicate = arguments.clone();
+        duplicate.splice(
+            device_index + 2..device_index + 2,
+            [OsString::from(CUDA_DEVICE_ARGUMENT), OsString::from(UUID)],
+        );
+        assert_eq!(
+            parse_arguments(duplicate).map(|_| ()),
+            Err(EngineHelperError::InvalidArguments)
+        );
+
+        let mut missing_uuid = arguments.clone();
+        missing_uuid.remove(device_index + 1);
+        assert_eq!(
+            parse_arguments(missing_uuid).map(|_| ()),
+            Err(EngineHelperError::InvalidArguments)
+        );
+
+        let mut invalid_uuid = arguments.clone();
+        invalid_uuid[device_index + 1] = OsString::from("0");
+        assert_eq!(
+            parse_arguments(invalid_uuid).map(|_| ()),
+            Err(EngineHelperError::InvalidArguments)
+        );
+
+        let mut out_of_order = arguments;
+        let cuda_pair = out_of_order
+            .drain(device_index..device_index + 2)
+            .collect::<Vec<_>>();
+        let stack_index = out_of_order
+            .iter()
+            .position(|argument| argument == STACK_ROOT_ARGUMENT)
+            .unwrap();
+        out_of_order.splice(stack_index..stack_index, cuda_pair);
+        assert_eq!(
+            parse_arguments(out_of_order).map(|_| ()),
+            Err(EngineHelperError::InvalidArguments)
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn backend_environment_probe() {
         if std::env::var_os("L3MS_STACK_ROOT_PROBE").as_deref() != Some(OsStr::new("1")) {
             return;
@@ -1109,6 +1234,82 @@ mod tests {
         .with_stack_root(stack_root);
         let mut child = spawn_backend(&backend).unwrap();
         assert!(child.wait().unwrap().success());
+    }
+
+    #[test]
+    fn backend_cuda_environment_probe() {
+        if std::env::var_os("L3MS_CUDA_PROBE").as_deref() != Some(OsStr::new("1")) {
+            return;
+        }
+        const UUID: &str = "GPU-01234567-89ab-cdef-0123-456789abcdef";
+        let stack_root = StackRoot::new(PathBuf::from(
+            std::env::var_os("L3MS_CUDA_PROBE_ROOT").expect("probe root supplied"),
+        ))
+        .unwrap();
+        let device =
+            CudaDevice::new(&std::env::var("L3MS_CUDA_PROBE_UUID").expect("probe UUID supplied"))
+                .unwrap();
+        assert_eq!(device.gpu_uuid(), UUID);
+        let backend = BackendProcessSpec::new(
+            "/bin/sh",
+            std::env::current_dir().unwrap(),
+            [
+                OsString::from("-c"),
+                OsString::from(
+                    r#"printf '%s\n%s\n%s\n' "$CUDA_VISIBLE_DEVICES" "$L3MS_ROOT" "${L3MS_AMBIENT_SENTINEL-unset}" > "$L3MS_ROOT/observed""#,
+                ),
+            ],
+        )
+        .unwrap()
+        .with_stack_root(stack_root)
+        .with_cuda_device(device);
+        let mut child = spawn_backend(&backend).unwrap();
+        assert!(child.wait().unwrap().success());
+    }
+
+    #[test]
+    fn selected_physical_uuid_replaces_ambient_child_cuda_environment() {
+        const UUID: &str = "GPU-01234567-89ab-cdef-0123-456789abcdef";
+        let directory = private_fixture_dir();
+        let explicit_root = directory.join("explicit");
+        let ambient_root = directory.join("ambient");
+        std::fs::create_dir(&explicit_root).unwrap();
+        std::fs::create_dir(&ambient_root).unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let listing = Command::new(&executable).arg("--list").output().unwrap();
+        assert!(listing.status.success());
+        let test_listing = String::from_utf8(listing.stdout).unwrap();
+        let test_name = test_listing
+            .lines()
+            .find_map(|line| {
+                line.strip_suffix(": test")
+                    .filter(|name| name.ends_with("::backend_cuda_environment_probe"))
+            })
+            .expect("backend CUDA environment probe test is listed");
+        let status = Command::new(executable)
+            .arg("--exact")
+            .arg(test_name)
+            .arg("--nocapture")
+            .env("CUDA_VISIBLE_DEVICES", "ambient,selection")
+            .env("L3MS_ROOT", &ambient_root)
+            .env("L3MS_AMBIENT_SENTINEL", "must-not-be-forwarded")
+            .env("L3MS_CUDA_PROBE", "1")
+            .env("L3MS_CUDA_PROBE_ROOT", &explicit_root)
+            .env("L3MS_CUDA_PROBE_UUID", UUID)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let observed = std::fs::read_to_string(explicit_root.join("observed")).unwrap();
+        let mut lines = observed.lines();
+        assert_eq!(lines.next(), Some(UUID));
+        assert_eq!(
+            lines.next(),
+            Some(explicit_root.canonicalize().unwrap().to_str().unwrap())
+        );
+        assert_eq!(lines.next(), Some("unset"));
+        assert!(lines.next().is_none());
+        assert!(!ambient_root.join("observed").exists());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

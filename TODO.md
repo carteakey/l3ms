@@ -91,8 +91,10 @@ See the [migration status](docs/migration/status.md),
   worker/coordinator handoff still need integration. Neither 404 nor cancel dispatch proves
   non-submission/completion. Per-job Breeze/GPU-decision ownership must use the
   exact-service cgroup path, not process-group cleanup alone.
-  Breeze now explicitly declares `device: cuda`; physical UUID selection for
-  resident and per-job native children still requires typed launch integration.
+  Breeze now explicitly declares `device: cuda`; typed physical UUID selection
+  is implemented for resident engines and accepted Breeze/local-decision native
+  execution, with model-free child fixtures. Per-job service ownership and
+  coordinator dispatch still need integration; visibility is not GPU isolation.
   CPU-only worker and restricted core admission are now connected to an opt-in
   foreground daemon with responsive private status/cancel/result queries,
   quota-before-acknowledgment, cancellation and bounded shutdown fixtures.

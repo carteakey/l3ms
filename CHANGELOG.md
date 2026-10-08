@@ -10,6 +10,10 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Select one canonical physical NVIDIA UUID for opt-in owned engine launches
+  and accepted CUDA Breeze/Nagi/Laya execution. Offline child fixtures verify
+  exact visibility and reject CPU-route substitution/catalog drift; this does
+  not establish GPU isolation, runtime release or real-model acceptance.
 - Persist Comfy dispatch candidates separately from verified backend IDs and
   issue move-only permits bound to the exact accepted workflow. Joined fixtures
   check persistence before POST and no replay after an uncertain acknowledgment.

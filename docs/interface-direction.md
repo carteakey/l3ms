@@ -16,6 +16,13 @@ Reserve colour for selection, evidence, focus and actual state; state must also
 have a readable label. Avoid falling code, pulsing/glowing status decorations,
 scanline overlays, gratuitous animation and illegible dim secondary text.
 
+User refinement: retain the atmosphere, but make the identity specific to L3MS,
+not a Matrix imitation. Explore ink-black surfaces, phosphor mint and icy violet
+as a bounded palette refinement, with fine routing lines that make the stack's
+three lanes recognizable. A future live client may highlight an actual observed
+route while it executes; the static profile website must not simulate that
+activity. This direction is recorded, not yet a verified palette/UI change.
+
 CSS custom properties in the dashboard are the initial palette source. Keep
 text/secondary text and functional accent colours at 4.5:1 on the darkest and
 lightest panel surfaces. Keyboard focus has a separate high-contrast token;

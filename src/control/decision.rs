@@ -9,6 +9,7 @@ use std::fmt;
 use std::time::Duration;
 
 use super::catalog::{Catalog, Device, Lane};
+use super::cuda_device::CudaDevice;
 use super::native_commands::{
     prepare_native_command, prepare_native_command_for_route, NativeCommandRecipe,
     NativeOutputExpectation,
@@ -91,7 +92,17 @@ pub fn execute_native_decision(
     if !matches!(engine.as_str(), "nagi" | "laya") || profile_type != "local" {
         return Err(DecisionExecutionError::NotDispatched);
     }
-    execute_prepared_recipe(catalog, request, &recipe, None, false, context, recovery)
+    execute_prepared_recipe(
+        catalog,
+        request,
+        &recipe,
+        DecisionBinding {
+            route: None,
+            device: DecisionDevice::Inherited,
+        },
+        context,
+        recovery,
+    )
 }
 
 /// Execute only a route already accepted by the coordinator's immediately
@@ -119,19 +130,61 @@ pub(crate) fn execute_accepted_cpu_decision(
         catalog,
         request,
         &recipe,
-        Some(accepted_route),
-        true,
+        DecisionBinding {
+            route: Some(accepted_route),
+            device: DecisionDevice::Cpu,
+        },
         context,
         recovery,
     )
+}
+
+/// Execute an explicitly CUDA-local accepted Nagi/Laya route on one configured
+/// physical device. This is native execution only: the caller must retain its
+/// owned service/cgroup and reservation, then separately prove GPU release.
+/// There is no inferred CPU fallback, environment installation or retry.
+pub fn execute_accepted_cuda_decision(
+    catalog: &Catalog,
+    request: &InferenceRequest,
+    accepted_route: &ResolvedProfileRoute,
+    device: &CudaDevice,
+    context: &OperationContext<'_>,
+    recovery: RecoveryPolicy,
+) -> Result<NativeDecisionResult, DecisionExecutionError> {
+    if !accepted_local_decision_route(request, accepted_route, Device::Cuda) {
+        return Err(DecisionExecutionError::NotDispatched);
+    }
+    let recipe = prepare_native_command_for_route(catalog, request, accepted_route)
+        .map_err(|_| DecisionExecutionError::NotDispatched)?;
+    execute_prepared_recipe(
+        catalog,
+        request,
+        &recipe,
+        DecisionBinding {
+            route: Some(accepted_route),
+            device: DecisionDevice::Cuda(device),
+        },
+        context,
+        recovery,
+    )
+}
+
+enum DecisionDevice<'a> {
+    Inherited,
+    Cpu,
+    Cuda(&'a CudaDevice),
+}
+
+struct DecisionBinding<'a> {
+    route: Option<&'a ResolvedProfileRoute>,
+    device: DecisionDevice<'a>,
 }
 
 fn execute_prepared_recipe(
     catalog: &Catalog,
     request: &InferenceRequest,
     recipe: &NativeCommandRecipe,
-    accepted_route: Option<&ResolvedProfileRoute>,
-    cpu_only: bool,
+    binding: DecisionBinding<'_>,
     context: &OperationContext<'_>,
     recovery: RecoveryPolicy,
 ) -> Result<NativeDecisionResult, DecisionExecutionError> {
@@ -146,8 +199,15 @@ fn execute_prepared_recipe(
     if !matches!(engine.as_str(), "nagi" | "laya") || profile_type != "local" {
         return Err(DecisionExecutionError::NotDispatched);
     }
-    if let Some(route) = accepted_route {
-        if !accepted_cpu_decision_route(request, route) || !recipe_matches_route(recipe, route) {
+    if let Some(route) = binding.route {
+        let expected_device = match binding.device {
+            DecisionDevice::Cpu => Device::Cpu,
+            DecisionDevice::Cuda(_) => Device::Cuda,
+            DecisionDevice::Inherited => return Err(DecisionExecutionError::NotDispatched),
+        };
+        if !accepted_local_decision_route(request, route, expected_device)
+            || !recipe_matches_route(recipe, route)
+        {
             return Err(DecisionExecutionError::NotDispatched);
         }
     }
@@ -157,10 +217,13 @@ fn execute_prepared_recipe(
         .env("HF_HUB_OFFLINE", "1")
         .env("TRANSFORMERS_OFFLINE", "1")
         .env("HF_DATASETS_OFFLINE", "1");
-    if cpu_only {
-        // The accepted route is explicitly CPU. Do not let CUDA be discovered
-        // by a local library that ignores the runner's --device argument.
-        command.env("CUDA_VISIBLE_DEVICES", "");
+    match binding.device {
+        DecisionDevice::Cpu => {
+            // Do not let a library that ignores --device discover CUDA.
+            command.env("CUDA_VISIBLE_DEVICES", "");
+        }
+        DecisionDevice::Cuda(device) => device.apply_to(&mut command),
+        DecisionDevice::Inherited => {}
     }
     let limits = ProcessLimits::new(1024 * 1024, 2 * 1024 * 1024)
         .map_err(|_| DecisionExecutionError::NotDispatched)?;
@@ -180,7 +243,7 @@ fn execute_prepared_recipe(
             process: disposition,
         },
     })?;
-    let decoded = match accepted_route {
+    let decoded = match binding.route {
         Some(route) => decode_decision_result_for_route(request, route, output.stdout()),
         None => decode_decision_result(catalog, request, output.stdout()),
     };
@@ -275,6 +338,14 @@ fn decode_decision_result_for_route(
 }
 
 fn accepted_cpu_decision_route(request: &InferenceRequest, route: &ResolvedProfileRoute) -> bool {
+    accepted_local_decision_route(request, route, Device::Cpu)
+}
+
+fn accepted_local_decision_route(
+    request: &InferenceRequest,
+    route: &ResolvedProfileRoute,
+    device: Device,
+) -> bool {
     let InferenceRequest::Decision { profile, .. } = request else {
         return false;
     };
@@ -285,7 +356,7 @@ fn accepted_cpu_decision_route(request: &InferenceRequest, route: &ResolvedProfi
         && route.profile.lane == Lane::Decisions
         && route.runtime.lane == Lane::Decisions
         && matches!(route.runtime.as_str(), "nagi" | "laya")
-        && route.device == Some(Device::Cpu)
+        && route.device.as_ref() == Some(&device)
         && profile_type == "local"
 }
 
@@ -398,6 +469,14 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn executable_fixture(engine_label: &str) -> (tempfile::TempDir, Catalog, InferenceRequest) {
+        executable_device_fixture(engine_label, "cpu")
+    }
+
+    #[cfg(target_os = "linux")]
+    fn executable_device_fixture(
+        engine_label: &str,
+        device: &str,
+    ) -> (tempfile::TempDir, Catalog, InferenceRequest) {
         use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
         let media = root.path().join("toolkits/l2m2");
@@ -415,7 +494,12 @@ mod tests {
             r#"{"schema_version":1,"profiles":[]}"#,
         )
         .unwrap();
-        std::fs::write(decisions.join("decision-runtimes.json"), r#"{"version":"1.0","profiles":[{"id":"fixture","name":"Fixture","engine":"nagi","type":"local","device":"cpu","model":"fixture","entrypoint":"decision-models/runner.py"}]}"#).unwrap();
+        let manifest = serde_json::json!({"version":"1.0","profiles":[{"id":"fixture","name":"Fixture","engine":"nagi","type":"local","device":device,"model":"fixture","entrypoint":"decision-models/runner.py"}]});
+        std::fs::write(
+            decisions.join("decision-runtimes.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
         // A harmless shell stand-in, not a model or Python environment.
         let interpreter = decisions.join(".venv/bin/python");
         let fixture_guard = super::super::process::executable_fixture_guard();
@@ -427,6 +511,62 @@ mod tests {
         std::fs::write(decisions.join("decision-models/runner.py"), script).unwrap();
         let catalog = Catalog::load(root.path()).unwrap();
         (root, catalog, request("fixture"))
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn accepted_cuda_decision_selects_exact_device_without_fallback() {
+        const UUID: &str = "GPU-01234567-89ab-cdef-0123-456789abcdef";
+        let (root, catalog, request) = executable_device_fixture("nagi-native", "cuda");
+        let InferenceRequest::Decision { profile, .. } = &request else {
+            unreachable!()
+        };
+        let route = super::super::routes::resolve_profile_route(&catalog, profile).unwrap();
+        let runner = root.path().join("toolkits/l3ds/decision-models/runner.py");
+        let script = std::fs::read_to_string(&runner).unwrap();
+        std::fs::write(
+            &runner,
+            format!("[ \"$CUDA_VISIBLE_DEVICES\" = '{UUID}' ] || exit 8\n{script}"),
+        )
+        .unwrap();
+        let context = OperationContext::new(
+            std::time::Instant::now() + Duration::from_secs(3),
+            &super::super::runtime::NeverCancel,
+        );
+        let recovery = RecoveryPolicy::new(Duration::from_secs(1)).unwrap();
+        let device = CudaDevice::new(UUID).unwrap();
+        let result =
+            execute_accepted_cuda_decision(&catalog, &request, &route, &device, &context, recovery)
+                .unwrap();
+        result.result.validate_for(&request).unwrap();
+        assert_eq!(result.native_latency, Some(Duration::from_micros(17250)));
+        assert_eq!(
+            execute_accepted_cpu_decision(&catalog, &request, &route, &context, recovery).err(),
+            Some(DecisionExecutionError::NotDispatched)
+        );
+
+        // Changing the accepted route cannot reinterpret the CUDA reservation.
+        let mut changed = route.clone();
+        changed.device = Some(Device::Cpu);
+        assert_eq!(
+            execute_accepted_cuda_decision(
+                &catalog, &request, &changed, &device, &context, recovery
+            )
+            .err(),
+            Some(DecisionExecutionError::NotDispatched)
+        );
+        // Refreshing the catalog must reject the old route before spawning.
+        let manifest = root.path().join("toolkits/l3ds/decision-runtimes.json");
+        let old = std::fs::read_to_string(&manifest).unwrap();
+        std::fs::write(&manifest, old.replace("\"cuda\"", "\"cpu\"")).unwrap();
+        let refreshed = Catalog::load(root.path()).unwrap();
+        assert_eq!(
+            execute_accepted_cuda_decision(
+                &refreshed, &request, &route, &device, &context, recovery
+            )
+            .err(),
+            Some(DecisionExecutionError::NotDispatched)
+        );
     }
 
     #[test]

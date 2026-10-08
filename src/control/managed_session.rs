@@ -25,6 +25,7 @@ use serde_json::{Map, Value};
 
 use super::catalog::{Catalog, Lane, ProfileKey, RuntimeIdentity};
 use super::cgroup_release::CgroupReleaseProbe;
+use super::cuda_device::CudaDevice;
 use super::engine_health::{
     activate_llama_swap_model_once, probe_llama_swap_router_model_readiness, ActivationDisposition,
     NativeEngineKind, RouterModelReadinessObservation,
@@ -122,6 +123,10 @@ pub(crate) enum ManagedConfigError {
     InvalidGpu,
 }
 
+fn cuda_device_for_gpu_config(gpu: &GpuProbeConfig) -> Result<CudaDevice, ManagedConfigError> {
+    CudaDevice::new(gpu.gpu_uuid()).map_err(|_| ManagedConfigError::InvalidGpu)
+}
+
 impl ManagedSessionConfig {
     pub(crate) fn validate(
         input: ManagedSessionConfigInput,
@@ -171,6 +176,7 @@ impl ManagedSessionConfig {
         }
         let gpu = GpuProbeConfig::new(input.gpu_uuid, input.gpu_index, input.gpu_idle_mib)
             .map_err(|_| ManagedConfigError::InvalidGpu)?;
+        let cuda_device = cuda_device_for_gpu_config(&gpu)?;
         let port =
             BackendPort::new(input.router_port).map_err(|_| ManagedConfigError::InvalidLaunch)?;
         let arguments = [
@@ -198,6 +204,7 @@ impl ManagedSessionConfig {
             input.stop_timeout,
         )
         .and_then(|launch| launch.with_stack_root(&input.repository_root))
+        .map(|launch| launch.with_cuda_device(cuda_device))
         .map_err(|_| ManagedConfigError::InvalidLaunch)?;
 
         Ok(Self {
@@ -1309,6 +1316,23 @@ mod tests {
         )
         .unwrap();
         assert_ne!(fs::read(&canonical).unwrap(), original);
+    }
+
+    #[test]
+    fn managed_cuda_launch_selection_comes_from_the_validated_probe_identity() {
+        const UUID: &str = "GPU-01234567-89ab-cdef-0123-456789abcdef";
+        let gpu = GpuProbeConfig::new(UUID, 0, 128).unwrap();
+        let selection = cuda_device_for_gpu_config(&gpu).unwrap();
+        assert_eq!(selection.gpu_uuid(), gpu.gpu_uuid());
+
+        // The probe accepts a syntactically valid case-insensitive UUID, but
+        // the child-process handoff requires one canonical spelling.
+        let noncanonical =
+            GpuProbeConfig::new("GPU-01234567-89AB-cdef-0123-456789abcdef", 0, 128).unwrap();
+        assert_eq!(
+            cuda_device_for_gpu_config(&noncanonical),
+            Err(ManagedConfigError::InvalidGpu)
+        );
     }
 
     #[test]

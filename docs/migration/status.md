@@ -10,6 +10,21 @@ runtime check.
 
 ## Current resumed checkpoint — 2026-10-08
 
+The physical-device execution slice passes **757 tests, 1 ignored**, strict
+all-target Clippy, formatting and whitespace checks. A typed CUDA selection
+accepts only one complete canonical physical GPU UUID. The managed-language
+launch derives it from the same validated physical GPU probe configuration;
+helper argument parsing rejects duplicate, malformed or reordered selection.
+Explicitly selected resident launches clear ambient environment and supply
+only the declared stack root and CUDA visibility. Legacy unselected launches
+retain their previous environment contract. Runtime dependencies that require
+additional environment need an explicit contract before real acceptance.
+Model-free child fixtures verify the exact UUID for resident engines, local
+decisions and Breeze, and reject CPU substitution/refreshed route drift.
+`CUDA_VISIBLE_DEVICES` is selection, not a device fence or release proof.
+Per-job owned-service handoff, Comfy worker integration and cross-runtime live
+acceptance remain unfinished. No live service was stopped for this slice.
+
 The subsequent Comfy candidate/history slice passes **747 tests, 1 ignored**,
 strict all-target Clippy, formatting and whitespace checks. Joined coordinator/
 native HTTP fixtures verify durable candidate persistence before the first POST,
@@ -22,8 +37,8 @@ Coordinator-only strict history loading rejects malformed, duplicate-key,
 duplicate-candidate and truncated source without rewriting it. Legacy standalone
 normalization and omitted metadata shape remain unchanged. Breeze's native
 manifest now declares CUDA explicitly, with a retained private pre-edit snapshot.
-Actual Comfy worker handoff, owned-generation recovery, physical-device launch
-selection and cross-runtime GPU acceptance remain open.
+Actual Comfy worker handoff, owned-generation recovery and cross-runtime GPU
+acceptance remain open; physical-device selection is now implemented as above.
 
 The native managed-language integration passes **734 tests, 1 ignored**, strict
 all-target Clippy, formatting and whitespace checks. This is not a live

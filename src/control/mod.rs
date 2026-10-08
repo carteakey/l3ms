@@ -12,6 +12,7 @@ pub mod comfy;
 pub mod coordinator_launch;
 #[cfg(target_os = "linux")]
 pub mod coordinator_workbench;
+pub mod cuda_device;
 #[cfg(target_os = "linux")]
 pub mod daemon;
 pub mod decision;

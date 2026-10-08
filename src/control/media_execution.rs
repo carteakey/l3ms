@@ -15,7 +15,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::catalog::Catalog;
+use super::catalog::{Catalog, Device};
+use super::cuda_device::CudaDevice;
 use super::native_commands::{
     prepare_breeze_speech_recipe, prepare_breeze_speech_recipe_for_route, NativeOutputExpectation,
 };
@@ -140,7 +141,17 @@ pub fn execute_breeze_speech(
     context: &OperationContext<'_>,
     recovery: RecoveryPolicy,
 ) -> Result<MediaExecutionResult, MediaExecutionFailure> {
-    execute_breeze_inner(catalog, request, None, job_directory, context, recovery)
+    execute_breeze_inner(
+        catalog,
+        request,
+        BreezeBinding {
+            route: None,
+            device: None,
+        },
+        job_directory,
+        context,
+        recovery,
+    )
 }
 
 /// Execute against a complete previously accepted route. The caller must
@@ -158,17 +169,53 @@ pub fn execute_breeze_speech_for_route(
     execute_breeze_inner(
         catalog,
         request,
-        Some(accepted_route),
+        BreezeBinding {
+            route: Some(accepted_route),
+            device: None,
+        },
         job_directory,
         context,
         recovery,
     )
 }
 
+/// Execute an accepted CUDA Breeze route on exactly one configured physical
+/// device. Native artifacts are candidates only: the owner must separately
+/// stop the exact service, prove cgroup/GPU release and revalidate artifacts.
+pub fn execute_breeze_speech_on_device(
+    catalog: &Catalog,
+    request: &InferenceRequest,
+    accepted_route: &ResolvedProfileRoute,
+    device: &CudaDevice,
+    job_directory: &Path,
+    context: &OperationContext<'_>,
+    recovery: RecoveryPolicy,
+) -> Result<MediaExecutionResult, MediaExecutionFailure> {
+    if accepted_route.device != Some(Device::Cuda) {
+        return Err(not_dispatched(MediaExecutionErrorKind::InvalidRequest));
+    }
+    execute_breeze_inner(
+        catalog,
+        request,
+        BreezeBinding {
+            route: Some(accepted_route),
+            device: Some(device),
+        },
+        job_directory,
+        context,
+        recovery,
+    )
+}
+
+struct BreezeBinding<'a> {
+    route: Option<&'a ResolvedProfileRoute>,
+    device: Option<&'a CudaDevice>,
+}
+
 fn execute_breeze_inner(
     catalog: &Catalog,
     request: &InferenceRequest,
-    accepted_route: Option<&ResolvedProfileRoute>,
+    binding: BreezeBinding<'_>,
     job_directory: &Path,
     context: &OperationContext<'_>,
     recovery: RecoveryPolicy,
@@ -187,7 +234,7 @@ fn execute_breeze_inner(
     ensure_absent(&output_root.join(OUTPUT_NAME))?;
     ensure_absent(&output_root.join(CHUNKS_NAME))?;
 
-    let recipe = match accepted_route {
+    let recipe = match binding.route {
         Some(route) => {
             prepare_breeze_speech_recipe_for_route(catalog, request, route, &output_root)
         }
@@ -201,6 +248,9 @@ fn execute_breeze_inner(
 
     let mut command = Command::new(&recipe.executable);
     command.args(&recipe.argv).current_dir(&recipe.cwd);
+    if let Some(device) = binding.device {
+        device.apply_to(&mut command);
+    }
     let limits = ProcessLimits::new(0, MAX_CAPTURE_BYTES)
         .map_err(|error| process_failure(error.disposition(), error.kind()))?;
     let output = process::execute(command, None, limits, context, recovery)
@@ -771,6 +821,77 @@ fi
             &context(cancel, duration),
             recovery(),
         )
+    }
+
+    #[test]
+    fn accepted_cuda_breeze_passes_exact_physical_uuid_and_rejects_cpu_route() {
+        const UUID: &str = "GPU-01234567-89ab-cdef-0123-456789abcdef";
+        let fixture = Fixture::new();
+        let manifest_path = fixture.media_root.join("media-runtimes.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["profiles"][0]["device"] = serde_json::json!("cuda");
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        fs::write(
+            fixture
+                .media_root
+                .join("media-models/generate-breeze-tts-2.sh"),
+            format!("[ \"$CUDA_VISIBLE_DEVICES\" = '{UUID}' ] || exit 8\n{FIXTURE_SCRIPT}"),
+        )
+        .unwrap();
+        let catalog = fixture.catalog();
+        let request = request(SpeechMode::Standard, "fixture speech", &fixture);
+        let accepted =
+            crate::control::routes::resolve_profile_route(&catalog, request.profile()).unwrap();
+        let device = CudaDevice::new(UUID).unwrap();
+        let output = fixture.output_directory("cuda-selected");
+        let ctx = context(&NeverCancel, Duration::from_secs(5));
+        let result = execute_breeze_speech_on_device(
+            &catalog,
+            &request,
+            &accepted,
+            &device,
+            &output,
+            &ctx,
+            recovery(),
+        )
+        .unwrap();
+        assert_eq!(result.artifacts().len(), 1);
+        let mut cpu = accepted.clone();
+        cpu.device = Some(Device::Cpu);
+        let rejected_output = fixture.output_directory("cpu-rejected");
+        let error = execute_breeze_speech_on_device(
+            &catalog,
+            &request,
+            &cpu,
+            &device,
+            &rejected_output,
+            &ctx,
+            recovery(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.disposition(),
+            ProcessFailureDisposition::NoChildSpawned
+        );
+        assert!(!rejected_output.join(OUTPUT_NAME).exists());
+        manifest["profiles"][0]["device"] = serde_json::json!("cpu");
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let error = execute_breeze_speech_on_device(
+            &fixture.catalog(),
+            &request,
+            &accepted,
+            &device,
+            &rejected_output,
+            &ctx,
+            recovery(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.disposition(),
+            ProcessFailureDisposition::NoChildSpawned
+        );
+        assert!(!rejected_output.join(OUTPUT_NAME).exists());
     }
 
     #[test]
