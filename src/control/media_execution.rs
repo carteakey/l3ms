@@ -212,6 +212,26 @@ struct BreezeBinding<'a> {
     device: Option<&'a CudaDevice>,
 }
 
+/// Re-read the bounded native artifact contract after the owner has stopped
+/// the exact job service and proven its cgroup empty. This function does not
+/// establish that prerequisite: callers must hold the directory exclusively
+/// and compare these fresh references with their native result candidate.
+pub fn revalidate_breeze_artifacts(
+    job_directory: &Path,
+    mode: SpeechMode,
+    context: &OperationContext<'_>,
+) -> Result<MediaExecutionResult, MediaExecutionFailure> {
+    let output_root = validate_job_directory(job_directory)?;
+    check_after_child(context)?;
+    let artifacts = discover_artifacts(&output_root, mode, context)?;
+    check_after_child(context)?;
+    Ok(MediaExecutionResult {
+        output_root,
+        mode,
+        artifacts,
+    })
+}
+
 fn execute_breeze_inner(
     catalog: &Catalog,
     request: &InferenceRequest,
@@ -821,6 +841,30 @@ fi
             &context(cancel, duration),
             recovery(),
         )
+    }
+
+    #[test]
+    fn fresh_artifact_validation_rejects_mutation_after_native_result() {
+        let fixture = Fixture::new();
+        let output = fixture.output_directory("revalidate");
+        let ctx = context(&NeverCancel, Duration::from_secs(5));
+        let candidate = execute_breeze_speech(
+            &fixture.catalog(),
+            &request(SpeechMode::Standard, "fixture speech", &fixture),
+            &output,
+            &ctx,
+            recovery(),
+        )
+        .unwrap();
+        let fresh = revalidate_breeze_artifacts(&output, candidate.mode(), &ctx).unwrap();
+        assert_eq!(candidate.artifacts(), fresh.artifacts());
+        fs::write(output.join(OUTPUT_NAME), b"truncated wave").unwrap();
+        assert_eq!(
+            revalidate_breeze_artifacts(&output, candidate.mode(), &ctx)
+                .unwrap_err()
+                .kind(),
+            MediaExecutionErrorKind::InvalidArtifact
+        );
     }
 
     #[test]

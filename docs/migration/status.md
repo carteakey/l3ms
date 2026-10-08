@@ -24,6 +24,10 @@ decisions and Breeze, and reject CPU substitution/refreshed route drift.
 `CUDA_VISIBLE_DEVICES` is selection, not a device fence or release proof.
 Per-job owned-service handoff, Comfy worker integration and cross-runtime live
 acceptance remain unfinished. No live service was stopped for this slice.
+The subsequent fresh Breeze artifact interface passes **758 root tests, 1
+ignored**, nine media execution tests and strict all-target Clippy, including rejection of a WAV changed after
+native execution. This provides a revalidation step for post-stop publication;
+it does not itself prove the service stopped or remove its reservation.
 
 The subsequent Comfy candidate/history slice passes **747 tests, 1 ignored**,
 strict all-target Clippy, formatting and whitespace checks. Joined coordinator/

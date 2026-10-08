@@ -10,6 +10,9 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Add fresh Breeze artifact revalidation for the owned-job post-stop handoff;
+  reject output mutated after a native result candidate. The caller still must
+  prove exact-service/cgroup cleanup before final publication.
 - Select one canonical physical NVIDIA UUID for opt-in owned engine launches
   and accepted CUDA Breeze/Nagi/Laya execution. Offline child fixtures verify
   exact visibility and reject CPU-route substitution/catalog drift; this does
