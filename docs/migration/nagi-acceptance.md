@@ -88,4 +88,24 @@ Host context: Intel i5-12600K, sixteen online CPUs, Linux `7.2.8-1-cachyos`,
 CPU0 governor `powersave` and energy-performance preference `performance` at the
 read-only context check. Power policy was not changed. This is an acceptance
 measurement on a shared active workstation, not a controlled GPU performance
-comparison. Private foreground-coordinator acceptance remains separately gated.
+comparison.
+
+## Private foreground coordinator
+
+The opt-in `maintenance/probe-nagi-coordinator.py --run` passed against the
+branch CLI built at `2c7d837`. The harness copied a private CPU-only profile,
+linked the installed environment, forced offline model access and empty CUDA
+visibility, and submitted one synthetic request with one unique caller ID.
+Original manifests, services and environments were unchanged.
+
+The submit acknowledgment matched; ten read-only status queries observed
+`succeeded`. One result page contained two events, and typed output contained
+one valid native answer. The private `jobs.json` contained exactly one matching
+successful terminal row for `l3ds` / `nagi-smol` / `decision`, exit zero.
+The daemon stopped, captured process birth identities disappeared, process
+groups were empty, and the exact temporary fixture was removed. No resubmission
+or simulation occurred. Eight offline harness safety regressions also pass.
+
+This closes the CPU coordinator execution gate only. The synthetic question
+does not measure routing accuracy; GPU execution, managed engine switching and
+cross-client/live cutover acceptance remain open.

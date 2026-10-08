@@ -10,6 +10,10 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Add an opt-in offline CPU Nagi coordinator acceptance harness with bounded
+  output, one-shot submission, durable caller-ID verification and conservative
+  cleanup. Real native coordinator execution passed; GPU switching and routing
+  quality remain separate gates.
 - Pass an explicit canonical, bounded `L3MS_ROOT` to owned engine backends when
   selected, keeping legacy helper arguments unchanged and rejecting malformed
   launch metadata; no arbitrary environment or credential forwarding is added.

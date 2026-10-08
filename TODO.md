@@ -84,7 +84,9 @@ See the [migration status](docs/migration/status.md),
   See [foreground setup](docs/migration/foreground-coordinator.md). Require an
   explicit CPU profile and no-GPU binding; current CUDA profiles stay gated.
   Never reinterpret a configured CPU fallback as CPU admission. General managed
-  engine/media dispatch and real-model CPU acceptance remain outstanding.
+  engine/media dispatch remains outstanding. Real-model CPU coordinator
+  acceptance passed with one submission, native output, durable terminal history
+  and verified process cleanup; see the Nagi evidence below.
 - [ ] Integrate CLI and keyboard-first UI run/observe/cancel with the same
   coordinator, settings, routing, and request IDs; preserve standalone commands.
   Linux CLI request status/cancel/results and one-shot Submit are implemented.
@@ -110,8 +112,9 @@ See the [migration status](docs/migration/status.md),
 - [ ] Complete real local-decision inference without synthetic fallback.
   Isolated environment and required weights were approved on 2026-10-07;
   pinned dependencies and checksum-verified minimal models are installed. Real
-  offline CPU native execution and bounded benchmark passed; private foreground
-  coordinator acceptance, GPU inference and routing-quality validation remain.
+  offline CPU native execution, bounded benchmark and private foreground
+  coordinator acceptance passed. GPU inference and routing-quality validation
+  remain; see [Nagi evidence](docs/migration/nagi-acceptance.md).
 - [ ] Run real Breeze standard/design/clone/streaming TTS acceptance and a
   coordinated language → media → language pilot in an agreed maintenance window.
   Record before/after service/GPU state, artifacts, cancellation, and restoration.

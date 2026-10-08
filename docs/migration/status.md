@@ -47,6 +47,9 @@ now work. Minimal revision/checksum-pinned model acquisition completed; six
 offline acquisition safety tests pass. Real offline CPU Nagi execution and
 the bounded ten-iteration native benchmark passed (P50 1.61 s, P95 1.64 s,
 zero option-order flips), without claiming routing accuracy or GPU performance.
+The real CPU foreground-coordinator probe also passed: one submission, matched
+caller ID, native typed output, a unique durable successful terminal row and
+verified daemon/process-group cleanup. Eight offline harness regressions pass.
 See [Nagi evidence](nagi-acceptance.md). Explicit owned-engine stack-root
 environment handoff and its actual-child fixtures also pass. No
 existing service was stopped in this continuation; nothing was pushed/published.
