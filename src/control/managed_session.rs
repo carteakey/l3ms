@@ -599,7 +599,11 @@ pub(crate) fn run_worker(
                 let completion = if must_stop {
                     let resident_clean =
                         stop_resident(&mut resident, &mut owner, &cgroups, &gpu, config.recovery);
-                    let clean = resident_clean && (!local_ticket || completion.cleanup_proven);
+                    let clean = combined_cleanup_proven(
+                        resident_clean,
+                        local_ticket,
+                        completion.cleanup_proven,
+                    );
                     let ManagedJobCompletion {
                         key,
                         completion: prior_completion,
@@ -746,6 +750,12 @@ fn uncertain_managed_completion(ticket: &DispatchTicket) -> ManagedJobCompletion
         stop_session: true,
         artifacts: Vec::new(),
     }
+}
+
+fn combined_cleanup_proven(resident_clean: bool, local_ticket: bool, local_clean: bool) -> bool {
+    // A missing resident router says nothing about the local service. This
+    // separate proof must survive uncertain completions and shutdown.
+    resident_clean && (!local_ticket || local_clean)
 }
 
 fn stop_resident(
@@ -1665,6 +1675,15 @@ impl<'de> Deserialize<'de> for UniqueJson {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn resident_cleanup_cannot_release_an_unproven_local_job() {
+        assert!(!combined_cleanup_proven(true, true, false));
+        assert!(!combined_cleanup_proven(false, true, true));
+        assert!(!combined_cleanup_proven(false, false, true));
+        assert!(combined_cleanup_proven(true, true, true));
+        assert!(combined_cleanup_proven(true, false, false));
+    }
 
     #[test]
     fn proven_release_does_not_reclassify_native_failure_or_uncertainty() {

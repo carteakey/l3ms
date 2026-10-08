@@ -10,6 +10,8 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Add explicit shutdown-accounting regression coverage: resident-router cleanup
+  cannot stand in for unproven local-job cleanup or release its reservation.
 - Compose opt-in allowlisted Breeze/local Nagi/Laya jobs with the managed
   language worker and coordinator admission. Finalization retains one exact
   Stop receipt, freshly checks cgroup/device release and artifacts on retries,

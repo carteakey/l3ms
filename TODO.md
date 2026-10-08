@@ -10,7 +10,7 @@ existing Linear migration issues rather than replacing their acceptance criteria
 
 ## Monorepo: next work
 
-Latest offline checkpoint on `feature/l3ms-monorepo`: 795 root tests passed,
+Latest offline checkpoint on `feature/l3ms-monorepo`: 796 root tests passed,
 1 ignored, strict all-target Clippy, formatting and whitespace checks pass.
 Opt-in CPU dispatch, managed-language launch, resumable native results and
 owned per-job packet/service handoff are implemented. Subsequent branch work

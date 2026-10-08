@@ -10,7 +10,7 @@ runtime check.
 
 ## Current resumed checkpoint — 2026-10-08
 
-The subsequent managed-stack composition passes **795 root tests, 1 ignored**,
+The subsequent managed-stack composition passes **796 root tests, 1 ignored**,
 strict all-target Clippy, formatting and whitespace checks. It adds opt-in `local_job_profiles` and
 `job_directory_root` to the private managed-session JSON. Omitting both keeps
 the existing language-only behavior. The root must already exist with owner-only
