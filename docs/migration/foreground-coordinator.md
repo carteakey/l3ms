@@ -93,7 +93,8 @@ In the Stack Catalog (F8/Alt+8), configure the same private socket directory and
 select a native profile. `s` opens a strict request-file input, `o` observes a
 retained or entered ID and displays native output in a private panel, and `c`
 requests cancellation. `f` opens a native task form for the captured catalog
-profile: chat turns, media workflow JSON or an argv array, speech text/mode and
+profile: chat turns or an embedding text-batch JSON array, media workflow JSON
+or an argv array, speech text/mode and
 optional cloning/design fields, or decision state/questions. Supply the caller
 ID and timeout explicitly; select the declared task and operation using the
 arrow keys, move fields with Tab/Shift+Tab, and submit with Ctrl+Enter or Enter
@@ -105,10 +106,13 @@ The caller ID is retained before submission, including when its acknowledgment
 is lost. An unresolved request blocks another submit until observation/cancel
 establishes a terminal outcome; no inference retry is inferred from lost output.
 These bounded background actions do not start engines or write payloads to job
-history. Embeddings, incremental chat events, and task-aware artifact access
+history. Embedding contracts/forms/adapter fixtures exist, but production
+language dispatch, incremental chat publication and task-aware artifact access
 remain parity gaps; a JSON output panel is not proof that a media file is usable.
 
 This CPU workflow does not establish GPU release, fence standalone engine
 clients, launch a managed llama/Comfy engine, expose HTTP ingress, or complete the
-real-model acceptance gates. Original checkouts and runtime rollback paths remain
-in place.
+managed-engine/GPU acceptance gates. A real offline CPU Nagi coordinator request
+passed with a private copied CPU profile, native output, durable terminal history
+and verified process cleanup; see [measured evidence](nagi-acceptance.md).
+Original checkouts and runtime rollback paths remain in place.

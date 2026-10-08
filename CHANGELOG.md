@@ -10,6 +10,9 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Preserve the full accepted Breeze route through bounded speech preparation
+  and execution; refreshed device/runtime/entrypoint/task drift now rejects
+  before spawning instead of substituting a new route for an old reservation.
 - Add an opt-in offline CPU Nagi coordinator acceptance harness with bounded
   output, one-shot submission, durable caller-ID verification and conservative
   cleanup. Real native coordinator execution passed; GPU switching and routing

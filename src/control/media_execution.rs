@@ -16,9 +16,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::catalog::Catalog;
-use super::native_commands::{prepare_breeze_speech_recipe, NativeOutputExpectation};
+use super::native_commands::{
+    prepare_breeze_speech_recipe, prepare_breeze_speech_recipe_for_route, NativeOutputExpectation,
+};
 use super::process::{self, ProcessFailureDisposition, ProcessFailureKind, ProcessLimits};
 use super::requests::{InferenceRequest, MediaInput, SpeechMode};
+use super::routes::ResolvedProfileRoute;
 use super::runtime::{OperationContext, RecoveryPolicy};
 
 const OUTPUT_NAME: &str = "result.wav";
@@ -137,6 +140,39 @@ pub fn execute_breeze_speech(
     context: &OperationContext<'_>,
     recovery: RecoveryPolicy,
 ) -> Result<MediaExecutionResult, MediaExecutionFailure> {
+    execute_breeze_inner(catalog, request, None, job_directory, context, recovery)
+}
+
+/// Execute against a complete previously accepted route. The caller must
+/// already have passed the coordinator's dispatch gate and retained its
+/// ownership/reservation. This checks route freshness, not GPU admission or
+/// release; uncertain process cleanup must still quarantine conflicting work.
+pub fn execute_breeze_speech_for_route(
+    catalog: &Catalog,
+    request: &InferenceRequest,
+    accepted_route: &ResolvedProfileRoute,
+    job_directory: &Path,
+    context: &OperationContext<'_>,
+    recovery: RecoveryPolicy,
+) -> Result<MediaExecutionResult, MediaExecutionFailure> {
+    execute_breeze_inner(
+        catalog,
+        request,
+        Some(accepted_route),
+        job_directory,
+        context,
+        recovery,
+    )
+}
+
+fn execute_breeze_inner(
+    catalog: &Catalog,
+    request: &InferenceRequest,
+    accepted_route: Option<&ResolvedProfileRoute>,
+    job_directory: &Path,
+    context: &OperationContext<'_>,
+    recovery: RecoveryPolicy,
+) -> Result<MediaExecutionResult, MediaExecutionFailure> {
     if !matches!(
         request,
         InferenceRequest::Media {
@@ -151,8 +187,13 @@ pub fn execute_breeze_speech(
     ensure_absent(&output_root.join(OUTPUT_NAME))?;
     ensure_absent(&output_root.join(CHUNKS_NAME))?;
 
-    let recipe = prepare_breeze_speech_recipe(catalog, request, &output_root)
-        .map_err(|_| not_dispatched(MediaExecutionErrorKind::InvalidRequest))?;
+    let recipe = match accepted_route {
+        Some(route) => {
+            prepare_breeze_speech_recipe_for_route(catalog, request, route, &output_root)
+        }
+        None => prepare_breeze_speech_recipe(catalog, request, &output_root),
+    }
+    .map_err(|_| not_dispatched(MediaExecutionErrorKind::InvalidRequest))?;
     let mode = match &recipe.expectation {
         NativeOutputExpectation::BreezeSpeech { mode, .. } => *mode,
         _ => return Err(not_dispatched(MediaExecutionErrorKind::InvalidRequest)),
@@ -730,6 +771,59 @@ fi
             &context(cancel, duration),
             recovery(),
         )
+    }
+
+    #[test]
+    fn accepted_route_executes_once_and_rejects_refreshed_route_drift_before_spawn() {
+        use crate::control::routes::resolve_profile_route;
+
+        let fixture = Fixture::new();
+        let catalog = fixture.catalog();
+        let request = request(SpeechMode::Standard, "fixture speech", &fixture);
+        let accepted = resolve_profile_route(&catalog, request.profile()).unwrap();
+        let result = execute_breeze_speech_for_route(
+            &catalog,
+            &request,
+            &accepted,
+            &fixture.output_directory("accepted"),
+            &context(&NeverCancel, Duration::from_secs(5)),
+            recovery(),
+        )
+        .unwrap();
+        assert_eq!(result.artifacts().len(), 1);
+
+        let manifest_path = fixture.media_root.join("media-runtimes.json");
+        let original: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        for (field, replacement) in [
+            ("runtime", serde_json::json!("different-runtime")),
+            ("device", serde_json::json!("cpu")),
+            ("script", serde_json::json!("media-models/changed.sh")),
+            ("tasks", serde_json::json!(["tts"])),
+        ] {
+            let mut changed = original.clone();
+            changed["profiles"][0][field] = replacement;
+            fs::write(&manifest_path, serde_json::to_vec(&changed).unwrap()).unwrap();
+            // A caller with a refreshed catalog must still retain the old
+            // acceptance route, not silently substitute the refreshed one.
+            let refreshed = fixture.catalog();
+            let output = fixture.output_directory(&format!("drift-{field}"));
+            let error = execute_breeze_speech_for_route(
+                &refreshed,
+                &request,
+                &accepted,
+                &output,
+                &context(&NeverCancel, Duration::from_secs(5)),
+                recovery(),
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), MediaExecutionErrorKind::InvalidRequest);
+            assert_eq!(
+                error.disposition(),
+                ProcessFailureDisposition::NoChildSpawned
+            );
+            assert_eq!(fs::read_dir(&output).unwrap().count(), 0);
+        }
     }
 
     #[test]

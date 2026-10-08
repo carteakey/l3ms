@@ -279,7 +279,28 @@ pub fn prepare_breeze_speech_recipe(
     request: &InferenceRequest,
     output_directory: &std::path::Path,
 ) -> Result<NativeCommandRecipe> {
-    let mut recipe = prepare_native_command(catalog, request)?;
+    breeze_recipe_with_output(prepare_native_command(catalog, request)?, output_directory)
+}
+
+/// Prepare explicit Breeze output against the complete route retained at
+/// acceptance. A refreshed device, runtime, task set or entrypoint may not
+/// replace that route while keeping the old coordinator reservation.
+pub fn prepare_breeze_speech_recipe_for_route(
+    catalog: &Catalog,
+    request: &InferenceRequest,
+    accepted_route: &ResolvedProfileRoute,
+    output_directory: &std::path::Path,
+) -> Result<NativeCommandRecipe> {
+    breeze_recipe_with_output(
+        prepare_native_command_for_route(catalog, request, accepted_route)?,
+        output_directory,
+    )
+}
+
+fn breeze_recipe_with_output(
+    mut recipe: NativeCommandRecipe,
+    output_directory: &std::path::Path,
+) -> Result<NativeCommandRecipe> {
     ensure!(
         matches!(
             &recipe.expectation,
