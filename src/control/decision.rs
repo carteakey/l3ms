@@ -507,7 +507,9 @@ mod tests {
         std::fs::set_permissions(&interpreter, std::fs::Permissions::from_mode(0o700)).unwrap();
         drop(fixture_guard);
         let response = serde_json::to_string(&serde_json::json!({"engine":engine_label,"answers":{"route":{"choice":"yes"}},"latency_ms":17.25,"usage":{"fixture_count":1}})).unwrap();
-        let script = format!("[ \"$HF_HUB_OFFLINE\" = 1 ] && [ \"$TRANSFORMERS_OFFLINE\" = 1 ] || exit 3\ninput=$(/bin/cat)\ncase \"$input\" in *'\"state\"'*'\"questions\"'*) ;; *) exit 4;; esac\nprintf '%s\\n' 'fixture log on stderr' >&2\nprintf '%s\\n' '{response}'\n");
+        let script = format!(
+            "[ \"$HF_HUB_OFFLINE\" = 1 ] && [ \"$TRANSFORMERS_OFFLINE\" = 1 ] || exit 3\ninput=$(/bin/cat)\ncase \"$input\" in *'\"state\"'*'\"questions\"'*) ;; *) exit 4;; esac\nprintf '%s\\n' 'fixture log on stderr' >&2\nprintf '%s\\n' '{response}'\n"
+        );
         std::fs::write(decisions.join("decision-models/runner.py"), script).unwrap();
         let catalog = Catalog::load(root.path()).unwrap();
         (root, catalog, request("fixture"))

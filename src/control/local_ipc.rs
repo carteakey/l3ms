@@ -100,7 +100,7 @@ impl LocalListener {
             active(context)?;
             match self.listener.accept() {
                 Ok((stream, _)) => {
-                    return LocalConnection::authenticated(stream, self.uid, Phase::ServerRequest)
+                    return LocalConnection::authenticated(stream, self.uid, Phase::ServerRequest);
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => pause(context)?,
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,

@@ -603,7 +603,7 @@ impl WireRouteSnapshot {
                 tier: tier.clone(),
             },
             NativeRoute::LlamaSwapModel { .. } => {
-                return Err(OwnedJobStoreError::UnsupportedRequest)
+                return Err(OwnedJobStoreError::UnsupportedRequest);
             }
         };
         let device = route.device.as_ref().map(|device| match device {

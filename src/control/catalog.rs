@@ -126,7 +126,7 @@ impl FromStr for ProfileKey {
             _ => {
                 return Err(ProfileKeyError(format!(
                     "unknown lane {lane:?}; expected language, media, or decisions"
-                )))
+                )));
             }
         };
         Self::new(lane, profile_id)

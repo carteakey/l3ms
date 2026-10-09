@@ -304,11 +304,7 @@ fn failed_during_deactivation(
                 || previous.verify_healthy(&recovery),
             )
             .and_then(|()| {
-                open_admission_commit(
-                    previous,
-                    &recovery,
-                    "reopen previous runtime admission",
-                )
+                open_admission_commit(previous, &recovery, "reopen previous runtime admission")
             });
             match restored {
                 Ok(()) => SwitchFailure::new(
@@ -328,7 +324,9 @@ fn failed_during_deactivation(
         }
         Ok(RuntimeState::Unknown) => SwitchFailure::new(
             FailureDisposition::OwnershipUncertain,
-            anyhow!("transition failed: {primary:#}; previous runtime state is unknown; refusing restart"),
+            anyhow!(
+                "transition failed: {primary:#}; previous runtime state is unknown; refusing restart"
+            ),
         ),
         Err(error) => recovery_failure(primary, error),
     }
@@ -478,7 +476,9 @@ pub fn switch_exclusive(
         if let Err(cleanup_error) = cleanup {
             return Err(recovery_failure(
                 primary,
-                anyhow!("target cleanup failed: {cleanup_error:#}; previous runtime was not restarted because GPU ownership is uncertain"),
+                anyhow!(
+                    "target cleanup failed: {cleanup_error:#}; previous runtime was not restarted because GPU ownership is uncertain"
+                ),
             ));
         }
         return Err(failed_with_restore(previous, primary, &recovery));

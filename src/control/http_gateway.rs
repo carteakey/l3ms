@@ -480,10 +480,10 @@ fn validate_header_line_endings(bytes: &[u8]) -> Result<(), HttpFailure> {
     for (index, byte) in bytes.iter().copied().enumerate() {
         match byte {
             b'\n' if index == 0 || bytes[index - 1] != b'\r' => {
-                return Err(HttpFailure::BadRequest)
+                return Err(HttpFailure::BadRequest);
             }
             b'\r' if index + 1 < bytes.len() && bytes[index + 1] != b'\n' => {
-                return Err(HttpFailure::BadRequest)
+                return Err(HttpFailure::BadRequest);
             }
             _ => {}
         }
