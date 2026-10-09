@@ -680,7 +680,7 @@ def fetch_and_validate_output(
     environment: dict[str, str],
     request_id: str,
     deadline: float,
-) -> int:
+) -> tuple[int, int]:
     response = run_cli(
         binary,
         [
@@ -717,7 +717,15 @@ def fetch_and_validate_output(
     )
     if not valid:
         raise ProbeFailure("coordinator native decision is invalid")
-    return len(answers)
+    metadata = response.get("native_decision_metadata")
+    if not isinstance(metadata, dict) or set(metadata) - {"native_latency_ns", "native_usage"}:
+        raise ProbeFailure("native decision metadata is missing or invalid")
+    latency = metadata.get("native_latency_ns")
+    if type(latency) is not int or not 0 < latency <= (2**64 - 1):
+        raise ProbeFailure("native decision latency is missing or invalid")
+    if "native_usage" in metadata and not isinstance(metadata["native_usage"], dict):
+        raise ProbeFailure("native decision usage is invalid")
+    return len(answers), latency
 
 
 def reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -1005,7 +1013,7 @@ def run_acceptance(binary: Path, timeout_seconds: int) -> dict[str, Any]:
             deadline,
         )
         history_rows, history_matches = validate_durable_history(history_dir, request_id)
-        answer_count = fetch_and_validate_output(
+        answer_count, native_latency_ns = fetch_and_validate_output(
             binary,
             socket_dir,
             fixture_root,
@@ -1024,6 +1032,8 @@ def run_acceptance(binary: Path, timeout_seconds: int) -> dict[str, Any]:
             "result_events": event_count,
             "decision_answers": answer_count,
             "native_decision_validated": True,
+            "native_latency_ns": native_latency_ns,
+            "native_metadata_validated": True,
             "durable_history_rows": history_rows,
             "durable_terminal_matches": history_matches,
             "offline": True,

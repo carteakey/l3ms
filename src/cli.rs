@@ -662,6 +662,8 @@ struct NativeOutputResponse<'a> {
     terminal: Option<crate::control::result_buffer::ResultTerminal>,
     complete: bool,
     output: &'a crate::control::result_consumer::NativeOutput,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    native_decision_metadata: Option<&'a crate::control::result_consumer::NativeDecisionMetadata>,
 }
 
 struct BoundedJsonWriter {
@@ -709,6 +711,7 @@ fn coordinator_native_output_json(
         terminal: consumer.terminal(),
         complete: consumer.is_complete(),
         output: consumer.output(),
+        native_decision_metadata: consumer.decision_metadata(),
     };
     let mut writer = BoundedJsonWriter::new(MAX_COORDINATOR_NATIVE_OUTPUT_BYTES);
     if serde_json::to_writer(&mut writer, &response).is_err() {
@@ -2299,6 +2302,53 @@ mod tests {
     }
 
     #[test]
+    fn native_decision_export_keeps_optional_metadata_separate_and_exact() {
+        use crate::control::catalog::Lane;
+        use crate::control::result_buffer::{ResultBuffer, ResultEvent, MAX_PAGE_BYTES};
+        use crate::control::result_consumer::ResultConsumer;
+        let mut buffer = ResultBuffer::new();
+        buffer.begin("decision-export", Lane::Decisions).unwrap();
+        buffer
+            .append(
+                "decision-export",
+                ResultEvent::DecisionResult {
+                    answers: serde_json::json!({"choice": "yes"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                    native_latency: Some(Duration::from_nanos(12_500_001)),
+                    native_usage: Some(
+                        serde_json::json!({"provider_units": 3, "detail": "private\nusage"})
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                    ),
+                },
+            )
+            .unwrap();
+        let mut consumer = ResultConsumer::new("decision-export", Lane::Decisions).unwrap();
+        consumer
+            .consume(&buffer.page("decision-export", 0, MAX_PAGE_BYTES).unwrap())
+            .unwrap();
+        let json = coordinator_native_output_json("decision-export", &consumer).unwrap();
+        assert!(!json.chars().any(char::is_control));
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            value["native_decision_metadata"]["native_latency_ns"],
+            12_500_001
+        );
+        assert_eq!(
+            value["native_decision_metadata"]["native_usage"]["provider_units"],
+            3
+        );
+        assert_eq!(
+            value["output"]["answers"],
+            serde_json::json!([{"choice": "yes"}])
+        );
+        assert!(value["output"].get("native_latency_ns").is_none());
+    }
+
+    #[test]
     fn native_output_json_is_compact_escaped_and_preserves_completion_metadata() {
         use crate::control::catalog::Lane;
         use crate::control::result_buffer::{
@@ -2336,6 +2386,7 @@ mod tests {
         assert!(json.contains("\"reasoning\":\"kept separate\""));
         assert!(json.len() <= MAX_COORDINATOR_NATIVE_OUTPUT_BYTES);
         assert!(!json.chars().any(char::is_control));
+        assert!(!json.contains("native_decision_metadata"));
         assert!(matches!(
             consumer.output(),
             NativeOutput::Language { content, reasoning }

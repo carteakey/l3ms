@@ -157,8 +157,11 @@ now reach result pages as additive `DecisionMetadataJsonPart` events: exact
 bounded integer nanoseconds and unchanged provider-specific usage fields.
 Answers and metadata publish transactionally. Legacy answer-only pages stay
 unchanged, but metadata pages require upgraded strict clients. The consumer
-exposes typed metadata separately; answer-only exports and TUI display do not
-include it yet. Native timing is not queue, cold-start or coordinator timing.
+exposes typed metadata separately. Explicit CLI output includes an optional
+`native_decision_metadata` sibling to the unchanged answer output, omitted when
+absent. The private TUI result panel shows it only after explicit observation;
+request resets/unavailable observations clear it with the output. Native timing
+is not queue, cold-start or coordinator timing; usage is not chat-token usage.
 
 The dedicated router file is strict duplicate-free JSON, which is also a YAML
 subset accepted by the router. It must be separate from the original

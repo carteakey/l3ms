@@ -85,6 +85,22 @@ impl std::fmt::Debug for NativeDecisionMetadata {
     }
 }
 
+impl Serialize for NativeDecisionMetadata {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let fields =
+            usize::from(self.native_latency.is_some()) + usize::from(self.native_usage.is_some());
+        let mut state = serializer.serialize_struct("NativeDecisionMetadata", fields)?;
+        if let Some(latency) = self.native_latency {
+            let nanos = u64::try_from(latency.as_nanos()).map_err(serde::ser::Error::custom)?;
+            state.serialize_field("native_latency_ns", &nanos)?;
+        }
+        if let Some(usage) = &self.native_usage {
+            state.serialize_field("native_usage", usage)?;
+        }
+        state.end()
+    }
+}
+
 impl Serialize for NativeOutput {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where

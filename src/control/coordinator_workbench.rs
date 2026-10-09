@@ -189,6 +189,7 @@ pub enum SubmitOutcome {
 pub struct Observation {
     pub status: RequestStatus,
     pub output: Option<NativeOutput>,
+    pub decision_metadata: Option<super::result_consumer::NativeDecisionMetadata>,
     pub output_complete: bool,
     pub results_available: bool,
     pub results_state: ResultReadState,
@@ -497,6 +498,7 @@ fn execute(
                     Ok(Observation {
                         status: state,
                         output: None,
+                        decision_metadata: None,
                         output_complete: false,
                         results_available: false,
                         results_state: ResultReadState::Unavailable,
@@ -522,6 +524,7 @@ fn execute(
                             let observation = Observation {
                                 status: state,
                                 output: Some(consumer.output().clone()),
+                                decision_metadata: consumer.decision_metadata().cloned(),
                                 output_complete: consumer.is_complete(),
                                 results_available: true,
                                 results_state: ResultReadState::Available,
@@ -543,6 +546,7 @@ fn execute(
                             Ok(Observation {
                                 status: state,
                                 output: None,
+                                decision_metadata: None,
                                 output_complete: false,
                                 results_available: false,
                                 results_state: ResultReadState::Unknown,
@@ -555,6 +559,7 @@ fn execute(
                             Ok(Observation {
                                 status: state,
                                 output: None,
+                                decision_metadata: None,
                                 output_complete: false,
                                 results_available: false,
                                 results_state: ResultReadState::Expired,
@@ -563,6 +568,7 @@ fn execute(
                         Err(_) => Ok(Observation {
                             status: state,
                             output: None,
+                            decision_metadata: None,
                             output_complete: false,
                             results_available: false,
                             results_state: ResultReadState::Unavailable,

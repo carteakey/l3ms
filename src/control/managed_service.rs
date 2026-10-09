@@ -624,6 +624,24 @@ pub struct OwnedService {
     main_pid: u32,
 }
 
+/// Cloneable comparison evidence for one exact owner-created manager
+/// generation. This is not an operation capability: it cannot start, inspect,
+/// or stop a service. Its private intent association prevents matching an
+/// otherwise-identical manager snapshot from another launch/runtime binding.
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct OwnedServiceGenerationIdentity {
+    intent: ServiceIntentRecord,
+    invocation_id: String,
+    cgroup: String,
+    main_pid: u32,
+}
+
+impl fmt::Debug for OwnedServiceGenerationIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("OwnedServiceGenerationIdentity([redacted])")
+    }
+}
+
 impl OwnedService {
     pub fn unit_name(&self) -> &str {
         &self.intent.unit_name
@@ -643,6 +661,18 @@ impl OwnedService {
             return None;
         };
         Some((self.main_pid, coordinator.uid()))
+    }
+
+    /// Capture opaque identity from this owner-created handle only. The
+    /// enclosing `ManagedRuntimeOwner` validates current WAL/state before
+    /// publishing this comparison evidence to another module.
+    pub(super) fn generation_identity(&self) -> OwnedServiceGenerationIdentity {
+        OwnedServiceGenerationIdentity {
+            intent: self.intent.clone(),
+            invocation_id: self.invocation_id.clone(),
+            cgroup: self.cgroup.clone(),
+            main_pid: self.main_pid,
+        }
     }
 }
 
@@ -2730,6 +2760,32 @@ exit 1
             fixture.controller.state(&handle, &context).unwrap(),
             ManagedServiceState::Running
         );
+        let identity = handle.generation_identity();
+        assert_eq!(identity, handle.generation_identity());
+        assert_eq!(
+            format!("{identity:?}"),
+            "OwnedServiceGenerationIdentity([redacted])"
+        );
+
+        let mut different_coordinator = identity.clone();
+        different_coordinator
+            .intent
+            .coordinator_id
+            .push_str("-other");
+        assert_ne!(identity, different_coordinator);
+        let mut different_launch = identity.clone();
+        different_launch.intent.launch_identity.push_str("-other");
+        assert_ne!(identity, different_launch);
+        let mut different_invocation = identity.clone();
+        different_invocation.invocation_id.push_str("-other");
+        assert_ne!(identity, different_invocation);
+        let mut different_cgroup = identity.clone();
+        different_cgroup.cgroup.push_str("-other");
+        assert_ne!(identity, different_cgroup);
+        let mut different_main_pid = identity.clone();
+        different_main_pid.main_pid += 1;
+        assert_ne!(identity, different_main_pid);
+
         let stopped = fixture.controller.stop(&handle, &context).unwrap();
         assert_eq!(stopped.cgroup_path(), handle.cgroup);
         assert!(!format!("{stopped:?}").contains(&handle.cgroup));

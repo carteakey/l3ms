@@ -1011,6 +1011,7 @@ struct App {
     coordinator_input_action: Option<CoordinatorInputAction>,
     task_form_editor: Option<TaskFormEditor>,
     coordinator_output: Option<NativeOutput>,
+    coordinator_decision_metadata: Option<crate::control::result_consumer::NativeDecisionMetadata>,
     coordinator_output_complete: bool,
     coordinator_results_available: bool,
     #[cfg(target_os = "linux")]
@@ -1175,6 +1176,7 @@ impl App {
             coordinator_input_action: None,
             task_form_editor: None,
             coordinator_output: None,
+            coordinator_decision_metadata: None,
             coordinator_output_complete: false,
             coordinator_results_available: false,
             #[cfg(target_os = "linux")]
@@ -1810,6 +1812,7 @@ impl App {
                                 | crate::control::ipc::RequestStatus::Interrupted
                         );
                         self.coordinator_output = observation.output;
+                        self.coordinator_decision_metadata = observation.decision_metadata;
                         self.coordinator_output_complete = observation.output_complete;
                         self.coordinator_results_available = observation.results_available;
                         self.status = match observation.results_state {
@@ -4368,6 +4371,7 @@ impl App {
             match result {
                 Ok(_) => {
                     self.coordinator_output = None;
+                    self.coordinator_decision_metadata = None;
                     self.coordinator_output_complete = false;
                     self.coordinator_results_available = false;
                     self.coordinator_action_pending = true;
@@ -4546,6 +4550,7 @@ impl App {
         match result {
             Ok(_) => {
                 self.coordinator_output = None;
+                self.coordinator_decision_metadata = None;
                 self.coordinator_output_complete = false;
                 self.coordinator_results_available = false;
                 self.coordinator_action_pending = true;
@@ -6393,7 +6398,11 @@ impl App {
                     "Native results are shown here only after pressing o. No result body is copied to logs or history.".to_owned()
                 }
             },
-            |output| native_output_preview(output, self.coordinator_output_complete),
+            |output| native_output_preview(
+                output,
+                self.coordinator_output_complete,
+                self.coordinator_decision_metadata.as_ref(),
+            ),
         );
         frame.render_widget(
             Paragraph::new(output_text)
@@ -7090,7 +7099,11 @@ fn coordinator_prompt(action: Option<CoordinatorInputAction>) -> &'static str {
     }
 }
 
-fn native_output_preview(output: &NativeOutput, complete: bool) -> String {
+fn native_output_preview(
+    output: &NativeOutput,
+    complete: bool,
+    metadata: Option<&crate::control::result_consumer::NativeDecisionMetadata>,
+) -> String {
     let mut rendered = match output {
         NativeOutput::Language { content, reasoning } => {
             if reasoning.is_empty() {
@@ -7111,8 +7124,18 @@ fn native_output_preview(output: &NativeOutput, complete: bool) -> String {
                 serde_json::to_string(&sample).unwrap_or_else(|_| "unavailable".into()),
             )
         }
-        NativeOutput::Decisions { answers } => serde_json::to_string_pretty(answers)
-            .unwrap_or_else(|_| "Decision output could not be rendered".into()),
+        NativeOutput::Decisions { answers } => {
+            let answers = serde_json::to_string_pretty(answers)
+                .unwrap_or_else(|_| "Decision output could not be rendered".into());
+            match metadata {
+                None => answers,
+                Some(metadata) => format!(
+                    "Native decision metadata (not coordinator timing):\n{}\n\nAnswers:\n{answers}",
+                    serde_json::to_string_pretty(metadata)
+                        .unwrap_or_else(|_| "Metadata unavailable".into()),
+                ),
+            }
+        }
         NativeOutput::Media { artifacts } => artifacts
             .iter()
             .map(|artifact| format!("{:?}: {}", artifact.kind, artifact.relative_path))
@@ -8660,6 +8683,46 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    #[test]
+    fn private_decision_preview_labels_native_timing_and_sanitizes_usage() {
+        use crate::control::result_buffer::{ResultBuffer, ResultEvent, MAX_PAGE_BYTES};
+        use crate::control::result_consumer::ResultConsumer;
+        let mut buffer = ResultBuffer::new();
+        buffer
+            .begin("preview", crate::control::catalog::Lane::Decisions)
+            .unwrap();
+        buffer
+            .append(
+                "preview",
+                ResultEvent::DecisionResult {
+                    answers: serde_json::json!({"choice": true})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                    native_latency: Some(Duration::from_nanos(17)),
+                    native_usage: Some(
+                        serde_json::json!({"native_units": 3, "detail": "private\u{1b}usage"})
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                    ),
+                },
+            )
+            .unwrap();
+        let mut consumer =
+            ResultConsumer::new("preview", crate::control::catalog::Lane::Decisions).unwrap();
+        consumer
+            .consume(&buffer.page("preview", 0, MAX_PAGE_BYTES).unwrap())
+            .unwrap();
+        let preview = native_output_preview(consumer.output(), false, consumer.decision_metadata());
+        assert!(preview.contains("not coordinator timing"));
+        assert!(preview.contains("native_latency_ns"));
+        assert!(preview.contains("native_units"));
+        assert!(preview.contains("press o"));
+        assert!(!preview.contains('\u{1b}'));
+        assert!(!format!("{:?}", consumer.decision_metadata()).contains("private"));
+    }
+
     #[test]
     fn stack_catalog_keyboard_submit_observe_cancel_keeps_native_output_private() {
         use std::os::unix::fs::PermissionsExt;

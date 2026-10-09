@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -38,6 +39,29 @@ def completed_row(request_id: str, result_state: str = "succeeded") -> dict[str,
 
 
 class ProbeNagiOfflineSafetyTests(unittest.TestCase):
+    def test_native_metadata_requires_exact_positive_integer_nanoseconds(self) -> None:
+        response = {
+            "request_id": "fixture", "complete": True,
+            "terminal": {"status": "succeeded"},
+            "output": {"lane": "decisions", "answers": [{"route": {"choice": "accept"}}]},
+            "native_decision_metadata": {"native_latency_ns": 12_500_001},
+        }
+        def fetch():
+            return probe.fetch_and_validate_output(
+                Path("/binary"), self.root, self.root, {}, "fixture", time.monotonic() + 5
+            )
+        with mock.patch.object(probe, "run_cli", return_value=response):
+            self.assertEqual(fetch(), (1, 12_500_001))
+            for latency in [True, 0, -1, 1.5, "17", 2**64, None]:
+                response["native_decision_metadata"] = {"native_latency_ns": latency}
+                with self.assertRaises(probe.ProbeFailure):
+                    fetch()
+            for metadata in [None, {}, {"native_latency_ns": 1, "native_usage": []},
+                             {"native_latency_ns": 1, "coordinator_ms": 1}]:
+                response["native_decision_metadata"] = metadata
+                with self.assertRaises(probe.ProbeFailure):
+                    fetch()
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="probe-nagi-offline-")
         self.root = Path(self.temp.name)

@@ -26,7 +26,9 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
 
 use super::catalog::ProfileId;
-use super::managed_service::{ManagedServiceErrorKind, ManagedServiceState, OwnedService};
+use super::managed_service::{
+    ManagedServiceErrorKind, OwnedService, OwnedServiceGenerationIdentity,
+};
 use super::native_http::{PinnedEngineSocket, VerifiedConnectError};
 use super::runtime::OperationContext;
 use super::service_owner::ManagedRuntimeOwner;
@@ -517,7 +519,7 @@ fn connect_owned_supervisor(
     context: &OperationContext<'_>,
 ) -> Result<UnixStream, NativeHealthFailure> {
     check_active(context)?;
-    require_running(owner, service, context)?;
+    let generation = running_generation(owner, service, context)?;
     let (expected_pid, expected_uid) = service
         .supervisor_peer_identity()
         .ok_or_else(|| failure(NativeHealthFailureKind::WrongServiceRole))?;
@@ -530,9 +532,16 @@ fn connect_owned_supervisor(
         }
     };
     check_active(context)?;
-    socket
+    let stream = socket
         .connect_verified(expected_pid, expected_uid, context)
-        .map_err(map_connect_error)
+        .map_err(map_connect_error)?;
+    // The actual socket peer and the retained owner generation must agree
+    // after connection too. A stale pre-connect observation is not dispatch
+    // authority if the manager/WAL changes during connect.
+    if running_generation(owner, service, context)? != generation {
+        return Err(failure(NativeHealthFailureKind::OwnerUnverified));
+    }
+    Ok(stream)
 }
 
 fn require_running(
@@ -540,10 +549,19 @@ fn require_running(
     service: &OwnedService,
     context: &OperationContext<'_>,
 ) -> Result<(), NativeHealthFailure> {
-    match owner.state(service, context) {
-        Ok(ManagedServiceState::Running) => Ok(()),
-        Ok(ManagedServiceState::Stopped) => Err(failure(NativeHealthFailureKind::NotRunning)),
-        Ok(ManagedServiceState::Unknown) => Err(failure(NativeHealthFailureKind::OwnerUnverified)),
+    running_generation(owner, service, context).map(|_| ())
+}
+
+fn running_generation(
+    owner: &ManagedRuntimeOwner<'_>,
+    service: &OwnedService,
+    context: &OperationContext<'_>,
+) -> Result<OwnedServiceGenerationIdentity, NativeHealthFailure> {
+    match owner.running_generation_identity(service, context) {
+        Ok(identity) => Ok(identity),
+        Err(ManagedServiceErrorKind::ServiceNotActive) => {
+            Err(failure(NativeHealthFailureKind::NotRunning))
+        }
         Err(ManagedServiceErrorKind::Cancelled) => Err(failure(NativeHealthFailureKind::Cancelled)),
         Err(ManagedServiceErrorKind::DeadlineExceeded) => {
             Err(failure(NativeHealthFailureKind::DeadlineExceeded))

@@ -10,6 +10,18 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Require and validate exact native decision metadata in the bounded CPU Nagi
+  acceptance harness; retain one-submit/no-replay and verified process cleanup.
+  A real offline CPU rerun passed, without service-manager or GPU changes.
+- Show optional native decision metadata in the explicitly observed private
+  TUI result panel and include it separately in bounded CLI JSON exports.
+  Preserve absent-field compatibility and answer shapes; keep native timing
+  distinct from coordinator timing and provider usage distinct from chat tokens.
+- Bind native health connections to an opaque exact owned-service generation,
+  revalidating retained intent/manager state after verified socket connection.
+  Restored Stop-only handles cannot produce this identity; it is comparison
+  evidence, not replay or dispatch authority. Comfy permit persistence remains
+  a separate integration gate.
 - Retain optional native decision latency and provider-specific usage in one
   transactional result append for CPU and managed local jobs. Answer-only pages
   stay unchanged; new metadata events require upgraded clients. The consumer

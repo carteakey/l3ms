@@ -10,13 +10,13 @@ existing Linear migration issues rather than replacing their acceptance criteria
 
 ## Monorepo: next work
 
-Latest offline checkpoint on `feature/l3ms-monorepo`: 798 root tests passed,
+Latest offline checkpoint on `feature/l3ms-monorepo`: 801 root tests passed,
 1 ignored, strict all-target Clippy, formatting and whitespace checks pass.
 Opt-in CPU dispatch, managed-language launch, resumable native results and
 owned per-job packet/service handoff are implemented. Subsequent branch work
 composes allowlisted local jobs with managed dispatch and retry-safe finalization;
 full mixed-worker tests, crash recovery, Comfy integration, native decision
-metadata display/export, artifact-root integration and real managed acceptance remain
+metadata live acceptance, artifact-root integration and real managed acceptance remain
 unfinished. See migration status for the current slice and its explicit gates.
 This is offline implementation evidence, not live cutover acceptance.
 The repeat-run fixture `ETXTBSY` race is corrected with test-only fork/write

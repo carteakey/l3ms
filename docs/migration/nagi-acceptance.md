@@ -109,3 +109,25 @@ or simulation occurred. Eight offline harness safety regressions also pass.
 This closes the CPU coordinator execution gate only. The synthetic question
 does not measure routing accuracy; GPU execution, managed engine switching and
 cross-client/live cutover acceptance remain open.
+
+## Native metadata rerun — 2026-10-09
+
+The current branch CLI and updated CPU harness completed one real offline Nagi
+request with a 120-second bound. There was exactly one submission and confirmed
+caller acknowledgment; fourteen read-only status queries observed success. One
+result page contained three events, and CLI native output retained one answer
+plus the exact model-reported latency **1,638,821,625 ns**. This is native
+forward-pass timing, not coordinator execution/cold-start timing. The private
+history had exactly one matching successful terminal row.
+
+All offline flags were enabled, CUDA visibility was empty, and library thread
+limits were two. No weights were downloaded, service manager invoked, GPU work
+started, or original manifest/environment changed. The foreground daemon stopped,
+captured owned process groups were empty, and the exact temporary fixture was
+removed. Nine offline harness tests reject absent, floating-point, boolean,
+overflowing or coordinator-substituted metadata. Scripts were snapshotted under
+the branch's private `.toolkit/model_config_versions` before the harness update.
+
+This closes real CPU native-metadata delivery through coordinator pages and CLI
+export. It is not a GPU latency target, routing-accuracy, TUI live interaction,
+mixed managed-runtime switching or crash-recovery acceptance claim.

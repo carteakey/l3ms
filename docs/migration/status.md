@@ -10,6 +10,33 @@ runtime check.
 
 ## Current resumed checkpoint — 2026-10-08
 
+2026-10-09 client/generation checkpoint: **801 root tests passed, 1 ignored**,
+with strict all-target Clippy, formatting and whitespace checks. Explicit
+bounded CLI exports now include optional native decision metadata separately
+from the unchanged answers. The private TUI result preview labels native timing
+and preserves native provider usage, with control-character sanitization and
+existing preview bounds. Request resets/unavailable observations clear metadata;
+absent values stay omitted from legacy exports. Focused CLI/preview fixtures
+verify exact nanoseconds, native usage semantics and redacted debug output.
+
+Opaque owned-generation identity includes the complete retained intent and
+exact manager invocation/cgroup/PID, not ports or names alone. It can be obtained
+only from an owned running handle after WAL/manager validation; restored
+Stop-only handles cannot produce one. Health connections revalidate that same
+generation after the verified socket connection and before native HTTP. Focused
+fixtures reject missing WAL/substituted invocation and distinguish launch and
+coordinator associations. This is not yet durable Comfy generation binding or
+mixed-runtime recovery/real GPU acceptance. No live service was changed.
+
+The real offline CPU Nagi coordinator rerun also passes: one submission,
+fourteen read-only status queries, one result page/three events, one typed answer
+and exact native latency `1638821625` ns in CLI export. One matching successful
+durable history row was verified. Daemon/process groups stopped and the exact
+temporary fixture was removed; no service manager, GPU work, download or original
+checkout mutation occurred. Nine offline harness safety tests pass. See
+[Nagi acceptance](nagi-acceptance.md) for scope; real GPU/mixed-runtime acceptance
+remains open.
+
 The subsequent native decision metadata slice passes **798 root tests, 1 ignored**,
 strict all-target Clippy, formatting and whitespace checks. CPU and managed
 local publication now preserve optional native latency/usage in one transactional
@@ -45,7 +72,7 @@ durable completion history; they do not expose the private absolute job root.
 Remaining gates: full injected mixed-worker lifecycle tests; crash-safe
 multi-runtime recovery and durable cleanup/history association; Comfy
 generation-bound dispatch/transport and artifact integration; optional native
-decision metadata display/export; HTTP artifact-root integration; and
+decision metadata end-to-end live acceptance; HTTP artifact-root integration; and
 real model/GPU switching, cancellation and exact service restoration acceptance.
 Current startup still refuses retained foreign/job intents rather than adopting
 or replaying them. No live service or original checkout changed in this slice.

@@ -25,8 +25,8 @@ use super::gpu_probe::GpuProbeConfig;
 use super::gpu_probe::{GpuProbeFailureKind, NvidiaSmiGpuProbe};
 use super::managed_service::{
     LaunchRecipe, ManagedServiceController, ManagedServiceErrorKind, ManagedServiceState,
-    OwnedLocalJobBinding, OwnedService, ReconcileResult, ServiceIntentRecord, StartDisposition,
-    StartFailure, StopOnlyService, StoppedService,
+    OwnedLocalJobBinding, OwnedService, OwnedServiceGenerationIdentity, ReconcileResult,
+    ServiceIntentRecord, StartDisposition, StartFailure, StopOnlyService, StoppedService,
 };
 use super::owned_job_store::{
     BreezeArtifactKind, NativeJobFailure, NativeJobResult, OwnedJobStore, ValidatedOwnedJob,
@@ -803,6 +803,24 @@ impl<'host> ManagedRuntimeOwner<'host> {
         }
         check_context(context)?;
         self.controller.state(service, context)
+    }
+
+    /// Return opaque equality evidence for a generation only after this owner
+    /// confirms its exact durable intent and current manager state. This value
+    /// is not an operation capability and the observation is point-in-time;
+    /// callers must revalidate the owner immediately before native dispatch.
+    /// The `OwnedService` argument deliberately excludes restored
+    /// `StopOnlyService` handles from this path.
+    pub(crate) fn running_generation_identity(
+        &self,
+        service: &OwnedService,
+        context: &OperationContext<'_>,
+    ) -> Result<OwnedServiceGenerationIdentity, ManagedServiceErrorKind> {
+        match self.state(service, context)? {
+            ManagedServiceState::Running => Ok(service.generation_identity()),
+            ManagedServiceState::Stopped => Err(ManagedServiceErrorKind::ServiceNotActive),
+            ManagedServiceState::Unknown => Err(ManagedServiceErrorKind::UnitStateUnverifiable),
+        }
     }
 
     /// Observe every retained intent; never recreate a recipe or replay start.
@@ -2093,6 +2111,49 @@ sys.exit(23)
         assert_eq!(
             fs::read_to_string(fixture.root.path().join("starts")).unwrap(),
             "start\n"
+        );
+    }
+
+    #[test]
+    fn running_generation_identity_requires_exact_wal_and_manager_generation() {
+        let fixture = Fixture::new();
+        let guard = CoordinatorLock::acquire(fixture.locks.path(), []).unwrap();
+        let mut owner = fixture.owner(&guard);
+        let service = fixture.start(&mut owner);
+
+        let identity = owner
+            .running_generation_identity(&service, &fixture.context())
+            .unwrap();
+        assert_eq!(
+            identity,
+            owner
+                .running_generation_identity(&service, &fixture.context())
+                .unwrap()
+        );
+        assert_eq!(
+            format!("{identity:?}"),
+            "OwnedServiceGenerationIdentity([redacted])"
+        );
+
+        let intent_path = fixture
+            .intents
+            .path()
+            .join(format!("{}.json", service.unit_name()));
+        fs::remove_file(&intent_path).unwrap();
+        assert_eq!(
+            owner.running_generation_identity(&service, &fixture.context()),
+            Err(ManagedServiceErrorKind::OwnershipMismatch)
+        );
+
+        owner.store.record(service.intent_record()).unwrap();
+        let state_path = fixture.root.path().join("manager-state.json");
+        let mut state: serde_json::Value =
+            serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+        state["invocation"] = serde_json::Value::String("b".repeat(32));
+        fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+        assert_eq!(
+            owner.running_generation_identity(&service, &fixture.context()),
+            Err(ManagedServiceErrorKind::UnitStateUnverifiable)
         );
     }
 
