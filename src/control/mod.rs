@@ -9,6 +9,8 @@ pub mod cgroup_release;
 pub mod client;
 pub mod comfy;
 #[cfg(target_os = "linux")]
+pub(crate) mod comfy_artifacts;
+#[cfg(target_os = "linux")]
 pub mod coordinator_launch;
 #[cfg(target_os = "linux")]
 pub mod coordinator_workbench;
@@ -37,6 +39,8 @@ pub mod ipc;
 pub mod language;
 #[cfg(target_os = "linux")]
 pub mod local_ipc;
+#[cfg(target_os = "linux")]
+pub(crate) mod managed_comfy_config;
 #[cfg(target_os = "linux")]
 pub mod managed_service;
 #[cfg(target_os = "linux")]

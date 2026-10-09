@@ -211,7 +211,12 @@ impl ControlDaemon {
             return Ok(report);
         }
         let expected_gpu = config.gpu.expected_index();
-        if config.local_job_profiles.is_empty() {
+        let comfy_profiles = config
+            .comfy
+            .as_ref()
+            .map(|comfy| comfy.profiles().clone())
+            .unwrap_or_default();
+        if config.local_job_profiles.is_empty() && comfy_profiles.is_empty() {
             self.core
                 .require_managed_language_startup(&config.runtime, expected_gpu)
         } else {
@@ -221,6 +226,7 @@ impl ControlDaemon {
                 &config.startup_profile,
                 &config.supported_model_tasks,
                 &config.local_job_profiles,
+                &comfy_profiles,
             )
         }
         .map_err(|_| DaemonError::ManagedSessionUnavailable)?;
@@ -288,7 +294,7 @@ impl ControlDaemon {
                             // observation. Do not reopen admission after the
                             // listener has already committed to stop.
                         } else if worker_ready
-                            || (if local_job_profiles.is_empty() {
+                            || (if local_job_profiles.is_empty() && comfy_profiles.is_empty() {
                                 core.confirm_managed_language_ready(
                                     &runtime,
                                     expected_gpu,
@@ -302,7 +308,10 @@ impl ControlDaemon {
                                     expected_gpu,
                                     &startup_profile,
                                     supported_model_tasks.clone(),
-                                    local_job_profiles.clone(),
+                                    super::inference::ManagedStackProfiles {
+                                        local_jobs: local_job_profiles.clone(),
+                                        comfy: comfy_profiles.clone(),
+                                    },
                                     &readiness,
                                 )
                             })
@@ -337,6 +346,54 @@ impl ControlDaemon {
                             stopping = true;
                         }
                         let _ = reply.send(appended);
+                    }
+                    Ok(super::managed_session::ManagedWorkerEvent::ComfyCandidate {
+                        ticket,
+                        candidate,
+                        generation,
+                        reply,
+                    }) => {
+                        let permit = if !stopping
+                            && active_slot.as_ref().is_some_and(|key| {
+                                key.job_id == ticket.job_id && key.request_id == ticket.request_id
+                            }) {
+                            core.record_managed_comfy_dispatch_candidate(
+                                &ticket,
+                                candidate,
+                                *generation,
+                                Instant::now(),
+                            )
+                            .ok()
+                            .filter(|permit| core.accepts_managed_comfy_dispatch_permit(permit))
+                        } else {
+                            None
+                        };
+                        let accepted = permit.is_some();
+                        // A persisted candidate whose reply was lost is not a
+                        // license to mint another ID or repeat submission.
+                        if reply.send(permit).is_err() || !accepted {
+                            core.quarantine();
+                            report.stopped = StopReason::WorkerUncertain;
+                            stopping = true;
+                        }
+                    }
+                    Ok(super::managed_session::ManagedWorkerEvent::ComfyBackendAcknowledged {
+                        acknowledgement,
+                        reply,
+                    }) => {
+                        let matches_slot = active_slot.as_ref().is_some_and(|key| {
+                            key.job_id == acknowledgement.job_id()
+                                && key.request_id == acknowledgement.request_id()
+                        });
+                        let accepted = matches_slot
+                            && core
+                                .accept_managed_comfy_backend_acknowledgement(*acknowledgement)
+                                .is_ok();
+                        if reply.send(accepted).is_err() || !accepted {
+                            core.quarantine();
+                            report.stopped = StopReason::WorkerUncertain;
+                            stopping = true;
+                        }
                     }
                     Ok(super::managed_session::ManagedWorkerEvent::JobFinished(completion)) => {
                         let stop_session = completion.stop_session;

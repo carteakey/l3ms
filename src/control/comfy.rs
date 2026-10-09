@@ -92,6 +92,8 @@ impl PreparedComfyJob {
 pub struct PreparedManagedComfyJob {
     inner: PreparedComfyJob,
     generation: super::managed_service::OwnedServiceGenerationIdentity,
+    coordinator_job_id: Option<u64>,
+    coordinator_request_id: Option<String>,
     cancel_attempted: bool,
 }
 
@@ -104,6 +106,120 @@ impl PreparedManagedComfyJob {
     pub fn submission_attempted(&self) -> bool {
         self.inner.submission_attempted()
     }
+}
+
+/// Transient evidence that Comfy positively acknowledged this exact managed
+/// candidate. It is intentionally neither cloneable nor restorable; its
+/// request/route/generation binding is consumed by the owner thread before
+/// backend identity is persisted.
+#[cfg(target_os = "linux")]
+pub(crate) struct ManagedComfyBackendAcknowledgement {
+    job_id: u64,
+    request_id: String,
+    candidate_id: String,
+    backend_id: String,
+    request: InferenceRequest,
+    route: ResolvedProfileRoute,
+    generation: super::managed_service::OwnedServiceGenerationIdentity,
+    generation_reference: Option<crate::state_store::ComfyServiceGenerationReference>,
+}
+
+#[cfg(target_os = "linux")]
+impl ManagedComfyBackendAcknowledgement {
+    pub(crate) fn job_id(&self) -> u64 {
+        self.job_id
+    }
+
+    pub(crate) fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    pub(crate) fn candidate_id(&self) -> &str {
+        &self.candidate_id
+    }
+
+    pub(crate) fn backend_id(&self) -> &str {
+        &self.backend_id
+    }
+
+    pub(crate) fn generation_reference(
+        &self,
+    ) -> Option<crate::state_store::ComfyServiceGenerationReference> {
+        self.generation_reference.clone()
+    }
+
+    pub(crate) fn matches_generation(
+        &self,
+        generation: &super::managed_service::OwnedServiceGenerationIdentity,
+    ) -> bool {
+        let Ok(reference) = generation.comfy_service_generation_reference() else {
+            return false;
+        };
+        self.generation == *generation && self.generation_reference.as_ref() == Some(&reference)
+    }
+
+    pub(crate) fn matches_active(
+        &self,
+        job_id: u64,
+        request_id: &str,
+        request: &InferenceRequest,
+        route: &ResolvedProfileRoute,
+    ) -> bool {
+        self.job_id == job_id
+            && self.request_id == request_id
+            && self.candidate_id == self.backend_id
+            && same_comfy_request(&self.request, request)
+            && self.route == *route
+    }
+
+    pub(crate) fn matches_ticket(&self, ticket: &super::inference::DispatchTicket) -> bool {
+        self.matches_active(
+            ticket.job_id,
+            &ticket.request_id,
+            &ticket.request,
+            &ticket.route,
+        )
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl fmt::Debug for ManagedComfyBackendAcknowledgement {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ManagedComfyBackendAcknowledgement([redacted])")
+    }
+}
+
+/// Build in-memory evidence for coordinator association unit tests only. This
+/// is not reachable in production and makes no claim that a native request or
+/// acknowledgment occurred.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn test_managed_comfy_acknowledgement(
+    ticket: &super::inference::DispatchTicket,
+    generation: super::managed_service::OwnedServiceGenerationIdentity,
+    candidate_id: &str,
+) -> Option<ManagedComfyBackendAcknowledgement> {
+    if !canonical_uuid(candidate_id)
+        || !same_comfy_request(&ticket.request, &ticket.request)
+        || ticket.route.profile.lane != Lane::Media
+        || ticket.route.runtime.lane != Lane::Media
+        || ticket.route.runtime.as_str() != "ComfyUI"
+    {
+        return None;
+    }
+    let generation_reference = generation.comfy_service_generation_reference().ok()?;
+    let acknowledgement = ManagedComfyBackendAcknowledgement {
+        job_id: ticket.job_id,
+        request_id: ticket.request_id.clone(),
+        candidate_id: candidate_id.to_owned(),
+        backend_id: candidate_id.to_owned(),
+        request: ticket.request.clone(),
+        route: ticket.route.clone(),
+        generation,
+        generation_reference: Some(generation_reference),
+    };
+    acknowledgement
+        .matches_generation(&acknowledgement.generation)
+        .then_some(acknowledgement)
 }
 
 /// Exact-generation native operations, not lifecycle/admission or release
@@ -164,6 +280,8 @@ impl<'session, 'host> OwnedComfySession<'session, 'host> {
                 .adapter
                 .prepare_for_route(catalog, request, accepted_route, fresh_uuid)?,
             generation: self.generation.clone(),
+            coordinator_job_id: None,
+            coordinator_request_id: None,
             cancel_attempted: false,
         })
     }
@@ -178,6 +296,43 @@ impl<'session, 'host> OwnedComfySession<'session, 'host> {
             .status_using_http(&job.inner, context, &|path, payload, context| {
                 self.http(path, payload, context)
             })
+    }
+
+    /// Observe a submitted candidate in the context of its exact original
+    /// ticket. Only a successful non-404 snapshot with a validated identical
+    /// native ID produces backend-acknowledgment evidence. Unknown/404 and
+    /// cancellation responses are not acknowledgment evidence.
+    pub(crate) fn status_with_acknowledgement(
+        &self,
+        job: &PreparedManagedComfyJob,
+        ticket: &super::inference::DispatchTicket,
+        context: &OperationContext<'_>,
+    ) -> Result<(ComfySnapshot, Option<ManagedComfyBackendAcknowledgement>), ComfyFailure> {
+        self.check_job(job)?;
+        if !managed_job_matches_ticket(job, ticket) {
+            return Err(no_dispatch(ComfyErrorKind::InvalidOwnership));
+        }
+        let snapshot =
+            self.adapter
+                .status_using_http(&job.inner, context, &|path, payload, context| {
+                    self.http(path, payload, context)
+                })?;
+        let acknowledgement = if snapshot.state == ComfyJobState::Unknown {
+            None
+        } else {
+            Some(managed_comfy_acknowledgement(
+                job,
+                ticket.job_id,
+                &ticket.request_id,
+            )?)
+        };
+        if acknowledgement
+            .as_ref()
+            .is_some_and(|proof| !proof.matches_ticket(ticket))
+        {
+            return Err(uncertain(ComfyErrorKind::InvalidOwnership));
+        }
+        Ok((snapshot, acknowledgement))
     }
 
     /// Main-thread handoff: prepare one job and atomically persist its fresh
@@ -196,6 +351,47 @@ impl<'session, 'host> OwnedComfySession<'session, 'host> {
         ),
         ComfyFailure,
     > {
+        let (job, permit) =
+            self.prepare_dispatch_using(catalog, ticket, context, |candidate, generation| {
+                coordinator
+                    .record_managed_comfy_dispatch_candidate(
+                        ticket,
+                        candidate,
+                        generation,
+                        std::time::Instant::now(),
+                    )
+                    .map_err(|_| no_dispatch(ComfyErrorKind::InvalidOwnership))
+            })?;
+        if !coordinator.accepts_managed_comfy_dispatch_permit(&permit) {
+            return Err(no_dispatch(ComfyErrorKind::InvalidOwnership));
+        }
+        Ok((job, permit))
+    }
+
+    /// Prepare a single-use managed candidate while letting the owner thread
+    /// perform the durable handoff. The callback receives only this freshly
+    /// generated candidate and its owner-minted exact generation. Its returned
+    /// permit is checked against the full accepted ticket before this method
+    /// returns, and the live generation is re-read after callback completion.
+    pub(crate) fn prepare_dispatch_using<F>(
+        &self,
+        catalog: &Catalog,
+        ticket: &super::inference::DispatchTicket,
+        context: &OperationContext<'_>,
+        record_candidate: F,
+    ) -> Result<
+        (
+            PreparedManagedComfyJob,
+            super::inference::ManagedComfyDispatchPermit,
+        ),
+        ComfyFailure,
+    >
+    where
+        F: FnOnce(
+            String,
+            super::managed_service::OwnedServiceGenerationIdentity,
+        ) -> Result<super::inference::ManagedComfyDispatchPermit, ComfyFailure>,
+    {
         active(context, DispatchDisposition::NoDispatch)?;
         let current = self
             .owner
@@ -205,18 +401,28 @@ impl<'session, 'host> OwnedComfySession<'session, 'host> {
             return Err(no_dispatch(ComfyErrorKind::InvalidOwnership));
         }
         let candidate = fresh_comfy_candidate(context)?;
-        let job = self.prepare_for_route(catalog, &ticket.request, &ticket.route, &candidate)?;
-        let permit = coordinator
-            .record_managed_comfy_dispatch_candidate(
-                ticket,
-                candidate,
-                current,
-                std::time::Instant::now(),
-            )
-            .map_err(|_| no_dispatch(ComfyErrorKind::InvalidOwnership))?;
-        if !coordinator.accepts_managed_comfy_dispatch_permit(&permit) {
+        let mut job =
+            self.prepare_for_route(catalog, &ticket.request, &ticket.route, &candidate)?;
+        let permit = record_candidate(candidate.clone(), current)?;
+        if permit.job_id() != ticket.job_id
+            || permit.request_id() != ticket.request_id
+            || !permit.matches_generation(&self.generation)
+            || !permit.matches_candidate(&candidate, &ticket.route)
+            || !permit.matches_request(&ticket.request_id, &ticket.request, &ticket.route)
+            || candidate != job.id()
+        {
             return Err(no_dispatch(ComfyErrorKind::InvalidOwnership));
         }
+        active(context, DispatchDisposition::NoDispatch)?;
+        let after = self
+            .owner
+            .running_generation_identity(self.service, context)
+            .map_err(owned_generation_failure)?;
+        if after != self.generation || !permit.matches_generation(&after) {
+            return Err(no_dispatch(ComfyErrorKind::InvalidOwnership));
+        }
+        job.coordinator_job_id = Some(ticket.job_id);
+        job.coordinator_request_id = Some(ticket.request_id.clone());
         Ok((job, permit))
     }
 
@@ -226,6 +432,18 @@ impl<'session, 'host> OwnedComfySession<'session, 'host> {
         permit: super::inference::ManagedComfyDispatchPermit,
         context: &OperationContext<'_>,
     ) -> Result<(), ComfyFailure> {
+        self.submit_with_acknowledgement(job, permit, context)
+            .map(drop)
+    }
+
+    /// Consume one exact pre-dispatch permit and return native acknowledgment
+    /// evidence only after the success response names the candidate ID exactly.
+    pub(crate) fn submit_with_acknowledgement(
+        &self,
+        job: &mut PreparedManagedComfyJob,
+        permit: super::inference::ManagedComfyDispatchPermit,
+        context: &OperationContext<'_>,
+    ) -> Result<ManagedComfyBackendAcknowledgement, ComfyFailure> {
         self.check_job(job)?;
         if !permit.matches_generation(&self.generation)
             || !permit.matches_candidate(job.id(), &job.inner.accepted_route)
@@ -237,13 +455,26 @@ impl<'session, 'host> OwnedComfySession<'session, 'host> {
         {
             return Err(no_dispatch(ComfyErrorKind::InvalidOwnership));
         }
+        if job
+            .coordinator_job_id
+            .is_some_and(|job_id| job_id != permit.job_id())
+            || job
+                .coordinator_request_id
+                .as_deref()
+                .is_some_and(|request_id| request_id != permit.request_id())
+        {
+            return Err(no_dispatch(ComfyErrorKind::InvalidOwnership));
+        }
+        job.coordinator_job_id = Some(permit.job_id());
+        job.coordinator_request_id = Some(permit.request_id().to_owned());
         let route = job.inner.accepted_route.clone();
         self.adapter.submit_using_http(
             &mut job.inner,
             &route,
             context,
             &|path, payload, context| self.http(path, payload, context),
-        )
+        )?;
+        managed_comfy_acknowledgement(job, permit.job_id(), permit.request_id())
     }
 
     /// A single scoped cancel attempt. Its acknowledgment is not terminal
@@ -361,6 +592,75 @@ fn fresh_comfy_candidate(context: &OperationContext<'_>) -> Result<String, Comfy
         write!(id, "{byte:02x}").map_err(|_| no_dispatch(ComfyErrorKind::Configuration))?;
     }
     Ok(id)
+}
+
+#[cfg(target_os = "linux")]
+fn managed_job_matches_ticket(
+    job: &PreparedManagedComfyJob,
+    ticket: &super::inference::DispatchTicket,
+) -> bool {
+    job.coordinator_job_id == Some(ticket.job_id)
+        && job.coordinator_request_id.as_deref() == Some(ticket.request_id.as_str())
+        && job.inner.accepted_route == ticket.route
+        && same_comfy_request(&job.inner.request, &ticket.request)
+}
+
+#[cfg(target_os = "linux")]
+fn same_comfy_request(left: &InferenceRequest, right: &InferenceRequest) -> bool {
+    match (left, right) {
+        (
+            InferenceRequest::Media {
+                profile: left_profile,
+                input:
+                    MediaInput::Workflow {
+                        task: left_task,
+                        graph: left_graph,
+                    },
+            },
+            InferenceRequest::Media {
+                profile: right_profile,
+                input:
+                    MediaInput::Workflow {
+                        task: right_task,
+                        graph: right_graph,
+                    },
+            },
+        ) => left_profile == right_profile && left_task == right_task && left_graph == right_graph,
+        _ => false,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn managed_comfy_acknowledgement(
+    job: &PreparedManagedComfyJob,
+    job_id: u64,
+    request_id: &str,
+) -> Result<ManagedComfyBackendAcknowledgement, ComfyFailure> {
+    if !job.inner.attempted
+        || job.coordinator_job_id != Some(job_id)
+        || job.coordinator_request_id.as_deref() != Some(request_id)
+        || !canonical_uuid(job.id())
+    {
+        return Err(uncertain(ComfyErrorKind::InvalidOwnership));
+    }
+    let generation_reference = job.generation.comfy_service_generation_reference().ok();
+    if generation_reference.is_none() {
+        return Err(uncertain(ComfyErrorKind::InvalidOwnership));
+    }
+    let acknowledgement = ManagedComfyBackendAcknowledgement {
+        job_id,
+        request_id: request_id.to_owned(),
+        candidate_id: job.id().to_owned(),
+        backend_id: job.id().to_owned(),
+        request: job.inner.request.clone(),
+        route: job.inner.accepted_route.clone(),
+        generation: job.generation.clone(),
+        generation_reference,
+    };
+    if !acknowledgement.matches_generation(&job.generation) {
+        return Err(uncertain(ComfyErrorKind::InvalidOwnership));
+    }
+    Ok(acknowledgement)
 }
 
 #[cfg(target_os = "linux")]
@@ -1225,6 +1525,93 @@ mod tests {
             fresh_comfy_candidate(&cancelled),
             Err(no_dispatch(ComfyErrorKind::Cancelled))
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn managed_backend_acknowledgement_is_exact_and_redacted() {
+        use super::super::catalog::RuntimeIdentity;
+        use super::super::inference::CoordinatorCore;
+        use super::super::managed_service::OwnedServiceGenerationIdentity;
+        use super::super::runtime::ResourceClaim;
+
+        let data = tempfile::tempdir().unwrap();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let catalog = Catalog::load(root).unwrap();
+        let mut core = CoordinatorCore::load(
+            catalog.clone(),
+            BTreeMap::from([(
+                RuntimeIdentity::new(Lane::Media, "ComfyUI").unwrap(),
+                ResourceClaim::ExclusiveGpu(0),
+            )]),
+            data.path(),
+            root,
+            8,
+        )
+        .unwrap();
+        core.confirm_reconciled().unwrap();
+        core.submit(
+            "managed-comfy-ack".into(),
+            request(),
+            Duration::from_secs(10),
+            Instant::now(),
+        )
+        .unwrap();
+        let ticket = core.reserve_next(Instant::now()).unwrap().unwrap();
+        core.begin_dispatch(&ticket, Instant::now()).unwrap();
+
+        let generation = OwnedServiceGenerationIdentity::for_test_comfy_supervisor().unwrap();
+        let adapter = adapter("http://127.0.0.1:1");
+        let mut inner = adapter
+            .prepare_for_route(&catalog, &ticket.request, &ticket.route, ID)
+            .unwrap();
+        inner.attempted = true;
+        let job = PreparedManagedComfyJob {
+            inner,
+            generation: generation.clone(),
+            coordinator_job_id: Some(ticket.job_id),
+            coordinator_request_id: Some(ticket.request_id.clone()),
+            cancel_attempted: false,
+        };
+        let acknowledgement =
+            managed_comfy_acknowledgement(&job, ticket.job_id, &ticket.request_id).unwrap();
+
+        assert!(acknowledgement.matches_ticket(&ticket));
+        assert!(acknowledgement.matches_generation(&generation));
+        assert_eq!(acknowledgement.job_id(), ticket.job_id);
+        assert_eq!(acknowledgement.request_id(), ticket.request_id);
+        assert_eq!(acknowledgement.candidate_id(), ID);
+        assert_eq!(acknowledgement.backend_id(), ID);
+        assert!(acknowledgement.generation_reference().is_some());
+        assert!(!format!("{acknowledgement:?}").contains("SENSITIVE_PROMPT"));
+
+        let mut other_request = request();
+        let InferenceRequest::Media {
+            input: MediaInput::Workflow { graph, .. },
+            ..
+        } = &mut other_request
+        else {
+            panic!("fixture request must be a workflow")
+        };
+        *graph = serde_json::json!({"1":{"class_type":"Changed","inputs":{}}});
+        assert!(!acknowledgement.matches_active(
+            ticket.job_id,
+            &ticket.request_id,
+            &other_request,
+            &ticket.route,
+        ));
+
+        let mut other_route = ticket.route.clone();
+        other_route.profile = ProfileKey::new(Lane::Media, "another-profile").unwrap();
+        assert!(!acknowledgement.matches_active(
+            ticket.job_id,
+            &ticket.request_id,
+            &ticket.request,
+            &other_route,
+        ));
+        let other_generation =
+            OwnedServiceGenerationIdentity::for_test_comfy_supervisor_with_main_pid(2346).unwrap();
+        assert!(!acknowledgement.matches_generation(&other_generation));
     }
 
     #[test]

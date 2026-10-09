@@ -10,6 +10,37 @@ runtime check.
 
 ## Current resumed checkpoint — 2026-10-09
 
+Managed Comfy worker composition is now implemented on the branch: explicit
+optional configuration, separate allowlists and exclusive configured-GPU
+binding, fresh per-job private directories, main-thread durable candidate/permit
+exchange, and separately verified native backend acknowledgment persistence.
+The worker releases language before launching Comfy, never repeats an uncertain
+POST, and requires exact engine/cgroup/GPU/WAL cleanup before publishing checked
+`Backend` artifact references. The output root is pinned before launch; unsafe
+paths, aliases, duplicates and invalid files fail closed. No bytes are delivered
+by the reference mapper.
+
+Verified Python launch preserves the `.venv-comfy/bin/python` invocation rather
+than executing its resolved target outside the environment. Its path/target,
+venv/bin directories and `pyvenv.cfg` identities are checked through helper
+handoff and before spawn; ordinary launch constructors remain unchanged.
+Fixtures cover actual `sys.prefix`, target substitution, configuration/input
+drift, protected-directory overlap, allocation collisions, candidate persistence
+before a channel reply, lost replies/no replay, late cancellation, exact backend
+association and stale-generation refusal. Optional model-path JSON uses native
+newline-separated category strings, not unsupported arrays or environment
+expansion.
+
+The all-target checkpoint passes **838 root tests, 1 ignored**, strict all-target
+Clippy, formatting and whitespace checks. Two new handoff fixtures initially
+expected an empty channel after its sole sender exited; they now correctly
+accept disconnected-with-no-message too. This was a fixture assertion correction,
+not a submission retry or production policy change. This is still not full
+injected owner/session/daemon acceptance or real GPU/media acceptance. Original
+services/checkouts were not changed. Next: full worker/lifecycle fixtures,
+artifact-byte access, durable mixed-runtime recovery/history cleanup association,
+and gated real switching with directingress/background-claimant policy resolved.
+
 The subsequent managed Comfy handoff/transport slice passes **812 root tests,
 1 ignored**, strict all-target Clippy, formatting and whitespace checks. It
 atomically persists candidate plus exact safe generation association and returns

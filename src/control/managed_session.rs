@@ -1,4 +1,4 @@
-//! Concrete managed foreground language/local-job configuration and executor.
+//! Concrete managed foreground language/local-job/Comfy configuration and executor.
 //!
 //! This first resident-engine path is deliberately specific: one llama-swap
 //! v247 router, llama-server-compatible model routes, one configured NVIDIA
@@ -6,9 +6,11 @@
 //! Explicitly allowlisted Breeze and local Nagi/Laya jobs use separate owned
 //! one-shot services. CUDA jobs release the resident router first; CPU jobs
 //! do not acquire its GPU. Publication follows exact Stop and release proof.
-//! It does not manage ComfyUI, arbitrary HTTP engines, ambient credentials, or
-//! direct clients. Model activation is a separate one-shot operation from
-//! read-only readiness and inference dispatch.
+//! Explicitly configured image workflows use fresh per-job isolated Comfy
+//! engines with main-thread durable permits and backend acknowledgments.
+//! It does not adopt existing Comfy services or manage arbitrary HTTP engines,
+//! ambient credentials, or direct clients. Model activation is a separate
+//! one-shot operation from read-only readiness and inference dispatch.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -82,6 +84,7 @@ pub(crate) struct ManagedSessionConfig {
     pub(crate) supported_model_tasks: BTreeMap<String, BTreeSet<String>>,
     pub(crate) gpu: GpuProbeConfig,
     pub(crate) local_job_profiles: BTreeSet<ProfileKey>,
+    pub(crate) comfy: Option<super::managed_comfy_config::ManagedComfyConfig>,
     job_directory_root: Option<PathBuf>,
     job_directory_identity: Option<(u64, u64)>,
     launch_plan: RouterLaunchPlan,
@@ -147,6 +150,7 @@ pub(crate) struct ManagedSessionConfigInput {
     pub(crate) startup_profile: String,
     pub(crate) supported_model_tasks: BTreeMap<String, BTreeSet<String>>,
     pub(crate) local_job_profiles: Vec<String>,
+    pub(crate) comfy: Option<super::managed_comfy_config::ManagedComfyLaunchInput>,
     pub(crate) job_directory_root: Option<PathBuf>,
     pub(crate) gpu_uuid: String,
     pub(crate) gpu_index: u32,
@@ -174,6 +178,7 @@ pub(crate) enum ManagedConfigError {
     InvalidLaunch,
     InvalidGpu,
     InvalidLocalJobs,
+    InvalidComfy,
 }
 
 fn cuda_device_for_gpu_config(gpu: &GpuProbeConfig) -> Result<CudaDevice, ManagedConfigError> {
@@ -287,6 +292,35 @@ impl ManagedSessionConfig {
         // Validate the complete declaration now, without manager dispatch.
         launch_plan.build(&runtime, &input.transport_directory)?;
 
+        let mut comfy = input
+            .comfy
+            .map(|declaration| {
+                super::managed_comfy_config::ManagedComfyConfig::validate(
+                    declaration,
+                    catalog,
+                    &gpu,
+                    launch_plan.helper_executable.clone(),
+                    input.transport_directory.clone(),
+                    input.stop_timeout,
+                )
+            })
+            .transpose()
+            .map_err(|_| ManagedConfigError::InvalidComfy)?;
+        if let Some(comfy) = comfy.as_mut() {
+            let mut protected = vec![
+                input.data_directory.clone(),
+                input.standalone_data_directory.clone(),
+                input.service_intent_directory.clone(),
+                input.transport_directory.clone(),
+            ];
+            if let Some(root) = input.job_directory_root.as_ref() {
+                protected.push(root.clone());
+            }
+            comfy
+                .validate_protected_directories(&protected)
+                .map_err(|_| ManagedConfigError::InvalidComfy)?;
+        }
+
         Ok(Self {
             repository_root: input.repository_root,
             data_directory: input.data_directory,
@@ -302,6 +336,7 @@ impl ManagedSessionConfig {
             supported_model_tasks: input.supported_model_tasks,
             gpu,
             local_job_profiles,
+            comfy,
             job_directory_root: input.job_directory_root,
             job_directory_identity,
             launch_plan,
@@ -395,6 +430,17 @@ pub(crate) enum ManagedWorkerEvent {
     Append {
         key: ManagedJobKey,
         event: ResultEvent,
+        reply: SyncSender<bool>,
+    },
+    /// No native POST may precede this main-thread durable handoff.
+    ComfyCandidate {
+        ticket: Box<DispatchTicket>,
+        candidate: String,
+        generation: Box<super::managed_service::OwnedServiceGenerationIdentity>,
+        reply: SyncSender<Option<super::inference::ManagedComfyDispatchPermit>>,
+    },
+    ComfyBackendAcknowledged {
+        acknowledgement: Box<super::comfy::ManagedComfyBackendAcknowledgement>,
         reply: SyncSender<bool>,
     },
     JobFinished(ManagedJobCompletion),
@@ -547,7 +593,24 @@ pub(crate) fn run_worker(
         match commands.recv_timeout(WORKER_POLL) {
             Ok(ManagedWorkerCommand::Dispatch(ticket)) => {
                 let local_ticket = config.local_job_profiles.contains(ticket.request.profile());
-                let completion = if local_ticket {
+                let comfy_ticket = config
+                    .comfy
+                    .as_ref()
+                    .is_some_and(|comfy| comfy.profiles().contains(ticket.request.profile()));
+                let completion = if comfy_ticket {
+                    ManagedComfyTicketExecutor {
+                        config: &config,
+                        catalog: &catalog,
+                        owner: &mut owner,
+                        resident: &mut resident,
+                        cgroups: &cgroups,
+                        gpu: &gpu,
+                        session_cancellation: &cancellation,
+                        session_deadline,
+                        events: &events,
+                    }
+                    .execute(*ticket)
+                } else if local_ticket {
                     ManagedLocalTicketExecutor {
                         config: &config,
                         owner: &mut owner,
@@ -601,7 +664,7 @@ pub(crate) fn run_worker(
                         stop_resident(&mut resident, &mut owner, &cgroups, &gpu, config.recovery);
                     let clean = combined_cleanup_proven(
                         resident_clean,
-                        local_ticket,
+                        local_ticket || comfy_ticket,
                         completion.cleanup_proven,
                     );
                     let ManagedJobCompletion {
@@ -770,6 +833,321 @@ fn stop_resident(
         .is_none_or(|service| stop_owned_service(owner, &service, cgroups, gpu, recovery))
 }
 
+struct ManagedComfyTicketExecutor<'executor, 'host> {
+    config: &'executor ManagedSessionConfig,
+    catalog: &'executor Catalog,
+    owner: &'executor mut ManagedRuntimeOwner<'host>,
+    resident: &'executor mut Option<super::managed_service::OwnedService>,
+    cgroups: &'executor CgroupReleaseProbe,
+    gpu: &'executor NvidiaSmiGpuProbe,
+    session_cancellation: &'executor ManagedWorkerCancellation,
+    session_deadline: std::time::Instant,
+    events: &'executor SyncSender<ManagedWorkerEvent>,
+}
+
+impl ManagedComfyTicketExecutor<'_, '_> {
+    fn execute(&mut self, ticket: DispatchTicket) -> ManagedJobCompletion {
+        use super::comfy::{ComfyAdapter, ComfyContract, ComfyJobState, OwnedComfySession};
+        let mut outcome = uncertain_managed_completion(&ticket);
+        let Some(comfy) = self.config.comfy.as_ref() else {
+            return outcome;
+        };
+        let cancellation = RequestAndSessionCancellation {
+            request: &ticket.cancellation,
+            session: self.session_cancellation,
+        };
+        let deadline = std::time::Instant::now()
+            .checked_add(self.config.request_timeout)
+            .unwrap_or(ticket.deadline)
+            .min(ticket.deadline)
+            .min(self.session_deadline);
+        let context = OperationContext::new(deadline, &cancellation);
+        let fresh = self.catalog.refresh().ok();
+        if !comfy.profiles().contains(ticket.request.profile())
+            || fresh
+                .as_ref()
+                .and_then(|catalog| resolve_profile_route(catalog, ticket.request.profile()).ok())
+                .as_ref()
+                != Some(&ticket.route)
+            || !matches!(
+                ticket.request,
+                InferenceRequest::Media {
+                    input: super::requests::MediaInput::Workflow { .. },
+                    ..
+                }
+            )
+        {
+            return outcome;
+        }
+        if !stop_resident(
+            self.resident,
+            self.owner,
+            self.cgroups,
+            self.gpu,
+            self.config.recovery,
+        ) {
+            return outcome;
+        }
+        // Until a Comfy start is attempted, the language release proves this
+        // dispatch owns no engine. A Start uncertainty reverses this below.
+        outcome.cleanup_proven = true;
+        if context.is_cancelled() || context.remaining().is_zero() {
+            set_comfy_context_terminal(&mut outcome, &context);
+            return outcome;
+        }
+        let Ok((launch, output_directory)) = comfy.allocate_job_launch(ticket.job_id) else {
+            return outcome;
+        };
+        let Some(prefix) = output_directory.file_name().and_then(|name| name.to_str()) else {
+            return outcome;
+        };
+        let Ok(artifacts_root) =
+            super::comfy_artifacts::ComfyArtifactRoot::open(&output_directory, prefix)
+        else {
+            return outcome;
+        };
+        if observe_gpu_idle_retry(self.gpu, &context, self.config.recovery).is_err() {
+            return outcome;
+        }
+        outcome.cleanup_proven = false;
+        let Ok(service) = self.owner.start_isolated_engine(launch, &context) else {
+            return outcome;
+        };
+        let mut post_may_have_been_sent = false;
+        let native = (|| {
+            // Startup health is read-only and bounded. It cannot submit work.
+            loop {
+                if super::engine_health::probe(
+                    self.owner,
+                    &service,
+                    &self.config.transport_directory,
+                    NativeEngineKind::Comfy,
+                    &context,
+                )
+                .is_ok()
+                {
+                    break;
+                }
+                if context.is_cancelled() || context.remaining().is_zero() {
+                    return Err(());
+                }
+                thread::sleep(WORKER_POLL.min(context.remaining()));
+            }
+            let adapter = ComfyAdapter::new_private_engine(
+                &self.config.transport_directory,
+                None,
+                ComfyContract::CanonicalIdsAndAtomicScopedCancellation,
+            )
+            .map_err(|_| ())?;
+            let session = OwnedComfySession::new(
+                &adapter,
+                self.owner,
+                &service,
+                &self.config.transport_directory,
+                &context,
+            )
+            .map_err(|_| ())?;
+            let catalog = fresh.as_ref().ok_or(())?;
+            let (mut job, permit) = session
+                .prepare_dispatch_using(catalog, &ticket, &context, |candidate, generation| {
+                    request_comfy_permit(self.events, &ticket, candidate, generation, &context)
+                        .map_err(|_| super::comfy::ComfyFailure {
+                            disposition: DispatchDisposition::NoDispatch,
+                            kind: super::comfy::ComfyErrorKind::InvalidOwnership,
+                        })
+                })
+                .map_err(|_| ())?;
+            let mut acknowledged = false;
+            post_may_have_been_sent = true;
+            match session.submit_with_acknowledgement(&mut job, permit, &context) {
+                Ok(acknowledgement) => {
+                    publish_comfy_acknowledgement(self.events, acknowledgement, &context)?;
+                    acknowledged = true;
+                }
+                // An uncertain POST permits only read-only observation of the
+                // same candidate; never a second submission or fresh ID.
+                Err(error) if error.disposition == DispatchDisposition::Uncertain => {}
+                Err(_) => {
+                    post_may_have_been_sent = false;
+                    return Err(());
+                }
+            }
+            loop {
+                if context.is_cancelled() || context.remaining().is_zero() {
+                    let recovery = recovery_context(self.config.recovery);
+                    let _ = session.cancel(&mut job, &recovery);
+                    // Cancel acknowledgment is not completion/release proof.
+                    return Err(());
+                }
+                let (snapshot, evidence) = session
+                    .status_with_acknowledgement(&job, &ticket, &context)
+                    .map_err(|_| ())?;
+                if !acknowledged {
+                    if let Some(acknowledgement) = evidence {
+                        publish_comfy_acknowledgement(self.events, acknowledgement, &context)?;
+                        acknowledged = true;
+                    }
+                }
+                match snapshot.state {
+                    ComfyJobState::Completed | ComfyJobState::Failed | ComfyJobState::Cancelled => {
+                        return Ok(snapshot);
+                    }
+                    ComfyJobState::Unknown | ComfyJobState::Pending | ComfyJobState::Running => {}
+                }
+                thread::sleep(WORKER_POLL.min(context.remaining()));
+            }
+        })();
+        // Independent cleanup survives request cancellation/deadline. No
+        // native terminal, output descriptor or cancel reply substitutes for
+        // exact Stop, cgroup emptiness, fresh GPU idle and WAL retirement.
+        outcome.cleanup_proven = stop_owned_service(
+            self.owner,
+            &service,
+            self.cgroups,
+            self.gpu,
+            self.config.recovery,
+        );
+        if !outcome.cleanup_proven {
+            return outcome;
+        }
+        let Ok(snapshot) = native else {
+            if !post_may_have_been_sent {
+                // Preparation failure or a positively NoDispatch submit
+                // cannot be mistaken for an unknown native execution.
+                if context.is_cancelled() || context.remaining().is_zero() {
+                    set_comfy_context_terminal(&mut outcome, &context);
+                } else {
+                    outcome.completion = Completion::Failed;
+                    outcome.result_terminal =
+                        ResultTerminal::Failed(ResultFailureCode::Unavailable);
+                }
+            }
+            return outcome;
+        };
+        if context.is_cancelled() || context.remaining().is_zero() {
+            set_comfy_context_terminal(&mut outcome, &context);
+            return outcome;
+        }
+        match snapshot.state {
+            ComfyJobState::Completed => {
+                // These opt-in profiles declare image output, not successful
+                // empty workflows or unrelated audio/video descriptors.
+                if snapshot.artifacts.is_empty()
+                    || snapshot
+                        .artifacts
+                        .iter()
+                        .any(|artifact| artifact.media_type != "images")
+                {
+                    outcome.completion = Completion::Failed;
+                    outcome.result_terminal =
+                        ResultTerminal::Failed(ResultFailureCode::InvalidOutput);
+                    return outcome;
+                }
+                let Ok(artifacts) = artifacts_root.validate(&snapshot.artifacts, 512 * 1024 * 1024)
+                else {
+                    outcome.completion = Completion::Failed;
+                    outcome.result_terminal =
+                        ResultTerminal::Failed(ResultFailureCode::InvalidOutput);
+                    return outcome;
+                };
+                let paths = artifacts
+                    .iter()
+                    .map(|artifact| artifact.relative_path.clone())
+                    .collect();
+                if publish_result_event(
+                    self.events,
+                    &outcome.key,
+                    ResultEvent::MediaArtifacts(artifacts),
+                    &context,
+                )
+                .is_err()
+                {
+                    return outcome;
+                }
+                outcome.artifacts = paths;
+                outcome.completion = Completion::Succeeded;
+                outcome.result_terminal = ResultTerminal::Succeeded;
+                outcome.stop_session = false;
+            }
+            ComfyJobState::Failed => {
+                outcome.completion = Completion::Failed;
+                outcome.result_terminal = ResultTerminal::Failed(ResultFailureCode::Internal);
+                outcome.stop_session = false;
+            }
+            ComfyJobState::Cancelled => {
+                outcome.completion = Completion::Cancelled;
+                outcome.result_terminal = ResultTerminal::Cancelled;
+                outcome.stop_session = false;
+            }
+            _ => {}
+        }
+        outcome
+    }
+}
+
+fn set_comfy_context_terminal(outcome: &mut ManagedJobCompletion, context: &OperationContext<'_>) {
+    if context.is_cancelled() {
+        outcome.completion = Completion::Cancelled;
+        outcome.result_terminal = ResultTerminal::Cancelled;
+    } else {
+        outcome.completion = Completion::Failed;
+        outcome.result_terminal = ResultTerminal::Failed(ResultFailureCode::TimedOut);
+    }
+}
+
+pub(crate) fn request_comfy_permit(
+    sender: &SyncSender<ManagedWorkerEvent>,
+    ticket: &DispatchTicket,
+    candidate: String,
+    generation: super::managed_service::OwnedServiceGenerationIdentity,
+    context: &OperationContext<'_>,
+) -> Result<super::inference::ManagedComfyDispatchPermit, ()> {
+    let (reply, result) = mpsc::sync_channel(1);
+    let ticket = Box::new(DispatchTicket {
+        job_id: ticket.job_id,
+        request_id: ticket.request_id.clone(),
+        request: ticket.request.clone(),
+        route: ticket.route.clone(),
+        resource: ticket.resource,
+        deadline: ticket.deadline,
+        cancellation: ticket.cancellation.clone(),
+        queue_wait: ticket.queue_wait,
+    });
+    worker_exchange(
+        sender,
+        ManagedWorkerEvent::ComfyCandidate {
+            ticket,
+            candidate,
+            generation: Box::new(generation),
+            reply,
+        },
+        result,
+        context,
+    )?
+    .ok_or(())
+}
+
+fn publish_comfy_acknowledgement(
+    sender: &SyncSender<ManagedWorkerEvent>,
+    acknowledgement: super::comfy::ManagedComfyBackendAcknowledgement,
+    context: &OperationContext<'_>,
+) -> Result<(), ()> {
+    let (reply, result) = mpsc::sync_channel(1);
+    if worker_exchange(
+        sender,
+        ManagedWorkerEvent::ComfyBackendAcknowledged {
+            acknowledgement: Box::new(acknowledgement),
+            reply,
+        },
+        result,
+        context,
+    )? {
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+
 struct ManagedLocalTicketExecutor<'executor, 'host> {
     config: &'executor ManagedSessionConfig,
     owner: &'executor mut ManagedRuntimeOwner<'host>,
@@ -911,7 +1289,7 @@ impl ManagedLocalTicketExecutor<'_, '_> {
                             | OwnedJobFinalizeErrorKind::RetirementUncertain
                     ) =>
                 {
-                    break None
+                    break None;
                 }
                 Err(_) => {
                     if cleanup.remaining().is_zero() {
@@ -1429,15 +1807,29 @@ fn publish_result_event(
     event: ResultEvent,
     context: &OperationContext<'_>,
 ) -> Result<(), ()> {
-    if context.is_cancelled() || context.remaining().is_zero() {
-        return Err(());
-    }
     let (reply, result) = mpsc::sync_channel(1);
-    let mut message = ManagedWorkerEvent::Append {
+    let message = ManagedWorkerEvent::Append {
         key: key.clone(),
         event,
         reply,
     };
+    match worker_exchange(sender, message, result, context)? {
+        true => Ok(()),
+        false => Err(()),
+    }
+}
+
+/// Bounded, single-send exchange. Losing the reply never retries the message:
+/// the main thread may already have committed its durable effect.
+fn worker_exchange<T>(
+    sender: &SyncSender<ManagedWorkerEvent>,
+    mut message: ManagedWorkerEvent,
+    result: Receiver<T>,
+    context: &OperationContext<'_>,
+) -> Result<T, ()> {
+    if context.is_cancelled() || context.remaining().is_zero() {
+        return Err(());
+    }
     loop {
         if context.is_cancelled() || context.remaining().is_zero() {
             return Err(());
@@ -1455,9 +1847,9 @@ fn publish_result_event(
         if context.is_cancelled() || context.remaining().is_zero() {
             return Err(());
         }
-        match result.recv_timeout(WORKER_POLL) {
-            Ok(true) => return Ok(()),
-            Ok(false) | Err(RecvTimeoutError::Disconnected) => return Err(()),
+        match result.recv_timeout(WORKER_POLL.min(context.remaining())) {
+            Ok(reply) => return Ok(reply),
+            Err(RecvTimeoutError::Disconnected) => return Err(()),
             Err(RecvTimeoutError::Timeout) => {}
         }
     }
@@ -1687,6 +2079,137 @@ mod tests {
         assert!(!combined_cleanup_proven(false, false, true));
         assert!(combined_cleanup_proven(true, true, true));
         assert!(combined_cleanup_proven(true, false, false));
+    }
+
+    #[test]
+    fn worker_exchange_delivers_once_and_returns_the_main_thread_reply() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let (reply, result) = mpsc::sync_channel(1);
+        let context = OperationContext::new(
+            std::time::Instant::now() + Duration::from_secs(1),
+            &NEVER_CANCEL,
+        );
+        thread::scope(|scope| {
+            let main = scope.spawn(move || {
+                match receiver.recv().unwrap() {
+                    ManagedWorkerEvent::Append { reply, .. } => reply.send(false).unwrap(),
+                    _ => panic!("wrong exchange"),
+                }
+                receiver
+            });
+            assert!(!worker_exchange(
+                &sender,
+                ManagedWorkerEvent::Append {
+                    key: ManagedJobKey {
+                        job_id: 1,
+                        request_id: "exchange".into()
+                    },
+                    event: ResultEvent::ChatContent("private".into()),
+                    reply,
+                },
+                result,
+                &context
+            )
+            .unwrap());
+            assert!(matches!(
+                main.join().unwrap().try_recv(),
+                Err(mpsc::TryRecvError::Empty)
+            ));
+        });
+    }
+
+    #[test]
+    fn worker_exchange_lost_reply_never_resends_a_committed_message() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let (reply, result) = mpsc::sync_channel(1);
+        let context = OperationContext::new(
+            std::time::Instant::now() + Duration::from_millis(50),
+            &NEVER_CANCEL,
+        );
+        thread::scope(|scope| {
+            let main = scope.spawn(move || {
+                let message = receiver.recv().unwrap();
+                drop(message); // Main effect could already be durable.
+                receiver
+            });
+            assert!(worker_exchange(
+                &sender,
+                ManagedWorkerEvent::Append {
+                    key: ManagedJobKey {
+                        job_id: 1,
+                        request_id: "exchange".into()
+                    },
+                    event: ResultEvent::ChatContent("private".into()),
+                    reply,
+                },
+                result,
+                &context
+            )
+            .is_err());
+            assert!(matches!(
+                main.join().unwrap().try_recv(),
+                Err(mpsc::TryRecvError::Empty)
+            ));
+        });
+    }
+
+    #[test]
+    fn worker_exchange_deadline_does_not_dispatch_into_an_available_channel() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let (reply, result) = mpsc::sync_channel(1);
+        let context = OperationContext::new(std::time::Instant::now(), &NEVER_CANCEL);
+        assert!(worker_exchange(
+            &sender,
+            ManagedWorkerEvent::Append {
+                key: ManagedJobKey {
+                    job_id: 1,
+                    request_id: "exchange".into()
+                },
+                event: ResultEvent::ChatContent("private".into()),
+                reply,
+            },
+            result,
+            &context
+        )
+        .is_err());
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn worker_exchange_reply_timeout_does_not_enqueue_another_effect() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let (reply, result) = mpsc::sync_channel(1);
+        let context = OperationContext::new(
+            std::time::Instant::now() + Duration::from_millis(20),
+            &NEVER_CANCEL,
+        );
+        let started = std::time::Instant::now();
+        assert!(worker_exchange(
+            &sender,
+            ManagedWorkerEvent::Append {
+                key: ManagedJobKey {
+                    job_id: 1,
+                    request_id: "timeout".into()
+                },
+                event: ResultEvent::ChatContent("private".into()),
+                reply,
+            },
+            result,
+            &context,
+        )
+        .is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ManagedWorkerEvent::Append { .. })
+        ));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
     }
 
     #[test]

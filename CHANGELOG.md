@@ -10,6 +10,16 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Wire opt-in managed Comfy workflows through the worker/main-thread durable
+  candidate handoff and separately verified backend acknowledgments. Use fresh
+  private per-job output/user directories, exact owned-engine release before
+  output publication, and pinned no-follow artifact reference validation.
+  Preserve language-only defaults and standalone paths; artifact byte delivery,
+  crash-safe multi-runtime recovery and real mixed-runtime acceptance remain open.
+- Preserve verified Comfy virtual-environment interpreter invocation through
+  isolated supervisor handoff, rechecking its filesystem association before
+  execution. Keep ordinary launch semantics unchanged and reject unsupported
+  model-path arrays/expansion instead of passing invalid configuration to Comfy.
 - Persist managed Comfy candidate UUID and exact payload-free supervisor
   generation atomically before a distinct non-restorable dispatch permit.
   Add an exact-generation native session with fixed peer-verified submit,

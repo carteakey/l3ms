@@ -182,6 +182,8 @@ struct ManagedConfig {
     local_job_profiles: Vec<String>,
     #[serde(default)]
     job_directory_root: Option<PathBuf>,
+    #[serde(default)]
+    comfy: Option<super::managed_comfy_config::ManagedComfyLaunchInput>,
     private_router_config: PathBuf,
     router_executable: PathBuf,
     router_working_directory: PathBuf,
@@ -236,13 +238,37 @@ impl ManagedConfig {
         {
             return Err(LaunchError::InvalidConfig);
         }
+        if let Some(comfy) = self.comfy.as_ref() {
+            if comfy.profiles.is_empty()
+                || comfy.profiles.len() > 16
+                || comfy.port == 0
+                || comfy.profiles.iter().any(|profile| {
+                    profile.is_empty() || profile.len() > 128 || profile.trim() != profile
+                })
+                || [
+                    &comfy.python_executable,
+                    &comfy.comfy_checkout,
+                    &comfy.private_user_directory_root,
+                    &comfy.private_output_directory_root,
+                ]
+                .iter()
+                .any(|path| !path.is_absolute())
+                || comfy
+                    .extra_model_paths_config
+                    .as_ref()
+                    .is_some_and(|path| !path.is_absolute())
+            {
+                return Err(LaunchError::InvalidConfig);
+            }
+        }
         Ok(())
     }
 }
 
-/// Run a strict managed language session with optional allowlisted local jobs.
-/// This is separate from the CPU-only schema. Local media/decision execution
-/// requires an explicit profile allowlist and pinned private job root.
+/// Run a strict managed language session with optional allowlisted local jobs
+/// and an explicit managed Comfy workflow opt-in. This is separate from the
+/// CPU-only schema; local media/decision execution requires a profile
+/// allowlist and pinned private job root.
 pub fn run_managed_session(config_path: &Path) -> Result<RunReport, LaunchError> {
     let config: ManagedConfig = read_private_json_object(config_path)?;
     config.validate()?;
@@ -268,6 +294,7 @@ pub fn run_managed_session(config_path: &Path) -> Result<RunReport, LaunchError>
             startup_profile: config.startup_profile,
             supported_model_tasks: config.supported_model_tasks,
             local_job_profiles: config.local_job_profiles,
+            comfy: config.comfy,
             job_directory_root: config.job_directory_root,
             gpu_uuid: config.gpu_uuid,
             gpu_index: config.gpu_index,
@@ -305,6 +332,23 @@ pub fn run_managed_session(config_path: &Path) -> Result<RunReport, LaunchError>
         if bindings
             .insert(route.runtime, resource)
             .is_some_and(|previous| previous != resource)
+        {
+            return Err(LaunchError::InvalidConfig);
+        }
+    }
+    if let Some(comfy) = managed.comfy.as_ref() {
+        let runtime =
+            RuntimeIdentity::new(Lane::Media, "ComfyUI").map_err(|_| LaunchError::InvalidConfig)?;
+        for profile in comfy.profiles() {
+            let route = super::routes::resolve_profile_route(&catalog, profile)
+                .map_err(|_| LaunchError::InvalidConfig)?;
+            if route.runtime != runtime || route.device != Some(super::catalog::Device::Cuda) {
+                return Err(LaunchError::InvalidConfig);
+            }
+        }
+        if bindings
+            .insert(runtime, ResourceClaim::ExclusiveGpu(config.gpu_index))
+            .is_some_and(|previous| previous != ResourceClaim::ExclusiveGpu(config.gpu_index))
         {
             return Err(LaunchError::InvalidConfig);
         }
@@ -495,6 +539,7 @@ mod tests {
         let legacy: ManagedConfig = serde_json::from_value(value.clone()).unwrap();
         assert!(legacy.local_job_profiles.is_empty());
         assert!(legacy.job_directory_root.is_none());
+        assert!(legacy.comfy.is_none());
         assert_eq!(legacy.validate(), Ok(()));
 
         value["local_job_profiles"] = serde_json::json!(["media:breeze-tts-2"]);
@@ -509,6 +554,68 @@ mod tests {
         // ManagedSessionConfig against the fresh catalog and pinned roots.
         value["local_job_profiles"] = serde_json::json!("media:breeze-tts-2");
         assert!(serde_json::from_value::<ManagedConfig>(value).is_err());
+    }
+
+    #[test]
+    fn managed_comfy_is_explicit_optional_and_strictly_shaped() {
+        let base = serde_json::json!({
+            "schema_version": 1,
+            "backend_contract": "llama_swap_v247_llama_server",
+            "repository_root": "/repo", "socket_directory": "/socket",
+            "lock_directory": "/locks", "data_directory": "/data",
+            "standalone_data_directory": "/standalone",
+            "service_intent_directory": "/intents", "transport_directory": "/transport",
+            "coordinator_id": "test", "startup_profile": "language:test",
+            "supported_model_tasks": {"test": ["chat"]},
+            "private_router_config": "/router.json", "router_executable": "/router",
+            "router_working_directory": "/repo", "router_port": 8080,
+            "gpu_uuid": "GPU-01234567-89ab-cdef-0123-456789abcdef",
+            "gpu_index": 0, "gpu_idle_mib": 128, "queue_capacity": 8,
+            "peer_timeout_ms": 1000, "max_connections": 8,
+            "session_timeout_seconds": 60, "request_timeout_seconds": 30,
+            "activation_timeout_seconds": 30, "stop_timeout_seconds": 10,
+            "recovery_timeout_seconds": 10
+        });
+        let comfy = serde_json::json!({
+            "profiles": ["media:qwen-image-2.1"],
+            "python_executable": "/repo/toolkits/l2m2/.venv-comfy/bin/python",
+            "comfy_checkout": "/repo/toolkits/l2m2/vendor/ComfyUI",
+            "private_user_directory_root": "/private/comfy-user",
+            "private_output_directory_root": "/private/comfy-output",
+            "port": 8188
+        });
+        let mut explicit = base.clone();
+        explicit["comfy"] = comfy.clone();
+        let parsed: ManagedConfig = serde_json::from_value(explicit.clone()).unwrap();
+        parsed.validate().unwrap();
+        assert_eq!(
+            parsed.comfy.as_ref().unwrap().profiles,
+            ["media:qwen-image-2.1"]
+        );
+
+        let mut missing = base.clone();
+        missing["comfy"] = serde_json::json!({"profiles": ["media:qwen-image-2.1"]});
+        assert!(serde_json::from_value::<ManagedConfig>(missing).is_err());
+
+        let mut empty_profiles = base.clone();
+        let mut empty = comfy.clone();
+        empty["profiles"] = serde_json::json!([]);
+        empty_profiles["comfy"] = empty;
+        assert_eq!(
+            serde_json::from_value::<ManagedConfig>(empty_profiles)
+                .unwrap()
+                .validate(),
+            Err(LaunchError::InvalidConfig)
+        );
+
+        let mut unknown_field = comfy.clone();
+        unknown_field["raw_command"] = serde_json::json!("secret command");
+        let mut config = base.clone();
+        config["comfy"] = unknown_field;
+        assert!(serde_json::from_value::<ManagedConfig>(config).is_err());
+        let duplicate_comfy =
+            format!("{}", explicit).replacen("\"comfy\":", "\"comfy\":{},\"comfy\":", 1);
+        assert!(serde_json::from_str::<ManagedConfig>(&duplicate_comfy).is_err());
     }
 
     #[test]

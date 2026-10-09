@@ -34,12 +34,15 @@ use super::engine_transport::{
     BackendPort, CoordinatorIdentityDescriptor, EngineTransport, EngineTransportError,
     NoDispatchReason, RelayFailure,
 };
+use super::managed_service::VerifiedPythonInterpreter;
 use super::runtime::{Cancellation, OperationContext};
 
 const ARGUMENT_MARKER: &str = "--l3ms-isolated-engine-supervisor-v1";
 const STACK_ROOT_ARGUMENT: &str = "--l3ms-stack-root";
 const CUDA_DEVICE_ARGUMENT: &str = "--l3ms-cuda-device";
+const VERIFIED_PYTHON_ARGUMENT: &str = "--l3ms-verified-python-v1";
 const MAX_ARGUMENTS: usize = 4096;
+const MAX_HELPER_ARGUMENTS: usize = 20;
 const MAX_ARGUMENT_BYTES: usize = 64 * 1024;
 const MAX_AGGREGATE_ARGUMENT_BYTES: usize = 256 * 1024;
 const MAX_DIRECTORY_BYTES: usize = 4096;
@@ -147,6 +150,7 @@ pub struct BackendProcessSpec {
     arguments: Vec<OsString>,
     stack_root: Option<StackRoot>,
     cuda_device: Option<CudaDevice>,
+    verified_python: Option<VerifiedPythonInterpreter>,
 }
 
 impl BackendProcessSpec {
@@ -155,8 +159,36 @@ impl BackendProcessSpec {
         working_directory: impl AsRef<Path>,
         arguments: impl IntoIterator<Item = OsString>,
     ) -> Result<Self, EngineHelperError> {
-        let executable_path = executable.as_ref();
-        let working_path = working_directory.as_ref();
+        Self::build(
+            executable.as_ref(),
+            working_directory.as_ref(),
+            arguments,
+            None,
+        )
+    }
+
+    pub(crate) fn new_with_verified_python(
+        interpreter: &VerifiedPythonInterpreter,
+        working_directory: impl AsRef<Path>,
+        arguments: impl IntoIterator<Item = OsString>,
+    ) -> Result<Self, EngineHelperError> {
+        interpreter
+            .verify()
+            .map_err(|_| EngineHelperError::InvalidArguments)?;
+        Self::build(
+            interpreter.configured_path(),
+            working_directory.as_ref(),
+            arguments,
+            Some(interpreter.clone()),
+        )
+    }
+
+    fn build(
+        executable_path: &Path,
+        working_path: &Path,
+        arguments: impl IntoIterator<Item = OsString>,
+        verified_python: Option<VerifiedPythonInterpreter>,
+    ) -> Result<Self, EngineHelperError> {
         if !executable_path.is_absolute()
             || !working_path.is_absolute()
             || executable_path.as_os_str().as_bytes().len() > MAX_PATH_BYTES
@@ -164,9 +196,19 @@ impl BackendProcessSpec {
         {
             return Err(EngineHelperError::InvalidArguments);
         }
-        let executable = executable_path
-            .canonicalize()
-            .map_err(|_| EngineHelperError::InvalidArguments)?;
+        let executable = if let Some(interpreter) = &verified_python {
+            interpreter
+                .verify()
+                .map_err(|_| EngineHelperError::InvalidArguments)?;
+            if executable_path != interpreter.configured_path() {
+                return Err(EngineHelperError::InvalidArguments);
+            }
+            executable_path.to_path_buf()
+        } else {
+            executable_path
+                .canonicalize()
+                .map_err(|_| EngineHelperError::InvalidArguments)?
+        };
         let metadata = executable
             .metadata()
             .map_err(|_| EngineHelperError::InvalidArguments)?;
@@ -186,6 +228,7 @@ impl BackendProcessSpec {
             arguments,
             stack_root: None,
             cuda_device: None,
+            verified_python,
         })
     }
 
@@ -247,7 +290,7 @@ pub fn supervisor_arguments(
     ];
     let executable = backend.executable.as_os_str();
     let working_directory = backend.working_directory.as_os_str();
-    let mut args = Vec::with_capacity(10 + backend.arguments.len());
+    let mut args = Vec::with_capacity(15 + backend.arguments.len());
     args.push(OsString::from(ARGUMENT_MARKER));
     args.push(directory.into_os_string());
     args.push(OsString::from(port));
@@ -262,6 +305,16 @@ pub fn supervisor_arguments(
     if let Some(cuda_device) = &backend.cuda_device {
         args.push(OsString::from(CUDA_DEVICE_ARGUMENT));
         args.push(OsString::from(cuda_device.gpu_uuid()));
+    }
+    if let Some(interpreter) = &backend.verified_python {
+        interpreter
+            .verify()
+            .map_err(|_| EngineHelperError::InvalidArguments)?;
+        args.push(OsString::from(VERIFIED_PYTHON_ARGUMENT));
+        args.push(interpreter.configured_path().as_os_str().to_os_string());
+        args.push(interpreter.target_path().as_os_str().to_os_string());
+        args.push(interpreter.venv_directory().as_os_str().to_os_string());
+        args.push(OsString::from(interpreter.identity_wire()));
     }
     args.push(executable.to_os_string());
     args.push(working_directory.to_os_string());
@@ -438,6 +491,27 @@ fn parse_arguments(arguments: Vec<OsString>) -> Result<ParsedConfig, EngineHelpe
     } else {
         None
     };
+    let verified_python = if arguments
+        .get(cursor)
+        .is_some_and(|argument| argument == VERIFIED_PYTHON_ARGUMENT)
+    {
+        cursor += 1;
+        let configured_path = take_path(&arguments, &mut cursor, MAX_PATH_BYTES)?;
+        let target_path = take_path(&arguments, &mut cursor, MAX_PATH_BYTES)?;
+        let venv_directory = take_path(&arguments, &mut cursor, MAX_PATH_BYTES)?;
+        let identity_wire = take_utf8(&arguments, &mut cursor)?;
+        Some(
+            VerifiedPythonInterpreter::from_helper_parts(
+                configured_path,
+                target_path,
+                venv_directory,
+                identity_wire,
+            )
+            .map_err(|_| EngineHelperError::InvalidArguments)?,
+        )
+    } else {
+        None
+    };
     let executable = take_path(&arguments, &mut cursor, MAX_PATH_BYTES)?;
     let working_directory = take_path(&arguments, &mut cursor, MAX_PATH_BYTES)?;
     let argument_count = take_number::<usize>(&arguments, &mut cursor)?;
@@ -445,7 +519,18 @@ fn parse_arguments(arguments: Vec<OsString>) -> Result<ParsedConfig, EngineHelpe
         return Err(EngineHelperError::InvalidArguments);
     }
     let backend_arguments = arguments.into_iter().skip(cursor).collect::<Vec<_>>();
-    let mut backend = BackendProcessSpec::new(executable, working_directory, backend_arguments)?;
+    let mut backend = if let Some(interpreter) = &verified_python {
+        if executable != interpreter.configured_path() {
+            return Err(EngineHelperError::InvalidArguments);
+        }
+        BackendProcessSpec::new_with_verified_python(
+            interpreter,
+            working_directory,
+            backend_arguments,
+        )?
+    } else {
+        BackendProcessSpec::new(executable, working_directory, backend_arguments)?
+    };
     if let Some(stack_root) = stack_root {
         backend = backend.with_stack_root(stack_root);
     }
@@ -502,6 +587,14 @@ fn validate_activation_values(
 }
 
 fn spawn_backend(backend: &BackendProcessSpec) -> Result<Child, EngineHelperError> {
+    if let Some(interpreter) = &backend.verified_python {
+        interpreter
+            .verify()
+            .map_err(|_| EngineHelperError::InvalidArguments)?;
+        if backend.executable != interpreter.configured_path() {
+            return Err(EngineHelperError::InvalidArguments);
+        }
+    }
     let expected_parent_pid = unsafe { libc::getpid() };
     let mut command = Command::new(&backend.executable);
     if backend.cuda_device.is_some() {
@@ -520,6 +613,11 @@ fn spawn_backend(backend: &BackendProcessSpec) -> Result<Child, EngineHelperErro
         .env_remove("LISTEN_FDS")
         .env_remove("LISTEN_FDNAMES")
         .env_remove("NOTIFY_SOCKET");
+    if backend.verified_python.is_some() {
+        // A validated venv must determine its own prefix and site packages;
+        // ambient Python path overrides apply to no other backend launch.
+        command.env_remove("PYTHONHOME").env_remove("PYTHONPATH");
+    }
     if let Some(stack_root) = &backend.stack_root {
         command.env("L3MS_ROOT", stack_root.path());
     }
@@ -879,7 +977,7 @@ fn notify_transport_ready() -> Result<(), ()> {
 }
 
 fn validate_arguments(arguments: Vec<OsString>) -> Result<Vec<OsString>, EngineHelperError> {
-    if arguments.len() > MAX_ARGUMENTS + 16 {
+    if arguments.len() > MAX_ARGUMENTS + MAX_HELPER_ARGUMENTS {
         return Err(EngineHelperError::InvalidArguments);
     }
     let mut total = 0usize;
@@ -1054,6 +1152,80 @@ mod tests {
             directory.canonicalize().unwrap()
         );
         std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn verified_python_roundtrip_executes_the_configured_venv_interpreter() {
+        let Some(target) = [
+            Path::new("/usr/bin/python3"),
+            Path::new("/usr/local/bin/python3"),
+        ]
+        .into_iter()
+        .find_map(|path| {
+            path.canonicalize().ok().filter(|target| {
+                target.metadata().is_ok_and(|metadata| {
+                    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+                })
+            })
+        }) else {
+            return;
+        };
+
+        let directory = private_fixture_dir().canonicalize().unwrap();
+        let venv_directory = directory.join(".venv-comfy");
+        let bin_directory = venv_directory.join("bin");
+        std::fs::create_dir_all(&bin_directory).unwrap();
+        std::os::unix::fs::symlink(&target, bin_directory.join("python")).unwrap();
+        std::fs::write(
+            venv_directory.join("pyvenv.cfg"),
+            format!(
+                "home = {}\ninclude-system-site-packages = false\n",
+                target.parent().unwrap().display()
+            ),
+        )
+        .unwrap();
+        let interpreter =
+            VerifiedPythonInterpreter::capture(bin_directory.join("python"), &venv_directory)
+                .unwrap();
+        let observed_prefix = directory.join("observed-prefix");
+        let backend = BackendProcessSpec::new_with_verified_python(
+            &interpreter,
+            std::env::current_dir().unwrap(),
+            [
+                OsString::from("-c"),
+                OsString::from(
+                    "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text(sys.prefix)",
+                ),
+                observed_prefix.as_os_str().to_os_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(backend.executable, interpreter.configured_path());
+
+        let arguments = supervisor_arguments(
+            &directory,
+            BackendPort::new(8188).unwrap(),
+            CoordinatorIdentityDescriptor::capture_current().unwrap(),
+            &backend,
+        )
+        .unwrap();
+        let parsed = parse_arguments(arguments).unwrap();
+        assert_eq!(parsed.backend.executable, interpreter.configured_path());
+        assert!(parsed.backend.verified_python.is_some());
+        let mut child = spawn_backend(&parsed.backend).unwrap();
+        assert!(child.wait().unwrap().success());
+        assert_eq!(
+            std::fs::read_to_string(&observed_prefix).unwrap(),
+            venv_directory.to_string_lossy().to_string()
+        );
+
+        std::fs::remove_file(bin_directory.join("python")).unwrap();
+        std::os::unix::fs::symlink("/bin/false", bin_directory.join("python")).unwrap();
+        assert_eq!(
+            interpreter.verify(),
+            Err(super::super::managed_service::ManagedServiceErrorKind::InvalidRecipe)
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

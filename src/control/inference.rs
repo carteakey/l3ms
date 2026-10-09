@@ -15,6 +15,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{ensure, Context, Result};
 
+#[cfg(target_os = "linux")]
+use super::catalog::Task;
 use super::catalog::{Catalog, Device, Lane, ProfileKey, RuntimeIdentity};
 use super::ipc::{
     self, AcceptedOperation, ClientRequest, RequestStatus, ResponseEnvelope, ResponseErrorCode,
@@ -436,7 +438,15 @@ impl std::fmt::Display for ComfyCandidateError {
 
 impl std::error::Error for ComfyCandidateError {}
 
-/// One coordinator's bounded queue. Only the future daemon may own this core
+/// Independent opt-in profile sets; Comfy workflows never inherit the local
+/// script/decision allowance or vice versa.
+#[cfg(target_os = "linux")]
+pub(crate) struct ManagedStackProfiles {
+    pub(crate) local_jobs: BTreeSet<ProfileKey>,
+    pub(crate) comfy: BTreeSet<ProfileKey>,
+}
+
+/// One coordinator's bounded queue. Only the daemon may own this core
 /// and write its history; multiple CLI/TUI processes must use IPC rather than
 /// create competing instances against the same store.
 pub struct CoordinatorCore {
@@ -455,6 +465,7 @@ pub struct CoordinatorCore {
     cpu_decisions_only: bool,
     managed_language_model_tasks: Option<BTreeMap<String, BTreeSet<String>>>,
     managed_local_job_profiles: Option<BTreeSet<ProfileKey>>,
+    managed_comfy_profiles: Option<BTreeSet<ProfileKey>>,
     managed_stack_gpu_index: Option<u32>,
 }
 
@@ -493,6 +504,7 @@ impl CoordinatorCore {
             cpu_decisions_only: false,
             managed_language_model_tasks: None,
             managed_local_job_profiles: None,
+            managed_comfy_profiles: None,
             managed_stack_gpu_index: None,
         })
     }
@@ -610,6 +622,7 @@ impl CoordinatorCore {
         request: &InferenceRequest,
         resource: ResourceClaim,
     ) -> bool {
+        let no_comfy_profiles = BTreeSet::new();
         if let Some(allowed_local_profiles) = self.managed_local_job_profiles.as_ref() {
             self.managed_stack_gpu_index
                 .zip(self.managed_language_model_tasks.as_ref())
@@ -620,6 +633,9 @@ impl CoordinatorCore {
                         request,
                         supported,
                         allowed_local_profiles,
+                        self.managed_comfy_profiles
+                            .as_ref()
+                            .unwrap_or(&no_comfy_profiles),
                         gpu,
                     )
                     .is_ok_and(|expected| expected == resource)
@@ -821,6 +837,7 @@ impl CoordinatorCore {
         startup_profile: &ProfileKey,
         supported_model_tasks: &BTreeMap<String, BTreeSet<String>>,
         allowed_local_profiles: &BTreeSet<ProfileKey>,
+        allowed_comfy_profiles: &BTreeSet<ProfileKey>,
     ) -> Result<()> {
         ensure!(
             self.admission == AdmissionState::ReconciliationRequired,
@@ -837,6 +854,7 @@ impl CoordinatorCore {
             startup_profile,
             supported_model_tasks,
             allowed_local_profiles,
+            allowed_comfy_profiles,
         )?;
         ensure!(
             self.bindings == expected_bindings,
@@ -856,9 +874,13 @@ impl CoordinatorCore {
         expected_gpu: u32,
         startup_profile: &ProfileKey,
         supported_model_tasks: BTreeMap<String, BTreeSet<String>>,
-        allowed_local_profiles: BTreeSet<ProfileKey>,
+        profiles: ManagedStackProfiles,
         readiness: &super::engine_health::RouterModelReadinessObservation,
     ) -> Result<()> {
+        let ManagedStackProfiles {
+            local_jobs: allowed_local_profiles,
+            comfy: allowed_comfy_profiles,
+        } = profiles;
         ensure!(
             self.admission == AdmissionState::ReconciliationRequired,
             "coordinator readiness was already resolved"
@@ -874,6 +896,7 @@ impl CoordinatorCore {
             startup_profile,
             &supported_model_tasks,
             &allowed_local_profiles,
+            &allowed_comfy_profiles,
         )?;
         ensure!(
             self.bindings == expected_bindings,
@@ -899,6 +922,7 @@ impl CoordinatorCore {
         self.catalog = refreshed;
         self.managed_language_model_tasks = Some(supported_model_tasks);
         self.managed_local_job_profiles = Some(allowed_local_profiles);
+        self.managed_comfy_profiles = Some(allowed_comfy_profiles);
         self.managed_stack_gpu_index = Some(expected_gpu);
         self.admission = AdmissionState::Ready;
         Ok(())
@@ -1571,6 +1595,7 @@ impl CoordinatorCore {
         let request_id = ticket.request_id.clone();
         let accepted_route = active.route.clone();
         let resource = active.resource;
+        let managed_generation = generation_reference.is_some();
         let is_comfy_workflow = matches!(
             &request,
             InferenceRequest::Media {
@@ -1586,6 +1611,12 @@ impl CoordinatorCore {
                 &accepted_route.native_route,
                 NativeRoute::MediaScript { .. }
             )
+            || (managed_generation
+                && (accepted_route.device != Some(Device::Cuda)
+                    || !self
+                        .managed_comfy_profiles
+                        .as_ref()
+                        .is_some_and(|profiles| profiles.contains(&accepted_route.profile))))
         {
             self.quarantine();
             return Err(ComfyCandidateError::UnsupportedRoute);
@@ -1830,6 +1861,96 @@ impl CoordinatorCore {
         Ok(())
     }
 
+    /// Commit native Comfy acceptance evidence only when it still names the
+    /// exact live managed workflow reservation and its durably associated
+    /// owned-service generation. Cancellation and deadline expiry do not
+    /// invalidate an already-observed native acknowledgement; the active
+    /// reservation remains held until normal completion or cleanup.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn accept_managed_comfy_backend_acknowledgement(
+        &mut self,
+        acknowledgement: super::comfy::ManagedComfyBackendAcknowledgement,
+    ) -> Result<()> {
+        let job_id = acknowledgement.job_id();
+        let Some(active) = self.active.get(&job_id) else {
+            self.quarantine();
+            anyhow::bail!("managed Comfy acknowledgement has no active reservation")
+        };
+        let active_matches = active.started.is_some()
+            && acknowledgement.request_id() == active.request_id
+            && acknowledgement.matches_active(
+                job_id,
+                &active.request_id,
+                &active.request,
+                &active.route,
+            )
+            && matches!(
+                &active.request,
+                InferenceRequest::Media {
+                    input: MediaInput::Workflow { graph, .. },
+                    ..
+                } if graph.as_object().is_some_and(|object| !object.is_empty())
+            )
+            && active.route.profile.lane == Lane::Media
+            && active.route.runtime.lane == Lane::Media
+            && active.route.runtime.as_str() == "ComfyUI"
+            && active.route.device == Some(Device::Cuda)
+            && self
+                .managed_comfy_profiles
+                .as_ref()
+                .is_some_and(|profiles| profiles.contains(&active.route.profile));
+        let active_request_id = active.request_id.clone();
+        let active_profile_id = active.route.profile.profile_id.as_str().to_owned();
+        let active_task = active.task.clone();
+        if !active_matches {
+            self.quarantine();
+            anyhow::bail!("managed Comfy acknowledgement does not match its active reservation")
+        }
+
+        let candidate_id = acknowledgement.candidate_id();
+        let backend_id = acknowledgement.backend_id();
+        let generation = acknowledgement.generation_reference();
+        let history_matches = self
+            .history
+            .records()
+            .iter()
+            .find(|job| job.id == job_id)
+            .is_some_and(|job| {
+                job.kind == "cross-toolkit"
+                    && job.status == "running"
+                    && job.metadata.toolkit.as_deref() == Some("l2m2")
+                    && job.metadata.profile.as_deref() == Some(active_profile_id.as_str())
+                    && job.metadata.task.as_deref() == Some(active_task.as_str())
+                    && job.metadata.request_id.as_deref() == Some(active_request_id.as_str())
+                    && job.metadata.result_state.as_deref() == Some("running")
+                    && job.metadata.comfy_dispatch_candidate.as_deref() == Some(candidate_id)
+                    && candidate_id == backend_id
+                    && generation.as_ref().is_some_and(|reference| {
+                        reference.is_valid()
+                            && job.metadata.comfy_service_generation.as_ref() == Some(reference)
+                    })
+            });
+        if !history_matches {
+            self.quarantine();
+            anyhow::bail!("managed Comfy acknowledgement does not match durable candidate evidence")
+        }
+
+        let existing_backend_id = self
+            .history
+            .records()
+            .iter()
+            .find(|job| job.id == job_id)
+            .and_then(|job| job.metadata.backend_id.clone());
+        match existing_backend_id {
+            Some(existing) if existing == backend_id => Ok(()),
+            Some(_) => {
+                self.quarantine();
+                anyhow::bail!("conflicting managed Comfy backend acknowledgement")
+            }
+            None => self.attach_backend(job_id, backend_id.to_owned()),
+        }
+    }
+
     pub fn complete(
         &mut self,
         job_id: u64,
@@ -1931,6 +2052,7 @@ fn validate_managed_stack_configuration(
     startup_profile: &ProfileKey,
     supported_model_tasks: &BTreeMap<String, BTreeSet<String>>,
     allowed_local_profiles: &BTreeSet<ProfileKey>,
+    allowed_comfy_profiles: &BTreeSet<ProfileKey>,
 ) -> Result<(Catalog, BTreeMap<RuntimeIdentity, ResourceClaim>)> {
     ensure!(
         runtime.lane == Lane::Language && runtime.as_str() == "llama-swap",
@@ -1945,8 +2067,8 @@ fn validate_managed_stack_configuration(
         "managed model list is empty"
     );
     ensure!(
-        !allowed_local_profiles.is_empty(),
-        "managed local profile allowlist is empty"
+        !allowed_local_profiles.is_empty() || !allowed_comfy_profiles.is_empty(),
+        "managed local and Comfy profile allowlists are empty"
     );
 
     let refreshed = catalog.refresh()?;
@@ -2014,6 +2136,25 @@ fn validate_managed_stack_configuration(
             expected_bindings.insert(route.runtime, claim);
         }
     }
+    for profile in allowed_comfy_profiles {
+        let route = resolve_profile_route(&refreshed, profile)?;
+        let request = representative_managed_comfy_request(profile)?;
+        let claim = validate_managed_comfy_route(
+            &refreshed,
+            &route,
+            &request,
+            allowed_comfy_profiles,
+            expected_gpu,
+        )?;
+        if let Some(existing) = expected_bindings.get(&route.runtime) {
+            ensure!(
+                *existing == claim,
+                "profiles on one managed runtime require conflicting resource claims"
+            );
+        } else {
+            expected_bindings.insert(route.runtime, claim);
+        }
+    }
 
     Ok((refreshed, expected_bindings))
 }
@@ -2047,12 +2188,26 @@ fn representative_managed_local_request(profile: &ProfileKey) -> Result<Inferenc
     }
 }
 
+#[cfg(target_os = "linux")]
+fn representative_managed_comfy_request(profile: &ProfileKey) -> Result<InferenceRequest> {
+    Ok(InferenceRequest::Media {
+        profile: profile.clone(),
+        input: MediaInput::Workflow {
+            task: Task::new("image")?,
+            graph: serde_json::json!({
+                "1": { "class_type": "LoadImage", "inputs": { "image": "fixture.png" } }
+            }),
+        },
+    })
+}
+
 fn validate_managed_stack_request(
     catalog: &Catalog,
     route: &ResolvedProfileRoute,
     request: &InferenceRequest,
     supported_model_tasks: &BTreeMap<String, BTreeSet<String>>,
     allowed_local_profiles: &BTreeSet<ProfileKey>,
+    allowed_comfy_profiles: &BTreeSet<ProfileKey>,
     expected_gpu: u32,
 ) -> Result<ResourceClaim> {
     if let NativeRoute::LlamaSwapModel { model_id, .. } = &route.native_route {
@@ -2068,11 +2223,65 @@ fn validate_managed_stack_request(
         );
         return Ok(ResourceClaim::ExclusiveGpu(expected_gpu));
     }
+    if allowed_comfy_profiles.contains(&route.profile) {
+        #[cfg(target_os = "linux")]
+        {
+            return validate_managed_comfy_route(
+                catalog,
+                route,
+                request,
+                allowed_comfy_profiles,
+                expected_gpu,
+            );
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            anyhow::bail!("managed Comfy is available only on Linux")
+        }
+    }
     ensure!(
         allowed_local_profiles.contains(&route.profile),
         "local profile is outside the configured managed allowlist"
     );
     validate_managed_local_route(catalog, route, request, expected_gpu)
+}
+
+#[cfg(target_os = "linux")]
+fn validate_managed_comfy_route(
+    catalog: &Catalog,
+    route: &ResolvedProfileRoute,
+    request: &InferenceRequest,
+    allowed_comfy_profiles: &BTreeSet<ProfileKey>,
+    expected_gpu: u32,
+) -> Result<ResourceClaim> {
+    ensure!(
+        allowed_comfy_profiles.contains(&route.profile)
+            && request.profile() == &route.profile
+            && request.validate(catalog).is_ok(),
+        "managed Comfy request is outside its explicit profile allowlist"
+    );
+    let InferenceRequest::Media {
+        input: MediaInput::Workflow { graph, .. },
+        ..
+    } = request
+    else {
+        anyhow::bail!("managed Comfy accepts only explicit native workflow requests")
+    };
+    let (native_route, _) =
+        super::managed_comfy_config::validate_comfy_profile(catalog, &route.profile)?;
+    ensure!(
+        &native_route == route
+            && route.profile.lane == Lane::Media
+            && route.runtime.lane == Lane::Media
+            && route.runtime.as_str() == "ComfyUI"
+            && route.device == Some(Device::Cuda)
+            && route.tasks.len() == 1
+            && route.tasks[0].as_str() == "image"
+            && request.task() == "image",
+        "managed Comfy native profile route is not explicit CUDA image execution"
+    );
+    super::managed_comfy_config::validate_api_workflow_graph(graph)?;
+    Ok(ResourceClaim::ExclusiveGpu(expected_gpu))
 }
 
 fn validate_managed_local_route(
@@ -2421,6 +2630,7 @@ mod tests {
                         "id": "fixture-profile",
                         "name": "Fixture Comfy profile",
                         "runtime": runtime,
+                        "device": "cuda",
                         "tasks": ["image"],
                         "script": script
                     }]
@@ -2688,6 +2898,76 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    fn managed_comfy_stack_core(root: &Path, data: &Path, device: &str) -> CoordinatorCore {
+        use std::os::unix::fs::PermissionsExt;
+
+        let language = root.join("language");
+        let media = root.join("media");
+        let decisions = root.join("decisions");
+        std::fs::create_dir_all(&language).unwrap();
+        std::fs::create_dir_all(media.join("media-models")).unwrap();
+        std::fs::create_dir_all(media.join("workflows/qwen-image-2.1")).unwrap();
+        std::fs::create_dir_all(&decisions).unwrap();
+        std::fs::write(
+            language.join("llama-swap.yaml"),
+            "models:\n  fixture-model:\n    cmd: llama-server\n",
+        )
+        .unwrap();
+        std::fs::write(
+            media.join("media-runtimes.json"),
+            serde_json::json!({
+                "schema_version": 1,
+                "profiles": [{
+                    "id": "qwen-image-2.1",
+                    "name": "Comfy fixture",
+                    "runtime": "ComfyUI",
+                    "device": device,
+                    "tasks": ["image"],
+                    "script": "media-models/generate-qwen-image-2.1.sh"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            decisions.join("decision-runtimes.json"),
+            r#"{"version":"1.0","profiles":[]}"#,
+        )
+        .unwrap();
+        // Inert scripts and native workflow templates are identity/shape
+        // evidence only. Admission never invokes a media script.
+        let script = media.join("media-models/generate-qwen-image-2.1.sh");
+        std::fs::write(&script, "#!/bin/sh\ntouch media-script-was-executed\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for name in [
+            "image_qwen_image_2_1_t2i.json",
+            "image_qwen_image_2_1_image_edit.json",
+        ] {
+            std::fs::write(
+                media.join("workflows/qwen-image-2.1").join(name),
+                r#"{"nodes":[{"id":1,"type":"LoadImage"}],"links":[]}"#,
+            )
+            .unwrap();
+        }
+        let catalog = Catalog::load_from_roots(&language, &media, &decisions).unwrap();
+        CoordinatorCore::load(catalog, managed_comfy_stack_bindings(), data, root, 8).unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn managed_comfy_stack_bindings() -> BTreeMap<RuntimeIdentity, ResourceClaim> {
+        BTreeMap::from([
+            (
+                RuntimeIdentity::new(Lane::Language, "llama-swap").unwrap(),
+                ResourceClaim::ExclusiveGpu(2),
+            ),
+            (
+                RuntimeIdentity::new(Lane::Media, "ComfyUI").unwrap(),
+                ResourceClaim::ExclusiveGpu(2),
+            ),
+        ])
+    }
+
+    #[cfg(target_os = "linux")]
     fn managed_tasks() -> BTreeMap<String, BTreeSet<String>> {
         BTreeMap::from([("fixture-model".into(), BTreeSet::from(["chat".into()]))])
     }
@@ -2722,6 +3002,11 @@ mod tests {
             ProfileKey::new(Lane::Decisions, "nagi-cpu-alt").unwrap(),
             ProfileKey::new(Lane::Decisions, "laya-cuda").unwrap(),
         ])
+    }
+
+    #[cfg(target_os = "linux")]
+    fn managed_comfy_profiles() -> BTreeSet<ProfileKey> {
+        BTreeSet::from([ProfileKey::new(Lane::Media, "qwen-image-2.1").unwrap()])
     }
 
     #[cfg(target_os = "linux")]
@@ -2761,7 +3046,10 @@ mod tests {
             2,
             &startup,
             managed_tasks(),
-            managed_local_profiles(),
+            ManagedStackProfiles {
+                local_jobs: managed_local_profiles(),
+                comfy: BTreeSet::new(),
+            },
             &super::super::engine_health::RouterModelReadinessObservation::test_for_model(
                 "fixture-model",
             ),
@@ -2778,8 +3066,15 @@ mod tests {
         let allowed = managed_local_profiles();
         let core = managed_stack_core(root.path(), data.path(), managed_stack_bindings());
 
-        core.require_managed_stack_startup(&runtime, 2, &startup, &managed_tasks(), &allowed)
-            .unwrap();
+        core.require_managed_stack_startup(
+            &runtime,
+            2,
+            &startup,
+            &managed_tasks(),
+            &allowed,
+            &BTreeSet::new(),
+        )
+        .unwrap();
         assert!(!root
             .path()
             .join("media/managed-media-script-executed")
@@ -2789,7 +3084,14 @@ mod tests {
             .join("decisions/managed-decision-runner-executed")
             .exists());
         assert!(core
-            .require_managed_stack_startup(&runtime, 1, &startup, &managed_tasks(), &allowed)
+            .require_managed_stack_startup(
+                &runtime,
+                1,
+                &startup,
+                &managed_tasks(),
+                &allowed,
+                &BTreeSet::new(),
+            )
             .is_err());
 
         let wrong_cpu_data = TempDir::new().unwrap();
@@ -2811,13 +3113,27 @@ mod tests {
         let cpu_claim_mismatch =
             managed_stack_core(root.path(), wrong_cpu_data.path(), wrong_cpu_fallback);
         assert!(cpu_claim_mismatch
-            .require_managed_stack_startup(&runtime, 2, &startup, &managed_tasks(), &allowed)
+            .require_managed_stack_startup(
+                &runtime,
+                2,
+                &startup,
+                &managed_tasks(),
+                &allowed,
+                &BTreeSet::new(),
+            )
             .is_err());
 
         let mut conflicting = allowed.clone();
         conflicting.insert(ProfileKey::new(Lane::Decisions, "nagi-cuda").unwrap());
         assert!(core
-            .require_managed_stack_startup(&runtime, 2, &startup, &managed_tasks(), &conflicting)
+            .require_managed_stack_startup(
+                &runtime,
+                2,
+                &startup,
+                &managed_tasks(),
+                &conflicting,
+                &BTreeSet::new(),
+            )
             .is_err());
 
         let missing_runtime_data = TempDir::new().unwrap();
@@ -2837,8 +3153,141 @@ mod tests {
             ]),
         );
         assert!(missing_runtime
-            .require_managed_stack_startup(&runtime, 2, &startup, &managed_tasks(), &allowed)
+            .require_managed_stack_startup(
+                &runtime,
+                2,
+                &startup,
+                &managed_tasks(),
+                &allowed,
+                &BTreeSet::new(),
+            )
             .is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn managed_comfy_opt_in_requires_native_cuda_workflow_route_and_never_runs_script() {
+        let root = TempDir::new().unwrap();
+        let data = TempDir::new().unwrap();
+        let runtime = RuntimeIdentity::new(Lane::Language, "llama-swap").unwrap();
+        let startup = ProfileKey::new(Lane::Language, "fixture-model").unwrap();
+        let comfy_profiles = managed_comfy_profiles();
+        let mut core = managed_comfy_stack_core(root.path(), data.path(), "cuda");
+
+        assert!(core
+            .require_managed_stack_startup(
+                &runtime,
+                2,
+                &startup,
+                &managed_tasks(),
+                &BTreeSet::new(),
+                &BTreeSet::new(),
+            )
+            .is_err());
+        core.require_managed_stack_startup(
+            &runtime,
+            2,
+            &startup,
+            &managed_tasks(),
+            &BTreeSet::new(),
+            &comfy_profiles,
+        )
+        .unwrap();
+        let cpu_root = TempDir::new().unwrap();
+        let cpu_data = TempDir::new().unwrap();
+        let cpu_core = managed_comfy_stack_core(cpu_root.path(), cpu_data.path(), "cpu");
+        assert!(cpu_core
+            .require_managed_stack_startup(
+                &runtime,
+                2,
+                &startup,
+                &managed_tasks(),
+                &BTreeSet::new(),
+                &comfy_profiles,
+            )
+            .is_err());
+
+        core.confirm_managed_stack_ready(
+            &runtime,
+            2,
+            &startup,
+            managed_tasks(),
+            ManagedStackProfiles {
+                local_jobs: BTreeSet::new(),
+                comfy: comfy_profiles.clone(),
+            },
+            &super::super::engine_health::RouterModelReadinessObservation::test_for_model(
+                "fixture-model",
+            ),
+        )
+        .unwrap();
+        let now = Instant::now();
+        let profile = ProfileKey::new(Lane::Media, "qwen-image-2.1").unwrap();
+        let scripted = InferenceRequest::Media {
+            profile: profile.clone(),
+            input: MediaInput::Script {
+                task: Task::new("image").unwrap(),
+                args: Vec::new(),
+            },
+        };
+        assert_eq!(
+            core.submit_checked(
+                "managed-comfy-script-fallback".into(),
+                scripted,
+                Duration::from_secs(30),
+                now,
+            ),
+            Err(SubmissionError::Unavailable)
+        );
+        let invalid_graph = InferenceRequest::Media {
+            profile: profile.clone(),
+            input: MediaInput::Workflow {
+                task: Task::new("image").unwrap(),
+                graph: serde_json::json!({
+                    "1": { "class_type": "LoadImage", "inputs": {}, "raw": true }
+                }),
+            },
+        };
+        assert_eq!(
+            core.submit_checked(
+                "managed-comfy-invalid-graph".into(),
+                invalid_graph,
+                Duration::from_secs(30),
+                now,
+            ),
+            Err(SubmissionError::Unavailable)
+        );
+
+        let request = InferenceRequest::Media {
+            profile,
+            input: MediaInput::Workflow {
+                task: Task::new("image").unwrap(),
+                graph: serde_json::json!({
+                    "1": { "class_type": "LoadImage", "inputs": { "image": "fixture.png" } }
+                }),
+            },
+        };
+        let job_id = core
+            .submit_checked(
+                "managed-comfy-workflow".into(),
+                request,
+                Duration::from_secs(30),
+                now,
+            )
+            .unwrap();
+        let ticket = core.reserve_next(now).unwrap().unwrap();
+        assert_eq!(ticket.resource, ResourceClaim::ExclusiveGpu(2));
+        assert_eq!(ticket.route.runtime.as_str(), "ComfyUI");
+        core.begin_dispatch(&ticket, now + Duration::from_millis(1))
+            .unwrap();
+        core.complete(
+            job_id,
+            Completion::Failed,
+            Vec::new(),
+            now + Duration::from_millis(2),
+        )
+        .unwrap();
+        assert!(!root.path().join("media-script-was-executed").exists());
     }
 
     #[cfg(target_os = "linux")]
@@ -2855,6 +3304,7 @@ mod tests {
             &startup,
             &managed_tasks(),
             &managed_local_profiles(),
+            &BTreeSet::new(),
         )
         .unwrap();
         assert!(core
@@ -2863,7 +3313,10 @@ mod tests {
                 2,
                 &startup,
                 managed_tasks(),
-                managed_local_profiles(),
+                ManagedStackProfiles {
+                    local_jobs: managed_local_profiles(),
+                    comfy: BTreeSet::new()
+                },
                 &super::super::engine_health::RouterModelReadinessObservation::test_for_model(
                     "other-model",
                 ),
@@ -3052,7 +3505,10 @@ mod tests {
                 2,
                 &startup,
                 managed_tasks(),
-                managed_local_profiles(),
+                ManagedStackProfiles {
+                    local_jobs: managed_local_profiles(),
+                    comfy: BTreeSet::new()
+                },
                 &super::super::engine_health::RouterModelReadinessObservation::test_for_model(
                     "fixture-model",
                 ),
@@ -3964,6 +4420,8 @@ mod tests {
     fn managed_comfy_candidate_commits_exact_owner_generation_before_permit() {
         const CANDIDATE: &str = "123e4567-e89b-12d3-a456-426614174000";
         let (fixture, mut coordinator, job_id, ticket, now) = started_comfy_dispatch();
+        coordinator.managed_comfy_profiles =
+            Some(BTreeSet::from([ticket.request.profile().clone()]));
         let generation = OwnedServiceGenerationIdentity::for_test_comfy_supervisor().unwrap();
         let permit = coordinator
             .record_managed_comfy_dispatch_candidate(
@@ -4020,6 +4478,271 @@ mod tests {
         assert!(!persisted.contains("workflow-payload-secret"));
         assert!(!persisted.contains("argv"));
         assert!(!persisted.contains("environment"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn managed_comfy_worker_handoff_persists_before_one_reply_and_late_cancel_revokes_permit() {
+        const CANDIDATE: &str = "123e4567-e89b-12d3-a456-426614174000";
+        let (fixture, mut coordinator, job_id, ticket, _now) = started_comfy_dispatch();
+        coordinator.managed_comfy_profiles =
+            Some(BTreeSet::from([ticket.request.profile().clone()]));
+        let generation = OwnedServiceGenerationIdentity::for_test_comfy_supervisor().unwrap();
+        let cancellation = RequestCancellation::new();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+
+        let permit = std::thread::scope(|scope| {
+            let worker_cancellation = cancellation.clone();
+            let worker_generation = generation.clone();
+            let worker_ticket = &ticket;
+            let worker = scope.spawn(move || {
+                let context = super::super::runtime::OperationContext::new(
+                    Instant::now() + Duration::from_secs(1),
+                    &worker_cancellation,
+                );
+                super::super::managed_session::request_comfy_permit(
+                    &sender,
+                    worker_ticket,
+                    CANDIDATE.into(),
+                    worker_generation,
+                    &context,
+                )
+            });
+            match receiver.recv_timeout(Duration::from_secs(1)).unwrap() {
+                super::super::managed_session::ManagedWorkerEvent::ComfyCandidate {
+                    ticket: event_ticket,
+                    candidate,
+                    generation: event_generation,
+                    reply,
+                } => {
+                    assert_eq!(event_ticket.job_id, job_id);
+                    assert_eq!(candidate, CANDIDATE);
+                    assert_eq!(*event_generation, generation);
+                    let permit = coordinator
+                        .record_managed_comfy_dispatch_candidate(
+                            &event_ticket,
+                            candidate,
+                            *event_generation,
+                            Instant::now(),
+                        )
+                        .unwrap();
+                    let rows: serde_json::Value = serde_json::from_slice(
+                        &std::fs::read(fixture.root.path().join("jobs.json")).unwrap(),
+                    )
+                    .unwrap();
+                    let row = rows
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|row| row["request_id"].as_str() == Some(ticket.request_id.as_str()))
+                        .unwrap();
+                    assert_eq!(row["comfy_dispatch_candidate"], CANDIDATE);
+                    assert!(row.get("backend_id").is_none());
+                    assert!(row.get("comfy_service_generation").is_some());
+                    reply.send(Some(permit)).unwrap();
+                    worker.join().unwrap().unwrap()
+                }
+                _ => panic!("expected one Comfy candidate handoff"),
+            }
+        });
+
+        assert!(coordinator.accepts_managed_comfy_dispatch_permit(&permit));
+        let active = coordinator.active.get_mut(&job_id).unwrap();
+        let deadline = active.deadline;
+        active.deadline = Instant::now() - Duration::from_millis(1);
+        assert!(!coordinator.accepts_managed_comfy_dispatch_permit(&permit));
+        coordinator.active.get_mut(&job_id).unwrap().deadline = deadline;
+        assert!(coordinator.accepts_managed_comfy_dispatch_permit(&permit));
+        ticket.cancellation.cancel();
+        assert!(!coordinator.accepts_managed_comfy_dispatch_permit(&permit));
+        assert_eq!(coordinator.active_count(), 1);
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty | std::sync::mpsc::TryRecvError::Disconnected)
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn managed_comfy_lost_permit_reply_keeps_durable_candidate_without_replay() {
+        const CANDIDATE: &str = "123e4567-e89b-12d3-a456-426614174000";
+        let (fixture, mut coordinator, job_id, ticket, _now) = started_comfy_dispatch();
+        coordinator.managed_comfy_profiles =
+            Some(BTreeSet::from([ticket.request.profile().clone()]));
+        let generation = OwnedServiceGenerationIdentity::for_test_comfy_supervisor().unwrap();
+        let cancellation = RequestCancellation::new();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+
+        let worker_result = std::thread::scope(|scope| {
+            let worker_cancellation = cancellation.clone();
+            let worker_generation = generation.clone();
+            let worker_ticket = &ticket;
+            let worker = scope.spawn(move || {
+                let context = super::super::runtime::OperationContext::new(
+                    Instant::now() + Duration::from_secs(1),
+                    &worker_cancellation,
+                );
+                super::super::managed_session::request_comfy_permit(
+                    &sender,
+                    worker_ticket,
+                    CANDIDATE.into(),
+                    worker_generation,
+                    &context,
+                )
+            });
+            match receiver.recv_timeout(Duration::from_secs(1)).unwrap() {
+                super::super::managed_session::ManagedWorkerEvent::ComfyCandidate {
+                    ticket: event_ticket,
+                    candidate,
+                    generation: event_generation,
+                    reply,
+                } => {
+                    coordinator
+                        .record_managed_comfy_dispatch_candidate(
+                            &event_ticket,
+                            candidate,
+                            *event_generation,
+                            Instant::now(),
+                        )
+                        .unwrap();
+                    let rows: serde_json::Value = serde_json::from_slice(
+                        &std::fs::read(fixture.root.path().join("jobs.json")).unwrap(),
+                    )
+                    .unwrap();
+                    let row = rows
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|row| row["request_id"].as_str() == Some(ticket.request_id.as_str()))
+                        .unwrap();
+                    assert_eq!(row["comfy_dispatch_candidate"], CANDIDATE);
+                    assert!(row.get("backend_id").is_none());
+                    drop(reply); // Worker observes loss; this event is never resent.
+                    worker.join().unwrap()
+                }
+                _ => panic!("expected one Comfy candidate handoff"),
+            }
+        });
+
+        assert!(worker_result.is_err());
+        assert_eq!(coordinator.active_count(), 1);
+        assert_eq!(
+            coordinator
+                .history()
+                .records()
+                .iter()
+                .find(|job| job.id == job_id)
+                .unwrap()
+                .metadata
+                .comfy_dispatch_candidate
+                .as_deref(),
+            Some(CANDIDATE)
+        );
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty | std::sync::mpsc::TryRecvError::Disconnected)
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn managed_comfy_ack_commits_after_late_cancel_and_exact_duplicate_is_read_only() {
+        const CANDIDATE: &str = "123e4567-e89b-12d3-a456-426614174000";
+        let (fixture, mut coordinator, _job_id, ticket, now) = started_comfy_dispatch();
+        coordinator.managed_comfy_profiles =
+            Some(BTreeSet::from([ticket.request.profile().clone()]));
+        let generation = OwnedServiceGenerationIdentity::for_test_comfy_supervisor().unwrap();
+        coordinator
+            .record_managed_comfy_dispatch_candidate(
+                &ticket,
+                CANDIDATE.into(),
+                generation.clone(),
+                now,
+            )
+            .unwrap();
+
+        let acknowledgement = super::super::comfy::test_managed_comfy_acknowledgement(
+            &ticket,
+            generation.clone(),
+            CANDIDATE,
+        )
+        .expect("fixture receipt should bind the active request and owned generation");
+        ticket.cancellation.cancel();
+        coordinator
+            .accept_managed_comfy_backend_acknowledgement(acknowledgement)
+            .unwrap();
+        let path = fixture.root.path().join("jobs.json");
+        let committed = std::fs::read(&path).unwrap();
+        let rows: serde_json::Value = serde_json::from_slice(&committed).unwrap();
+        let row = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["request_id"] == "comfy-dispatch-fixture")
+            .unwrap();
+        assert_eq!(row["comfy_dispatch_candidate"], CANDIDATE);
+        assert_eq!(row["backend_id"], CANDIDATE);
+        assert!(row.get("comfy_service_generation").is_some());
+
+        let duplicate = super::super::comfy::test_managed_comfy_acknowledgement(
+            &ticket,
+            generation.clone(),
+            CANDIDATE,
+        )
+        .unwrap();
+        coordinator
+            .accept_managed_comfy_backend_acknowledgement(duplicate)
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), committed);
+        assert_eq!(coordinator.active_count(), 1);
+        assert_eq!(coordinator.admission(), AdmissionState::Ready);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn managed_comfy_ack_rejects_a_different_owned_generation() {
+        const CANDIDATE: &str = "123e4567-e89b-12d3-a456-426614174000";
+        let (_fixture, mut coordinator, job_id, ticket, now) = started_comfy_dispatch();
+        coordinator.managed_comfy_profiles =
+            Some(BTreeSet::from([ticket.request.profile().clone()]));
+        let generation = OwnedServiceGenerationIdentity::for_test_comfy_supervisor().unwrap();
+        coordinator
+            .record_managed_comfy_dispatch_candidate(
+                &ticket,
+                CANDIDATE.into(),
+                generation.clone(),
+                now,
+            )
+            .unwrap();
+        let stale_generation =
+            OwnedServiceGenerationIdentity::for_test_comfy_supervisor_with_main_pid(9876).unwrap();
+        let acknowledgement = super::super::comfy::test_managed_comfy_acknowledgement(
+            &ticket,
+            stale_generation,
+            CANDIDATE,
+        )
+        .unwrap();
+
+        assert!(coordinator
+            .accept_managed_comfy_backend_acknowledgement(acknowledgement)
+            .is_err());
+        assert_eq!(
+            coordinator.admission(),
+            AdmissionState::ReconciliationRequired
+        );
+        assert_eq!(coordinator.active_count(), 1);
+        let row = coordinator
+            .history()
+            .records()
+            .iter()
+            .find(|job| job.id == job_id)
+            .unwrap();
+        assert_eq!(
+            row.metadata.comfy_dispatch_candidate.as_deref(),
+            Some(CANDIDATE)
+        );
+        assert!(row.metadata.backend_id.is_none());
+        assert!(row.metadata.comfy_service_generation.is_some());
     }
 
     #[test]
@@ -4161,6 +4884,8 @@ mod tests {
     fn managed_comfy_persistence_failure_returns_no_permit_or_partial_association() {
         const CANDIDATE: &str = "123e4567-e89b-12d3-a456-426614174000";
         let (fixture, mut coordinator, job_id, ticket, now) = started_comfy_dispatch();
+        coordinator.managed_comfy_profiles =
+            Some(BTreeSet::from([ticket.request.profile().clone()]));
         let jobs_path = fixture.root.path().join("jobs.json");
         std::fs::remove_file(&jobs_path).unwrap();
         std::fs::create_dir(&jobs_path).unwrap();

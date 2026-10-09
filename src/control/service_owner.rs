@@ -607,11 +607,18 @@ impl<'host> ManagedRuntimeOwner<'host> {
                 ManagedServiceErrorKind::InvalidRecipe,
             ));
         }
-        let mut backend = BackendProcessSpec::new(
-            launch.backend_recipe.executable(),
-            launch.backend_recipe.working_directory(),
-            launch.backend_recipe.arguments().iter().cloned(),
-        )
+        let mut backend = match launch.backend_recipe.verified_python() {
+            Some(interpreter) => BackendProcessSpec::new_with_verified_python(
+                interpreter,
+                launch.backend_recipe.working_directory(),
+                launch.backend_recipe.arguments().iter().cloned(),
+            ),
+            None => BackendProcessSpec::new(
+                launch.backend_recipe.executable(),
+                launch.backend_recipe.working_directory(),
+                launch.backend_recipe.arguments().iter().cloned(),
+            ),
+        }
         .map_err(|_| OwnerStartError::Preparation(ManagedServiceErrorKind::InvalidRecipe))?;
         if let Some(stack_root) = launch.stack_root {
             backend = backend.with_stack_root(stack_root);
@@ -1290,7 +1297,7 @@ impl OwnedJobFinalizer<'_, '_> {
             Err(_) => {
                 return Ok(ReleasedNativeOutcome::Failed(
                     NativeJobFailure::InvalidOutput,
-                ))
+                ));
             }
         };
         match result {

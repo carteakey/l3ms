@@ -116,6 +116,355 @@ pub struct LaunchRecipe {
     executable: PathBuf,
     working_directory: PathBuf,
     arguments: Vec<OsString>,
+    verified_python: Option<VerifiedPythonInterpreter>,
+}
+
+const MAX_PYTHON_CONFIG_BYTES: u64 = 16 * 1024;
+const MAX_PYTHON_IDENTITY_BYTES: usize = 1024;
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct PythonFileIdentity {
+    device: u64,
+    inode: u64,
+    uid: u32,
+    mode: u32,
+    size: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    changed_seconds: i64,
+    changed_nanoseconds: i64,
+}
+
+impl PythonFileIdentity {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            uid: metadata.uid(),
+            mode: metadata.mode() & 0o7777,
+            size: metadata.len(),
+            modified_seconds: metadata.mtime(),
+            modified_nanoseconds: metadata.mtime_nsec(),
+            changed_seconds: metadata.ctime(),
+            changed_nanoseconds: metadata.ctime_nsec(),
+        }
+    }
+
+    fn append_wire_fields(self, fields: &mut Vec<String>) {
+        fields.extend([
+            self.device.to_string(),
+            self.inode.to_string(),
+            self.uid.to_string(),
+            self.mode.to_string(),
+            self.size.to_string(),
+            self.modified_seconds.to_string(),
+            self.modified_nanoseconds.to_string(),
+            self.changed_seconds.to_string(),
+            self.changed_nanoseconds.to_string(),
+        ]);
+    }
+
+    fn parse_wire_fields<'a>(
+        fields: &mut impl Iterator<Item = &'a str>,
+    ) -> Result<Self, ManagedServiceErrorKind> {
+        let device = parse_python_wire_u64(fields)?;
+        let inode = parse_python_wire_u64(fields)?;
+        let uid = parse_python_wire_u32(fields)?;
+        let mode = parse_python_wire_u32(fields)?;
+        let size = parse_python_wire_u64(fields)?;
+        let modified_seconds = parse_python_wire_i64(fields)?;
+        let modified_nanoseconds = parse_python_wire_i64(fields)?;
+        let changed_seconds = parse_python_wire_i64(fields)?;
+        let changed_nanoseconds = parse_python_wire_i64(fields)?;
+        if modified_nanoseconds.unsigned_abs() >= 1_000_000_000
+            || changed_nanoseconds.unsigned_abs() >= 1_000_000_000
+            || mode & !0o7777 != 0
+        {
+            return Err(ManagedServiceErrorKind::InvalidRecipe);
+        }
+        Ok(Self {
+            device,
+            inode,
+            uid,
+            mode,
+            size,
+            modified_seconds,
+            modified_nanoseconds,
+            changed_seconds,
+            changed_nanoseconds,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct PythonDirectoryIdentity {
+    device: u64,
+    inode: u64,
+    uid: u32,
+    mode: u32,
+}
+
+impl PythonDirectoryIdentity {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            uid: metadata.uid(),
+            mode: metadata.mode() & 0o7777,
+        }
+    }
+
+    fn append_wire_fields(self, fields: &mut Vec<String>) {
+        fields.extend([
+            self.device.to_string(),
+            self.inode.to_string(),
+            self.uid.to_string(),
+            self.mode.to_string(),
+        ]);
+    }
+
+    fn parse_wire_fields<'a>(
+        fields: &mut impl Iterator<Item = &'a str>,
+    ) -> Result<Self, ManagedServiceErrorKind> {
+        let device = parse_python_wire_u64(fields)?;
+        let inode = parse_python_wire_u64(fields)?;
+        let uid = parse_python_wire_u32(fields)?;
+        let mode = parse_python_wire_u32(fields)?;
+        if mode & !0o7777 != 0 {
+            return Err(ManagedServiceErrorKind::InvalidRecipe);
+        }
+        Ok(Self {
+            device,
+            inode,
+            uid,
+            mode,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct VerifiedPythonIdentity {
+    configured_entry_is_symlink: bool,
+    configured_entry: PythonFileIdentity,
+    target: PythonFileIdentity,
+    venv_directory: PythonDirectoryIdentity,
+    bin_directory: PythonDirectoryIdentity,
+    pyvenv_config: PythonFileIdentity,
+}
+
+impl VerifiedPythonIdentity {
+    fn to_wire(self) -> String {
+        let mut fields = Vec::with_capacity(36);
+        fields.push(if self.configured_entry_is_symlink {
+            "1".to_owned()
+        } else {
+            "0".to_owned()
+        });
+        self.configured_entry.append_wire_fields(&mut fields);
+        self.target.append_wire_fields(&mut fields);
+        self.venv_directory.append_wire_fields(&mut fields);
+        self.bin_directory.append_wire_fields(&mut fields);
+        self.pyvenv_config.append_wire_fields(&mut fields);
+        fields.join(":")
+    }
+
+    fn from_wire(value: &str) -> Result<Self, ManagedServiceErrorKind> {
+        if value.len() > MAX_PYTHON_IDENTITY_BYTES {
+            return Err(ManagedServiceErrorKind::InvalidRecipe);
+        }
+        let mut fields = value.split(':');
+        let configured_entry_is_symlink = match fields.next() {
+            Some("0") => false,
+            Some("1") => true,
+            _ => return Err(ManagedServiceErrorKind::InvalidRecipe),
+        };
+        let identity = Self {
+            configured_entry_is_symlink,
+            configured_entry: PythonFileIdentity::parse_wire_fields(&mut fields)?,
+            target: PythonFileIdentity::parse_wire_fields(&mut fields)?,
+            venv_directory: PythonDirectoryIdentity::parse_wire_fields(&mut fields)?,
+            bin_directory: PythonDirectoryIdentity::parse_wire_fields(&mut fields)?,
+            pyvenv_config: PythonFileIdentity::parse_wire_fields(&mut fields)?,
+        };
+        if fields.next().is_some() || identity.to_wire() != value {
+            return Err(ManagedServiceErrorKind::InvalidRecipe);
+        }
+        Ok(identity)
+    }
+}
+
+/// A Comfy-only Python invocation that keeps the declared venv path while
+/// binding its symlink, executable target, venv directories, and pyvenv.cfg to
+/// fresh filesystem identities. Generic launch constructors do not accept or
+/// infer this marker.
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct VerifiedPythonInterpreter {
+    configured_path: PathBuf,
+    target_path: PathBuf,
+    venv_directory: PathBuf,
+    identity: VerifiedPythonIdentity,
+}
+
+impl VerifiedPythonInterpreter {
+    /// Pin the exact `<venv>/.venv-comfy/bin/python` invocation path and its
+    /// existing executable target. Call `verify` again before launch.
+    pub(crate) fn capture(
+        configured_path: impl AsRef<Path>,
+        expected_venv_directory: impl AsRef<Path>,
+    ) -> Result<Self, ManagedServiceErrorKind> {
+        Self::inspect(configured_path.as_ref(), expected_venv_directory.as_ref())
+    }
+
+    pub(crate) fn verify(&self) -> Result<(), ManagedServiceErrorKind> {
+        let current = Self::inspect(&self.configured_path, &self.venv_directory)?;
+        if current == *self {
+            Ok(())
+        } else {
+            Err(ManagedServiceErrorKind::InvalidRecipe)
+        }
+    }
+
+    pub(crate) fn configured_path(&self) -> &Path {
+        &self.configured_path
+    }
+
+    pub(crate) fn target_path(&self) -> &Path {
+        &self.target_path
+    }
+
+    pub(crate) fn venv_directory(&self) -> &Path {
+        &self.venv_directory
+    }
+
+    pub(crate) fn identity_wire(&self) -> String {
+        self.identity.to_wire()
+    }
+
+    pub(crate) fn from_helper_parts(
+        configured_path: PathBuf,
+        target_path: PathBuf,
+        venv_directory: PathBuf,
+        identity_wire: &str,
+    ) -> Result<Self, ManagedServiceErrorKind> {
+        let expected_identity = VerifiedPythonIdentity::from_wire(identity_wire)?;
+        let current = Self::inspect(&configured_path, &venv_directory)?;
+        if current.target_path != target_path || current.identity != expected_identity {
+            return Err(ManagedServiceErrorKind::InvalidRecipe);
+        }
+        Ok(current)
+    }
+
+    fn inspect(
+        configured_path: &Path,
+        expected_venv_directory: &Path,
+    ) -> Result<Self, ManagedServiceErrorKind> {
+        let invalid = || ManagedServiceErrorKind::InvalidRecipe;
+        if !configured_path.is_absolute()
+            || !expected_venv_directory.is_absolute()
+            || configured_path.as_os_str().as_bytes().len() > MAX_WORKING_DIRECTORY_BYTES
+            || expected_venv_directory.as_os_str().as_bytes().len() > MAX_WORKING_DIRECTORY_BYTES
+            || configured_path.as_os_str().as_bytes().contains(&0)
+            || expected_venv_directory.as_os_str().as_bytes().contains(&0)
+            || configured_path
+                .components()
+                .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+            || expected_venv_directory
+                .components()
+                .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+            || expected_venv_directory.file_name() != Some(std::ffi::OsStr::new(".venv-comfy"))
+            || configured_path != expected_venv_directory.join("bin/python")
+            || expected_venv_directory.canonicalize().ok()
+                != Some(expected_venv_directory.to_path_buf())
+        {
+            return Err(invalid());
+        }
+
+        let venv_metadata = fs::symlink_metadata(expected_venv_directory).map_err(|_| invalid())?;
+        if !venv_metadata.is_dir() || venv_metadata.file_type().is_symlink() {
+            return Err(invalid());
+        }
+        let bin_directory = expected_venv_directory.join("bin");
+        let bin_metadata = fs::symlink_metadata(&bin_directory).map_err(|_| invalid())?;
+        if !bin_metadata.is_dir()
+            || bin_metadata.file_type().is_symlink()
+            || bin_directory.canonicalize().ok() != Some(bin_directory.clone())
+        {
+            return Err(invalid());
+        }
+
+        let configured_metadata = fs::symlink_metadata(configured_path).map_err(|_| invalid())?;
+        let configured_entry_is_symlink = configured_metadata.file_type().is_symlink();
+        if !configured_entry_is_symlink && !configured_metadata.is_file() {
+            return Err(invalid());
+        }
+        let target_path = configured_path.canonicalize().map_err(|_| invalid())?;
+        if !target_path.is_absolute()
+            || target_path.as_os_str().as_bytes().len() > MAX_WORKING_DIRECTORY_BYTES
+        {
+            return Err(invalid());
+        }
+        let target_metadata = fs::metadata(&target_path).map_err(|_| invalid())?;
+        if !target_metadata.is_file() || target_metadata.permissions().mode() & 0o111 == 0 {
+            return Err(invalid());
+        }
+
+        let config_path = expected_venv_directory.join("pyvenv.cfg");
+        let config_link_metadata = fs::symlink_metadata(&config_path).map_err(|_| invalid())?;
+        if config_link_metadata.file_type().is_symlink()
+            || !config_link_metadata.is_file()
+            || config_link_metadata.len() == 0
+            || config_link_metadata.len() > MAX_PYTHON_CONFIG_BYTES
+        {
+            return Err(invalid());
+        }
+
+        Ok(Self {
+            configured_path: configured_path.to_path_buf(),
+            target_path,
+            venv_directory: expected_venv_directory.to_path_buf(),
+            identity: VerifiedPythonIdentity {
+                configured_entry_is_symlink,
+                configured_entry: PythonFileIdentity::from_metadata(&configured_metadata),
+                target: PythonFileIdentity::from_metadata(&target_metadata),
+                venv_directory: PythonDirectoryIdentity::from_metadata(&venv_metadata),
+                bin_directory: PythonDirectoryIdentity::from_metadata(&bin_metadata),
+                pyvenv_config: PythonFileIdentity::from_metadata(&config_link_metadata),
+            },
+        })
+    }
+}
+
+impl fmt::Debug for VerifiedPythonInterpreter {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("VerifiedPythonInterpreter([redacted])")
+    }
+}
+
+fn parse_python_wire_u64<'a>(
+    fields: &mut impl Iterator<Item = &'a str>,
+) -> Result<u64, ManagedServiceErrorKind> {
+    fields
+        .next()
+        .and_then(|value| value.parse().ok())
+        .ok_or(ManagedServiceErrorKind::InvalidRecipe)
+}
+
+fn parse_python_wire_u32<'a>(
+    fields: &mut impl Iterator<Item = &'a str>,
+) -> Result<u32, ManagedServiceErrorKind> {
+    fields
+        .next()
+        .and_then(|value| value.parse().ok())
+        .ok_or(ManagedServiceErrorKind::InvalidRecipe)
+}
+
+fn parse_python_wire_i64<'a>(
+    fields: &mut impl Iterator<Item = &'a str>,
+) -> Result<i64, ManagedServiceErrorKind> {
+    fields
+        .next()
+        .and_then(|value| value.parse().ok())
+        .ok_or(ManagedServiceErrorKind::InvalidRecipe)
 }
 
 /// Validated, payload-free binding between one local job and its owned
@@ -301,9 +650,50 @@ impl LaunchRecipe {
         let executable = path
             .canonicalize()
             .map_err(|_| ManagedServiceErrorKind::InvalidRecipe)?;
-        let metadata = executable
-            .metadata()
-            .map_err(|_| ManagedServiceErrorKind::InvalidRecipe)?;
+
+        Self::new_with_executable(executable, working_directory, arguments, None)
+    }
+
+    /// Create a recipe for the one explicitly verified Comfy venv interpreter.
+    /// Unlike `new`, this preserves the configured symlink path so Python can
+    /// discover `pyvenv.cfg`; the marker is checked again by the helper before
+    /// it spawns the backend. Ordinary launch recipes remain canonicalized.
+    pub(crate) fn new_with_verified_python(
+        interpreter: &VerifiedPythonInterpreter,
+        working_directory: impl AsRef<Path>,
+        arguments: impl IntoIterator<Item = OsString>,
+    ) -> Result<Self, ManagedServiceErrorKind> {
+        interpreter.verify()?;
+        Self::new_with_executable(
+            interpreter.configured_path().to_path_buf(),
+            working_directory,
+            arguments,
+            Some(interpreter.clone()),
+        )
+    }
+
+    fn new_with_executable(
+        executable: PathBuf,
+        working_directory: impl AsRef<Path>,
+        arguments: impl IntoIterator<Item = OsString>,
+        verified_python: Option<VerifiedPythonInterpreter>,
+    ) -> Result<Self, ManagedServiceErrorKind> {
+        if !executable.is_absolute()
+            || executable.as_os_str().as_bytes().contains(&0)
+            || executable.as_os_str().as_bytes().len() > MAX_WORKING_DIRECTORY_BYTES
+        {
+            return Err(ManagedServiceErrorKind::InvalidRecipe);
+        }
+        if let Some(interpreter) = &verified_python {
+            interpreter.verify()?;
+            if executable != interpreter.configured_path() {
+                return Err(ManagedServiceErrorKind::InvalidRecipe);
+            }
+        } else if executable.canonicalize().ok().as_ref() != Some(&executable) {
+            return Err(ManagedServiceErrorKind::InvalidRecipe);
+        }
+        let metadata =
+            fs::metadata(&executable).map_err(|_| ManagedServiceErrorKind::InvalidRecipe)?;
         if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
             return Err(ManagedServiceErrorKind::InvalidRecipe);
         }
@@ -360,6 +750,7 @@ impl LaunchRecipe {
             executable,
             working_directory,
             arguments: collected,
+            verified_python,
         })
     }
 
@@ -380,6 +771,10 @@ impl LaunchRecipe {
 
     pub(super) fn arguments(&self) -> &[OsString] {
         &self.arguments
+    }
+
+    pub(super) fn verified_python(&self) -> Option<&VerifiedPythonInterpreter> {
+        self.verified_python.as_ref()
     }
 }
 
@@ -1931,6 +2326,13 @@ fn launch_fingerprint(recipe: &LaunchRecipe) -> String {
     feed(recipe.working_directory.as_os_str().as_bytes());
     for argument in &recipe.arguments {
         feed(argument.as_os_str().as_bytes());
+    }
+    if let Some(interpreter) = &recipe.verified_python {
+        feed(b"verified-python-interpreter-v1");
+        feed(interpreter.configured_path().as_os_str().as_bytes());
+        feed(interpreter.target_path().as_os_str().as_bytes());
+        feed(interpreter.venv_directory().as_os_str().as_bytes());
+        feed(interpreter.identity_wire().as_bytes());
     }
     format!(
         "{:016x}{:016x}{:016x}{:016x}",

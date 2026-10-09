@@ -43,6 +43,58 @@ conflicting work and retains ownership records.
 
 ## Native contracts remain different
 
+### Managed Comfy worker composition
+
+Comfy configuration is an explicit optional declaration; absence keeps the
+language/local-job configuration unchanged. Only allowlisted manifest-bound
+CUDA image workflows use this path, not native media scripts or arbitrary HTTP
+engines. Each dispatch releases the resident language engine first, allocates
+fresh private user/output directories without reuse, and starts a new isolated
+Comfy generation on the configured physical GPU. `/system_stats` is bounded
+read-only startup liveness, not proof that a workflow's model is loaded.
+
+The existing strict private managed-session JSON may include a `comfy` object
+with `profiles` (`media:qwen-image-2.1` and/or `media:krea-2`),
+`python_executable` (the toolkit's exact `.venv-comfy/bin/python` path),
+`comfy_checkout` (the installed native checkout),
+`private_user_directory_root`, `private_output_directory_root`, and `port`.
+`extra_model_paths_config` is optional; when supplied it is a pinned private
+0600 JSON subset of native YAML: one `comfyui` object, a canonical absolute
+`base_path`, optional boolean `is_default`, and allowlisted category values as
+newline-separated relative strings. Arrays, duplicate/secret fields, traversal
+and environment/user expansion are rejected. The user/output parents must
+already exist with mode 0700 and must not overlap native/model directories,
+transport, history, WAL or local-job roots. No environment, directory parent,
+checkout or model is installed by configuration validation.
+
+This declaration does not fence original/direct engine clients. Live startup
+and switching still require their verified exclusion and the background-GPU
+claimant policy; a configured UUID or momentarily idle GPU is not that proof.
+
+The worker prepares a fresh UUID and sends the full transient ticket and
+owner-issued generation to the history-owning main thread. That thread checks
+the active slot and persists the candidate/generation atomically before
+returning the move-only permit. A missing, late or lost reply never retries the
+message or POST. The session revalidates generation and exact request/route
+after receiving the permit. Positive submit/status evidence crosses a separate
+typed exchange before `backend_id` is persisted; 404, unknown status and scoped
+cancel acknowledgments cannot produce that evidence.
+
+Terminal output is not publication authority. Independent bounded cleanup
+requires exact Stop, cgroup release, fresh configured-GPU idle and intent
+retirement before descriptors are checked against the output root pinned before
+launch. Only explicit `output` descriptors mapping to fresh regular nonempty,
+single-link, bounded files are accepted. Symlinks, traversal, duplicate paths,
+special files, root substitution and input/temp storage are rejected. Result
+references are `Backend` paths relative to the configured private output parent,
+including the unique job directory; they are not invented `LocalJob` paths.
+These references do not deliver bytes or prove content quality. Unknown native
+attempts remain interrupted even when physical cleanup is subsequently proven.
+
+This branch composition still needs full injected daemon/owner/native-engine
+acceptance, durable crash recovery and real GPU switching. A retained Comfy or
+local-job intent on restart remains fail-closed; no engine is adopted or replayed.
+
 | Runtime | Activation/readiness | Drain |
 | --- | --- | --- |
 | llama-swap | Router reachability is not model readiness. Load the selected model once, then reconcile its exact state after uncertain replies. Direct llama-server `/health` must not be mistaken for router readiness. | Track coordinator work through native completion; connection loss is not server cancellation. |

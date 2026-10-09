@@ -10,12 +10,12 @@ existing Linear migration issues rather than replacing their acceptance criteria
 
 ## Monorepo: next work
 
-Latest offline checkpoint on `feature/l3ms-monorepo`: 812 root tests passed,
+Latest offline checkpoint on `feature/l3ms-monorepo`: 838 root tests passed,
 1 ignored, strict all-target Clippy, formatting and whitespace checks pass.
 Opt-in CPU dispatch, managed-language launch, resumable native results and
 owned per-job packet/service handoff are implemented. Subsequent branch work
 composes allowlisted local jobs with managed dispatch and retry-safe finalization;
-full mixed-worker tests, crash recovery, Comfy integration, native decision
+full mixed-worker tests, crash recovery, full Comfy acceptance, native decision
 TUI/mixed-runtime live acceptance, artifact-root integration and real managed acceptance remain
 unfinished. See migration status for the current slice and its explicit gates.
 This is offline implementation evidence, not live cutover acceptance.
@@ -25,10 +25,13 @@ See the [migration status](docs/migration/status.md),
 [plan](docs/monorepo-consolidation-plan.md), and
 [execution contracts](docs/migration/execution-contracts.md).
 
-Immediate integration work: managed Comfy candidate/generation persistence and
-peer-verified native session are implemented, but concrete worker/configuration,
-backend-ID acknowledgment accounting, artifact bytes and crash-safe recovery
-remain. Real CPU native metadata delivery is verified; GPU switching is not.
+Immediate integration work: managed Comfy candidate/generation persistence,
+peer-verified native session, opt-in worker/configuration and typed backend-ID
+acknowledgment accounting are implemented. Fresh pinned output validation yields
+Backend references, not artifact bytes. Full joined worker/lifecycle fixtures,
+artifact-byte access and crash-safe mixed-runtime recovery remain. Verified venv
+interpreter handoff preserves Python environment semantics. Real CPU native
+metadata delivery is verified; GPU switching is not.
 
 ### Safety decisions and runtime completion — CAR-217
 
