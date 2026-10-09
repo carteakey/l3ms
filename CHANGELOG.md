@@ -10,6 +10,11 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Reorient monorepo delivery around a smaller native-engine wrapper, shared
+  operator workflows and substantial control-code reduction. Defer hardened
+  daemon/IPC/crash-recovery infrastructure as required delivery scope; retain
+  current gated code until replacement workflows pass and displaced code can
+  be removed safely. Record the revised plan and LOC baseline.
 - Preflight the complete retained-service batch before startup cleanup sends
   any Stop, preventing partial cleanup when a later intent is unsupported or
   unverifiable. Keep mixed-runtime recovery gated pending durable Stop stages

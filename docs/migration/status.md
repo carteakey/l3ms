@@ -10,6 +10,16 @@ runtime check.
 
 ## Current resumed checkpoint — 2026-10-09
 
+**Direction changed by the user:** simplify to an operator-owned native-engine
+wrapper and reduce LOC. The [simplification plan](simplification-plan.md) governs
+next work and supersedes hardened-platform requirements in older checkpoints.
+The existing code/test evidence below remains valid for that code, but does not
+justify continuing to expand the managed daemon or automatic crash recovery.
+No code has yet been retired under this plan; control LOC baseline is 60,729
+including tests/comments/blanks. Next trace and consolidate native job execution,
+verify user workflows, then delete displaced infrastructure rather than adding
+a parallel permanently supported stack.
+
 Recovery now preflights every retained runtime/role and manager observation before
 the first Stop, rather than discovering a later unsupported intent after partial
 cleanup. This does not enable mixed-runtime recovery. The remaining durable

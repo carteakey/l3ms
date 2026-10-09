@@ -1,5 +1,15 @@
 # Monorepo consolidation plan
 
+## Current direction — simplicity first, 2026-10-09
+
+The user has approved a smaller native-engine wrapper with fewer lines of code.
+[The simplification plan](migration/simplification-plan.md) now governs execution
+and acceptance scope where it conflicts with the platform-oriented phases below.
+Keep the integrated language/media/TTS/decision workbench and safe rollback; do
+not require custom IPC, an HTTP gateway, namespaces or automatic crash recovery
+to deliver it. The earlier plan is retained as design history, not a mandate to
+finish every infrastructure layer already started.
+
 Status: phased implementation proposal; no implementation phase is complete. Keep the L3MS name and use **Local 3-Mode Model Stack** as its
 expanded form: language, media, and decisions are the three inference modes.
 The existing `l3ms` GitHub slug, checkout, executable, environment variables,
