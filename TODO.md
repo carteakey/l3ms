@@ -16,6 +16,12 @@ workflows, then delete displaced infrastructure. Do not build the Stop journal
 next. Older infrastructure entries below are historical inventory, not the
 current implementation order or required hardened-platform acceptance scope.
 
+Parallel audit is complete. First implementation slice: de-wire the task form
+and execute a prepared CPU-local decision through one CLI/TUI direct operation,
+using existing native recipes/process supervision and safe job metadata. Then
+native media/TTS, GPU switching, platform deletion and UI polish in the
+[execution plan](docs/migration/simplification-plan.md#execution-plan--parallel-audit-resolved-2026-10-09).
+
 Latest offline checkpoint on `feature/l3ms-monorepo`: 859 root tests passed,
 1 ignored, strict all-target Clippy, formatting and whitespace checks pass.
 Opt-in CPU dispatch, managed-language launch, resumable native results and

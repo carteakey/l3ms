@@ -96,3 +96,83 @@ Acceptance is a smaller, usable integrated stack with real end-to-end evidence,
 not a growing infrastructure test count. Tests should cover the user-facing
 workflow and meaningful failure cases. The Stop journal and hardened crash
 recovery contract are deferred; do not implement them as the next slice.
+
+## Execution plan — parallel audit resolved, 2026-10-09
+
+Three Luna Max agents traced the engine, UI and deletion dependencies at
+`6110daa`. Their recommendation is one direct inference operation shared by CLI
+and TUI, not directly embedding `CoordinatorCore` into the UI or wrapping it in
+another daemon. No new framework, service installation or GPUI pivot.
+
+### Chosen seams and reuse
+
+- Keep `SwapClient` for existing llama-swap discovery/load/unload and existing
+  `ChatClient` streaming. llama-swap remains the language serving/swap engine.
+  Reuse the existing embeddings adapter; consolidate duplicated language HTTP
+  logic as callers move, not by maintaining two permanent chat implementations.
+- Reuse `catalog`, `requests`, `routes`, `native_commands`, `decision`,
+  `media_execution` and `process::execute`. Native Comfy workflows retain native
+  submit/status/cancel semantics; scripts remain scripts.
+- Turn task-form validation into a typed request builder independent of IPC.
+  Use one concrete direct-run dispatch function, a small foreground inference
+  job worker and existing `JobHistory`. No engine trait hierarchy or serialized
+  events. CLI runs the same operation; TUI receives bounded in-memory updates.
+- Do not route sensitive inference through `app::start_process_from_parts`
+  unchanged: it logs argv and supplies null stdin. Its argv is retained in memory
+  but omitted from persisted job rows. Use the existing bounded process runner
+  and stdin payload contract; persist only safe job metadata.
+- Keep ordinary bench/download workflows working. Consolidate inference ownership
+  first rather than rewriting every non-inference background task at once.
+
+### Delivery order and gates
+
+| Slice | Change | Evidence before proceeding |
+| --- | --- | --- |
+| 1. Direct run | De-wire task-form validation; direct prepared CPU-local Nagi/Laya execution via the existing runner and one job owner. Add one native-input CLI run action and wire the Stack task form to that same operation. | Real decision result, exact declared CPU profile, stdin handling, cancel/timeout, no payload logs, interrupted-on-restart/no replay, CLI/TUI tests. No CUDA-to-CPU fallback. |
+| 2. Native tasks | Add Breeze modes and media scripts, then Comfy workflows. Preserve native language chat/embeddings and consolidate their shared invocation/results. | Task inputs, native output paths/results, partial language streaming, accurate failures, cancellation and artifacts through the workbench. |
+| 3. GPU switching | One conflicting-GPU queue; existing explicitly managed service controls, bounded release/readiness checks and visible recovery. | Approved real language -> image/TTS -> language cycle, unknown-claimant refusal and exact prior service restoration. No preemption or direct-client fencing claim. |
+| 4. Delete platform | Remove displaced CLI/UI coordinator actions and their implementation closure; strip managed-only branches from mixed native adapters. | New paths cover former supported workflows; old native commands/history remain readable; compile, focused regressions and actual LOC reduction. |
+| 5. Finish experience | Clean Run/Jobs/Results UI, align the native palette with Signal/03, and reconcile site/docs/settings with the smaller product. | Keyboard workflow, readable states/focus, real language/media/TTS/decision acceptance, standalone compatibility and no conflicting default paths. |
+
+Do not ship a second default execution mode while leaving both stacks maintained.
+Temporary overlap is limited to replacing actual callers; each slice records the
+next deletion it unlocks. Existing private-coordinator flags are branch-added
+surfaces to retire explicitly, not permanent compatibility requirements for the
+original standalone tools. Do not claim unsupported tasks are complete merely
+because their toolkit remains available separately.
+
+### Parallel implementation ownership
+
+Use all three available child-agent slots with disjoint writes once the shared
+direct request/result interface is fixed:
+
+1. Engine agent: direct dispatch and native adapters; no `app.rs` or CLI edits.
+2. UI agent: `app.rs` task run/cancel/results and keyboard tests; no runner edits.
+3. CLI/deletion agent: direct CLI input/output and dependency pruning after caller
+   replacement; coordinate every deletion with the root and engine agent.
+
+Root owns shared interface decisions, module exports, history compatibility,
+integration, docs, Cargo verification, commits and any approved live test. Agents
+must not independently run Cargo, mutate services, change configs/download weights
+or commit. Reassign completed slots to focused workflow review, not more design
+documents or speculative infrastructure. Prefer one small dispatch match over
+generic lifecycle abstractions.
+
+### Deletion map and reporting
+
+The broad retirement candidate is **41,161 gross existing lines in 30 files**:
+17,087 in coordinator/transport/result delivery and 24,074 in managed ownership,
+helpers, namespace transport and related probes. This is not immediately dead
+code or a promised net saving. Some utilities must be retained or simplified;
+`comfy.rs` and `inference.rs` also contain mixed native/managed logic outside that
+count. No public module was found obviously unused by production callers.
+
+Delete from the callers inward: UI/CLI -> coordinator/gateway/worker -> managed
+adapter branches -> ownership/helpers/packet stores -> protocol/results machinery.
+Untie forms and native results from IPC first. Preserve legacy optional history
+fields as historical data only; never reconstruct execution authority from them.
+Keep necessary GPU checks even if their current module appears in the candidate.
+
+Report each implementation checkpoint as: user workflow gained, concepts/modules
+removed, net LOC change across the whole `src/` tree (so relocation cannot count),
+verification, and next concrete slice. Test count alone is not a progress metric.

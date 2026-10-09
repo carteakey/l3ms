@@ -20,6 +20,13 @@ including tests/comments/blanks. Next trace and consolidate native job execution
 verify user workflows, then delete displaced infrastructure rather than adding
 a parallel permanently supported stack.
 
+Three parallel Luna Max audits have now completed that trace. The broad platform
+retirement candidate is 41,161 gross existing LOC, not immediately dead code.
+The [execution plan](simplification-plan.md#execution-plan--parallel-audit-resolved-2026-10-09)
+selects existing native adapters/process supervision and a first CPU decision
+CLI/TUI slice, followed by media/TTS, GPU switching and caller-first deletion.
+No runtime implementation or service behavior changed during this planning pass.
+
 Recovery now preflights every retained runtime/role and manager observation before
 the first Stop, rather than discovering a later unsupported intent after partial
 cleanup. This does not enable mixed-runtime recovery. The remaining durable
