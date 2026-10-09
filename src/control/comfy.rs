@@ -26,6 +26,13 @@ const MAX_NATIVE_OUTPUT_ITEMS: usize = 4096;
 const MAX_NATIVE_MESSAGES: usize = 4096;
 const POLL: Duration = Duration::from_millis(25);
 
+type ComfyHttpCall<'a> = dyn Fn(
+        &str,
+        Option<&Value>,
+        &OperationContext<'_>,
+    ) -> Result<(reqwest::StatusCode, Vec<u8>), ComfyFailure>
+    + 'a;
+
 /// Explicit caller assertion, based on the installed server implementation.
 /// This does not discover capabilities or enable switching/admission.
 pub enum ComfyContract {
@@ -77,6 +84,295 @@ impl PreparedComfyJob {
     pub fn submission_attempted(&self) -> bool {
         self.attempted
     }
+}
+
+/// A managed job cannot be handed to the legacy HTTP adapter: its inner
+/// preparation is private and its exact owned generation stays attached.
+#[cfg(target_os = "linux")]
+pub struct PreparedManagedComfyJob {
+    inner: PreparedComfyJob,
+    generation: super::managed_service::OwnedServiceGenerationIdentity,
+    cancel_attempted: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl PreparedManagedComfyJob {
+    pub fn id(&self) -> &str {
+        self.inner.id()
+    }
+
+    pub fn submission_attempted(&self) -> bool {
+        self.inner.submission_attempted()
+    }
+}
+
+/// Exact-generation native operations, not lifecycle/admission or release
+/// proof. Every operation revalidates the owner and actual socket peer. No
+/// legacy reqwest/TCP/auth fallback can receive this session's managed jobs.
+#[cfg(target_os = "linux")]
+pub struct OwnedComfySession<'session, 'host> {
+    adapter: &'session ComfyAdapter,
+    owner: &'session super::service_owner::ManagedRuntimeOwner<'host>,
+    service: &'session super::managed_service::OwnedService,
+    socket_directory: &'session std::path::Path,
+    generation: super::managed_service::OwnedServiceGenerationIdentity,
+}
+
+#[cfg(target_os = "linux")]
+impl<'session, 'host> OwnedComfySession<'session, 'host> {
+    pub fn new(
+        adapter: &'session ComfyAdapter,
+        owner: &'session super::service_owner::ManagedRuntimeOwner<'host>,
+        service: &'session super::managed_service::OwnedService,
+        socket_directory: &'session std::path::Path,
+        context: &OperationContext<'_>,
+    ) -> Result<Self, ComfyFailure> {
+        active(context, DispatchDisposition::NoDispatch)?;
+        if adapter.api_key.is_some()
+            || !service
+                .intent_record()
+                .runtime_identity()
+                .is_some_and(|runtime| runtime.lane == Lane::Media && runtime.as_str() == "ComfyUI")
+            || service.supervisor_peer_identity().is_none()
+        {
+            return Err(no_dispatch(ComfyErrorKind::InvalidOwnership));
+        }
+        let generation = owner
+            .running_generation_identity(service, context)
+            .map_err(owned_generation_failure)?;
+        Ok(Self {
+            adapter,
+            owner,
+            service,
+            socket_directory,
+            generation,
+        })
+    }
+
+    pub fn prepare_for_route(
+        &self,
+        catalog: &Catalog,
+        request: &InferenceRequest,
+        accepted_route: &ResolvedProfileRoute,
+        fresh_uuid: &str,
+    ) -> Result<PreparedManagedComfyJob, ComfyFailure> {
+        if self.service.intent_record().runtime_identity() != Some(&accepted_route.runtime) {
+            return Err(no_dispatch(ComfyErrorKind::InvalidOwnership));
+        }
+        Ok(PreparedManagedComfyJob {
+            inner: self
+                .adapter
+                .prepare_for_route(catalog, request, accepted_route, fresh_uuid)?,
+            generation: self.generation.clone(),
+            cancel_attempted: false,
+        })
+    }
+
+    pub fn status(
+        &self,
+        job: &PreparedManagedComfyJob,
+        context: &OperationContext<'_>,
+    ) -> Result<ComfySnapshot, ComfyFailure> {
+        self.check_job(job)?;
+        self.adapter
+            .status_using_http(&job.inner, context, &|path, payload, context| {
+                self.http(path, payload, context)
+            })
+    }
+
+    /// Main-thread handoff: prepare one job and atomically persist its fresh
+    /// candidate plus exact generation before returning a one-shot permit.
+    /// Losing this handoff never authorizes a second candidate or submission.
+    pub fn prepare_dispatch(
+        &self,
+        coordinator: &mut super::inference::CoordinatorCore,
+        catalog: &Catalog,
+        ticket: &super::inference::DispatchTicket,
+        context: &OperationContext<'_>,
+    ) -> Result<
+        (
+            PreparedManagedComfyJob,
+            super::inference::ManagedComfyDispatchPermit,
+        ),
+        ComfyFailure,
+    > {
+        active(context, DispatchDisposition::NoDispatch)?;
+        let current = self
+            .owner
+            .running_generation_identity(self.service, context)
+            .map_err(owned_generation_failure)?;
+        if current != self.generation {
+            return Err(no_dispatch(ComfyErrorKind::InvalidOwnership));
+        }
+        let candidate = fresh_comfy_candidate(context)?;
+        let job = self.prepare_for_route(catalog, &ticket.request, &ticket.route, &candidate)?;
+        let permit = coordinator
+            .record_managed_comfy_dispatch_candidate(
+                ticket,
+                candidate,
+                current,
+                std::time::Instant::now(),
+            )
+            .map_err(|_| no_dispatch(ComfyErrorKind::InvalidOwnership))?;
+        if !coordinator.accepts_managed_comfy_dispatch_permit(&permit) {
+            return Err(no_dispatch(ComfyErrorKind::InvalidOwnership));
+        }
+        Ok((job, permit))
+    }
+
+    pub fn submit_with_dispatch_permit(
+        &self,
+        job: &mut PreparedManagedComfyJob,
+        permit: super::inference::ManagedComfyDispatchPermit,
+        context: &OperationContext<'_>,
+    ) -> Result<(), ComfyFailure> {
+        self.check_job(job)?;
+        if !permit.matches_generation(&self.generation)
+            || !permit.matches_candidate(job.id(), &job.inner.accepted_route)
+            || !permit.matches_request(
+                permit.request_id(),
+                &job.inner.request,
+                &job.inner.accepted_route,
+            )
+        {
+            return Err(no_dispatch(ComfyErrorKind::InvalidOwnership));
+        }
+        let route = job.inner.accepted_route.clone();
+        self.adapter.submit_using_http(
+            &mut job.inner,
+            &route,
+            context,
+            &|path, payload, context| self.http(path, payload, context),
+        )
+    }
+
+    /// A single scoped cancel attempt. Its acknowledgment is not terminal
+    /// evidence; uncertainty never authorizes another cancellation or POST.
+    pub fn cancel(
+        &self,
+        job: &mut PreparedManagedComfyJob,
+        context: &OperationContext<'_>,
+    ) -> Result<bool, ComfyFailure> {
+        self.check_job(job)?;
+        self.adapter.check_owner(&job.inner, true)?;
+        if job.cancel_attempted {
+            return Err(no_dispatch(ComfyErrorKind::AlreadyAttempted));
+        }
+        job.cancel_attempted = true;
+        self.adapter
+            .cancel_using_http(&job.inner, context, &|path, payload, context| {
+                self.http(path, payload, context)
+            })
+    }
+
+    fn check_job(&self, job: &PreparedManagedComfyJob) -> Result<(), ComfyFailure> {
+        if job.generation != self.generation {
+            return Err(no_dispatch(ComfyErrorKind::InvalidOwnership));
+        }
+        self.adapter.check_owner(&job.inner, false)
+    }
+
+    fn http(
+        &self,
+        path: &str,
+        payload: Option<&Value>,
+        context: &OperationContext<'_>,
+    ) -> Result<(reqwest::StatusCode, Vec<u8>), ComfyFailure> {
+        use super::engine_health::{OwnedComfyFailureKind, OwnedComfyOperation};
+        let invalid = || no_dispatch(ComfyErrorKind::InvalidRequest);
+        let operation = if path == "/prompt" {
+            let payload = payload.ok_or_else(invalid)?;
+            OwnedComfyOperation::Submit {
+                prompt_id: payload
+                    .get("prompt_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(invalid)?,
+                graph: payload.get("prompt").ok_or_else(invalid)?,
+            }
+        } else if let Some(prompt_id) = path.strip_prefix("/api/jobs/") {
+            match prompt_id.strip_suffix("/cancel") {
+                Some(prompt_id) if payload == Some(&serde_json::json!({})) => {
+                    OwnedComfyOperation::Cancel { prompt_id }
+                }
+                None if payload.is_none() => OwnedComfyOperation::Status { prompt_id },
+                _ => return Err(invalid()),
+            }
+        } else {
+            return Err(invalid());
+        };
+        let response = super::engine_health::request_owned_comfy_json(
+            self.owner,
+            self.service,
+            self.socket_directory,
+            &self.generation,
+            operation,
+            context,
+        )
+        .map_err(|failure| ComfyFailure {
+            disposition: failure.disposition,
+            kind: match failure.kind {
+                OwnedComfyFailureKind::Configuration => ComfyErrorKind::Configuration,
+                OwnedComfyFailureKind::Ownership => ComfyErrorKind::InvalidOwnership,
+                OwnedComfyFailureKind::Cancelled => ComfyErrorKind::Cancelled,
+                OwnedComfyFailureKind::Deadline => ComfyErrorKind::Deadline,
+                OwnedComfyFailureKind::Transport => ComfyErrorKind::Transport,
+                OwnedComfyFailureKind::Protocol => ComfyErrorKind::Protocol,
+                OwnedComfyFailureKind::TooLarge => ComfyErrorKind::TooLarge,
+            },
+        })?;
+        let status = reqwest::StatusCode::from_u16(response.status)
+            .map_err(|_| uncertain(ComfyErrorKind::Protocol))?;
+        Ok((status, response.body))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn fresh_comfy_candidate(context: &OperationContext<'_>) -> Result<String, ComfyFailure> {
+    let mut bytes = [0u8; 16];
+    let mut offset = 0;
+    while offset < bytes.len() {
+        active(context, DispatchDisposition::NoDispatch)?;
+        let count = unsafe {
+            libc::getrandom(
+                bytes[offset..].as_mut_ptr().cast(),
+                bytes.len() - offset,
+                libc::GRND_NONBLOCK,
+            )
+        };
+        if count < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(no_dispatch(ComfyErrorKind::Configuration));
+        }
+        if count == 0 {
+            return Err(no_dispatch(ComfyErrorKind::Configuration));
+        }
+        offset += count as usize;
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let mut id = String::with_capacity(36);
+    for (index, byte) in bytes.iter().enumerate() {
+        if matches!(index, 4 | 6 | 8 | 10) {
+            id.push('-');
+        }
+        use std::fmt::Write;
+        write!(id, "{byte:02x}").map_err(|_| no_dispatch(ComfyErrorKind::Configuration))?;
+    }
+    Ok(id)
+}
+
+#[cfg(target_os = "linux")]
+fn owned_generation_failure(
+    error: super::managed_service::ManagedServiceErrorKind,
+) -> ComfyFailure {
+    use super::managed_service::ManagedServiceErrorKind;
+    no_dispatch(match error {
+        ManagedServiceErrorKind::Cancelled => ComfyErrorKind::Cancelled,
+        ManagedServiceErrorKind::DeadlineExceeded => ComfyErrorKind::Deadline,
+        _ => ComfyErrorKind::InvalidOwnership,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -247,6 +543,18 @@ impl ComfyAdapter {
         accepted_route: &ResolvedProfileRoute,
         context: &OperationContext<'_>,
     ) -> Result<(), ComfyFailure> {
+        self.submit_using_http(job, accepted_route, context, &|path, payload, context| {
+            self.http(path, payload, context)
+        })
+    }
+
+    fn submit_using_http(
+        &self,
+        job: &mut PreparedComfyJob,
+        accepted_route: &ResolvedProfileRoute,
+        context: &OperationContext<'_>,
+        http: &ComfyHttpCall<'_>,
+    ) -> Result<(), ComfyFailure> {
         self.check_owner(job, false)?;
         if job.attempted {
             return Err(no_dispatch(ComfyErrorKind::AlreadyAttempted));
@@ -266,7 +574,7 @@ impl ComfyAdapter {
         };
         let payload = serde_json::json!({"prompt_id":job.id, "prompt":graph});
         job.attempted = true;
-        let (status, body) = self.http("/prompt", Some(&payload), context)?;
+        let (status, body) = http("/prompt", Some(&payload), context)?;
         if !status.is_success() {
             return Err(uncertain(ComfyErrorKind::Rejected));
         }
@@ -284,8 +592,19 @@ impl ComfyAdapter {
         job: &PreparedComfyJob,
         context: &OperationContext<'_>,
     ) -> Result<ComfySnapshot, ComfyFailure> {
+        self.status_using_http(job, context, &|path, payload, context| {
+            self.http(path, payload, context)
+        })
+    }
+
+    fn status_using_http(
+        &self,
+        job: &PreparedComfyJob,
+        context: &OperationContext<'_>,
+        http: &ComfyHttpCall<'_>,
+    ) -> Result<ComfySnapshot, ComfyFailure> {
         self.check_owner(job, true)?;
-        let (status, body) = self.http(&format!("/api/jobs/{}", job.id), None, context)?;
+        let (status, body) = http(&format!("/api/jobs/{}", job.id), None, context)?;
         if status == reqwest::StatusCode::NOT_FOUND {
             return Ok(ComfySnapshot {
                 state: ComfyJobState::Unknown,
@@ -306,8 +625,19 @@ impl ComfyAdapter {
         job: &PreparedComfyJob,
         context: &OperationContext<'_>,
     ) -> Result<bool, ComfyFailure> {
+        self.cancel_using_http(job, context, &|path, payload, context| {
+            self.http(path, payload, context)
+        })
+    }
+
+    fn cancel_using_http(
+        &self,
+        job: &PreparedComfyJob,
+        context: &OperationContext<'_>,
+        http: &ComfyHttpCall<'_>,
+    ) -> Result<bool, ComfyFailure> {
         self.check_owner(job, true)?;
-        let (status, body) = self.http(
+        let (status, body) = http(
             &format!("/api/jobs/{}/cancel", job.id),
             Some(&serde_json::json!({})),
             context,
@@ -876,6 +1206,49 @@ mod tests {
     use std::time::Instant;
 
     const ID: &str = "12345678-1234-1234-1234-123456789abc";
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn managed_candidate_is_canonical_v4_and_respects_cancelled_context() {
+        let id = fresh_comfy_candidate(&context()).unwrap();
+        assert!(canonical_uuid(&id));
+        assert_eq!(id.as_bytes()[14], b'4');
+        assert!(matches!(id.as_bytes()[19], b'8' | b'9' | b'a' | b'b'));
+        struct Cancelled;
+        impl Cancellation for Cancelled {
+            fn is_cancelled(&self) -> bool {
+                true
+            }
+        }
+        let cancelled = OperationContext::new(Instant::now() + Duration::from_secs(2), &Cancelled);
+        assert_eq!(
+            fresh_comfy_candidate(&cancelled),
+            Err(no_dispatch(ComfyErrorKind::Cancelled))
+        );
+    }
+
+    #[test]
+    fn shared_submit_logic_never_retries_an_uncertain_transport() {
+        let adapter = adapter("http://127.0.0.1:1");
+        let mut job = prepared(&adapter);
+        let route = job.accepted_route.clone();
+        let calls = std::cell::Cell::new(0);
+        let http = |path: &str, payload: Option<&Value>, _: &OperationContext<'_>| {
+            calls.set(calls.get() + 1);
+            assert_eq!(path, "/prompt");
+            assert_eq!(payload.unwrap()["prompt_id"], ID);
+            Err(uncertain(ComfyErrorKind::Transport))
+        };
+        assert_eq!(
+            adapter.submit_using_http(&mut job, &route, &context(), &http),
+            Err(uncertain(ComfyErrorKind::Transport))
+        );
+        assert_eq!(
+            adapter.submit_using_http(&mut job, &route, &context(), &http),
+            Err(no_dispatch(ComfyErrorKind::AlreadyAttempted))
+        );
+        assert_eq!(calls.get(), 1);
+    }
     fn adapter(endpoint: &str) -> ComfyAdapter {
         ComfyAdapter::new(
             endpoint,

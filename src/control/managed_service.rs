@@ -34,6 +34,11 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
+use crate::state_store::{
+    ComfyManagerGenerationReference, ComfyServiceGenerationReference, ComfyServiceIntentReference,
+    ComfySupervisorCoordinatorReference,
+};
+
 use super::catalog::{Lane, RuntimeIdentity};
 use super::process::{self, ProcessLimits};
 use super::runtime::{OperationContext, RecoveryPolicy};
@@ -639,6 +644,86 @@ pub(crate) struct OwnedServiceGenerationIdentity {
 impl fmt::Debug for OwnedServiceGenerationIdentity {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("OwnedServiceGenerationIdentity([redacted])")
+    }
+}
+
+impl OwnedServiceGenerationIdentity {
+    /// Project this exact owner-issued Comfy supervisor identity into bounded,
+    /// payload-free history evidence. Other runtime identities and launch
+    /// roles cannot be projected into the Comfy dispatch path.
+    pub(crate) fn comfy_service_generation_reference(
+        &self,
+    ) -> Result<ComfyServiceGenerationReference, ManagedServiceErrorKind> {
+        if !self
+            .intent
+            .runtime_identity()
+            .is_some_and(|runtime| runtime.lane == Lane::Media && runtime.as_str() == "ComfyUI")
+        {
+            return Err(ManagedServiceErrorKind::InvalidRuntimeIdentity);
+        }
+        let ServiceLaunchRole::IsolatedEngineSupervisor(coordinator) = self.intent.launch_role()
+        else {
+            return Err(ManagedServiceErrorKind::InvalidLaunchRole);
+        };
+
+        let reference = ComfyServiceGenerationReference {
+            schema_version: 1,
+            intent: ComfyServiceIntentReference {
+                coordinator_id: self.intent.coordinator_id.clone(),
+                unit_name: self.intent.unit_name.clone(),
+                launch_identity: self.intent.launch_identity.clone(),
+                stop_timeout_millis: self.intent.stop_timeout_millis,
+                runtime_lane: "media".to_owned(),
+                runtime_name: "ComfyUI".to_owned(),
+                launch_role: "isolated_engine_supervisor".to_owned(),
+                supervisor_coordinator: ComfySupervisorCoordinatorReference {
+                    pid: coordinator.pid(),
+                    uid: coordinator.uid(),
+                    start_time_ticks: coordinator.start_time_ticks(),
+                    network_namespace_device: coordinator.network_namespace_device(),
+                    network_namespace_inode: coordinator.network_namespace_inode(),
+                },
+            },
+            generation: ComfyManagerGenerationReference {
+                invocation_id: self.invocation_id.clone(),
+                cgroup: self.cgroup.clone(),
+                main_pid: self.main_pid,
+            },
+        };
+        if !reference.is_valid() {
+            return Err(ManagedServiceErrorKind::OwnershipMismatch);
+        }
+        Ok(reference)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test_comfy_supervisor() -> Result<Self, ManagedServiceErrorKind> {
+        Self::for_test_comfy_supervisor_with_main_pid(2345)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test_comfy_supervisor_with_main_pid(
+        main_pid: u32,
+    ) -> Result<Self, ManagedServiceErrorKind> {
+        let coordinator = super::engine_transport::CoordinatorIdentityDescriptor::capture_current()
+            .map_err(|_| ManagedServiceErrorKind::CoordinatorIdentityUnavailable)?;
+        let runtime = RuntimeIdentity::new(Lane::Media, "ComfyUI")
+            .map_err(|_| ManagedServiceErrorKind::InvalidRuntimeIdentity)?;
+        let unit_name = "l3ms-test-owner-0123456789abcdef0123456789abcdef.service".to_owned();
+        let intent = ServiceIntentRecord::from_persisted_parts_with_role(
+            "test-owner".to_owned(),
+            unit_name.clone(),
+            "b".repeat(64),
+            30_000,
+            Some(runtime),
+            ServiceLaunchRole::IsolatedEngineSupervisor(coordinator),
+        )?;
+        Ok(Self {
+            intent,
+            invocation_id: "c".repeat(32),
+            cgroup: format!("/user.slice/{unit_name}"),
+            main_pid,
+        })
     }
 }
 
@@ -1808,7 +1893,7 @@ fn valid_invocation_id(value: &str) -> bool {
 fn valid_cgroup(value: &str, unit_name: &str) -> bool {
     value.starts_with('/')
         && value.len() <= 4096
-        && value.ends_with(unit_name)
+        && value.rsplit('/').next() == Some(unit_name)
         && value.split('/').skip(1).all(|part| {
             !part.is_empty()
                 && part != "."
@@ -2793,6 +2878,104 @@ exit 1
         assert_eq!(
             fixture.controller.state(&handle, &context).unwrap(),
             ManagedServiceState::Stopped
+        );
+    }
+
+    #[test]
+    fn comfy_generation_projection_requires_exact_runtime_and_supervisor_role() {
+        let identity = OwnedServiceGenerationIdentity::for_test_comfy_supervisor().unwrap();
+        let reference = identity.comfy_service_generation_reference().unwrap();
+        assert!(reference.is_valid());
+        assert_eq!(
+            format!("{reference:?}"),
+            "ComfyServiceGenerationReference([redacted])"
+        );
+        assert_eq!(
+            reference.intent.coordinator_id,
+            identity.intent.coordinator_id
+        );
+        assert_eq!(reference.intent.unit_name, identity.intent.unit_name);
+        assert_eq!(
+            reference.intent.launch_identity,
+            identity.intent.launch_identity
+        );
+        assert_eq!(
+            reference.intent.stop_timeout_millis,
+            identity.intent.stop_timeout_millis
+        );
+        assert_eq!(reference.generation.invocation_id, identity.invocation_id);
+        assert_eq!(reference.generation.cgroup, identity.cgroup);
+        assert_eq!(reference.generation.main_pid, identity.main_pid);
+        assert!(!valid_cgroup(
+            &format!("/user.slice/prefix-{}", identity.intent.unit_name),
+            &identity.intent.unit_name,
+        ));
+
+        let ServiceLaunchRole::IsolatedEngineSupervisor(coordinator) =
+            identity.intent.launch_role()
+        else {
+            panic!("test identity must use the isolated supervisor role");
+        };
+        assert_eq!(
+            reference.intent.supervisor_coordinator.pid,
+            coordinator.pid()
+        );
+        assert_eq!(
+            reference.intent.supervisor_coordinator.uid,
+            coordinator.uid()
+        );
+        assert_eq!(
+            reference.intent.supervisor_coordinator.start_time_ticks,
+            coordinator.start_time_ticks()
+        );
+        assert_eq!(
+            reference
+                .intent
+                .supervisor_coordinator
+                .network_namespace_device,
+            coordinator.network_namespace_device()
+        );
+        assert_eq!(
+            reference
+                .intent
+                .supervisor_coordinator
+                .network_namespace_inode,
+            coordinator.network_namespace_inode()
+        );
+
+        let mut wrong_runtime = identity.clone();
+        wrong_runtime.intent.runtime_identity =
+            Some(RuntimeIdentity::new(Lane::Media, "comfyui").unwrap());
+        assert_eq!(
+            wrong_runtime.comfy_service_generation_reference().err(),
+            Some(ManagedServiceErrorKind::InvalidRuntimeIdentity)
+        );
+
+        let mut ordinary = identity.clone();
+        ordinary.intent.launch_role = ServiceLaunchRole::Ordinary;
+        assert_eq!(
+            ordinary.comfy_service_generation_reference().err(),
+            Some(ManagedServiceErrorKind::InvalidLaunchRole)
+        );
+
+        let fixture = Fixture::new();
+        let directory = fixture.directory.path().join("job-local");
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let binding = OwnedLocalJobBinding::capture(
+            RuntimeIdentity::new(Lane::Media, "ComfyUI").unwrap(),
+            7,
+            "req-local-job",
+            directory,
+            super::super::engine_transport::CoordinatorIdentityDescriptor::capture_current()
+                .unwrap(),
+        )
+        .unwrap();
+        let mut local_job = identity;
+        local_job.intent.launch_role = ServiceLaunchRole::OwnedLocalJob(binding);
+        assert_eq!(
+            local_job.comfy_service_generation_reference().err(),
+            Some(ManagedServiceErrorKind::InvalidLaunchRole)
         );
     }
 

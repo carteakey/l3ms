@@ -66,12 +66,34 @@ Retained histories with malformed/duplicate-key/duplicate-candidate or
 truncated rows fail coordinator startup without being rewritten. Standalone
 history normalization remains compatible.
 
-The candidate row retains job/profile/task/request identifiers, but not a
-service-generation identity or a persisted full-route snapshot. Those owned
-generation/recovery checks and the actual worker/coordinator handoff remain
-required before managed Comfy dispatch is enabled. Restart never reconstructs
-a submission permit or resubmits the workflow from this field. A candidate is
-not evidence of native acceptance, readiness or GPU release.
+Legacy candidate-only rows retain their old shape. The managed path now
+persists an additive versioned `comfy_service_generation` reference with the
+candidate in the same cloned-history update and one atomic save. It retains
+safe immutable intent/runtime/launch association, supervisor coordinator birth,
+UID/network namespace identity and exact manager invocation/cgroup/PID; no
+workflow, command, argv or environment enters that reference. Nested tuple,
+unknown-field, duplicate-key and malformed association forms are rejected.
+Deserializing this comparison data never creates an owned handle or permit.
+
+`OwnedComfySession::prepare_dispatch` mints one fresh canonical UUID, prepares
+the exact accepted workflow and records the managed candidate before returning
+a distinct `ManagedComfyDispatchPermit`. The managed job wrapper cannot enter
+the legacy reqwest adapter. Submit consumes that permit, checks its candidate,
+request/route and exact ephemeral generation, then uses only a peer-verified
+owned connection. Native operation paths are fixed: POST `/prompt`, GET
+`/api/jobs/{uuid}`, and POST `/api/jobs/{uuid}/cancel`. No TCP/auth/global-interrupt
+fallback or POST retry exists. Cancel is attempted once; its acknowledgment is
+not terminal or cleanup evidence. Owner generation is checked before connection,
+after peer verification/before request bytes, and after the response. Comfy
+responses are bounded to 2 MiB; existing health probes retain their 512 KiB cap.
+
+Concrete daemon/worker configuration, backend-ID acknowledgment accounting,
+artifact mapping/retrieval and crash-safe recovery still remain before managed
+Comfy dispatch is enabled. The full accepted route is transient, not a durable
+replay recipe. Restart never reconstructs a submission permit or resubmits the
+workflow. A candidate/reference is not evidence of native acceptance, readiness
+or GPU release. Fixture evidence for these seams is not a real mixed-worker or
+systemd/GPU acceptance claim.
 
 The manifest currently permits llama-swap model startup up to 500 seconds while
 the old standalone load client allows 60. The managed path needs one explicit

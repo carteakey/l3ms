@@ -26,6 +26,10 @@ use super::runtime::{Cancellation, ResourceClaim};
 use crate::job_history::{CrossToolkitJobStart, CrossToolkitJobUpdate, JobHistory, JobRecord};
 
 #[cfg(target_os = "linux")]
+use super::managed_service::OwnedServiceGenerationIdentity;
+use crate::state_store::ComfyServiceGenerationReference;
+
+#[cfg(target_os = "linux")]
 use super::requests::{SpeechInput, SpeechMode};
 
 const MAX_CAPACITY: usize = 128;
@@ -275,6 +279,67 @@ impl ComfyDispatchPermit {
     }
 }
 
+/// One-shot managed Comfy handoff bound to the exact owner-issued supervisor
+/// generation whose safe comparison reference was persisted with its UUID.
+/// The identity and reference are transient evidence only: this type has no
+/// persistence or restoration constructor and does not prove native acceptance.
+#[cfg(target_os = "linux")]
+pub struct ManagedComfyDispatchPermit {
+    dispatch: ComfyDispatchPermit,
+    generation_identity: OwnedServiceGenerationIdentity,
+    generation_reference: ComfyServiceGenerationReference,
+}
+
+#[cfg(target_os = "linux")]
+impl ManagedComfyDispatchPermit {
+    pub fn job_id(&self) -> u64 {
+        self.dispatch.job_id()
+    }
+
+    pub fn request_id(&self) -> &str {
+        self.dispatch.request_id()
+    }
+
+    pub fn candidate_id(&self) -> &str {
+        self.dispatch.candidate_id()
+    }
+
+    pub fn route(&self) -> &ResolvedProfileRoute {
+        self.dispatch.route()
+    }
+
+    pub(crate) fn matches_candidate(
+        &self,
+        candidate_id: &str,
+        route: &ResolvedProfileRoute,
+    ) -> bool {
+        self.dispatch.matches_candidate(candidate_id, route)
+    }
+
+    pub(crate) fn matches_request(
+        &self,
+        request_id: &str,
+        request: &InferenceRequest,
+        route: &ResolvedProfileRoute,
+    ) -> bool {
+        self.dispatch.matches_request(request_id, request, route)
+    }
+
+    pub(crate) fn matches_generation(&self, generation: &OwnedServiceGenerationIdentity) -> bool {
+        self.generation_identity == *generation
+            && generation
+                .comfy_service_generation_reference()
+                .is_ok_and(|reference| reference == self.generation_reference)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl std::fmt::Debug for ManagedComfyDispatchPermit {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ManagedComfyDispatchPermit([redacted])")
+    }
+}
+
 impl std::fmt::Debug for ComfyDispatchPermit {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("ComfyDispatchPermit([redacted])")
@@ -343,6 +408,7 @@ pub enum ComfyCandidateError {
     RouteChanged,
     BindingChanged,
     JobAssociationMismatch,
+    ServiceGenerationMismatch,
     CandidateRejected,
     PersistenceFailed,
 }
@@ -361,6 +427,7 @@ impl std::fmt::Display for ComfyCandidateError {
             Self::RouteChanged => "Comfy candidate: route changed",
             Self::BindingChanged => "Comfy candidate: runtime binding changed",
             Self::JobAssociationMismatch => "Comfy candidate: job association mismatch",
+            Self::ServiceGenerationMismatch => "Comfy candidate: service generation mismatch",
             Self::CandidateRejected => "Comfy candidate: candidate rejected",
             Self::PersistenceFailed => "Comfy candidate: persistence failed",
         })
@@ -1415,6 +1482,52 @@ impl CoordinatorCore {
         candidate_id: String,
         now: Instant,
     ) -> std::result::Result<ComfyDispatchPermit, ComfyCandidateError> {
+        self.record_comfy_dispatch_candidate_inner(ticket, candidate_id, None, now)
+    }
+
+    /// Managed Comfy dispatch requires an exact owner-issued generation. Its
+    /// payload-free comparison reference is committed atomically with the
+    /// candidate before this non-restorable permit is returned.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn record_managed_comfy_dispatch_candidate(
+        &mut self,
+        ticket: &DispatchTicket,
+        candidate_id: String,
+        generation_identity: OwnedServiceGenerationIdentity,
+        now: Instant,
+    ) -> std::result::Result<ManagedComfyDispatchPermit, ComfyCandidateError> {
+        let generation_reference = match generation_identity.comfy_service_generation_reference() {
+            Ok(reference) => reference,
+            Err(_) => {
+                self.quarantine();
+                return Err(ComfyCandidateError::ServiceGenerationMismatch);
+            }
+        };
+        let dispatch = self.record_comfy_dispatch_candidate_inner(
+            ticket,
+            candidate_id,
+            Some(generation_reference.clone()),
+            now,
+        )?;
+        let permit = ManagedComfyDispatchPermit {
+            dispatch,
+            generation_identity,
+            generation_reference,
+        };
+        if !self.accepts_managed_comfy_dispatch_permit(&permit) {
+            self.quarantine();
+            return Err(ComfyCandidateError::JobAssociationMismatch);
+        }
+        Ok(permit)
+    }
+
+    fn record_comfy_dispatch_candidate_inner(
+        &mut self,
+        ticket: &DispatchTicket,
+        candidate_id: String,
+        generation_reference: Option<ComfyServiceGenerationReference>,
+        now: Instant,
+    ) -> std::result::Result<ComfyDispatchPermit, ComfyCandidateError> {
         if self.admission != AdmissionState::Ready {
             self.quarantine();
             return Err(ComfyCandidateError::AdmissionUnavailable);
@@ -1527,6 +1640,7 @@ impl CoordinatorCore {
                     && job.metadata.result_state.as_deref() == Some("running")
                     && job.metadata.backend_id.is_none()
                     && job.metadata.comfy_dispatch_candidate.is_none()
+                    && job.metadata.comfy_service_generation.is_none()
             });
         if !association_matches {
             self.quarantine();
@@ -1543,10 +1657,16 @@ impl CoordinatorCore {
         }
 
         let mut candidate_history = self.history.clone();
-        if candidate_history
-            .record_comfy_dispatch_candidate(ticket.job_id, candidate_id.clone())
-            .is_err()
-        {
+        let history_result = match generation_reference.as_ref() {
+            Some(generation) => candidate_history.record_managed_comfy_dispatch_candidate(
+                ticket.job_id,
+                candidate_id.clone(),
+                generation.clone(),
+            ),
+            None => candidate_history
+                .record_comfy_dispatch_candidate(ticket.job_id, candidate_id.clone()),
+        };
+        if history_result.is_err() {
             self.quarantine();
             return Err(ComfyCandidateError::CandidateRejected);
         }
@@ -1573,7 +1693,13 @@ impl CoordinatorCore {
             candidate_id,
             route: accepted_route,
         };
-        if !self.accepts_comfy_dispatch_permit(&permit) {
+        let permit_matches = match generation_reference.as_ref() {
+            None => self.accepts_comfy_dispatch_permit(&permit),
+            Some(reference) => {
+                self.accepts_comfy_dispatch_permit_with_generation(&permit, Some(reference))
+            }
+        };
+        if !permit_matches {
             self.quarantine();
             return Err(ComfyCandidateError::JobAssociationMismatch);
         }
@@ -1584,6 +1710,28 @@ impl CoordinatorCore {
     /// to its unresolved reservation. Daemon handoffs call this before moving
     /// the permit into the Comfy adapter.
     pub(crate) fn accepts_comfy_dispatch_permit(&self, permit: &ComfyDispatchPermit) -> bool {
+        self.accepts_comfy_dispatch_permit_with_generation(permit, None)
+    }
+
+    /// Managed equivalent: also requires the row's durable generation
+    /// reference to match the transient owner identity carried by the permit.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn accepts_managed_comfy_dispatch_permit(
+        &self,
+        permit: &ManagedComfyDispatchPermit,
+    ) -> bool {
+        permit.matches_generation(&permit.generation_identity)
+            && self.accepts_comfy_dispatch_permit_with_generation(
+                &permit.dispatch,
+                Some(&permit.generation_reference),
+            )
+    }
+
+    fn accepts_comfy_dispatch_permit_with_generation(
+        &self,
+        permit: &ComfyDispatchPermit,
+        generation_reference: Option<&ComfyServiceGenerationReference>,
+    ) -> bool {
         if self.admission != AdmissionState::Ready
             || !permit.is_live()
             || !permit.belongs_to(&self.dispatch_permit_owner_identity)
@@ -1611,6 +1759,7 @@ impl CoordinatorCore {
                     && job.metadata.comfy_dispatch_candidate.as_deref()
                         == Some(permit.candidate_id.as_str())
                     && job.metadata.backend_id.is_none()
+                    && job.metadata.comfy_service_generation.as_ref() == generation_reference
             });
         active_matches && history_matches
     }
@@ -3806,7 +3955,71 @@ mod tests {
             .unwrap();
         assert_eq!(row["comfy_dispatch_candidate"], CANDIDATE);
         assert!(row.get("backend_id").is_none());
+        assert!(row.get("comfy_service_generation").is_none());
         assert!(!rows.to_string().contains("FixtureNode"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn managed_comfy_candidate_commits_exact_owner_generation_before_permit() {
+        const CANDIDATE: &str = "123e4567-e89b-12d3-a456-426614174000";
+        let (fixture, mut coordinator, job_id, ticket, now) = started_comfy_dispatch();
+        let generation = OwnedServiceGenerationIdentity::for_test_comfy_supervisor().unwrap();
+        let permit = coordinator
+            .record_managed_comfy_dispatch_candidate(
+                &ticket,
+                CANDIDATE.into(),
+                generation.clone(),
+                now,
+            )
+            .unwrap();
+
+        assert_eq!(permit.job_id(), job_id);
+        assert_eq!(permit.request_id(), "comfy-dispatch-fixture");
+        assert_eq!(permit.candidate_id(), CANDIDATE);
+        assert_eq!(permit.route(), &ticket.route);
+        assert!(permit.matches_candidate(CANDIDATE, &ticket.route));
+        assert!(permit.matches_request("comfy-dispatch-fixture", &ticket.request, &ticket.route));
+        assert!(permit.matches_generation(&generation));
+        let different_generation =
+            OwnedServiceGenerationIdentity::for_test_comfy_supervisor_with_main_pid(9876).unwrap();
+        assert!(!permit.matches_generation(&different_generation));
+        assert!(coordinator.accepts_managed_comfy_dispatch_permit(&permit));
+        assert_eq!(coordinator.active_count(), 1);
+        assert_eq!(coordinator.admission(), AdmissionState::Ready);
+        assert_eq!(
+            format!("{permit:?}"),
+            "ManagedComfyDispatchPermit([redacted])"
+        );
+
+        let rows: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(fixture.root.path().join("jobs.json")).unwrap())
+                .unwrap();
+        let row = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["request_id"] == "comfy-dispatch-fixture")
+            .unwrap();
+        assert_eq!(row["comfy_dispatch_candidate"], CANDIDATE);
+        assert_eq!(
+            row["comfy_service_generation"]["schema_version"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            row["comfy_service_generation"]["intent"]["runtime_name"],
+            "ComfyUI"
+        );
+        assert_eq!(
+            row["comfy_service_generation"]["generation"]["main_pid"],
+            serde_json::json!(2345)
+        );
+        assert!(row.get("backend_id").is_none());
+        let persisted = rows.to_string();
+        assert!(!persisted.contains("FixtureNode"));
+        assert!(!persisted.contains("workflow-payload-secret"));
+        assert!(!persisted.contains("argv"));
+        assert!(!persisted.contains("environment"));
     }
 
     #[test]
@@ -3941,6 +4154,40 @@ mod tests {
             .metadata
             .comfy_dispatch_candidate
             .is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn managed_comfy_persistence_failure_returns_no_permit_or_partial_association() {
+        const CANDIDATE: &str = "123e4567-e89b-12d3-a456-426614174000";
+        let (fixture, mut coordinator, job_id, ticket, now) = started_comfy_dispatch();
+        let jobs_path = fixture.root.path().join("jobs.json");
+        std::fs::remove_file(&jobs_path).unwrap();
+        std::fs::create_dir(&jobs_path).unwrap();
+        let generation = OwnedServiceGenerationIdentity::for_test_comfy_supervisor().unwrap();
+
+        assert!(matches!(
+            coordinator.record_managed_comfy_dispatch_candidate(
+                &ticket,
+                CANDIDATE.into(),
+                generation,
+                now
+            ),
+            Err(ComfyCandidateError::PersistenceFailed)
+        ));
+        assert_eq!(
+            coordinator.admission(),
+            AdmissionState::ReconciliationRequired
+        );
+        assert_eq!(coordinator.active_count(), 1);
+        let row = coordinator
+            .history()
+            .records()
+            .iter()
+            .find(|job| job.id == job_id)
+            .unwrap();
+        assert!(row.metadata.comfy_dispatch_candidate.is_none());
+        assert!(row.metadata.comfy_service_generation.is_none());
     }
 
     #[test]

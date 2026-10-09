@@ -22,10 +22,11 @@ use std::time::{Duration, Instant};
 
 use serde::de::value::MapAccessDeserializer;
 use serde::de::{MapAccess, Visitor};
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
-use super::catalog::ProfileId;
+use super::catalog::{Lane, ProfileId};
+use super::language::DispatchDisposition;
 use super::managed_service::{
     ManagedServiceErrorKind, OwnedService, OwnedServiceGenerationIdentity,
 };
@@ -35,6 +36,9 @@ use super::service_owner::ManagedRuntimeOwner;
 
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_BODY_BYTES: usize = 512 * 1024;
+const MAX_COMFY_GRAPH_BYTES: usize = 1024 * 1024;
+const MAX_COMFY_SUBMIT_BODY_BYTES: usize = MAX_COMFY_GRAPH_BYTES + 128;
+const MAX_COMFY_RESPONSE_BODY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CHUNK_LINE_BYTES: usize = 16;
 const MAX_CHUNK_COUNT: usize = 4096;
 const MAX_CHUNKED_OVERHEAD_BYTES: usize = 64 * 1024;
@@ -192,6 +196,82 @@ impl fmt::Display for NativeHealthFailure {
 }
 
 impl Error for NativeHealthFailure {}
+
+/// The only native JSON operations admitted by the owner-bound Comfy path.
+/// UUIDs are validated as canonical lowercase values before they enter a
+/// fixed path; the graph remains transient and is never included in `Debug`.
+pub(crate) enum OwnedComfyOperation<'a> {
+    Submit {
+        prompt_id: &'a str,
+        graph: &'a Value,
+    },
+    Status {
+        prompt_id: &'a str,
+    },
+    Cancel {
+        prompt_id: &'a str,
+    },
+}
+
+/// Safe response envelope for the coordinator's typed Comfy decoders. Body
+/// bytes may contain native workflow data and are intentionally redacted.
+pub(crate) struct OwnedComfyResponse {
+    pub(crate) status: u16,
+    pub(crate) body: Vec<u8>,
+}
+
+impl fmt::Debug for OwnedComfyResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OwnedComfyResponse")
+            .field("status", &self.status)
+            .field("body", &"<redacted>")
+            .field("body_bytes", &self.body.len())
+            .finish()
+    }
+}
+
+/// Fixed failure labels for owner-bound Comfy operations. The disposition is
+/// NoDispatch only when no request bytes were written; otherwise the native
+/// side effect may have happened and the outcome remains Uncertain.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OwnedComfyFailureKind {
+    Configuration,
+    Ownership,
+    Cancelled,
+    Deadline,
+    Transport,
+    Protocol,
+    TooLarge,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) struct OwnedComfyFailure {
+    pub(crate) disposition: DispatchDisposition,
+    pub(crate) kind: OwnedComfyFailureKind,
+}
+
+impl fmt::Debug for OwnedComfyFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OwnedComfyFailure")
+            .field("disposition", &self.disposition)
+            .field("kind", &self.kind)
+            .finish()
+    }
+}
+
+impl fmt::Display for OwnedComfyFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "owned Comfy operation {:?}: {:?}",
+            self.disposition, self.kind
+        )
+    }
+}
+
+impl Error for OwnedComfyFailure {}
 
 /// Point-in-time native endpoint evidence. It is deliberately not an owner,
 /// admission token, job-completion receipt, or resource-release observation.
@@ -464,6 +544,236 @@ pub fn activate_llama_swap_model_once(
     })
 }
 
+/// Make exactly one owner-bound native Comfy JSON request. The service must
+/// be the exact `media:ComfyUI` isolated supervisor and `expected_generation`
+/// must match the current owner/WAL/manager generation before connection and
+/// again immediately before the first request byte. The native path is fixed
+/// by the typed operation; this function has no TCP, auth, retry or global
+/// interrupt mode.
+pub(crate) fn request_owned_comfy_json(
+    owner: &ManagedRuntimeOwner<'_>,
+    service: &OwnedService,
+    socket_directory: &Path,
+    expected_generation: &OwnedServiceGenerationIdentity,
+    operation: OwnedComfyOperation<'_>,
+    context: &OperationContext<'_>,
+) -> Result<OwnedComfyResponse, OwnedComfyFailure> {
+    check_active(context).map_err(|error| owned_failure(DispatchDisposition::NoDispatch, error))?;
+    let runtime_is_comfy = service
+        .intent_record()
+        .runtime_identity()
+        .is_some_and(|runtime| runtime.lane == Lane::Media && runtime.as_str() == "ComfyUI");
+    if !runtime_is_comfy || service.supervisor_peer_identity().is_none() {
+        return Err(owned_failure_kind(
+            DispatchDisposition::NoDispatch,
+            OwnedComfyFailureKind::Ownership,
+        ));
+    }
+
+    let request = build_owned_comfy_request(operation)
+        .map_err(|kind| owned_failure_kind(DispatchDisposition::NoDispatch, kind))?;
+    verify_expected_generation(owner, service, expected_generation, context)
+        .map_err(|error| owned_failure(DispatchDisposition::NoDispatch, error))?;
+    let mut stream = connect_owned_supervisor(owner, service, socket_directory, context)
+        .map_err(|error| owned_failure(DispatchDisposition::NoDispatch, error))?;
+
+    // Recheck the caller's exact generation after connection (which itself
+    // checks owner generation across SO_PEERCRED connection establishment) so
+    // a different valid Comfy unit cannot inherit this request.
+    verify_expected_generation(owner, service, expected_generation, context)
+        .map_err(|error| owned_failure(DispatchDisposition::NoDispatch, error))?;
+    check_active(context).map_err(|error| owned_failure(DispatchDisposition::NoDispatch, error))?;
+
+    let response = exchange_owned_comfy_request(&mut stream, &request, context)?;
+    verify_expected_generation(owner, service, expected_generation, context)
+        .map_err(|error| owned_failure(DispatchDisposition::Uncertain, error))?;
+
+    Ok(OwnedComfyResponse {
+        status: response.status,
+        body: response.body,
+    })
+}
+
+fn exchange_owned_comfy_request(
+    stream: &mut UnixStream,
+    request: &[u8],
+    context: &OperationContext<'_>,
+) -> Result<NativeResponse, OwnedComfyFailure> {
+    check_active(context).map_err(|error| owned_failure(DispatchDisposition::NoDispatch, error))?;
+    if let Err((error, wrote_any_bytes)) = write_all_bounded_tracking(stream, request, context) {
+        let disposition = if wrote_any_bytes {
+            DispatchDisposition::Uncertain
+        } else {
+            DispatchDisposition::NoDispatch
+        };
+        return Err(owned_failure(disposition, error));
+    }
+    let response = read_response_with_limit(
+        stream,
+        context,
+        NativeContentType::Json,
+        true,
+        MAX_COMFY_RESPONSE_BODY_BYTES,
+    )
+    .map_err(|error| owned_failure(DispatchDisposition::Uncertain, error))?;
+    check_active(context).map_err(|error| owned_failure(DispatchDisposition::Uncertain, error))?;
+    Ok(response)
+}
+
+fn verify_expected_generation(
+    owner: &ManagedRuntimeOwner<'_>,
+    service: &OwnedService,
+    expected: &OwnedServiceGenerationIdentity,
+    context: &OperationContext<'_>,
+) -> Result<(), NativeHealthFailure> {
+    let current = running_generation(owner, service, context)?;
+    if &current == expected {
+        Ok(())
+    } else {
+        Err(failure(NativeHealthFailureKind::OwnerUnverified))
+    }
+}
+
+#[derive(Serialize)]
+struct ComfySubmitEnvelope<'a> {
+    prompt_id: &'a str,
+    prompt: &'a Value,
+}
+
+struct LimitedCounter {
+    count: usize,
+    limit: usize,
+    exceeded: bool,
+}
+
+impl Write for LimitedCounter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > self.limit.saturating_sub(self.count) {
+            self.exceeded = true;
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "serialization limit",
+            ));
+        }
+        self.count += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+struct LimitedBuffer {
+    bytes: Vec<u8>,
+    limit: usize,
+    exceeded: bool,
+}
+
+impl Write for LimitedBuffer {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
+            self.exceeded = true;
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "serialization limit",
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn build_owned_comfy_request(
+    operation: OwnedComfyOperation<'_>,
+) -> Result<Vec<u8>, OwnedComfyFailureKind> {
+    let (method, path, body) = match operation {
+        OwnedComfyOperation::Submit { prompt_id, graph } => {
+            if !canonical_comfy_uuid(prompt_id)
+                || !graph.as_object().is_some_and(|object| !object.is_empty())
+            {
+                return Err(OwnedComfyFailureKind::Configuration);
+            }
+            let mut counter = LimitedCounter {
+                count: 0,
+                limit: MAX_COMFY_GRAPH_BYTES,
+                exceeded: false,
+            };
+            let graph_encoded = serde_json::to_writer(&mut counter, graph);
+            if counter.exceeded {
+                return Err(OwnedComfyFailureKind::TooLarge);
+            }
+            if graph_encoded.is_err() {
+                return Err(OwnedComfyFailureKind::Protocol);
+            }
+            let mut buffer = LimitedBuffer {
+                bytes: Vec::with_capacity(counter.count.saturating_add(96)),
+                limit: MAX_COMFY_SUBMIT_BODY_BYTES,
+                exceeded: false,
+            };
+            let encoded = serde_json::to_writer(
+                &mut buffer,
+                &ComfySubmitEnvelope {
+                    prompt_id,
+                    prompt: graph,
+                },
+            );
+            if buffer.exceeded {
+                return Err(OwnedComfyFailureKind::TooLarge);
+            }
+            if encoded.is_err() {
+                return Err(OwnedComfyFailureKind::Protocol);
+            }
+            ("POST", "/prompt".to_owned(), buffer.bytes)
+        }
+        OwnedComfyOperation::Status { prompt_id } => {
+            if !canonical_comfy_uuid(prompt_id) {
+                return Err(OwnedComfyFailureKind::Configuration);
+            }
+            ("GET", format!("/api/jobs/{prompt_id}"), Vec::new())
+        }
+        OwnedComfyOperation::Cancel { prompt_id } => {
+            if !canonical_comfy_uuid(prompt_id) {
+                return Err(OwnedComfyFailureKind::Configuration);
+            }
+            (
+                "POST",
+                format!("/api/jobs/{prompt_id}/cancel"),
+                b"{}".to_vec(),
+            )
+        }
+    };
+
+    let mut request = Vec::with_capacity(body.len().saturating_add(512));
+    request.extend_from_slice(method.as_bytes());
+    request.push(b' ');
+    request.extend_from_slice(path.as_bytes());
+    request.extend_from_slice(b" HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\n");
+    if method == "POST" {
+        request.extend_from_slice(b"Content-Type: application/json\r\nContent-Length: ");
+        request.extend_from_slice(body.len().to_string().as_bytes());
+        request.extend_from_slice(b"\r\n");
+    }
+    request.extend_from_slice(b"Connection: close\r\n\r\n");
+    request.extend_from_slice(&body);
+    Ok(request)
+}
+
+fn canonical_comfy_uuid(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+            }
+        })
+}
+
 fn request_llama_swap_model_health_once(
     stream: &mut UnixStream,
     selected_model: &ProfileId,
@@ -603,6 +913,22 @@ fn read_response(
     expected_content_type: NativeContentType,
     allow_chunked: bool,
 ) -> Result<NativeResponse, NativeHealthFailure> {
+    read_response_with_limit(
+        stream,
+        context,
+        expected_content_type,
+        allow_chunked,
+        MAX_BODY_BYTES,
+    )
+}
+
+fn read_response_with_limit(
+    stream: &mut UnixStream,
+    context: &OperationContext<'_>,
+    expected_content_type: NativeContentType,
+    allow_chunked: bool,
+    maximum_body_bytes: usize,
+) -> Result<NativeResponse, NativeHealthFailure> {
     let mut buffered = Vec::with_capacity(READ_CHUNK_BYTES);
     let header_end = loop {
         if let Some(offset) = find_subslice(&buffered, b"\r\n\r\n") {
@@ -622,10 +948,11 @@ fn read_response(
         buffered.extend_from_slice(&chunk[..count]);
     };
 
-    let (status, framing) = parse_response_head(
+    let (status, framing) = parse_response_head_with_limit(
         &buffered[..header_end],
         expected_content_type,
         allow_chunked,
+        maximum_body_bytes,
     )?;
     let body_start = header_end + 4;
     let body_prefix = &buffered[body_start..];
@@ -648,15 +975,27 @@ fn read_response(
             }
             body
         }
-        NativeBodyFraming::Chunked => read_chunked_body(stream, body_prefix, context)?,
+        NativeBodyFraming::Chunked => {
+            read_chunked_body(stream, body_prefix, context, maximum_body_bytes)?
+        }
     };
     Ok(NativeResponse { status, body })
 }
 
+#[cfg(test)]
 fn parse_response_head(
     bytes: &[u8],
     expected_content_type: NativeContentType,
     allow_chunked: bool,
+) -> Result<(u16, NativeBodyFraming), NativeHealthFailure> {
+    parse_response_head_with_limit(bytes, expected_content_type, allow_chunked, MAX_BODY_BYTES)
+}
+
+fn parse_response_head_with_limit(
+    bytes: &[u8],
+    expected_content_type: NativeContentType,
+    allow_chunked: bool,
+    maximum_body_bytes: usize,
 ) -> Result<(u16, NativeBodyFraming), NativeHealthFailure> {
     let lines = split_crlf_lines(bytes)?;
     let Some(status_line) = lines.first() else {
@@ -721,7 +1060,7 @@ fn parse_response_head(
                 .ok()
                 .and_then(|value| value.parse::<usize>().ok())
                 .ok_or_else(|| failure(NativeHealthFailureKind::MalformedResponse))?;
-            if parsed > MAX_BODY_BYTES {
+            if parsed > maximum_body_bytes {
                 return Err(failure(NativeHealthFailureKind::ResponseTooLarge));
             }
             content_length = Some(parsed);
@@ -749,6 +1088,7 @@ fn read_chunked_body(
     stream: &mut UnixStream,
     prefix: &[u8],
     context: &OperationContext<'_>,
+    maximum_body_bytes: usize,
 ) -> Result<Vec<u8>, NativeHealthFailure> {
     let mut reader = ChunkedBodyReader::new(stream, prefix, context);
     let mut body = Vec::new();
@@ -792,7 +1132,7 @@ fn read_chunked_body(
             .len()
             .checked_add(size)
             .ok_or_else(|| failure(NativeHealthFailureKind::ResponseTooLarge))?;
-        if total_body_bytes > MAX_BODY_BYTES {
+        if total_body_bytes > maximum_body_bytes {
             return Err(failure(NativeHealthFailureKind::ResponseTooLarge));
         }
         framing_bytes = framing_bytes
@@ -1207,6 +1547,37 @@ fn map_connect_error(error: VerifiedConnectError) -> NativeHealthFailure {
     failure(kind)
 }
 
+fn owned_failure(
+    disposition: DispatchDisposition,
+    error: NativeHealthFailure,
+) -> OwnedComfyFailure {
+    let kind = match error.kind() {
+        NativeHealthFailureKind::Cancelled => OwnedComfyFailureKind::Cancelled,
+        NativeHealthFailureKind::DeadlineExceeded => OwnedComfyFailureKind::Deadline,
+        NativeHealthFailureKind::ResponseTooLarge => OwnedComfyFailureKind::TooLarge,
+        NativeHealthFailureKind::MalformedResponse | NativeHealthFailureKind::Unhealthy => {
+            OwnedComfyFailureKind::Protocol
+        }
+        NativeHealthFailureKind::TruncatedResponse | NativeHealthFailureKind::Io => {
+            OwnedComfyFailureKind::Transport
+        }
+        NativeHealthFailureKind::OwnerUnverified
+        | NativeHealthFailureKind::NotRunning
+        | NativeHealthFailureKind::WrongServiceRole
+        | NativeHealthFailureKind::WrongNativeBackend
+        | NativeHealthFailureKind::SocketUnavailable
+        | NativeHealthFailureKind::PeerMismatch => OwnedComfyFailureKind::Ownership,
+    };
+    owned_failure_kind(disposition, kind)
+}
+
+fn owned_failure_kind(
+    disposition: DispatchDisposition,
+    kind: OwnedComfyFailureKind,
+) -> OwnedComfyFailure {
+    OwnedComfyFailure { disposition, kind }
+}
+
 fn failure(kind: NativeHealthFailureKind) -> NativeHealthFailure {
     NativeHealthFailure::new(kind)
 }
@@ -1432,6 +1803,41 @@ mod tests {
         let mut stream = fixture.connect(context)?;
         request_get(&mut stream, "/running", "application/json", context)?;
         read_response(&mut stream, context, NativeContentType::Json, true)
+    }
+
+    fn bounded_response(
+        wire: Vec<u8>,
+        comfy_limit: bool,
+    ) -> Result<NativeResponse, NativeHealthFailure> {
+        let (mut reader, mut writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        writer
+            .set_write_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let server = thread::spawn(move || {
+            let _ = writer.write_all(&wire);
+        });
+        let response = if comfy_limit {
+            read_response_with_limit(
+                &mut reader,
+                &context(Duration::from_secs(3)),
+                NativeContentType::Json,
+                true,
+                MAX_COMFY_RESPONSE_BODY_BYTES,
+            )
+        } else {
+            read_response(
+                &mut reader,
+                &context(Duration::from_secs(3)),
+                NativeContentType::Json,
+                true,
+            )
+        };
+        // Rejection may leave a large mock response unread. Close before
+        // joining so the sender observes disconnection instead of blocking.
+        drop(reader);
+        server.join().unwrap();
+        response
     }
 
     #[test]
@@ -2154,5 +2560,147 @@ mod tests {
             .unwrap_err();
         assert_eq!(error, VerifiedConnectError::PeerMismatch);
         server.join().unwrap();
+    }
+
+    #[test]
+    fn owned_comfy_request_shapes_use_only_fixed_native_methods_and_paths() {
+        const ID: &str = "12345678-1234-4abc-8def-0123456789ab";
+        let status =
+            build_owned_comfy_request(OwnedComfyOperation::Status { prompt_id: ID }).unwrap();
+        assert_eq!(
+            status,
+            format!(
+                "GET /api/jobs/{ID} HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes()
+        );
+
+        let cancel =
+            build_owned_comfy_request(OwnedComfyOperation::Cancel { prompt_id: ID }).unwrap();
+        assert_eq!(
+            cancel,
+            format!(
+                "POST /api/jobs/{ID}/cancel HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+            )
+            .as_bytes()
+        );
+
+        let graph = serde_json::json!({
+            "1": {"class_type": "FixtureNode", "inputs": {"text": "secret workflow"}}
+        });
+        let submit = build_owned_comfy_request(OwnedComfyOperation::Submit {
+            prompt_id: ID,
+            graph: &graph,
+        })
+        .unwrap();
+        let separator = find_subslice(&submit, b"\r\n\r\n").unwrap() + 4;
+        let header = &submit[..separator];
+        let body = &submit[separator..];
+        assert!(header.starts_with(b"POST /prompt HTTP/1.1\r\n"));
+        assert!(header
+            .windows(b"Content-Type: application/json\r\n".len())
+            .any(|window| window == b"Content-Type: application/json\r\n"));
+        assert!(header
+            .windows(format!("Content-Length: {}\r\n", body.len()).len())
+            .any(|window| window == format!("Content-Length: {}\r\n", body.len()).as_bytes()));
+        let decoded: Value = serde_json::from_slice(body).unwrap();
+        assert_eq!(decoded["prompt_id"], ID);
+        assert_eq!(decoded["prompt"], graph);
+
+        for id in [
+            "../12345678-1234-4abc-8def-0123456789ab",
+            "12345678-1234-4ABC-8DEF-0123456789AB",
+            "1234567812344abc8def0123456789ab",
+        ] {
+            assert_eq!(
+                build_owned_comfy_request(OwnedComfyOperation::Status { prompt_id: id }),
+                Err(OwnedComfyFailureKind::Configuration)
+            );
+        }
+        assert_eq!(
+            build_owned_comfy_request(OwnedComfyOperation::Submit {
+                prompt_id: ID,
+                graph: &serde_json::json!([]),
+            }),
+            Err(OwnedComfyFailureKind::Configuration)
+        );
+        let oversized_graph = serde_json::json!({
+            "payload": "x".repeat(MAX_COMFY_GRAPH_BYTES)
+        });
+        assert_eq!(
+            build_owned_comfy_request(OwnedComfyOperation::Submit {
+                prompt_id: ID,
+                graph: &oversized_graph,
+            }),
+            Err(OwnedComfyFailureKind::TooLarge)
+        );
+    }
+
+    #[test]
+    fn owned_comfy_exchange_tracks_partial_write_and_redacts_response() {
+        let (mut stream, _peer) = UnixStream::pair().unwrap();
+        let cancellation = TestCancellation(Arc::new(AtomicBool::new(true)));
+        let cancelled_context =
+            OperationContext::new(Instant::now() + Duration::from_secs(2), &cancellation);
+        let failure =
+            exchange_owned_comfy_request(&mut stream, b"GET /api/jobs/id", &cancelled_context)
+                .unwrap_err();
+        assert_eq!(failure.disposition, DispatchDisposition::NoDispatch);
+        assert_eq!(failure.kind, OwnedComfyFailureKind::Cancelled);
+
+        let (mut stream, _peer) = UnixStream::pair().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        let request = vec![b'x'; 1024 * 1024];
+        let failure = exchange_owned_comfy_request(
+            &mut stream,
+            &request,
+            &context(Duration::from_millis(60)),
+        )
+        .unwrap_err();
+        assert_eq!(failure.disposition, DispatchDisposition::Uncertain);
+        assert!(matches!(
+            failure.kind,
+            OwnedComfyFailureKind::Deadline | OwnedComfyFailureKind::Transport
+        ));
+        assert!(!failure.to_string().contains("secret"));
+        assert!(!format!("{failure:?}").contains("secret"));
+
+        let response = OwnedComfyResponse {
+            status: 200,
+            body: br#"{"private":"secret"}"#.to_vec(),
+        };
+        assert!(!format!("{response:?}").contains("secret"));
+    }
+
+    #[test]
+    fn comfy_response_limit_is_two_mib_and_health_limit_stays_512_kib() {
+        let body = vec![b'x'; MAX_BODY_BYTES + 1];
+        let wire = response(200, &body);
+        let comfy = bounded_response(wire.clone(), true).unwrap();
+        assert_eq!(comfy.body.len(), body.len());
+        let health = bounded_response(wire, false).unwrap_err();
+        assert_eq!(health.kind(), NativeHealthFailureKind::ResponseTooLarge);
+
+        let chunked = chunked_response(200, "application/json", &body, READ_CHUNK_BYTES);
+        let comfy = bounded_response(chunked.clone(), true).unwrap();
+        assert_eq!(comfy.body.len(), body.len());
+        let health = bounded_response(chunked, false).unwrap_err();
+        assert_eq!(health.kind(), NativeHealthFailureKind::ResponseTooLarge);
+
+        let oversized_length = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            MAX_COMFY_RESPONSE_BODY_BYTES + 1
+        )
+        .into_bytes();
+        let oversized = bounded_response(oversized_length, true).unwrap_err();
+        assert_eq!(oversized.kind(), NativeHealthFailureKind::ResponseTooLarge);
+
+        let oversized_chunk = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n",
+            MAX_COMFY_RESPONSE_BODY_BYTES + 1
+        )
+        .into_bytes();
+        let oversized = bounded_response(oversized_chunk, true).unwrap_err();
+        assert_eq!(oversized.kind(), NativeHealthFailureKind::ResponseTooLarge);
     }
 }

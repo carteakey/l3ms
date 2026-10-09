@@ -8,7 +8,36 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
-## Current resumed checkpoint — 2026-10-08
+## Current resumed checkpoint — 2026-10-09
+
+The subsequent managed Comfy handoff/transport slice passes **812 root tests,
+1 ignored**, strict all-target Clippy, formatting and whitespace checks. It
+atomically persists candidate plus exact safe generation association and returns
+a distinct opaque non-restorable permit. Legacy candidate-only rows/pages remain
+unchanged. The owned session keeps managed jobs out of legacy HTTP, checks the
+accepted workflow/route and exact generation, and uses fixed peer-verified
+submit/status/scoped-cancel operations. No auth/TCP/global interrupt fallback or
+uncertain POST replay exists. Scoped cancellation is one attempt, not terminal
+evidence. Native transport compares owner generation before/after connection and
+after response; response budgets are 2 MiB for Comfy and unchanged 512 KiB for
+health. Cgroup validation now requires the exact final unit-name component,
+not a suffix match, and persisted manager PIDs remain in the supported range.
+
+Fixtures cover transactional persistence, generation mismatch, absent legacy
+fields, strict nested DTOs/duplicate keys, retained no-replay references,
+fixed HTTP operation paths and graph budgets, partial-write uncertainty,
+response budgets and redaction. A new mock response fixture initially blocked
+its sender after an intentional oversized-response rejection; closing the
+receiver before joining and bounding fixture IO fixes the hang. The rerun passes.
+This is not full injected owner/session/daemon dispatch or live Comfy acceptance.
+Installed ComfyUI source at clean commit `6bfaacc67c2103481e5f0c84d75257cd0581d86a`
+was read-only checked for canonical client IDs and mutex-guarded scoped running
+job cancellation. No original checkout, service or GPU state was changed.
+
+Next: wire concrete Comfy runtime configuration and main-thread permit/event
+handoff into the worker, account for positive native backend IDs without replay,
+define typed artifact mapping/byte retrieval, and implement crash-safe cleanup
+and history association before real mixed-runtime acceptance.
 
 2026-10-09 client/generation checkpoint: **801 root tests passed, 1 ignored**,
 with strict all-target Clippy, formatting and whitespace checks. Explicit

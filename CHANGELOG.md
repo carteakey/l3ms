@@ -10,6 +10,12 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Persist managed Comfy candidate UUID and exact payload-free supervisor
+  generation atomically before a distinct non-restorable dispatch permit.
+  Add an exact-generation native session with fixed peer-verified submit,
+  status and one-shot scoped cancel operations, preserving legacy adapter paths
+  and health-response limits. Tighten exact cgroup leaf/PID metadata validation.
+  Concrete worker dispatch, artifact integration and live acceptance remain open.
 - Require and validate exact native decision metadata in the bounded CPU Nagi
   acceptance harness; retain one-submit/no-replay and verified process cleanup.
   A real offline CPU rerun passed, without service-manager or GPU changes.

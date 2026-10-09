@@ -1,6 +1,7 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap};
 use std::ffi::OsString;
+use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -8,8 +9,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
+use serde::de::value::MapAccessDeserializer;
 use serde::de::{Error as DeError, MapAccess, SeqAccess, Visitor};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 pub const JOBS_MAX: usize = 200;
@@ -29,6 +31,9 @@ const JOB_METADATA_ID_MAX_BYTES: usize = 128;
 const JOB_METADATA_ARTIFACT_MAX_BYTES: usize = 2 * 1_024;
 const JOB_METADATA_ARTIFACTS_MAX: usize = 64;
 const JOB_METADATA_TOTAL_MAX_BYTES: usize = 16 * 1_024;
+const COMFY_SERVICE_GENERATION_SCHEMA: u8 = 1;
+const COMFY_SERVICE_UNIT_MAX_BYTES: usize = 96;
+const COMFY_SERVICE_CGROUP_MAX_BYTES: usize = 4_096;
 const JOBS_MAX_FILE_BYTES: usize = 16 * 1_024 * 1_024;
 const CHAT_MAX_SAVED_BYTES: usize = 256;
 const CHAT_MAX_ROLE_BYTES: usize = 64;
@@ -68,11 +73,223 @@ pub struct JobMetadata {
     pub artifact_refs: Vec<String>,
     /// A ComfyUI prompt UUID durably allocated before one POST attempt. This is
     /// intent only; it is never evidence that the native backend accepted work.
-    /// The exact route/runtime and service-generation binding is not persisted;
-    /// a transient permit binds the route only to its current coordinator.
-    /// Restart must reconcile and must not adopt or replay this identifier.
+    /// Optional exact service-generation evidence is present only for managed
+    /// Comfy dispatch. It is durable comparison data, not a live owner handle
+    /// or proof of native acceptance. Older candidate rows omit it and remain
+    /// legacy records; restart must never adopt or replay either form.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comfy_dispatch_candidate: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_comfy_generation_reference"
+    )]
+    pub comfy_service_generation: Option<ComfyServiceGenerationReference>,
+}
+
+/// Payload-free, versioned comparison data for the exact isolated Comfy
+/// supervisor generation associated with one managed candidate. This value
+/// is intentionally not an ownership capability: deserializing it cannot
+/// reconstruct an `OwnedService`, a live generation identity, or a permit.
+/// Fields are crate-private so only the owner projection builds it in normal
+/// code; its JSON representation is strict and bounded for job history.
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComfyServiceGenerationReference {
+    pub(crate) schema_version: u8,
+    #[serde(deserialize_with = "deserialize_map_only")]
+    pub(crate) intent: ComfyServiceIntentReference,
+    #[serde(deserialize_with = "deserialize_map_only")]
+    pub(crate) generation: ComfyManagerGenerationReference,
+}
+
+impl fmt::Debug for ComfyServiceGenerationReference {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ComfyServiceGenerationReference([redacted])")
+    }
+}
+
+/// Immutable, bounded intent association for the isolated Comfy supervisor.
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ComfyServiceIntentReference {
+    pub(crate) coordinator_id: String,
+    pub(crate) unit_name: String,
+    pub(crate) launch_identity: String,
+    pub(crate) stop_timeout_millis: u64,
+    pub(crate) runtime_lane: String,
+    pub(crate) runtime_name: String,
+    pub(crate) launch_role: String,
+    #[serde(deserialize_with = "deserialize_map_only")]
+    pub(crate) supervisor_coordinator: ComfySupervisorCoordinatorReference,
+}
+
+impl fmt::Debug for ComfyServiceIntentReference {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ComfyServiceIntentReference([redacted])")
+    }
+}
+
+/// Full supervisor coordinator birth, UID, and network namespace association.
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ComfySupervisorCoordinatorReference {
+    pub(crate) pid: u32,
+    pub(crate) uid: u32,
+    pub(crate) start_time_ticks: u64,
+    pub(crate) network_namespace_device: u64,
+    pub(crate) network_namespace_inode: u64,
+}
+
+impl fmt::Debug for ComfySupervisorCoordinatorReference {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ComfySupervisorCoordinatorReference([redacted])")
+    }
+}
+
+/// Exact manager generation values from the live owner-created handle.
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ComfyManagerGenerationReference {
+    pub(crate) invocation_id: String,
+    pub(crate) cgroup: String,
+    pub(crate) main_pid: u32,
+}
+
+impl fmt::Debug for ComfyManagerGenerationReference {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ComfyManagerGenerationReference([redacted])")
+    }
+}
+
+impl ComfyServiceGenerationReference {
+    pub(crate) fn is_valid(&self) -> bool {
+        if self.schema_version != COMFY_SERVICE_GENERATION_SCHEMA {
+            return false;
+        }
+        let intent = &self.intent;
+        if !valid_service_coordinator_id(&intent.coordinator_id)
+            || !valid_comfy_unit_name(&intent.unit_name, &intent.coordinator_id)
+            || !is_lower_hex_of_len(&intent.launch_identity, 64, false)
+            || intent.stop_timeout_millis == 0
+            || intent.stop_timeout_millis > 300_000
+            || intent.runtime_lane != "media"
+            || intent.runtime_name != "ComfyUI"
+            || intent.launch_role != "isolated_engine_supervisor"
+            || !valid_supervisor_coordinator_reference(&intent.supervisor_coordinator)
+        {
+            return false;
+        }
+
+        let generation = &self.generation;
+        is_lower_hex_of_len(&generation.invocation_id, 32, true)
+            && valid_service_cgroup(&generation.cgroup, &intent.unit_name)
+            && generation.main_pid > 0
+            && generation.main_pid <= i32::MAX as u32
+    }
+
+    fn metadata_string_bytes(&self) -> usize {
+        self.intent.coordinator_id.len()
+            + self.intent.unit_name.len()
+            + self.intent.launch_identity.len()
+            + self.intent.runtime_lane.len()
+            + self.intent.runtime_name.len()
+            + self.intent.launch_role.len()
+            + self.generation.invocation_id.len()
+            + self.generation.cgroup.len()
+    }
+}
+
+fn valid_service_coordinator_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 32
+        && value.as_bytes()[0].is_ascii_lowercase()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && !value.ends_with('-')
+}
+
+fn valid_comfy_unit_name(value: &str, coordinator_id: &str) -> bool {
+    let prefix = format!("l3ms-{coordinator_id}-");
+    let Some(random) = value
+        .strip_prefix(&prefix)
+        .and_then(|name| name.strip_suffix(".service"))
+    else {
+        return false;
+    };
+    value.len() <= COMFY_SERVICE_UNIT_MAX_BYTES && is_lower_hex_of_len(random, 32, false)
+}
+
+fn valid_supervisor_coordinator_reference(
+    coordinator: &ComfySupervisorCoordinatorReference,
+) -> bool {
+    coordinator.pid > 1
+        && coordinator.pid <= i32::MAX as u32
+        && coordinator.start_time_ticks > 0
+        && coordinator.network_namespace_inode > 0
+}
+
+fn valid_service_cgroup(value: &str, unit_name: &str) -> bool {
+    value.starts_with('/')
+        && value.len() <= COMFY_SERVICE_CGROUP_MAX_BYTES
+        && value.rsplit('/').next() == Some(unit_name)
+        && value.split('/').skip(1).all(|part| {
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_.:@-".contains(&byte))
+        })
+}
+
+fn is_lower_hex_of_len(value: &str, length: usize, nonzero: bool) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        && (!nonzero || value.bytes().any(|byte| byte != b'0'))
+}
+
+fn deserialize_optional_comfy_generation_reference<'de, D>(
+    deserializer: D,
+) -> Result<Option<ComfyServiceGenerationReference>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_map_only(deserializer).map(Some)
+}
+
+/// Deserialize DTOs only from JSON objects. Serde's derived struct visitor
+/// also accepts tuple/sequence forms, which are intentionally not part of the
+/// durable job-history shape.
+fn deserialize_map_only<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct ObjectVisitor<T>(std::marker::PhantomData<T>);
+
+    impl<'de, T> Visitor<'de> for ObjectVisitor<T>
+    where
+        T: Deserialize<'de>,
+    {
+        type Value = T;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a JSON object")
+        }
+
+        fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            T::deserialize(MapAccessDeserializer::new(map))
+        }
+    }
+
+    deserializer.deserialize_map(ObjectVisitor(std::marker::PhantomData))
 }
 
 /// A persisted job row in the same field order and string representation as
@@ -452,6 +669,19 @@ pub fn validate_job_metadata(metadata: &JobMetadata) -> Vec<String> {
         if let Some(value) = value {
             total_bytes = total_bytes.saturating_add(value.len());
             validate_metadata_identifier(field, value, &mut errors);
+        }
+    }
+
+    if let Some(generation) = metadata.comfy_service_generation.as_ref() {
+        total_bytes = total_bytes.saturating_add(generation.metadata_string_bytes());
+        if !generation.is_valid() {
+            errors.push(
+                "comfy_service_generation has an invalid version or owner-generation association"
+                    .to_owned(),
+            );
+        }
+        if metadata.comfy_dispatch_candidate.is_none() {
+            errors.push("comfy_service_generation requires comfy_dispatch_candidate".to_owned());
         }
     }
 
@@ -1268,6 +1498,34 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn comfy_generation_reference() -> ComfyServiceGenerationReference {
+        let unit_name = "l3ms-test-coordinator-0123456789abcdef0123456789abcdef.service".to_owned();
+        ComfyServiceGenerationReference {
+            schema_version: COMFY_SERVICE_GENERATION_SCHEMA,
+            intent: ComfyServiceIntentReference {
+                coordinator_id: "test-coordinator".to_owned(),
+                unit_name: unit_name.clone(),
+                launch_identity: "b".repeat(64),
+                stop_timeout_millis: 30_000,
+                runtime_lane: "media".to_owned(),
+                runtime_name: "ComfyUI".to_owned(),
+                launch_role: "isolated_engine_supervisor".to_owned(),
+                supervisor_coordinator: ComfySupervisorCoordinatorReference {
+                    pid: 123,
+                    uid: 1000,
+                    start_time_ticks: 456,
+                    network_namespace_device: 7,
+                    network_namespace_inode: 4_026_531_993,
+                },
+            },
+            generation: ComfyManagerGenerationReference {
+                invocation_id: "a".repeat(32),
+                cgroup: format!("/user.slice/{unit_name}"),
+                main_pid: 2345,
+            },
+        }
+    }
+
     fn job(name: impl Into<String>, exit: impl Into<String>) -> JobRecord {
         JobRecord {
             name: name.into(),
@@ -1331,6 +1589,129 @@ mod tests {
     }
 
     #[test]
+    fn comfy_generation_reference_is_additive_redacted_and_strictly_shaped() {
+        const CANDIDATE: &str = "123e4567-e89b-12d3-a456-426614174000";
+        let reference = comfy_generation_reference();
+        let metadata = JobMetadata {
+            toolkit: Some("l2m2".to_owned()),
+            profile: Some("fixture-profile".to_owned()),
+            task: Some("image".to_owned()),
+            request_id: Some("req-managed-comfy".to_owned()),
+            result_state: Some("running".to_owned()),
+            comfy_dispatch_candidate: Some(CANDIDATE.to_owned()),
+            comfy_service_generation: Some(reference.clone()),
+            ..JobMetadata::default()
+        };
+        assert!(validate_job_metadata(&metadata).is_empty());
+        assert_eq!(
+            format!("{:?}", metadata.comfy_service_generation.as_ref().unwrap()),
+            "ComfyServiceGenerationReference([redacted])"
+        );
+
+        let mut invalid = metadata.clone();
+        invalid
+            .comfy_service_generation
+            .as_mut()
+            .unwrap()
+            .schema_version = 2;
+        assert!(validate_job_metadata(&invalid)
+            .iter()
+            .any(|error| error.contains("invalid version")));
+
+        invalid = metadata.clone();
+        invalid
+            .comfy_service_generation
+            .as_mut()
+            .unwrap()
+            .intent
+            .launch_role = "ordinary".to_owned();
+        assert!(validate_job_metadata(&invalid)
+            .iter()
+            .any(|error| error.contains("invalid version or owner-generation")));
+
+        invalid = metadata.clone();
+        let invalid_reference = invalid.comfy_service_generation.as_mut().unwrap();
+        invalid_reference.generation.cgroup =
+            format!("/user.slice/prefix-{}", invalid_reference.intent.unit_name);
+        assert!(validate_job_metadata(&invalid)
+            .iter()
+            .any(|error| error.contains("invalid version or owner-generation")));
+
+        invalid = metadata.clone();
+        invalid
+            .comfy_service_generation
+            .as_mut()
+            .unwrap()
+            .generation
+            .main_pid = i32::MAX as u32 + 1;
+        assert!(validate_job_metadata(&invalid)
+            .iter()
+            .any(|error| error.contains("invalid version or owner-generation")));
+
+        invalid = metadata.clone();
+        invalid.comfy_dispatch_candidate = None;
+        assert!(validate_job_metadata(&invalid)
+            .iter()
+            .any(|error| error.contains("requires comfy_dispatch_candidate")));
+
+        let base_row = serde_json::json!({
+            "name": "managed-comfy",
+            "started": "12:34:56",
+            "elapsed": "-",
+            "exit": JOB_RUNNING_EXIT,
+            "mode": "cross-toolkit",
+            "script_path": "",
+            "toolkit": "l2m2",
+            "profile": "fixture-profile",
+            "task": "image",
+            "request_id": "req-managed-comfy",
+            "result_state": "running",
+            "comfy_dispatch_candidate": CANDIDATE,
+            "comfy_service_generation": serde_json::to_value(&reference).unwrap()
+        });
+        let mut malformed = Vec::new();
+        let mut tuple_root = base_row.clone();
+        tuple_root["comfy_service_generation"] = serde_json::json!([1, {}, {}]);
+        malformed.push(tuple_root);
+        let mut tuple_intent = base_row.clone();
+        tuple_intent["comfy_service_generation"]["intent"] = serde_json::json!([]);
+        malformed.push(tuple_intent);
+        let mut tuple_generation = base_row.clone();
+        tuple_generation["comfy_service_generation"]["generation"] = serde_json::json!([]);
+        malformed.push(tuple_generation);
+        let mut tuple_coordinator = base_row.clone();
+        tuple_coordinator["comfy_service_generation"]["intent"]["supervisor_coordinator"] =
+            serde_json::json!([]);
+        malformed.push(tuple_coordinator);
+        let mut unknown_nested = base_row;
+        unknown_nested["comfy_service_generation"]["generation"]["unexpected"] =
+            serde_json::json!("not allowed");
+        malformed.push(unknown_nested);
+
+        let temp = TempDir::new().unwrap();
+        for row in malformed {
+            fs::write(
+                jobs_path_in(temp.path()),
+                serde_json::to_vec(&serde_json::json!([row])).unwrap(),
+            )
+            .unwrap();
+            let loaded = load_jobs_strict_in(temp.path()).unwrap();
+            assert!(loaded.jobs.is_empty());
+            assert_eq!(loaded.issues.len(), 1);
+            assert_eq!(loaded.reconciled_running, 0);
+        }
+
+        let encoded_reference = serde_json::to_string(&reference).unwrap();
+        let duplicate_nested_field =
+            encoded_reference.replace("\"main_pid\":2345", "\"main_pid\":2345,\"main_pid\":2346");
+        let duplicate_row = format!(
+            r#"[{{"name":"duplicate-generation-key","started":"12:34:56","elapsed":"-","exit":"…","mode":"cross-toolkit","script_path":"","toolkit":"l2m2","profile":"fixture-profile","task":"image","request_id":"req-duplicate","result_state":"running","comfy_dispatch_candidate":"{CANDIDATE}","comfy_service_generation":{duplicate_nested_field}}}]"#
+        );
+        fs::write(jobs_path_in(temp.path()), duplicate_row).unwrap();
+        assert!(load_jobs_strict_in(temp.path()).is_err());
+    }
+
+    #[test]
     fn validates_cross_toolkit_metadata_and_rejects_credentials_or_oversize() {
         let valid = JobMetadata {
             toolkit: Some("l2m2".into()),
@@ -1347,6 +1728,7 @@ mod tests {
                 "https://store.example/a.wav".into(),
             ],
             comfy_dispatch_candidate: None,
+            comfy_service_generation: None,
         };
         assert!(validate_job_metadata(&valid).is_empty());
 
