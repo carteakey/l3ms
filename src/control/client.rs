@@ -11,7 +11,7 @@ use std::path::Path;
 
 use super::{
     ipc::{
-        self, AcceptedOperation, RequestEnvelope, RequestStatus, ResponseMessage,
+        self, AcceptedOperation, ArtifactVersion, RequestEnvelope, RequestStatus, ResponseMessage,
         WireRequestMessage,
     },
     local_ipc::{LocalConnection, LocalIpcError},
@@ -65,6 +65,85 @@ impl fmt::Display for NativeReadError {
     }
 }
 impl Error for NativeReadError {}
+
+/// One validated, read-only artifact response. The chunk bytes are capped at
+/// 64 KiB and omitted from Debug output; artifact paths and version tokens are
+/// redacted as well.
+pub struct ArtifactChunk {
+    pub request_id: String,
+    pub artifact: super::result_buffer::MediaArtifact,
+    pub availability: super::result_buffer::Availability,
+    pub offset: u64,
+    pub total_bytes: u64,
+    pub next_offset: u64,
+    pub end_of_file: bool,
+    pub artifact_version: Option<ArtifactVersion>,
+    pub bytes: Vec<u8>,
+}
+
+impl fmt::Debug for ArtifactChunk {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ArtifactChunk")
+            .field("request_id", &"<redacted>")
+            .field("artifact", &self.artifact)
+            .field("availability", &self.availability)
+            .field("offset", &self.offset)
+            .field("total_bytes", &self.total_bytes)
+            .field("next_offset", &self.next_offset)
+            .field("end_of_file", &self.end_of_file)
+            .field("artifact_version", &"<redacted>")
+            .field("bytes", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Fetch exactly one bounded chunk from a previously published media artifact.
+/// The reference is relative and bound to `request_id`; this method performs
+/// one v3 exchange only, never submits inference or retries a failed read.
+pub fn artifact_chunk(
+    socket_directory: &Path,
+    request_id: &str,
+    artifact: &super::result_buffer::MediaArtifact,
+    offset: u64,
+    byte_budget: u32,
+    artifact_version: Option<&ArtifactVersion>,
+    context: &OperationContext<'_>,
+) -> Result<ArtifactChunk, ClientError> {
+    let request = RequestEnvelope::v3_artifact(
+        request_id,
+        artifact.clone(),
+        offset,
+        byte_budget,
+        artifact_version.cloned(),
+    );
+    let response = exchange(socket_directory, request, context)?;
+    let ResponseMessage::Artifact {
+        request_id,
+        artifact,
+        availability,
+        offset,
+        total_bytes,
+        next_offset,
+        end_of_file,
+        artifact_version,
+        bytes,
+    } = response
+    else {
+        return Err(ClientError::InvalidResponse);
+    };
+    Ok(ArtifactChunk {
+        request_id,
+        artifact,
+        availability,
+        offset,
+        total_bytes,
+        next_offset,
+        end_of_file,
+        artifact_version,
+        bytes,
+    })
+}
 
 /// Read and reassemble currently available output from cursor zero. Each page
 /// is a fresh read-only query, never an inference retry. The same absolute
@@ -123,7 +202,7 @@ enum Phase {
     Read,
 }
 
-/// Sends one v1 control request or one v2 results query over the caller-selected
+/// Sends one v1 control request, v2 results query, or v3 artifact query over the caller-selected
 /// private socket directory.
 ///
 /// `context` bounds the entire connect/write/read sequence. Request IDs are
@@ -162,7 +241,8 @@ fn request_id(message: &WireRequestMessage) -> &str {
         WireRequestMessage::Submit { request_id, .. }
         | WireRequestMessage::Cancel { request_id }
         | WireRequestMessage::Status { request_id }
-        | WireRequestMessage::Results { request_id, .. } => request_id,
+        | WireRequestMessage::Results { request_id, .. }
+        | WireRequestMessage::Artifact { request_id, .. } => request_id,
     }
 }
 
@@ -175,12 +255,24 @@ fn validate_response(
         ResponseMessage::Accepted { request_id, .. }
         | ResponseMessage::Status { request_id, .. } => Some(request_id.as_str()),
         ResponseMessage::Results { request_id, .. } => Some(request_id.as_str()),
+        ResponseMessage::Artifact { request_id, .. } => Some(request_id.as_str()),
         ResponseMessage::Error { request_id, .. } => request_id.as_deref(),
     };
     if response_id.is_some_and(|response_id| response_id != request_id) {
         return Err(ClientError::InvalidResponse);
     }
     if matches!(request, WireRequestMessage::Results { .. })
+        && matches!(
+            &response,
+            ResponseMessage::Error {
+                request_id: None,
+                ..
+            }
+        )
+    {
+        return Err(ClientError::InvalidResponse);
+    }
+    if matches!(request, WireRequestMessage::Artifact { .. })
         && matches!(
             &response,
             ResponseMessage::Error {
@@ -231,6 +323,24 @@ fn validate_response(
                 && page.request_id == request_id
                 && ipc::validate_result_page(*after_cursor, *byte_budget, page).is_ok()
         }
+        (
+            WireRequestMessage::Artifact {
+                request_id,
+                artifact,
+                offset,
+                byte_budget,
+                artifact_version,
+            },
+            response @ ResponseMessage::Artifact { .. },
+        ) => ipc::validate_artifact_reply(
+            request_id,
+            artifact,
+            *offset,
+            *byte_budget,
+            artifact_version.as_ref(),
+            response,
+        )
+        .is_ok(),
         _ => false,
     };
     if matches_request {
@@ -279,11 +389,12 @@ mod tests {
     use crate::control::{
         catalog::Lane,
         ipc::{
-            ClientRequest, RequestEnvelope, ResponseEnvelope, ResponseErrorCode, WireChatRole,
-            WireChatTurn, WireInferenceRequest,
+            ArtifactVersion, ClientRequest, RequestEnvelope, ResponseEnvelope, ResponseErrorCode,
+            WireChatRole, WireChatTurn, WireInferenceRequest,
         },
         result_buffer::{
-            ResultBuffer, ResultEvent, ResultTerminal, MAX_PAGE_BYTES, MIN_PAGE_BYTES,
+            ArtifactKind, Availability, MediaArtifact, ResultBuffer, ResultEvent, ResultTerminal,
+            MAX_PAGE_BYTES, MIN_PAGE_BYTES,
         },
         runtime::NeverCancel,
     };
@@ -315,6 +426,52 @@ mod tests {
             .terminal(request_id, ResultTerminal::Succeeded)
             .unwrap();
         buffer.page(request_id, 0, MAX_PAGE_BYTES).unwrap()
+    }
+
+    fn artifact_reference() -> MediaArtifact {
+        MediaArtifact::new(ArtifactKind::LocalJob, "job/41/output.png").unwrap()
+    }
+
+    fn one_artifact_response(
+        response: ResponseMessage,
+        requested_offset: u64,
+        requested_version: Option<ArtifactVersion>,
+    ) -> Result<ArtifactChunk, ClientError> {
+        let directory = private_directory();
+        let listener = listener(directory.path());
+        let server_requested_version = requested_version.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let ipc::IncomingRequest::Artifact(query) =
+                ipc::read_incoming_request(&mut stream).unwrap()
+            else {
+                panic!("artifact reader must send one artifact query")
+            };
+            assert_eq!(query.request_id, "request:artifact");
+            assert_eq!(query.artifact, artifact_reference());
+            assert_eq!(query.offset, requested_offset);
+            assert_eq!(query.byte_budget, 2);
+            assert_eq!(query.artifact_version, server_requested_version);
+            ipc::write_response(&mut stream, &ResponseEnvelope::v3_artifact(response)).unwrap();
+        });
+        let cancellation = NeverCancel;
+        let result = artifact_chunk(
+            directory.path(),
+            "request:artifact",
+            &artifact_reference(),
+            requested_offset,
+            2,
+            requested_version.as_ref(),
+            &context(&cancellation),
+        );
+        server.join().unwrap();
+        if let Ok(chunk) = result.as_ref() {
+            assert_eq!(chunk.request_id, "request:artifact");
+            let debug = format!("{chunk:?}");
+            assert!(!debug.contains("job/41/output.png"));
+            assert!(!debug.contains("xy"));
+        }
+        result
     }
 
     #[test]
@@ -661,6 +818,166 @@ mod tests {
                 ..
             } if page == expected_page
         ));
+    }
+
+    #[test]
+    fn one_shot_artifact_chunk_decodes_data_and_preserves_first_version_token() {
+        let artifact = artifact_reference();
+        let version = ArtifactVersion::new(&"a".repeat(64)).unwrap();
+        let chunk = one_artifact_response(
+            ResponseMessage::Artifact {
+                request_id: "request:artifact".into(),
+                artifact: artifact.clone(),
+                availability: Availability::Available,
+                offset: 0,
+                total_bytes: 9,
+                next_offset: 2,
+                end_of_file: false,
+                artifact_version: Some(version.clone()),
+                bytes: b"xy".to_vec(),
+            },
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(chunk.artifact, artifact);
+        assert_eq!(chunk.offset, 0);
+        assert_eq!(chunk.total_bytes, 9);
+        assert_eq!(chunk.next_offset, 2);
+        assert!(!chunk.end_of_file);
+        assert_eq!(chunk.artifact_version, Some(version.clone()));
+        assert_eq!(chunk.bytes.as_slice(), b"xy");
+        assert!(!format!("{chunk:?}").contains(version.as_str()));
+
+        let resumed = one_artifact_response(
+            ResponseMessage::Artifact {
+                request_id: "request:artifact".into(),
+                artifact: artifact_reference(),
+                availability: Availability::Available,
+                offset: 2,
+                total_bytes: 4,
+                next_offset: 4,
+                end_of_file: true,
+                artifact_version: Some(version.clone()),
+                bytes: b"xy".to_vec(),
+            },
+            2,
+            Some(version.clone()),
+        )
+        .unwrap();
+        assert!(resumed.end_of_file);
+        assert_eq!(resumed.artifact_version, Some(version));
+    }
+
+    #[test]
+    fn artifact_chunk_surfaces_unknown_availability_and_rejects_mismatched_replies() {
+        let artifact = artifact_reference();
+        let version = ArtifactVersion::new(&"a".repeat(64)).unwrap();
+        let unknown = one_artifact_response(
+            ResponseMessage::Artifact {
+                request_id: "request:artifact".into(),
+                artifact: artifact.clone(),
+                availability: Availability::Unknown,
+                offset: 2,
+                total_bytes: 0,
+                next_offset: 2,
+                end_of_file: false,
+                artifact_version: None,
+                bytes: Vec::new(),
+            },
+            2,
+            Some(version.clone()),
+        )
+        .unwrap();
+        assert_eq!(unknown.availability, Availability::Unknown);
+        assert!(unknown.bytes.is_empty());
+        assert!(unknown.artifact_version.is_none());
+        let expired = one_artifact_response(
+            ResponseMessage::Artifact {
+                request_id: "request:artifact".into(),
+                artifact: artifact.clone(),
+                availability: Availability::Expired,
+                offset: 2,
+                total_bytes: 0,
+                next_offset: 2,
+                end_of_file: false,
+                artifact_version: None,
+                bytes: Vec::new(),
+            },
+            2,
+            Some(version.clone()),
+        )
+        .unwrap();
+        assert_eq!(expired.availability, Availability::Expired);
+        assert!(expired.bytes.is_empty());
+        assert!(expired.artifact_version.is_none());
+
+        let wrong_artifact =
+            MediaArtifact::new(ArtifactKind::Backend, "history/42/image.png").unwrap();
+        let wrong_version = ArtifactVersion::new(&"b".repeat(64)).unwrap();
+        let responses = [
+            ResponseMessage::Artifact {
+                request_id: "request:other".into(),
+                artifact: artifact.clone(),
+                availability: Availability::Available,
+                offset: 2,
+                total_bytes: 4,
+                next_offset: 4,
+                end_of_file: true,
+                artifact_version: Some(version.clone()),
+                bytes: b"xy".to_vec(),
+            },
+            ResponseMessage::Artifact {
+                request_id: "request:artifact".into(),
+                artifact: wrong_artifact,
+                availability: Availability::Available,
+                offset: 2,
+                total_bytes: 4,
+                next_offset: 4,
+                end_of_file: true,
+                artifact_version: Some(version.clone()),
+                bytes: b"xy".to_vec(),
+            },
+            ResponseMessage::Artifact {
+                request_id: "request:artifact".into(),
+                artifact: artifact.clone(),
+                availability: Availability::Available,
+                offset: 3,
+                total_bytes: 5,
+                next_offset: 5,
+                end_of_file: true,
+                artifact_version: Some(version.clone()),
+                bytes: b"xy".to_vec(),
+            },
+            ResponseMessage::Artifact {
+                request_id: "request:artifact".into(),
+                artifact: artifact.clone(),
+                availability: Availability::Available,
+                offset: 2,
+                total_bytes: 5,
+                next_offset: 5,
+                end_of_file: true,
+                artifact_version: Some(version.clone()),
+                bytes: b"xyz".to_vec(),
+            },
+            ResponseMessage::Artifact {
+                request_id: "request:artifact".into(),
+                artifact,
+                availability: Availability::Available,
+                offset: 2,
+                total_bytes: 4,
+                next_offset: 4,
+                end_of_file: true,
+                artifact_version: Some(wrong_version),
+                bytes: b"xy".to_vec(),
+            },
+        ];
+        for response in responses {
+            assert_eq!(
+                one_artifact_response(response, 2, Some(version.clone())).err(),
+                Some(ClientError::InvalidResponse)
+            );
+        }
     }
 
     #[test]

@@ -2,6 +2,8 @@
 //! Opt-in CPU-local execution is connected to explicit CLI/UI actions; general
 //! managed-engine and GPU/media admission remain gated.
 
+#[cfg(target_os = "linux")]
+pub(crate) mod artifact_store;
 pub mod catalog;
 #[cfg(target_os = "linux")]
 pub mod cgroup_release;

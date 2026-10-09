@@ -10,13 +10,13 @@ existing Linear migration issues rather than replacing their acceptance criteria
 
 ## Monorepo: next work
 
-Latest offline checkpoint on `feature/l3ms-monorepo`: 838 root tests passed,
+Latest offline checkpoint on `feature/l3ms-monorepo`: 858 root tests passed,
 1 ignored, strict all-target Clippy, formatting and whitespace checks pass.
 Opt-in CPU dispatch, managed-language launch, resumable native results and
 owned per-job packet/service handoff are implemented. Subsequent branch work
 composes allowlisted local jobs with managed dispatch and retry-safe finalization;
 full mixed-worker tests, crash recovery, full Comfy acceptance, native decision
-TUI/mixed-runtime live acceptance, artifact-root integration and real managed acceptance remain
+TUI/mixed-runtime live acceptance, full-file artifact consumption and real managed acceptance remain
 unfinished. See migration status for the current slice and its explicit gates.
 This is offline implementation evidence, not live cutover acceptance.
 The repeat-run fixture `ETXTBSY` race is corrected with test-only fork/write
@@ -28,8 +28,11 @@ See the [migration status](docs/migration/status.md),
 Immediate integration work: managed Comfy candidate/generation persistence,
 peer-verified native session, opt-in worker/configuration and typed backend-ID
 acknowledgment accounting are implemented. Fresh pinned output validation yields
-Backend references, not artifact bytes. Full joined worker/lifecycle fixtures,
-artifact-byte access and crash-safe mixed-runtime recovery remain. Verified venv
+Backend references now have bounded v3 chunk access through private IPC,
+authenticated HTTP and an explicit one-read CLI command. Durable success and
+retained result state gate exact pinned references; no history restore or
+arbitrary path access. Full joined worker/lifecycle fixtures, full-file/TUI
+artifact consumption and crash-safe mixed-runtime recovery remain. Verified venv
 interpreter handoff preserves Python environment semantics. Real CPU native
 metadata delivery is verified; GPU switching is not.
 

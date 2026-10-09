@@ -432,6 +432,11 @@ pub(crate) enum ManagedWorkerEvent {
         event: ResultEvent,
         reply: SyncSender<bool>,
     },
+    PublishArtifacts {
+        key: ManagedJobKey,
+        files: Vec<super::artifact_store::PublishedArtifact>,
+        reply: SyncSender<bool>,
+    },
     /// No native POST may precede this main-thread durable handoff.
     ComfyCandidate {
         ticket: Box<DispatchTicket>,
@@ -1054,13 +1059,29 @@ impl ManagedComfyTicketExecutor<'_, '_> {
                     .iter()
                     .map(|artifact| artifact.relative_path.clone())
                     .collect();
-                if publish_result_event(
-                    self.events,
-                    &outcome.key,
-                    ResultEvent::MediaArtifacts(artifacts),
-                    &context,
-                )
-                .is_err()
+                let mut files = Vec::with_capacity(artifacts.len());
+                for (reference, descriptor) in artifacts.into_iter().zip(&snapshot.artifacts) {
+                    let native_path = if descriptor.subfolder.is_empty() {
+                        descriptor.filename.clone()
+                    } else {
+                        format!("{}/{}", descriptor.subfolder, descriptor.filename)
+                    };
+                    let Ok(file) = super::artifact_store::PublishedArtifact::capture(
+                        &output_directory,
+                        reference,
+                        &native_path,
+                        &context,
+                    ) else {
+                        return outcome;
+                    };
+                    files.push(file);
+                }
+                // Keep the original pre-launch root association through the
+                // byte-handle handoff as well as descriptor validation.
+                if artifacts_root
+                    .validate(&snapshot.artifacts, 512 * 1024 * 1024)
+                    .is_err()
+                    || publish_artifacts(self.events, &outcome.key, files, &context).is_err()
                 {
                     return outcome;
                 }
@@ -1317,6 +1338,7 @@ impl ManagedLocalTicketExecutor<'_, '_> {
             };
             return outcome;
         }
+        let mut published_files = None;
         let event = match released {
             ReleasedNativeOutcome::Decision(native) => match native.result {
                 InferenceResult::Decision { answers } => ResultEvent::DecisionResult {
@@ -1331,6 +1353,7 @@ impl ManagedLocalTicketExecutor<'_, '_> {
                     return outcome;
                 };
                 let mut located = Vec::with_capacity(artifacts.len());
+                let mut files = Vec::with_capacity(artifacts.len());
                 for artifact in artifacts {
                     let path = format!("{prefix}/{}", artifact.relative_path);
                     let Ok(reference) =
@@ -1338,9 +1361,19 @@ impl ManagedLocalTicketExecutor<'_, '_> {
                     else {
                         return outcome;
                     };
+                    let Ok(file) = super::artifact_store::PublishedArtifact::capture(
+                        &directory,
+                        reference.clone(),
+                        &artifact.relative_path,
+                        &cleanup,
+                    ) else {
+                        return outcome;
+                    };
+                    files.push(file);
                     outcome.artifacts.push(path);
                     located.push(reference);
                 }
+                published_files = Some(files);
                 ResultEvent::MediaArtifacts(located)
             }
             ReleasedNativeOutcome::Failed(failure) => {
@@ -1350,7 +1383,11 @@ impl ManagedLocalTicketExecutor<'_, '_> {
         };
         // Publication uses an independent bound after the job is released,
         // never a request deadline that expired during cleanup.
-        if publish_result_event(self.events, &outcome.key, event, &cleanup).is_err() {
+        let published = match published_files {
+            Some(files) => publish_artifacts(self.events, &outcome.key, files, &cleanup),
+            None => publish_result_event(self.events, &outcome.key, event, &cleanup),
+        };
+        if published.is_err() {
             outcome.stop_session = true;
             return outcome;
         }
@@ -1799,6 +1836,29 @@ fn publish_chat_event(
             ChatEventCallbackError::Publication
         }
     })
+}
+
+fn publish_artifacts(
+    sender: &SyncSender<ManagedWorkerEvent>,
+    key: &ManagedJobKey,
+    files: Vec<super::artifact_store::PublishedArtifact>,
+    context: &OperationContext<'_>,
+) -> Result<(), ()> {
+    let (reply, result) = mpsc::sync_channel(1);
+    if worker_exchange(
+        sender,
+        ManagedWorkerEvent::PublishArtifacts {
+            key: key.clone(),
+            files,
+            reply,
+        },
+        result,
+        context,
+    )? {
+        Ok(())
+    } else {
+        Err(())
+    }
 }
 
 fn publish_result_event(

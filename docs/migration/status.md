@@ -10,6 +10,31 @@ runtime check.
 
 ## Current resumed checkpoint — 2026-10-09
 
+The current slice adds bounded artifact bytes to managed Comfy/Breeze publication.
+Opaque pinned file capabilities move from the released worker to the main-thread
+registry; reference append failure removes the new registration. Additive v3
+private IPC and authenticated HTTP forwarding plus `--artifact-chunk` provide
+one exact request/kind/reference read at a time, with 1–65536 decoded bytes and
+mandatory version continuity after offset zero. Durable success and live result
+retention both gate reads. No client path selects a file, no global artifact
+root is exposed, and restart does not reconstruct capabilities from history.
+Root/file drift, wrong jobs/kinds, expiry and malformed wire/query shapes fail
+closed. The persistent descriptor quota includes pinned roots. Chunk delivery is
+post-completion retrieval, not native audio streaming or full TUI/file-save parity.
+
+Current all-target evidence: **858 root tests passed, 1 ignored**, strict all-target
+Clippy, formatting and whitespace checks. A new quota fixture initially counted
+global process descriptors and raced unrelated parallel tests; it now checks
+only its retained/rejected file inodes. Joined private-daemon chunk paging,
+success/retention/restart gates, failed-publication rollback, transport response
+correlation, HTTP forwarding and explicit one-exchange CLI fixtures are covered.
+No original services/checkouts were changed. Next: full injected mixed-worker/
+lifecycle acceptance, crash-safe mixed-runtime cleanup/history association,
+full-file/TUI artifact consumption and gated real GPU/media switching. Publication
+and permanent cutover remain unapproved/unverified.
+
+Previous checkpoint:
+
 Managed Comfy worker composition is now implemented on the branch: explicit
 optional configuration, separate allowlists and exclusive configured-GPU
 binding, fresh per-job private directories, main-thread durable candidate/permit

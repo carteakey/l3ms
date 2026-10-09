@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use super::client::{self, ClientError};
 use super::ipc::{
     self, RequestEnvelope, ResponseEnvelope, ResponseErrorCode, ResponseMessage,
-    WireRequestMessage, MAX_FRAME_BYTES, RESULTS_PROTOCOL_VERSION,
+    WireRequestMessage, ARTIFACT_PROTOCOL_VERSION, MAX_FRAME_BYTES, RESULTS_PROTOCOL_VERSION,
 };
 use super::runtime::{Cancellation, OperationContext};
 
@@ -399,7 +399,8 @@ fn handle_connection(
         WireRequestMessage::Submit { request_id, .. }
         | WireRequestMessage::Cancel { request_id }
         | WireRequestMessage::Status { request_id }
-        | WireRequestMessage::Results { request_id, .. } => request_id.clone(),
+        | WireRequestMessage::Results { request_id, .. }
+        | WireRequestMessage::Artifact { request_id, .. } => request_id.clone(),
     };
     let is_submit = matches!(&request.message, WireRequestMessage::Submit { .. });
     let version = request.version;
@@ -688,7 +689,9 @@ fn active(context: &OperationContext<'_>) -> Result<(), HttpFailure> {
 }
 
 fn response_envelope(version: u16, message: ResponseMessage) -> ResponseEnvelope {
-    if version == RESULTS_PROTOCOL_VERSION {
+    if version == ARTIFACT_PROTOCOL_VERSION {
+        ResponseEnvelope::v3_artifact(message)
+    } else if version == RESULTS_PROTOCOL_VERSION {
         ResponseEnvelope::v2_results(message)
     } else {
         ResponseEnvelope::v1(message)
@@ -1177,6 +1180,49 @@ mod tests {
                 ..
             } if request_id == "caller:http-result-3" && byte_budget == MAX_PAGE_BYTES as u32
         ));
+        assert_eq!(serving.join().unwrap().completed_http_connections, 1);
+        server.join().unwrap();
+        assert_eq!(coordinator.accept_count(), 1);
+    }
+
+    #[test]
+    fn v3_artifact_chunk_is_authenticated_correlated_and_forwarded_once() {
+        use crate::control::ipc::ArtifactVersion;
+        use crate::control::result_buffer::{ArtifactKind, Availability, MediaArtifact};
+        let coordinator = MockCoordinator::bind();
+        let artifact = MediaArtifact::new(ArtifactKind::Backend, "job-1/image.png").unwrap();
+        let expected = artifact.clone();
+        let server = coordinator.respond_once(move |incoming| {
+            let IncomingRequest::Artifact(query) = incoming else {
+                panic!("expected artifact query")
+            };
+            assert_eq!(query.artifact, expected);
+            assert_eq!(query.byte_budget, 7);
+            Some(ResponseEnvelope::v3_artifact(ResponseMessage::Artifact {
+                request_id: query.request_id,
+                artifact: query.artifact,
+                availability: Availability::Available,
+                offset: 0,
+                total_bytes: 7,
+                next_offset: 7,
+                end_of_file: true,
+                artifact_version: Some(ArtifactVersion::new(&"a".repeat(64)).unwrap()),
+                bytes: b"fixture".to_vec(),
+            }))
+        });
+        let gateway = gateway(&coordinator.socket_directory, Duration::from_secs(1), 1, 1);
+        let address = gateway.local_addr();
+        let serving = run_gateway(gateway);
+        let request = RequestEnvelope::v3_artifact("caller:http-artifact", artifact, 0, 7, None);
+        let body = serde_json::to_vec(&request).unwrap();
+        let response = send_http(address, &http_request(ROUTE, &body, &[]));
+        let (status, _, body) = response_parts(&response);
+        assert_eq!(status, 200);
+        let envelope = decode_envelope(&body);
+        assert_eq!(envelope.version, ARTIFACT_PROTOCOL_VERSION);
+        assert!(
+            matches!(envelope.message, ResponseMessage::Artifact { bytes, .. } if bytes == b"fixture")
+        );
         assert_eq!(serving.join().unwrap().completed_http_connections, 1);
         server.join().unwrap();
         assert_eq!(coordinator.accept_count(), 1);

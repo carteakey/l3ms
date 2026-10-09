@@ -221,12 +221,23 @@ durable mixed-runtime crash recovery remains a prerequisite for deployment.
 
 Breeze result pages and durable history carry relative `LocalJob` references
 prefixed by the private job-directory name, not private absolute paths.
-The current HTTP gateway forwards coordinator envelopes and references only;
-it does **not** serve artifact bytes. `artifact_root` settings alone do not
-establish a retrieval route or a matching pinned root. Byte retrieval still
-needs request/job-bound reference authorization, no-follow root/file access,
-bounded reads and drift rejection. Do not expose the private job directory
-through a generic static file server. Optional native decision latency/usage
+The HTTP gateway now forwards additive v3 read-only artifact envelopes through
+the same authenticated `/v1/coordinator` route. Managed Comfy/Breeze publication
+moves pinned file handles to the main thread after release, and appends their
+references transactionally; a failed append drops the new handles. Reads require
+durable `Succeeded` status and retained result availability. Exact request/kind/
+relative-reference lookup selects an existing capability, never a client path
+or a global `artifact_root`. Pinned root/file identities are checked before and
+after each 1–65536-byte read. Nonzero offsets require the opaque version returned
+by the initial chunk. Changed files or tokens return no bytes; unknown/expired
+results likewise do not grant access. The registry is memory-only, capped at
+128 requests, 128 artifacts per batch and 256 retained file/root descriptors.
+Failed jobs and queried expired results release their handles; restart never
+reconstructs handles from history. Trusted private roots are still required;
+this is not a hostile same-user filesystem sandbox or native audio streaming.
+Do not expose the private job directory through a generic static file server.
+Full-file saving/TUI consumption and mixed-worker/live acceptance remain open.
+Optional native decision latency/usage
 now reach result pages as additive `DecisionMetadataJsonPart` events: exact
 bounded integer nanoseconds and unchanged provider-specific usage fields.
 Answers and metadata publish transactionally. Legacy answer-only pages stay

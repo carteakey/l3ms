@@ -138,6 +138,7 @@ pub struct LocalConnection {
     request_id: Option<String>,
     request_version: Option<u16>,
     result_query: Option<(u64, u32)>,
+    artifact_query: Option<ipc::ArtifactQuery>,
 }
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Phase {
@@ -163,6 +164,7 @@ impl LocalConnection {
             request_id: None,
             request_version: None,
             result_query: None,
+            artifact_query: None,
         })
     }
 
@@ -275,7 +277,11 @@ impl LocalConnection {
         self.request_version = Some(request.version());
         self.result_query = match &request {
             IncomingRequest::Results(query) => Some((query.after_cursor, query.byte_budget)),
-            IncomingRequest::Control(_) => None,
+            IncomingRequest::Control(_) | IncomingRequest::Artifact(_) => None,
+        };
+        self.artifact_query = match &request {
+            IncomingRequest::Artifact(query) => Some(query.clone()),
+            _ => None,
         };
         self.phase = Phase::ServerResponse;
         Ok(request)
@@ -290,7 +296,8 @@ impl LocalConnection {
             ipc::WireRequestMessage::Submit { request_id, .. }
             | ipc::WireRequestMessage::Status { request_id }
             | ipc::WireRequestMessage::Cancel { request_id }
-            | ipc::WireRequestMessage::Results { request_id, .. } => request_id,
+            | ipc::WireRequestMessage::Results { request_id, .. }
+            | ipc::WireRequestMessage::Artifact { request_id, .. } => request_id,
         };
         let result = ipc::write_request(
             &mut BoundedIo {
@@ -308,6 +315,22 @@ impl LocalConnection {
                 byte_budget,
                 ..
             } => Some((*after_cursor, *byte_budget)),
+            _ => None,
+        };
+        self.artifact_query = match &request.message {
+            ipc::WireRequestMessage::Artifact {
+                request_id,
+                artifact,
+                offset,
+                byte_budget,
+                artifact_version,
+            } => Some(ipc::ArtifactQuery {
+                request_id: request_id.clone(),
+                artifact: artifact.clone(),
+                offset: *offset,
+                byte_budget: *byte_budget,
+                artifact_version: artifact_version.clone(),
+            }),
             _ => None,
         };
         self.phase = Phase::ClientResponse;
@@ -354,21 +377,37 @@ impl LocalConnection {
         let id = match &response.message {
             ipc::ResponseMessage::Accepted { request_id, .. }
             | ipc::ResponseMessage::Status { request_id, .. } => Some(request_id.as_str()),
-            ipc::ResponseMessage::Results { request_id, .. } => Some(request_id.as_str()),
+            ipc::ResponseMessage::Results { request_id, .. }
+            | ipc::ResponseMessage::Artifact { request_id, .. } => Some(request_id.as_str()),
             ipc::ResponseMessage::Error { request_id, .. } => request_id.as_deref(),
         };
         if self.request_version != Some(response.version)
             || (id.is_some() && id != self.request_id.as_deref())
-            || (self.request_version == Some(ipc::RESULTS_PROTOCOL_VERSION)
-                && matches!(
-                    &response.message,
-                    ipc::ResponseMessage::Error {
-                        request_id: None,
-                        ..
-                    }
-                ))
+            || (matches!(
+                self.request_version,
+                Some(ipc::RESULTS_PROTOCOL_VERSION | ipc::ARTIFACT_PROTOCOL_VERSION)
+            ) && matches!(
+                &response.message,
+                ipc::ResponseMessage::Error {
+                    request_id: None,
+                    ..
+                }
+            ))
         {
             return Err(LocalIpcError::ResponseMismatch);
+        }
+        if let Some(query) = &self.artifact_query {
+            if !matches!(response.message, ipc::ResponseMessage::Error { .. }) {
+                ipc::validate_artifact_reply(
+                    &query.request_id,
+                    &query.artifact,
+                    query.offset,
+                    query.byte_budget,
+                    query.artifact_version.as_ref(),
+                    &response.message,
+                )
+                .map_err(|_| LocalIpcError::ResponseMismatch)?;
+            }
         }
         if let ipc::ResponseMessage::Results {
             after_cursor,
@@ -910,6 +949,55 @@ mod tests {
         // Freeing backlog alone did not finish it; connect must be called again.
         assert_eq!(connect(), 0);
         assert!(raw.peer_addr().is_ok());
+    }
+
+    #[test]
+    fn artifact_response_must_match_reference_offset_and_budget() {
+        use super::super::result_buffer::{ArtifactKind, Availability, MediaArtifact};
+        let artifact = MediaArtifact::new(ArtifactKind::Backend, "job-1/image.png").unwrap();
+        for invalid in 0..3 {
+            let (mut connection, mut peer) = pair();
+            ipc::write_request(
+                &mut peer,
+                &RequestEnvelope::v3_artifact("artifact-job", artifact.clone(), 0, 2, None),
+            )
+            .unwrap();
+            connection.read_incoming_request(&context(100)).unwrap();
+            let mut wrong_ref = artifact.clone();
+            if invalid == 0 {
+                wrong_ref.relative_path = "job-2/image.png".into();
+            }
+            let offset = if invalid == 1 { 1 } else { 0 };
+            let bytes = if invalid == 2 {
+                b"abc".to_vec()
+            } else {
+                b"ab".to_vec()
+            };
+            let end = offset + bytes.len() as u64;
+            let response = ResponseEnvelope::v3_artifact(ipc::ResponseMessage::Artifact {
+                request_id: "artifact-job".into(),
+                artifact: wrong_ref,
+                availability: Availability::Available,
+                offset,
+                total_bytes: end,
+                next_offset: end,
+                end_of_file: true,
+                artifact_version: Some(ipc::ArtifactVersion::new(&"b".repeat(64)).unwrap()),
+                bytes,
+            });
+            assert_eq!(
+                connection
+                    .write_response(&response, &context(100))
+                    .unwrap_err(),
+                LocalIpcError::ResponseMismatch
+            );
+            assert_eq!(
+                connection
+                    .write_response(&response, &context(100))
+                    .unwrap_err(),
+                LocalIpcError::OutOfOrder
+            );
+        }
     }
 
     #[test]

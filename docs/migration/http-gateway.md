@@ -37,7 +37,7 @@ failure is reported separately and exits nonzero.
 
 Send `POST /v1/coordinator` using HTTP/1.1, `Content-Type: application/json`, one
 `Content-Length`, and `Authorization: Bearer <credential>`. The body is the same
-strict native v1 Submit/status/cancel or v2 results envelope used by private IPC.
+strict native v1 Submit/status/cancel, v2 results, or v3 artifact envelope used by private IPC.
 Each connection carries exactly one request and is closed after its reply.
 Chunked transfer, upgrades, duplicate headers, oversized bodies, folded/control
 headers and buffered pipelined requests are refused. IO and IPC share one
@@ -47,6 +47,12 @@ An HTTP 200 means a valid coordinator response was transported; its body may
 still contain a native rejection or failed job status. Inspect the versioned
 response instead of treating HTTP status as inference success. Native output
 can contain sensitive answers/artifact references and must not enter shared logs.
+Artifact chunks additionally contain sensitive file bytes and opaque continuity
+tokens. Each chunk is one read-only exchange, at most 65536 decoded bytes encoded
+as lowercase `bytes_hex`; it does not submit or replay a job. Completed managed
+artifacts only are accessible through exact retained request/reference matching,
+not filesystem paths or a static-file route. See the
+[managed session contract](managed-session-contract.md) for retention/version gates.
 
 Any lost Submit reply is unconfirmed: query status with the same caller-owned
 ID, never automatically resubmit. Where a reply can still be sent, the gateway

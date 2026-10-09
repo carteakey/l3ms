@@ -9,7 +9,8 @@
 //! workflow graphs, speech text, and native arguments are not dumped
 //! accidentally by diagnostic logging. Version 1 returns acceptance and
 //! lifecycle status only. Version 2 adds a read-only bounded results-page
-//! query; neither version starts runtimes or streams data across a connection.
+//! query, and version 3 adds bounded reads of already-published media
+//! artifacts; neither version starts runtimes or streams inference output.
 
 use std::error::Error;
 use std::fmt;
@@ -25,7 +26,7 @@ use serde_json::{Map, Value};
 use super::catalog::{Lane, ProfileKey, Task};
 use super::requests::{ChatRole, ChatTurn, InferenceRequest, MediaInput, SpeechInput, SpeechMode};
 use super::result_buffer::{
-    Availability, ResultBufferError, ResultPage, MAX_PAGE_BYTES, MIN_PAGE_BYTES,
+    Availability, MediaArtifact, ResultBufferError, ResultPage, MAX_PAGE_BYTES, MIN_PAGE_BYTES,
 };
 use crate::state_store::{validate_job_metadata, JobMetadata};
 
@@ -33,6 +34,13 @@ pub const PROTOCOL_VERSION: u16 = 1;
 /// Result retrieval is deliberately additive: v1 submit/status/cancel remain
 /// unchanged and are never interpreted as v2 operations.
 pub const RESULTS_PROTOCOL_VERSION: u16 = 2;
+/// Published artifact chunks use a separate read-only protocol version. The
+/// existing v1 control and v2 page-query wire shapes stay unchanged.
+pub const ARTIFACT_PROTOCOL_VERSION: u16 = 3;
+/// Artifact reads are single exchanges capped at 64 KiB of decoded bytes.
+pub const MAX_ARTIFACT_CHUNK_BYTES: usize = 64 * 1024;
+const ARTIFACT_VERSION_BYTES: usize = 64;
+const MAX_ARTIFACT_CHUNK_HEX_BYTES: usize = MAX_ARTIFACT_CHUNK_BYTES * 2;
 /// One native request is limited to 1 MiB; this small allowance covers its
 /// versioned envelope and JSON field names without permitting unbounded reads.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024 + 16 * 1024;
@@ -52,6 +60,9 @@ pub enum ProtocolError {
     InvalidRequestId,
     InvalidTimeout,
     InvalidRequest,
+    InvalidArtifactReference,
+    InvalidArtifactVersion,
+    InvalidArtifactChunk,
 }
 
 impl fmt::Display for ProtocolError {
@@ -68,11 +79,54 @@ impl fmt::Display for ProtocolError {
             Self::InvalidRequestId => formatter.write_str("request ID is invalid"),
             Self::InvalidTimeout => formatter.write_str("request timeout is invalid"),
             Self::InvalidRequest => formatter.write_str("inference request is invalid"),
+            Self::InvalidArtifactReference => formatter.write_str("artifact reference is invalid"),
+            Self::InvalidArtifactVersion => formatter.write_str("artifact version is invalid"),
+            Self::InvalidArtifactChunk => formatter.write_str("artifact chunk is invalid"),
         }
     }
 }
 
 impl Error for ProtocolError {}
+
+/// Opaque, bounded server token pinning one published artifact version.
+/// The value is intentionally omitted from Debug output and is never a path
+/// or URL. The server chooses the token; clients echo it on later chunks.
+#[derive(Clone, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct ArtifactVersion(String);
+
+impl ArtifactVersion {
+    pub fn new(value: &str) -> Result<Self, ProtocolError> {
+        if value.len() != ARTIFACT_VERSION_BYTES
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(ProtocolError::InvalidArtifactVersion);
+        }
+        Ok(Self(value.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ArtifactVersion {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(&value).map_err(de::Error::custom)
+    }
+}
+
+impl fmt::Debug for ArtifactVersion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ArtifactVersion([redacted])")
+    }
+}
 
 /// One JSON request envelope. Unknown fields are rejected by deserialization.
 #[derive(Clone, Serialize, Deserialize)]
@@ -97,6 +151,27 @@ impl RequestEnvelope {
                 request_id: request_id.into(),
                 after_cursor,
                 byte_budget,
+            },
+        }
+    }
+
+    /// Construct one read-only v3 query for an already-published artifact.
+    /// The byte budget counts decoded bytes and is checked before writing.
+    pub fn v3_artifact(
+        request_id: impl Into<String>,
+        artifact: MediaArtifact,
+        offset: u64,
+        byte_budget: u32,
+        artifact_version: Option<ArtifactVersion>,
+    ) -> Self {
+        Self {
+            version: ARTIFACT_PROTOCOL_VERSION,
+            message: WireRequestMessage::Artifact {
+                request_id: request_id.into(),
+                artifact,
+                offset,
+                byte_budget,
+                artifact_version,
             },
         }
     }
@@ -132,7 +207,9 @@ impl RequestEnvelope {
                 validate_request_id(&request_id)?;
                 Ok(ClientRequest::Status { request_id })
             }
-            WireRequestMessage::Results { .. } => Err(ProtocolError::InvalidRequest),
+            WireRequestMessage::Results { .. } | WireRequestMessage::Artifact { .. } => {
+                Err(ProtocolError::InvalidRequest)
+            }
         }
     }
 
@@ -153,6 +230,31 @@ impl RequestEnvelope {
                         request_id,
                         after_cursor,
                         byte_budget,
+                    }))
+                }
+                _ => Err(ProtocolError::InvalidRequest),
+            },
+            ARTIFACT_PROTOCOL_VERSION => match self.message {
+                WireRequestMessage::Artifact {
+                    request_id,
+                    artifact,
+                    offset,
+                    byte_budget,
+                    artifact_version,
+                } => {
+                    validate_artifact_request_fields(
+                        &request_id,
+                        &artifact,
+                        offset,
+                        byte_budget,
+                        artifact_version.as_ref(),
+                    )?;
+                    Ok(IncomingRequest::Artifact(ArtifactQuery {
+                        request_id,
+                        artifact,
+                        offset,
+                        byte_budget,
+                        artifact_version,
                     }))
                 }
                 _ => Err(ProtocolError::InvalidRequest),
@@ -185,6 +287,16 @@ pub enum WireRequestMessage {
         after_cursor: u64,
         byte_budget: u32,
     },
+    /// One bounded read from an already-published relative artifact reference.
+    /// Valid only in protocol v3; it never accepts a URL or root path.
+    Artifact {
+        request_id: String,
+        artifact: MediaArtifact,
+        offset: u64,
+        byte_budget: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        artifact_version: Option<ArtifactVersion>,
+    },
 }
 
 /// A checked result lookup decoded from a v2 envelope.
@@ -200,6 +312,7 @@ pub struct ResultsQuery {
 pub enum IncomingRequest {
     Control(ClientRequest),
     Results(ResultsQuery),
+    Artifact(ArtifactQuery),
 }
 
 impl IncomingRequest {
@@ -207,6 +320,7 @@ impl IncomingRequest {
         match self {
             Self::Control(request) => request.request_id(),
             Self::Results(query) => &query.request_id,
+            Self::Artifact(query) => &query.request_id,
         }
     }
 
@@ -214,7 +328,34 @@ impl IncomingRequest {
         match self {
             Self::Control(_) => PROTOCOL_VERSION,
             Self::Results(_) => RESULTS_PROTOCOL_VERSION,
+            Self::Artifact(_) => ARTIFACT_PROTOCOL_VERSION,
         }
+    }
+}
+
+/// Checked artifact query delivered to a coordinator. The reference must be
+/// present in already-published media output for this exact request. Offset
+/// zero may omit the version token; every nonzero offset must echo the token
+/// from the first available chunk, preventing mixed-version assembly.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ArtifactQuery {
+    pub request_id: String,
+    pub artifact: MediaArtifact,
+    pub offset: u64,
+    pub byte_budget: u32,
+    pub artifact_version: Option<ArtifactVersion>,
+}
+
+impl fmt::Debug for ArtifactQuery {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ArtifactQuery")
+            .field("request_id", &"<redacted>")
+            .field("artifact", &self.artifact)
+            .field("offset", &self.offset)
+            .field("byte_budget", &self.byte_budget)
+            .field("artifact_version", &"<redacted>")
+            .finish()
     }
 }
 
@@ -647,6 +788,13 @@ impl ResponseEnvelope {
             message,
         }
     }
+
+    pub fn v3_artifact(message: ResponseMessage) -> Self {
+        Self {
+            version: ARTIFACT_PROTOCOL_VERSION,
+            message,
+        }
+    }
 }
 
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -671,6 +819,23 @@ pub enum ResponseMessage {
         byte_budget: u32,
         state: RequestStatus,
         page: ResultPage,
+    },
+    /// One bounded read from a published artifact. `bytes` is serialized as
+    /// canonical lowercase hexadecimal to keep the wire representation small
+    /// without introducing another package dependency. For `unknown` or
+    /// `expired`, the body/version are empty, `total_bytes` is zero,
+    /// `next_offset` echoes `offset`, and `end_of_file` is false.
+    Artifact {
+        request_id: String,
+        artifact: MediaArtifact,
+        availability: Availability,
+        offset: u64,
+        total_bytes: u64,
+        next_offset: u64,
+        end_of_file: bool,
+        artifact_version: Option<ArtifactVersion>,
+        #[serde(rename = "bytes_hex", with = "artifact_bytes_hex")]
+        bytes: Vec<u8>,
     },
     Error {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -707,6 +872,25 @@ impl fmt::Debug for ResponseMessage {
                 .field("byte_budget", byte_budget)
                 .field("state", state)
                 .field("page", &"<redacted>")
+                .finish(),
+            Self::Artifact {
+                availability,
+                offset,
+                total_bytes,
+                next_offset,
+                end_of_file,
+                ..
+            } => formatter
+                .debug_struct("Artifact")
+                .field("request_id", &"<redacted>")
+                .field("artifact", &"<redacted>")
+                .field("availability", availability)
+                .field("offset", offset)
+                .field("total_bytes", total_bytes)
+                .field("next_offset", next_offset)
+                .field("end_of_file", end_of_file)
+                .field("artifact_version", &"<redacted>")
+                .field("bytes", &"<redacted>")
                 .finish(),
             Self::Error { code, .. } => formatter
                 .debug_struct("Error")
@@ -779,6 +963,23 @@ pub(crate) fn validate_request_envelope(envelope: &RequestEnvelope) -> Result<()
             validate_request_id(request_id)?;
             validate_page_budget(*byte_budget)
         }
+        (
+            ARTIFACT_PROTOCOL_VERSION,
+            WireRequestMessage::Artifact {
+                request_id,
+                artifact,
+                offset,
+                byte_budget,
+                artifact_version,
+                ..
+            },
+        ) => validate_artifact_request_fields(
+            request_id,
+            artifact,
+            *offset,
+            *byte_budget,
+            artifact_version.as_ref(),
+        ),
         _ => Err(ProtocolError::InvalidRequest),
     }
 }
@@ -800,15 +1001,75 @@ fn validate_response_envelope(envelope: &ResponseEnvelope) -> Result<(), Protoco
             },
         ) => validate_result_page(*after_cursor, *byte_budget, page),
         (RESULTS_PROTOCOL_VERSION, ResponseMessage::Error { .. }) => Ok(()),
+        (ARTIFACT_PROTOCOL_VERSION, ResponseMessage::Artifact { .. }) => {
+            validate_artifact_response_fields(&envelope.message)
+        }
+        (ARTIFACT_PROTOCOL_VERSION, ResponseMessage::Error { .. }) => Ok(()),
         _ => Err(ProtocolError::InvalidRequest),
     }
 }
 
 fn validate_version(version: u16) -> Result<(), ProtocolError> {
-    if version == PROTOCOL_VERSION || version == RESULTS_PROTOCOL_VERSION {
+    if version == PROTOCOL_VERSION
+        || version == RESULTS_PROTOCOL_VERSION
+        || version == ARTIFACT_PROTOCOL_VERSION
+    {
         Ok(())
     } else {
         Err(ProtocolError::UnsupportedVersion(version))
+    }
+}
+
+mod artifact_bytes_hex {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use super::{MAX_ARTIFACT_CHUNK_BYTES, MAX_ARTIFACT_CHUNK_HEX_BYTES};
+
+    pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if bytes.len() > MAX_ARTIFACT_CHUNK_BYTES {
+            return Err(<S::Error as serde::ser::Error>::custom(
+                "artifact chunk exceeds the size limit",
+            ));
+        }
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut encoded = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            encoded.push(HEX[(byte >> 4) as usize] as char);
+            encoded.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+        serializer.serialize_str(&encoded)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let encoded = String::deserialize(deserializer)?;
+        if encoded.len() > MAX_ARTIFACT_CHUNK_HEX_BYTES || encoded.len() % 2 != 0 {
+            return Err(<D::Error as serde::de::Error>::custom(
+                "invalid bounded artifact bytes",
+            ));
+        }
+        let mut bytes = Vec::with_capacity(encoded.len() / 2);
+        for pair in encoded.as_bytes().chunks_exact(2) {
+            let high = nibble(pair[0])
+                .ok_or_else(|| <D::Error as serde::de::Error>::custom("invalid artifact hex"))?;
+            let low = nibble(pair[1])
+                .ok_or_else(|| <D::Error as serde::de::Error>::custom("invalid artifact hex"))?;
+            bytes.push((high << 4) | low);
+        }
+        Ok(bytes)
+    }
+
+    fn nibble(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            _ => None,
+        }
     }
 }
 
@@ -827,7 +1088,9 @@ fn validate_wire_request_headers(message: &WireRequestMessage) -> Result<(), Pro
         WireRequestMessage::Cancel { request_id } | WireRequestMessage::Status { request_id } => {
             validate_request_id(request_id)?;
         }
-        WireRequestMessage::Results { .. } => return Err(ProtocolError::InvalidRequest),
+        WireRequestMessage::Results { .. } | WireRequestMessage::Artifact { .. } => {
+            return Err(ProtocolError::InvalidRequest);
+        }
     }
     Ok(())
 }
@@ -845,6 +1108,7 @@ fn validate_response_ids(message: &ResponseMessage) -> Result<(), ProtocolError>
             }
             Ok(())
         }
+        ResponseMessage::Artifact { .. } => validate_artifact_response_fields(message),
         ResponseMessage::Error { request_id, .. } => {
             if let Some(request_id) = request_id {
                 validate_request_id(request_id)?;
@@ -860,6 +1124,132 @@ fn validate_page_budget(byte_budget: u32) -> Result<(), ProtocolError> {
     } else {
         Err(ProtocolError::InvalidRequest)
     }
+}
+
+fn validate_artifact_request_fields(
+    request_id: &str,
+    artifact: &MediaArtifact,
+    offset: u64,
+    byte_budget: u32,
+    artifact_version: Option<&ArtifactVersion>,
+) -> Result<(), ProtocolError> {
+    validate_request_id(request_id)?;
+    validate_artifact_reference(artifact)?;
+    validate_artifact_byte_budget(byte_budget)?;
+    if (offset > 0 && artifact_version.is_none())
+        || artifact_version.is_some_and(|version| ArtifactVersion::new(version.as_str()).is_err())
+    {
+        return Err(ProtocolError::InvalidArtifactVersion);
+    }
+    Ok(())
+}
+
+fn validate_artifact_reference(artifact: &MediaArtifact) -> Result<(), ProtocolError> {
+    MediaArtifact::new(artifact.kind, artifact.relative_path.clone())
+        .map(|_| ())
+        .map_err(|_| ProtocolError::InvalidArtifactReference)
+}
+
+fn validate_artifact_byte_budget(byte_budget: u32) -> Result<(), ProtocolError> {
+    if (1..=MAX_ARTIFACT_CHUNK_BYTES as u32).contains(&byte_budget) {
+        Ok(())
+    } else {
+        Err(ProtocolError::InvalidRequest)
+    }
+}
+
+fn validate_artifact_response_fields(response: &ResponseMessage) -> Result<(), ProtocolError> {
+    let ResponseMessage::Artifact {
+        request_id,
+        artifact,
+        availability,
+        offset,
+        total_bytes,
+        next_offset,
+        end_of_file,
+        artifact_version,
+        bytes,
+    } = response
+    else {
+        return Err(ProtocolError::InvalidArtifactChunk);
+    };
+    validate_request_id(request_id)?;
+    validate_artifact_reference(artifact)?;
+    if bytes.len() > MAX_ARTIFACT_CHUNK_BYTES {
+        return Err(ProtocolError::InvalidArtifactChunk);
+    }
+    match availability {
+        Availability::Available => {
+            let expected_next = offset
+                .checked_add(bytes.len() as u64)
+                .ok_or(ProtocolError::InvalidArtifactChunk)?;
+            if artifact_version.is_none()
+                || offset > total_bytes
+                || *next_offset != expected_next
+                || next_offset > total_bytes
+                || *end_of_file != (next_offset == total_bytes)
+                || (bytes.is_empty() && !*end_of_file)
+                || artifact_version
+                    .as_ref()
+                    .is_some_and(|version| ArtifactVersion::new(version.as_str()).is_err())
+            {
+                return Err(ProtocolError::InvalidArtifactChunk);
+            }
+        }
+        Availability::Unknown | Availability::Expired => {
+            if *total_bytes != 0
+                || next_offset != offset
+                || *end_of_file
+                || artifact_version.is_some()
+                || !bytes.is_empty()
+            {
+                return Err(ProtocolError::InvalidArtifactChunk);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate that one v3 response is correlated to the exact query, including
+/// the caller's byte budget and version token. Unavailable and expired replies
+/// remain explicit values and contain no bytes or version token.
+pub(crate) fn validate_artifact_reply(
+    request_id: &str,
+    artifact: &MediaArtifact,
+    offset: u64,
+    byte_budget: u32,
+    expected_version: Option<&ArtifactVersion>,
+    response: &ResponseMessage,
+) -> Result<(), ProtocolError> {
+    validate_request_id(request_id)?;
+    validate_artifact_reference(artifact)?;
+    validate_artifact_byte_budget(byte_budget)?;
+    if offset > 0 && expected_version.is_none() {
+        return Err(ProtocolError::InvalidArtifactVersion);
+    }
+    let ResponseMessage::Artifact {
+        request_id: response_id,
+        artifact: response_artifact,
+        availability,
+        offset: response_offset,
+        artifact_version,
+        bytes,
+        ..
+    } = response
+    else {
+        return Err(ProtocolError::InvalidRequest);
+    };
+    if response_id != request_id || response_artifact != artifact || *response_offset != offset {
+        return Err(ProtocolError::InvalidArtifactChunk);
+    }
+    validate_artifact_response_fields(response)?;
+    if bytes.len() > byte_budget as usize
+        || (matches!(availability, Availability::Available)
+            && expected_version.is_some_and(|expected| artifact_version.as_ref() != Some(expected)))
+    {
+        return Err(ProtocolError::InvalidArtifactChunk);
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_result_page(
@@ -1062,6 +1452,14 @@ mod tests {
         buffer.page(request_id, 0, MAX_PAGE_BYTES).unwrap()
     }
 
+    fn artifact_reference() -> MediaArtifact {
+        MediaArtifact::new(
+            super::super::result_buffer::ArtifactKind::Backend,
+            "history/42/output.png",
+        )
+        .unwrap()
+    }
+
     #[test]
     fn v2_results_round_trip_and_v1_wire_contract_stays_operation_scoped() {
         let request = RequestEnvelope::v2_results("caller:result-1", 0, MIN_PAGE_BYTES as u32);
@@ -1102,6 +1500,235 @@ mod tests {
             write_request(&mut Vec::new(), &v1_results),
             Err(ProtocolError::InvalidRequest)
         );
+    }
+
+    #[test]
+    fn v3_artifact_query_and_hex_response_round_trip_without_changing_older_versions() {
+        let artifact = artifact_reference();
+        let version_value = "0123456789abcdef".repeat(4);
+        let version = ArtifactVersion::new(&version_value).unwrap();
+        let request = RequestEnvelope::v3_artifact(
+            "caller:artifact-1",
+            artifact.clone(),
+            7,
+            3,
+            Some(version.clone()),
+        );
+        let mut request_bytes = Vec::new();
+        write_request(&mut request_bytes, &request).unwrap();
+        let IncomingRequest::Artifact(query) =
+            read_incoming_request(&mut Cursor::new(request_bytes)).unwrap()
+        else {
+            panic!("v3 artifact envelope must decode as a read-only artifact query")
+        };
+        assert_eq!(query.request_id, "caller:artifact-1");
+        assert_eq!(query.artifact, artifact);
+        assert_eq!(query.offset, 7);
+        assert_eq!(query.byte_budget, 3);
+        assert_eq!(query.artifact_version, Some(version.clone()));
+        let query_debug = format!("{query:?}");
+        assert!(!query_debug.contains("caller:artifact-1"));
+        assert!(!query_debug.contains("history/42/output.png"));
+        assert!(!query_debug.contains(&version_value));
+        assert_eq!(
+            read_request(&mut Cursor::new({
+                let mut bytes = Vec::new();
+                write_request(
+                    &mut bytes,
+                    &RequestEnvelope::v3_artifact(
+                        "caller:artifact-1",
+                        artifact.clone(),
+                        7,
+                        3,
+                        Some(version.clone()),
+                    ),
+                )
+                .unwrap();
+                bytes
+            }))
+            .err()
+            .unwrap(),
+            ProtocolError::UnsupportedVersion(ARTIFACT_PROTOCOL_VERSION)
+        );
+
+        let response = ResponseEnvelope::v3_artifact(ResponseMessage::Artifact {
+            request_id: "caller:artifact-1".into(),
+            artifact: artifact.clone(),
+            availability: Availability::Available,
+            offset: 7,
+            total_bytes: 12,
+            next_offset: 10,
+            end_of_file: false,
+            artifact_version: Some(version.clone()),
+            bytes: vec![0x00, 0xab, 0xff],
+        });
+        assert_eq!(
+            serde_json::to_value(&response).unwrap()["message"]["bytes_hex"],
+            "00abff"
+        );
+        let mut response_bytes = Vec::new();
+        write_response(&mut response_bytes, &response).unwrap();
+        let decoded = read_response(&mut Cursor::new(response_bytes)).unwrap();
+        assert_eq!(decoded.version, response.version);
+        assert_eq!(decoded.message, response.message);
+        let debug = format!("{:?}", decoded.message);
+        assert!(!debug.contains("caller:artifact-1"));
+        assert!(!debug.contains(version.as_str()));
+        assert!(!debug.contains("history/42/output.png"));
+        assert!(!debug.contains("00abff"));
+        assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn v3_artifact_queries_and_responses_reject_bad_bounds_and_shapes() {
+        let artifact = artifact_reference();
+        for byte_budget in [0, MAX_ARTIFACT_CHUNK_BYTES as u32 + 1] {
+            assert_eq!(
+                write_request(
+                    &mut Vec::new(),
+                    &RequestEnvelope::v3_artifact(
+                        "caller:artifact-1",
+                        artifact.clone(),
+                        0,
+                        byte_budget,
+                        None,
+                    ),
+                ),
+                Err(ProtocolError::InvalidRequest)
+            );
+        }
+        assert_eq!(
+            write_request(
+                &mut Vec::new(),
+                &RequestEnvelope::v3_artifact("caller:artifact-1", artifact.clone(), 1, 1, None,),
+            ),
+            Err(ProtocolError::InvalidArtifactVersion)
+        );
+        let invalid_artifact = MediaArtifact {
+            kind: super::super::result_buffer::ArtifactKind::LocalJob,
+            relative_path: "/outside/root.png".into(),
+        };
+        assert_eq!(
+            write_request(
+                &mut Vec::new(),
+                &RequestEnvelope::v3_artifact("caller:artifact-1", invalid_artifact, 0, 1, None,),
+            ),
+            Err(ProtocolError::InvalidArtifactReference)
+        );
+        assert!(ArtifactVersion::new("../private/path").is_err());
+
+        let version = ArtifactVersion::new(&"a".repeat(64)).unwrap();
+        for response in [
+            ResponseMessage::Artifact {
+                request_id: "caller:artifact-1".into(),
+                artifact: artifact.clone(),
+                availability: Availability::Available,
+                offset: 0,
+                total_bytes: 2,
+                next_offset: 2,
+                end_of_file: true,
+                artifact_version: None,
+                bytes: b"ok".to_vec(),
+            },
+            ResponseMessage::Artifact {
+                request_id: "caller:artifact-1".into(),
+                artifact: artifact.clone(),
+                availability: Availability::Available,
+                offset: 0,
+                total_bytes: 2,
+                next_offset: 1,
+                end_of_file: false,
+                artifact_version: Some(version.clone()),
+                bytes: b"ok".to_vec(),
+            },
+            ResponseMessage::Artifact {
+                request_id: "caller:artifact-1".into(),
+                artifact: artifact.clone(),
+                availability: Availability::Expired,
+                offset: 0,
+                total_bytes: 1,
+                next_offset: 1,
+                end_of_file: false,
+                artifact_version: None,
+                bytes: Vec::new(),
+            },
+        ] {
+            assert_eq!(
+                write_response(&mut Vec::new(), &ResponseEnvelope::v3_artifact(response)),
+                Err(ProtocolError::InvalidArtifactChunk)
+            );
+        }
+
+        let version = ArtifactVersion::new(&"b".repeat(64)).unwrap();
+        let maximum_chunk = ResponseEnvelope::v3_artifact(ResponseMessage::Artifact {
+            request_id: "caller:artifact-1".into(),
+            artifact: artifact.clone(),
+            availability: Availability::Available,
+            offset: 0,
+            total_bytes: MAX_ARTIFACT_CHUNK_BYTES as u64,
+            next_offset: MAX_ARTIFACT_CHUNK_BYTES as u64,
+            end_of_file: true,
+            artifact_version: Some(version.clone()),
+            bytes: vec![0; MAX_ARTIFACT_CHUNK_BYTES],
+        });
+        let mut encoded_maximum = Vec::new();
+        write_response(&mut encoded_maximum, &maximum_chunk).unwrap();
+        assert!(encoded_maximum.len() < MAX_FRAME_BYTES);
+        assert_eq!(
+            write_response(
+                &mut Vec::new(),
+                &ResponseEnvelope::v3_artifact(ResponseMessage::Artifact {
+                    request_id: "caller:artifact-1".into(),
+                    artifact,
+                    availability: Availability::Available,
+                    offset: 0,
+                    total_bytes: (MAX_ARTIFACT_CHUNK_BYTES + 1) as u64,
+                    next_offset: (MAX_ARTIFACT_CHUNK_BYTES + 1) as u64,
+                    end_of_file: true,
+                    artifact_version: Some(version),
+                    bytes: vec![0; MAX_ARTIFACT_CHUNK_BYTES + 1],
+                }),
+            ),
+            Err(ProtocolError::InvalidArtifactChunk)
+        );
+
+        let invalid_hex = frame(
+            br#"{"version":3,"message":{"type":"artifact","request_id":"caller:artifact-1","artifact":{"kind":"backend","relative_path":"history/42/output.png"},"availability":"available","offset":0,"total_bytes":2,"next_offset":2,"end_of_file":true,"artifact_version":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","bytes_hex":"0G"}}"#,
+        );
+        assert_eq!(
+            read_response(&mut Cursor::new(invalid_hex)).err().unwrap(),
+            ProtocolError::MalformedFrame
+        );
+    }
+
+    #[test]
+    fn v3_artifact_wire_objects_reject_duplicate_and_unknown_fields() {
+        let invalid = [
+            br#"{"version":3,"version":3,"message":{"type":"artifact","request_id":"caller:artifact-1","artifact":{"kind":"backend","relative_path":"history/42/output.png"},"offset":0,"byte_budget":1,"artifact_version":null}}"#.as_slice(),
+            br#"{"version":3,"message":{"type":"artifact","request_id":"caller:artifact-1","artifact":{"kind":"backend","relative_path":"history/42/output.png"},"offset":0,"offset":0,"byte_budget":1,"artifact_version":null}}"#.as_slice(),
+            br#"{"version":3,"message":{"type":"artifact","request_id":"caller:artifact-1","artifact":{"kind":"backend","relative_path":"history/42/output.png","extra":true},"offset":0,"byte_budget":1,"artifact_version":null}}"#.as_slice(),
+            br#"{"version":3,"message":{"type":"artifact","request_id":"caller:artifact-1","artifact":{"kind":"backend","relative_path":"history/42/output.png"},"offset":0,"byte_budget":1,"artifact_version":null,"url":"file:///private"}}"#.as_slice(),
+            br#"{"version":3,"message":{"type":"artifact","request_id":"caller:artifact-1","artifact":{"kind":"backend","relative_path":"history/42/output.png"},"offset":0,"byte_budget":1,"artifact_version":"../private"}}"#.as_slice(),
+        ];
+        for bytes in invalid {
+            assert_eq!(
+                read_incoming_request(&mut Cursor::new(frame(bytes)))
+                    .err()
+                    .unwrap(),
+                ProtocolError::MalformedFrame
+            );
+        }
+
+        let invalid_responses = [
+            br#"{"version":3,"message":{"type":"artifact","request_id":"caller:artifact-1","artifact":{"kind":"backend","relative_path":"history/42/output.png"},"availability":"available","offset":0,"offset":0,"total_bytes":1,"next_offset":1,"end_of_file":true,"artifact_version":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","bytes_hex":"61"}}"#.as_slice(),
+            br#"{"version":3,"message":{"type":"artifact","request_id":"caller:artifact-1","artifact":{"kind":"backend","relative_path":"history/42/output.png"},"availability":"available","offset":0,"total_bytes":1,"next_offset":1,"end_of_file":true,"artifact_version":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","bytes_hex":"61","local_path":"/private"}}"#.as_slice(),
+        ];
+        for bytes in invalid_responses {
+            assert_eq!(
+                read_response(&mut Cursor::new(frame(bytes))).err().unwrap(),
+                ProtocolError::MalformedFrame
+            );
+        }
     }
 
     #[test]

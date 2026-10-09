@@ -10,11 +10,17 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Deliver completed managed Comfy/Breeze artifacts through additive v3,
+  read-only coordinator chunks and an explicit `--artifact-chunk` CLI command.
+  Pin published files behind exact request/reference matching, require durable
+  success and retained results, bound reads to 64 KiB, and require version-token
+  continuity. Preserve v1/v2 and standalone behavior; do not restore file access
+  from history, retry inference, or expose arbitrary paths/static directories.
 - Wire opt-in managed Comfy workflows through the worker/main-thread durable
   candidate handoff and separately verified backend acknowledgments. Use fresh
   private per-job output/user directories, exact owned-engine release before
   output publication, and pinned no-follow artifact reference validation.
-  Preserve language-only defaults and standalone paths; artifact byte delivery,
+  Preserve language-only defaults and standalone paths; full artifact-client parity,
   crash-safe multi-runtime recovery and real mixed-runtime acceptance remain open.
 - Preserve verified Comfy virtual-environment interpreter invocation through
   isolated supervisor handoff, rechecking its filesystem association before

@@ -27,6 +27,8 @@ const COORDINATOR_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_COORDINATOR_RESPONSE_BYTES: usize = 2 * 1024;
 const MAX_COORDINATOR_RESULTS_ENVELOPE_BYTES: usize = 4 * 1024;
 const MAX_COORDINATOR_NATIVE_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+#[cfg(target_os = "linux")]
+const MAX_COORDINATOR_ARTIFACT_CHUNK_JSON_BYTES: usize = 160 * 1024;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -35,7 +37,7 @@ const MAX_COORDINATOR_NATIVE_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
     about = "L3MS launcher (TUI + interactive model and bench CLI)",
     group(
         ArgGroup::new("action")
-            .args(["run", "bench", "list", "quickstart", "settings", "export_profile", "import_profile", "compare_results", "coordinator_status", "coordinator_cancel", "request_results", "request_submit", "request_output", "coordinator_cpu_daemon", "coordinator_managed_session", "coordinator_http_gateway"])
+            .args(["run", "bench", "list", "quickstart", "settings", "export_profile", "import_profile", "compare_results", "coordinator_status", "coordinator_cancel", "request_results", "request_submit", "request_output", "artifact_chunk", "coordinator_cpu_daemon", "coordinator_managed_session", "coordinator_http_gateway"])
             .multiple(false)
     )
 )]
@@ -102,6 +104,30 @@ struct Cli {
     #[arg(long, value_name = "ID")]
     request_output: Option<String>,
 
+    /// Read exactly one bounded chunk from an already-published artifact.
+    #[arg(long, value_name = "ID")]
+    artifact_chunk: Option<String>,
+
+    /// Published artifact kind required by --artifact-chunk.
+    #[arg(long, value_enum, value_name = "KIND")]
+    artifact_kind: Option<ArtifactChunkKind>,
+
+    /// Published relative artifact path required by --artifact-chunk.
+    #[arg(long, value_name = "PATH")]
+    artifact_path: Option<String>,
+
+    /// Byte offset required by --artifact-chunk.
+    #[arg(long, value_name = "OFFSET")]
+    artifact_offset: Option<u64>,
+
+    /// Maximum decoded bytes to read (1..=65536).
+    #[arg(long, value_name = "BYTES")]
+    artifact_byte_budget: Option<u32>,
+
+    /// Optional exact lowercase 64-hex version token for a published artifact.
+    #[arg(long, value_name = "TOKEN")]
+    artifact_version: Option<String>,
+
     /// Native output lane required by --request-output.
     #[arg(long, value_enum, value_name = "LANE")]
     request_lane: Option<RequestOutputLane>,
@@ -150,6 +176,36 @@ enum RequestOutputLane {
     Language,
     Media,
     Decisions,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ArtifactChunkKind {
+    #[value(name = "local_job")]
+    LocalJob,
+    Backend,
+}
+
+impl ArtifactChunkKind {
+    fn artifact_kind(self) -> crate::control::result_buffer::ArtifactKind {
+        match self {
+            Self::LocalJob => crate::control::result_buffer::ArtifactKind::LocalJob,
+            Self::Backend => crate::control::result_buffer::ArtifactKind::Backend,
+        }
+    }
+}
+
+struct ArtifactChunkSpec {
+    request_id: String,
+    artifact: crate::control::result_buffer::MediaArtifact,
+    offset: u64,
+    byte_budget: u32,
+    artifact_version: Option<crate::control::ipc::ArtifactVersion>,
+}
+
+impl std::fmt::Debug for ArtifactChunkSpec {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ArtifactChunkSpec(<redacted>)")
+    }
 }
 
 impl RequestOutputLane {
@@ -216,12 +272,14 @@ fn dispatch(cli: Cli) -> Result<u8> {
         return run_managed_session_action(config_path);
     }
     let output_spec = coordinator_output_spec(&cli)?;
+    let artifact_chunk_spec = coordinator_artifact_chunk_spec(&cli)?;
 
     let configured_socket_dir = if (cli.coordinator_status.is_some()
         || cli.coordinator_cancel.is_some()
         || cli.request_results.is_some()
         || cli.request_submit.is_some()
-        || cli.request_output.is_some())
+        || cli.request_output.is_some()
+        || cli.artifact_chunk.is_some())
         && cli.coordinator_socket_dir.is_none()
         && cli.extra.is_none()
     {
@@ -229,6 +287,10 @@ fn dispatch(cli: Cli) -> Result<u8> {
     } else {
         None
     };
+    if let Some(spec) = artifact_chunk_spec {
+        let socket_directory = coordinator_socket_directory(&cli, configured_socket_dir)?;
+        return coordinator_artifact_chunk_action(&socket_directory, spec);
+    }
     if let Some((request_id, lane)) = output_spec {
         let socket_directory = coordinator_socket_directory(&cli, configured_socket_dir)?;
         let consumer = coordinator_native_results_exchange(&socket_directory, request_id, lane)?;
@@ -327,6 +389,12 @@ fn http_gateway_action(cli: &Cli) -> Result<Option<&Path>> {
         || cli.coordinator_socket_dir.is_some()
         || cli.after_cursor.is_some()
         || cli.result_page_bytes.is_some()
+        || cli.artifact_chunk.is_some()
+        || cli.artifact_kind.is_some()
+        || cli.artifact_path.is_some()
+        || cli.artifact_offset.is_some()
+        || cli.artifact_byte_budget.is_some()
+        || cli.artifact_version.is_some()
         || cli.extra.is_some()
     {
         bail!("HTTP gateway accepts only its explicit configuration file");
@@ -373,6 +441,12 @@ fn coordinator_cpu_daemon_action(cli: &Cli) -> Result<Option<&Path>> {
         || cli.request_results.is_some()
         || cli.request_submit.is_some()
         || cli.request_output.is_some()
+        || cli.artifact_chunk.is_some()
+        || cli.artifact_kind.is_some()
+        || cli.artifact_path.is_some()
+        || cli.artifact_offset.is_some()
+        || cli.artifact_byte_budget.is_some()
+        || cli.artifact_version.is_some()
         || cli.request_lane.is_some()
         || cli.after_cursor.is_some()
         || cli.result_page_bytes.is_some()
@@ -393,6 +467,12 @@ fn coordinator_managed_session_action(cli: &Cli) -> Result<Option<&Path>> {
         || cli.request_results.is_some()
         || cli.request_submit.is_some()
         || cli.request_output.is_some()
+        || cli.artifact_chunk.is_some()
+        || cli.artifact_kind.is_some()
+        || cli.artifact_path.is_some()
+        || cli.artifact_offset.is_some()
+        || cli.artifact_byte_budget.is_some()
+        || cli.artifact_version.is_some()
         || cli.request_lane.is_some()
         || cli.after_cursor.is_some()
         || cli.result_page_bytes.is_some()
@@ -425,6 +505,86 @@ fn coordinator_output_spec(cli: &Cli) -> Result<Option<(&str, crate::control::ca
             Ok(Some((request_id, lane.lane())))
         }
     }
+}
+
+fn coordinator_artifact_chunk_spec(cli: &Cli) -> Result<Option<ArtifactChunkSpec>> {
+    let has_artifact_options = cli.artifact_kind.is_some()
+        || cli.artifact_path.is_some()
+        || cli.artifact_offset.is_some()
+        || cli.artifact_byte_budget.is_some()
+        || cli.artifact_version.is_some();
+    let Some(request_id) = cli.artifact_chunk.as_deref() else {
+        if has_artifact_options {
+            bail!("artifact chunk options require --artifact-chunk");
+        }
+        return Ok(None);
+    };
+
+    if cli.artifact_kind.is_none()
+        || cli.artifact_path.is_none()
+        || cli.artifact_offset.is_none()
+        || cli.artifact_byte_budget.is_none()
+    {
+        bail!("--artifact-chunk requires --artifact-kind, --artifact-path, --artifact-offset, and --artifact-byte-budget");
+    }
+    if cli.coordinator_status.is_some()
+        || cli.coordinator_cancel.is_some()
+        || cli.request_results.is_some()
+        || cli.request_submit.is_some()
+        || cli.request_output.is_some()
+        || cli.request_lane.is_some()
+        || cli.coordinator_cpu_daemon.is_some()
+        || cli.coordinator_managed_session.is_some()
+        || cli.coordinator_http_gateway.is_some()
+        || cli.after_cursor.is_some()
+        || cli.result_page_bytes.is_some()
+        || cli.extra.is_some()
+    {
+        bail!("--artifact-chunk must be the only coordinator operation");
+    }
+    if crate::control::ipc::validate_request_id(request_id).is_err() {
+        bail!("--artifact-chunk request ID is invalid");
+    }
+
+    let artifact = crate::control::result_buffer::MediaArtifact::new(
+        cli.artifact_kind.expect("required above").artifact_kind(),
+        cli.artifact_path.as_deref().expect("required above"),
+    )
+    .map_err(|_| anyhow::anyhow!("--artifact-path is invalid"))?;
+    let byte_budget = cli.artifact_byte_budget.expect("required above");
+    if !(1..=crate::control::ipc::MAX_ARTIFACT_CHUNK_BYTES as u32).contains(&byte_budget) {
+        bail!("--artifact-byte-budget must be between 1 and 65536");
+    }
+    let offset = cli.artifact_offset.expect("required above");
+    let artifact_version = cli
+        .artifact_version
+        .as_deref()
+        .map(|token| {
+            if !is_artifact_version_token(token) {
+                bail!("--artifact-version must be exactly 64 lowercase hexadecimal characters");
+            }
+            crate::control::ipc::ArtifactVersion::new(token)
+                .map_err(|_| anyhow::anyhow!("--artifact-version is invalid"))
+        })
+        .transpose()?;
+    if offset > 0 && artifact_version.is_none() {
+        bail!("--artifact-version is required when --artifact-offset is nonzero");
+    }
+
+    Ok(Some(ArtifactChunkSpec {
+        request_id: request_id.to_owned(),
+        artifact,
+        offset,
+        byte_budget,
+        artifact_version,
+    }))
+}
+
+fn is_artifact_version_token(token: &str) -> bool {
+    token.len() == 64
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[cfg(target_os = "linux")]
@@ -722,6 +882,101 @@ fn coordinator_native_output_json(
     }
     String::from_utf8(writer.bytes)
         .map_err(|_| anyhow::anyhow!("coordinator native output could not be encoded"))
+}
+
+#[cfg(target_os = "linux")]
+#[derive(serde::Serialize)]
+struct ArtifactChunkOutput<'a> {
+    request_id: &'a str,
+    artifact: &'a crate::control::result_buffer::MediaArtifact,
+    availability: crate::control::result_buffer::Availability,
+    offset: u64,
+    byte_budget: u32,
+    total_bytes: u64,
+    next_offset: u64,
+    end_of_file: bool,
+    artifact_version: Option<&'a str>,
+    bytes_hex: String,
+}
+
+#[cfg(target_os = "linux")]
+fn coordinator_artifact_chunk_action(
+    socket_directory: &Path,
+    spec: ArtifactChunkSpec,
+) -> Result<u8> {
+    let never_cancel = crate::control::runtime::NeverCancel;
+    let context = crate::control::runtime::OperationContext::new(
+        Instant::now() + COORDINATOR_TIMEOUT,
+        &never_cancel,
+    );
+    let chunk = crate::control::client::artifact_chunk(
+        socket_directory,
+        &spec.request_id,
+        &spec.artifact,
+        spec.offset,
+        spec.byte_budget,
+        spec.artifact_version.as_ref(),
+        &context,
+    )
+    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    println!(
+        "{}",
+        coordinator_artifact_chunk_json(&chunk, spec.byte_budget)?
+    );
+    Ok(0)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn coordinator_artifact_chunk_action(_: &Path, _: ArtifactChunkSpec) -> Result<u8> {
+    bail!("coordinator IPC is supported only on Linux");
+}
+
+#[cfg(target_os = "linux")]
+fn coordinator_artifact_chunk_json(
+    chunk: &crate::control::client::ArtifactChunk,
+    byte_budget: u32,
+) -> Result<String> {
+    if chunk.bytes.len() > byte_budget as usize
+        || chunk.bytes.len() > crate::control::ipc::MAX_ARTIFACT_CHUNK_BYTES
+        || chunk
+            .artifact_version
+            .as_ref()
+            .is_some_and(|token| !is_artifact_version_token(token.as_str()))
+    {
+        bail!("coordinator artifact response is invalid");
+    }
+    let response = ArtifactChunkOutput {
+        request_id: &chunk.request_id,
+        artifact: &chunk.artifact,
+        availability: chunk.availability,
+        offset: chunk.offset,
+        byte_budget,
+        total_bytes: chunk.total_bytes,
+        next_offset: chunk.next_offset,
+        end_of_file: chunk.end_of_file,
+        artifact_version: chunk.artifact_version.as_ref().map(|token| token.as_str()),
+        bytes_hex: lower_hex(&chunk.bytes),
+    };
+    let mut writer = BoundedJsonWriter::new(MAX_COORDINATOR_ARTIFACT_CHUNK_JSON_BYTES);
+    if serde_json::to_writer(&mut writer, &response).is_err() {
+        if writer.exceeded {
+            bail!("coordinator artifact chunk exceeded the output limit");
+        }
+        bail!("coordinator artifact chunk could not be encoded");
+    }
+    String::from_utf8(writer.bytes)
+        .map_err(|_| anyhow::anyhow!("coordinator artifact chunk could not be encoded"))
+}
+
+#[cfg(target_os = "linux")]
+fn lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
 }
 
 fn coordinator_response_json(response: &crate::control::ipc::ResponseMessage) -> Result<String> {
@@ -2571,5 +2826,307 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let executable = root.join("target/debug/deps/l3ms-test");
         assert_eq!(find_repository_root(&executable).as_deref(), Some(root));
+    }
+
+    #[test]
+    fn artifact_chunk_parsing_checks_required_fields_bounds_and_redaction() {
+        let token = "a".repeat(64);
+        let cli = Cli::try_parse_from([
+            "l3ms",
+            "--artifact-chunk",
+            "caller:artifact-cli",
+            "--artifact-kind",
+            "backend",
+            "--artifact-path",
+            "jobs/job-1/frame.png",
+            "--artifact-offset",
+            "0",
+            "--artifact-byte-budget",
+            "65536",
+            "--artifact-version",
+            token.as_str(),
+        ])
+        .unwrap();
+        let spec = coordinator_artifact_chunk_spec(&cli).unwrap().unwrap();
+        assert_eq!(spec.request_id, "caller:artifact-cli");
+        assert_eq!(
+            spec.artifact.kind,
+            crate::control::result_buffer::ArtifactKind::Backend
+        );
+        assert_eq!(spec.artifact.relative_path, "jobs/job-1/frame.png");
+        assert_eq!(spec.offset, 0);
+        assert_eq!(spec.byte_budget, 65_536);
+        assert_eq!(spec.artifact_version.as_ref().unwrap().as_str(), token);
+
+        for budget in ["0", "65537"] {
+            let cli = Cli::try_parse_from([
+                "l3ms",
+                "--artifact-chunk",
+                "caller:artifact-cli",
+                "--artifact-kind",
+                "local_job",
+                "--artifact-path",
+                "job/output.wav",
+                "--artifact-offset",
+                "0",
+                "--artifact-byte-budget",
+                budget,
+            ])
+            .unwrap();
+            assert!(coordinator_artifact_chunk_spec(&cli).is_err());
+        }
+
+        let missing_version = Cli::try_parse_from([
+            "l3ms",
+            "--artifact-chunk",
+            "caller:artifact-cli",
+            "--artifact-kind",
+            "backend",
+            "--artifact-path",
+            "jobs/job-1/frame.png",
+            "--artifact-offset",
+            "1",
+            "--artifact-byte-budget",
+            "8",
+        ])
+        .unwrap();
+        assert!(coordinator_artifact_chunk_spec(&missing_version).is_err());
+
+        assert!(Cli::try_parse_from([
+            "l3ms",
+            "--artifact-chunk",
+            "caller:artifact-cli",
+            "--artifact-kind",
+            "local-job",
+            "--artifact-path",
+            "job/output.wav",
+            "--artifact-offset",
+            "0",
+            "--artifact-byte-budget",
+            "8",
+        ])
+        .is_err());
+
+        let secret_path = "../private/native/output.png";
+        let invalid_path = Cli::try_parse_from([
+            "l3ms",
+            "--artifact-chunk",
+            "caller:artifact-cli",
+            "--artifact-kind",
+            "backend",
+            "--artifact-path",
+            secret_path,
+            "--artifact-offset",
+            "0",
+            "--artifact-byte-budget",
+            "8",
+        ])
+        .unwrap();
+        let error = coordinator_artifact_chunk_spec(&invalid_path)
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains(secret_path));
+
+        let secret_token = format!("{}!", "b".repeat(63));
+        let invalid_version = Cli::try_parse_from([
+            "l3ms",
+            "--artifact-chunk",
+            "caller:artifact-cli",
+            "--artifact-kind",
+            "backend",
+            "--artifact-path",
+            "jobs/job-1/frame.png",
+            "--artifact-offset",
+            "0",
+            "--artifact-byte-budget",
+            "8",
+            "--artifact-version",
+            secret_token.as_str(),
+        ])
+        .unwrap();
+        let error = coordinator_artifact_chunk_spec(&invalid_version)
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains(&secret_token));
+    }
+
+    #[test]
+    fn artifact_chunk_is_exclusive_and_does_not_change_results_cli_flow() {
+        let args = [
+            "l3ms",
+            "--artifact-chunk",
+            "caller:artifact-cli",
+            "--artifact-kind",
+            "backend",
+            "--artifact-path",
+            "jobs/job-1/frame.png",
+            "--artifact-offset",
+            "0",
+            "--artifact-byte-budget",
+            "8",
+        ];
+        let mut mixed_results = args.to_vec();
+        mixed_results.extend(["--request-results", "caller:other"]);
+        assert!(Cli::try_parse_from(mixed_results).is_err());
+        let mut mixed_run = args.to_vec();
+        mixed_run.push("--run");
+        assert!(Cli::try_parse_from(mixed_run).is_err());
+
+        let results_cli = Cli::try_parse_from([
+            "l3ms",
+            "--request-results",
+            "caller:results-cli",
+            "--after-cursor",
+            "9",
+            "--result-page-bytes",
+            "2048",
+        ])
+        .unwrap();
+        assert!(coordinator_artifact_chunk_spec(&results_cli)
+            .unwrap()
+            .is_none());
+        let Some((request, _)) =
+            coordinator_action(&results_cli, Some(PathBuf::from("/private/coordinator"))).unwrap()
+        else {
+            panic!("legacy result page action should remain available");
+        };
+        assert!(matches!(
+            request.message,
+            crate::control::ipc::WireRequestMessage::Results {
+                request_id,
+                after_cursor: 9,
+                byte_budget: 2048,
+            } if request_id == "caller:results-cli"
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn artifact_chunk_json_is_bounded_and_keeps_sensitive_debug_data_redacted() {
+        let token = "c".repeat(64);
+        let chunk = crate::control::client::ArtifactChunk {
+            request_id: "caller:artifact-cli".to_owned(),
+            artifact: crate::control::result_buffer::MediaArtifact::new(
+                crate::control::result_buffer::ArtifactKind::Backend,
+                "jobs/job-1/private-frame.png",
+            )
+            .unwrap(),
+            availability: crate::control::result_buffer::Availability::Available,
+            offset: 0,
+            total_bytes: 3,
+            next_offset: 3,
+            end_of_file: true,
+            artifact_version: Some(
+                crate::control::ipc::ArtifactVersion::new(token.as_str()).unwrap(),
+            ),
+            bytes: vec![0, 1, 255],
+        };
+        let debug = format!("{chunk:?}");
+        assert!(!debug.contains("jobs/job-1/private-frame.png"));
+        assert!(!debug.contains(&token));
+        assert!(!debug.contains("0001ff"));
+
+        let json = coordinator_artifact_chunk_json(&chunk, 3).unwrap();
+        assert!(json.len() <= MAX_COORDINATOR_ARTIFACT_CHUNK_JSON_BYTES);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["availability"], "available");
+        assert_eq!(parsed["total_bytes"], 3);
+        assert_eq!(parsed["next_offset"], 3);
+        assert_eq!(parsed["end_of_file"], true);
+        assert_eq!(parsed["artifact_version"], token);
+        assert_eq!(parsed["bytes_hex"], "0001ff");
+        assert_eq!(
+            parsed["artifact"]["relative_path"],
+            "jobs/job-1/private-frame.png"
+        );
+
+        let large_chunk = crate::control::client::ArtifactChunk {
+            bytes: vec![0; crate::control::ipc::MAX_ARTIFACT_CHUNK_BYTES],
+            total_bytes: crate::control::ipc::MAX_ARTIFACT_CHUNK_BYTES as u64,
+            next_offset: crate::control::ipc::MAX_ARTIFACT_CHUNK_BYTES as u64,
+            ..chunk
+        };
+        let large_json = coordinator_artifact_chunk_json(
+            &large_chunk,
+            crate::control::ipc::MAX_ARTIFACT_CHUNK_BYTES as u32,
+        )
+        .unwrap();
+        assert!(large_json.len() <= MAX_COORDINATOR_ARTIFACT_CHUNK_JSON_BYTES);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&large_json).unwrap()["bytes_hex"]
+                .as_str()
+                .unwrap()
+                .len(),
+            crate::control::ipc::MAX_ARTIFACT_CHUNK_BYTES * 2
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn artifact_chunk_cli_makes_one_exact_read_only_v3_exchange() {
+        use crate::control::ipc::{
+            ArtifactVersion, IncomingRequest, ResponseEnvelope, ResponseMessage,
+        };
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket_path = directory.path().join("coordinator.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let version = "d".repeat(64);
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let IncomingRequest::Artifact(query) =
+                crate::control::ipc::read_incoming_request(&mut stream).unwrap()
+            else {
+                panic!("artifact chunk should use one read-only artifact operation");
+            };
+            assert_eq!(query.request_id, "caller:artifact-cli");
+            assert_eq!(
+                query.artifact.kind,
+                crate::control::result_buffer::ArtifactKind::LocalJob
+            );
+            assert_eq!(query.artifact.relative_path, "job-41/output.png");
+            assert_eq!(query.offset, 0);
+            assert_eq!(query.byte_budget, 3);
+            assert!(query.artifact_version.is_none());
+            crate::control::ipc::write_response(
+                &mut stream,
+                &ResponseEnvelope::v3_artifact(ResponseMessage::Artifact {
+                    request_id: query.request_id,
+                    artifact: query.artifact,
+                    availability: crate::control::result_buffer::Availability::Available,
+                    offset: query.offset,
+                    total_bytes: 3,
+                    next_offset: 3,
+                    end_of_file: true,
+                    artifact_version: Some(ArtifactVersion::new(&version).unwrap()),
+                    bytes: vec![1, 2, 3],
+                }),
+            )
+            .unwrap();
+        });
+
+        let cli = Cli::try_parse_from([
+            "l3ms",
+            "--artifact-chunk",
+            "caller:artifact-cli",
+            "--artifact-kind",
+            "local_job",
+            "--artifact-path",
+            "job-41/output.png",
+            "--artifact-offset",
+            "0",
+            "--artifact-byte-budget",
+            "3",
+            "--coordinator-socket-dir",
+            directory.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(dispatch(cli).unwrap(), 0);
+        server.join().unwrap();
     }
 }

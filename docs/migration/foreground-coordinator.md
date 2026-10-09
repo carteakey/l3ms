@@ -55,6 +55,22 @@ one bounded v2 native result page. Results are memory-only; durable status survi
 restart, but output loss never causes automatic rerun. Explicit native output
 contains sensitive prompts/answers/artifact names and should not enter logs.
 
+For a completed managed Comfy/Breeze artifact, use its exact published reference:
+
+```sh
+l3ms --coordinator-socket-dir /absolute/private/coordinator-socket \
+  --artifact-chunk caller:your-request --artifact-kind backend \
+  --artifact-path job-1/image.png --artifact-offset 0 --artifact-byte-budget 65536
+```
+
+This reads exactly one chunk and prints bounded JSON with `bytes_hex`,
+`availability`, offsets, total size, `end_of_file` and `artifact_version`.
+Use `local_job` for Breeze, and supply the returned version with
+`--artifact-version` on every subsequent nonzero offset. No output file is
+created and no inference is started/retried. Unknown/expired data returns no
+bytes; durable success after a daemon restart does not restore access. Full-file
+saving, TUI consumption and native streaming remain separate acceptance work.
+
 For example, the Submit file for an operator-prepared native CPU decision profile
 has this shape. Replace `your-native-cpu-profile` with its actual catalog ID;
 this example does not install a profile or turn an existing CUDA profile into CPU.

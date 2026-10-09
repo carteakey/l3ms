@@ -25,15 +25,15 @@ use super::decision_worker::{
 };
 use super::inference::{Completion, CoordinatorCore, DispatchBeginError};
 use super::ipc::{
-    AcceptedOperation, ClientRequest, IncomingRequest, RequestStatus, ResponseEnvelope,
-    ResponseErrorCode, ResponseMessage, ResultsQuery,
+    AcceptedOperation, ArtifactQuery, ArtifactVersion, ClientRequest, IncomingRequest,
+    RequestStatus, ResponseEnvelope, ResponseErrorCode, ResponseMessage, ResultsQuery,
 };
 use super::local_ipc::{private_directory, LocalIpcError, LocalListener};
 #[cfg(target_os = "linux")]
 use super::managed_session::{ManagedJobKey, ManagedWorkerCommand};
 use super::process::ProcessFailureDisposition;
 use super::result_buffer::{
-    ResultBuffer, ResultBufferError, ResultEvent, ResultFailureCode, ResultTerminal,
+    Availability, ResultBuffer, ResultBufferError, ResultEvent, ResultFailureCode, ResultTerminal,
 };
 #[cfg(target_os = "linux")]
 use super::runtime::Cancellation;
@@ -98,6 +98,7 @@ pub struct ControlDaemon {
     // Result bodies are intentionally process-local; durable history in core
     // remains authoritative after buffer loss or daemon restart.
     results: ResultBuffer,
+    artifacts: super::artifact_store::ArtifactStore,
     listener: LocalListener,
     peer_timeout: Duration,
     max_connections: usize,
@@ -139,6 +140,7 @@ impl ControlDaemon {
         Ok(Self {
             core,
             results: ResultBuffer::new(),
+            artifacts: super::artifact_store::ArtifactStore::new(),
             listener,
             peer_timeout: config.peer_timeout,
             max_connections: config.max_connections,
@@ -246,6 +248,7 @@ impl ControlDaemon {
             let ControlDaemon {
                 core,
                 results,
+                artifacts,
                 listener,
                 peer_timeout,
                 max_connections,
@@ -347,6 +350,22 @@ impl ControlDaemon {
                         }
                         let _ = reply.send(appended);
                     }
+                    Ok(super::managed_session::ManagedWorkerEvent::PublishArtifacts {
+                        key,
+                        files,
+                        reply,
+                    }) => {
+                        let published = if active_slot.as_ref() == Some(&key) {
+                            publish_managed_artifacts(results, artifacts, &key.request_id, files)
+                        } else {
+                            false
+                        };
+                        if reply.send(published).is_err() || !published {
+                            core.quarantine();
+                            report.stopped = StopReason::WorkerUncertain;
+                            stopping = true;
+                        }
+                    }
                     Ok(super::managed_session::ManagedWorkerEvent::ComfyCandidate {
                         ticket,
                         candidate,
@@ -397,6 +416,7 @@ impl ControlDaemon {
                     }
                     Ok(super::managed_session::ManagedWorkerEvent::JobFinished(completion)) => {
                         let stop_session = completion.stop_session;
+                        let finished_request = completion.key.request_id.clone();
                         match consume_managed_completion(
                             core,
                             results,
@@ -418,6 +438,11 @@ impl ControlDaemon {
                         if stop_session {
                             report.stopped = StopReason::WorkerUncertain;
                             stopping = true;
+                        }
+                        if core.authoritative_request_status(&finished_request)
+                            != Some(RequestStatus::Succeeded)
+                        {
+                            let _ = artifacts.forget(&finished_request);
                         }
                     }
                     Ok(super::managed_session::ManagedWorkerEvent::Stopped { cleanup_proven }) => {
@@ -612,6 +637,7 @@ impl ControlDaemon {
                 if serve_managed_connection(
                     core,
                     results,
+                    artifacts,
                     &mut peer,
                     &peer_context,
                     &mut accepted_result_ids,
@@ -885,6 +911,13 @@ impl ControlDaemon {
                 self.core.handle_client_request(request, Instant::now())
             }
             IncomingRequest::Results(query) => self.handle_results_query(query),
+            IncomingRequest::Artifact(query) => managed_artifact_query(
+                &self.core,
+                &self.results,
+                &mut self.artifacts,
+                query,
+                context,
+            ),
         };
         connection.write_response(&response, context)
     }
@@ -926,6 +959,13 @@ impl ControlDaemon {
                 self.core.handle_client_request(request, Instant::now())
             }
             IncomingRequest::Results(query) => self.handle_results_query(query),
+            IncomingRequest::Artifact(query) => managed_artifact_query(
+                &self.core,
+                &self.results,
+                &mut self.artifacts,
+                query,
+                context,
+            ),
         };
         if let ResponseMessage::Accepted {
             request_id,
@@ -1298,6 +1338,7 @@ impl ControlDaemon {
 fn serve_managed_connection(
     core: &mut CoordinatorCore,
     results: &mut ResultBuffer,
+    artifacts: &mut super::artifact_store::ArtifactStore,
     connection: &mut super::local_ipc::LocalConnection,
     context: &OperationContext<'_>,
     accepted_result_ids: &mut BTreeSet<String>,
@@ -1339,6 +1380,9 @@ fn serve_managed_connection(
     let response = match request {
         IncomingRequest::Control(request) => core.handle_client_request(request, Instant::now()),
         IncomingRequest::Results(query) => managed_results_query(core, results, query),
+        IncomingRequest::Artifact(query) => {
+            managed_artifact_query(core, results, artifacts, query, context)
+        }
     };
     if let (
         Some((expected_request_id, lane)),
@@ -1363,6 +1407,113 @@ fn serve_managed_connection(
         accepted_result_ids.insert(request_id.clone());
     }
     connection.write_response(&response, context)
+}
+
+fn publish_managed_artifacts(
+    results: &mut ResultBuffer,
+    artifacts: &mut super::artifact_store::ArtifactStore,
+    request_id: &str,
+    files: Vec<super::artifact_store::PublishedArtifact>,
+) -> bool {
+    let references = files.iter().map(|file| file.reference().clone()).collect();
+    if artifacts.register(request_id, files).is_err() {
+        return false;
+    }
+    if results
+        .append(request_id, ResultEvent::MediaArtifacts(references))
+        .is_err()
+    {
+        let _ = artifacts.forget(request_id);
+        return false;
+    }
+    true
+}
+
+/// Only capabilities published during this daemon session can be read. Durable
+/// success and live result retention are both required; history never rebuilds
+/// a file capability or authorizes a path supplied by a client.
+fn managed_artifact_query(
+    core: &CoordinatorCore,
+    results: &ResultBuffer,
+    artifacts: &mut super::artifact_store::ArtifactStore,
+    query: ArtifactQuery,
+    context: &OperationContext<'_>,
+) -> ResponseEnvelope {
+    use super::artifact_store::ArtifactStoreError;
+    let error = |code| {
+        ResponseEnvelope::v3_artifact(ResponseMessage::Error {
+            request_id: Some(query.request_id.clone()),
+            code,
+        })
+    };
+    let retained = match results.availability(&query.request_id) {
+        Ok(value) => value,
+        Err(_) => return error(ResponseErrorCode::InvalidRequest),
+    };
+    let mut availability = if retained == Availability::Expired {
+        Availability::Expired
+    } else {
+        Availability::Unknown
+    };
+    if retained == Availability::Available
+        && core.authoritative_request_status(&query.request_id) == Some(RequestStatus::Succeeded)
+    {
+        match artifacts.read_chunk(
+            &query.request_id,
+            &query.artifact,
+            query.offset,
+            query.byte_budget as usize,
+            query.artifact_version.as_ref().map(ArtifactVersion::as_str),
+            context,
+        ) {
+            Ok(chunk) => {
+                let Ok(version) = ArtifactVersion::new(&chunk.version) else {
+                    return error(ResponseErrorCode::Internal);
+                };
+                return ResponseEnvelope::v3_artifact(ResponseMessage::Artifact {
+                    request_id: query.request_id,
+                    artifact: chunk.artifact,
+                    availability: Availability::Available,
+                    offset: chunk.offset,
+                    total_bytes: chunk.total_bytes,
+                    next_offset: chunk.next_offset,
+                    end_of_file: chunk.eof,
+                    artifact_version: Some(version),
+                    bytes: chunk.bytes,
+                });
+            }
+            Err(ArtifactStoreError::Unavailable) => {}
+            Err(ArtifactStoreError::Changed) => {
+                availability = Availability::Expired;
+            }
+            Err(
+                ArtifactStoreError::Invalid
+                | ArtifactStoreError::InvalidBudget
+                | ArtifactStoreError::InvalidOffset,
+            ) => {
+                return error(ResponseErrorCode::InvalidRequest);
+            }
+            Err(_) => return error(ResponseErrorCode::Internal),
+        }
+    } else if retained != Availability::Available
+        || !matches!(
+            core.authoritative_request_status(&query.request_id),
+            Some(RequestStatus::Queued | RequestStatus::Running)
+        )
+    {
+        let _ = artifacts.forget(&query.request_id);
+    }
+    ResponseEnvelope::v3_artifact(ResponseMessage::Artifact {
+        request_id: query.request_id,
+        artifact: query.artifact,
+        availability,
+        offset: query.offset,
+        total_bytes: 0,
+        next_offset: query.offset,
+        end_of_file: false,
+        artifact_version: None,
+        bytes: Vec::new(),
+    })
 }
 
 fn managed_results_query(
@@ -2458,6 +2609,242 @@ mod tests {
                 ..
             } if page.availability == Availability::Unknown
         ));
+        fixture.released();
+    }
+
+    #[test]
+    fn artifact_publication_removes_pins_when_result_append_fails() {
+        use crate::control::result_buffer::{ArtifactKind, MediaArtifact};
+        let fixture = Fixture::new();
+        let context = OperationContext::new(Instant::now() + Duration::from_secs(5), &NeverCancel);
+        let artifact = MediaArtifact::new(ArtifactKind::Backend, "job-1/image.png").unwrap();
+        std::fs::write(fixture.data.path().join("native.png"), b"fixture-image").unwrap();
+        let pin = super::super::artifact_store::PublishedArtifact::capture(
+            fixture.data.path(),
+            artifact.clone(),
+            "native.png",
+            &context,
+        )
+        .unwrap();
+        let mut results = ResultBuffer::new();
+        let mut store = super::super::artifact_store::ArtifactStore::new();
+        assert!(!publish_managed_artifacts(
+            &mut results,
+            &mut store,
+            "missing-result",
+            vec![pin]
+        ));
+        assert!(store
+            .read_chunk("missing-result", &artifact, 0, 8, None, &context)
+            .is_err());
+        results
+            .begin("successful-result", crate::control::catalog::Lane::Media)
+            .unwrap();
+        let pin = super::super::artifact_store::PublishedArtifact::capture(
+            fixture.data.path(),
+            artifact.clone(),
+            "native.png",
+            &context,
+        )
+        .unwrap();
+        assert!(publish_managed_artifacts(
+            &mut results,
+            &mut store,
+            "successful-result",
+            vec![pin]
+        ));
+        assert_eq!(
+            store
+                .read_chunk("successful-result", &artifact, 0, 8, None, &context)
+                .unwrap()
+                .bytes,
+            b"fixture-"
+        );
+        let page = results
+            .page(
+                "successful-result",
+                0,
+                super::super::result_buffer::MAX_PAGE_BYTES,
+            )
+            .unwrap();
+        assert_eq!(page.events.len(), 1);
+    }
+
+    #[test]
+    fn artifact_chunks_cross_private_ipc_without_dispatch_or_path_lookup() {
+        use crate::control::result_buffer::{ArtifactKind, MediaArtifact};
+        let fixture = Fixture::new();
+        let mut daemon = fixture.bind(fixture.config(4)).unwrap();
+        let context = OperationContext::new(Instant::now() + Duration::from_secs(5), &NeverCancel);
+        let artifact = MediaArtifact::new(ArtifactKind::Backend, "job-1/image.png").unwrap();
+        std::fs::write(
+            fixture.data.path().join("native.png"),
+            b"fixture-image-bytes",
+        )
+        .unwrap();
+        let pinned = super::super::artifact_store::PublishedArtifact::capture(
+            fixture.data.path(),
+            artifact.clone(),
+            "native.png",
+            &context,
+        )
+        .unwrap();
+        daemon
+            .core
+            .seed_test_request_status("artifact-success", "succeeded")
+            .unwrap();
+        daemon
+            .results
+            .begin("artifact-success", crate::control::catalog::Lane::Media)
+            .unwrap();
+        daemon
+            .results
+            .append(
+                "artifact-success",
+                ResultEvent::MediaArtifacts(vec![artifact.clone()]),
+            )
+            .unwrap();
+        daemon
+            .results
+            .terminal("artifact-success", ResultTerminal::Succeeded)
+            .unwrap();
+        daemon
+            .artifacts
+            .register("artifact-success", vec![pinned])
+            .unwrap();
+        assert_eq!(daemon.core.active_count(), 0);
+        assert_eq!(daemon.core.queued_count(), 0);
+        let directory = fixture.socket.path().to_owned();
+        let client = std::thread::spawn(move || {
+            let context =
+                OperationContext::new(Instant::now() + Duration::from_secs(5), &NeverCancel);
+            let first = super::super::client::artifact_chunk(
+                &directory,
+                "artifact-success",
+                &artifact,
+                0,
+                7,
+                None,
+                &context,
+            )
+            .unwrap();
+            assert_eq!(first.bytes, b"fixture");
+            assert!(!first.end_of_file);
+            let second = super::super::client::artifact_chunk(
+                &directory,
+                "artifact-success",
+                &artifact,
+                first.next_offset,
+                64,
+                first.artifact_version.as_ref(),
+                &context,
+            )
+            .unwrap();
+            assert_eq!(second.bytes, b"-image-bytes");
+            assert!(second.end_of_file);
+            assert_eq!(first.artifact_version, second.artifact_version);
+            let foreign = super::super::client::artifact_chunk(
+                &directory,
+                "other-request",
+                &artifact,
+                0,
+                7,
+                None,
+                &context,
+            )
+            .unwrap();
+            assert_eq!(foreign.availability, Availability::Unknown);
+            let wrong = MediaArtifact::new(ArtifactKind::LocalJob, artifact.relative_path).unwrap();
+            let wrong_kind = super::super::client::artifact_chunk(
+                &directory,
+                "artifact-success",
+                &wrong,
+                0,
+                7,
+                None,
+                &context,
+            )
+            .unwrap();
+            assert_eq!(wrong_kind.availability, Availability::Unknown);
+        });
+        let report = daemon.run(&context).unwrap();
+        client.join().unwrap();
+        assert_eq!(report.completed_exchanges, 4);
+        fixture.released();
+    }
+
+    #[test]
+    fn artifact_reads_require_success_and_retention_and_never_restore_pins() {
+        use crate::control::result_buffer::{ArtifactKind, MediaArtifact};
+        let fixture = Fixture::new();
+        let mut daemon = fixture.bind(fixture.config(1)).unwrap();
+        let context = OperationContext::new(Instant::now() + Duration::from_secs(5), &NeverCancel);
+        let artifact = MediaArtifact::new(ArtifactKind::LocalJob, "job-1/output.wav").unwrap();
+        std::fs::write(fixture.data.path().join("output.wav"), b"fixture-wave").unwrap();
+        let query = |id: &str| ArtifactQuery {
+            request_id: id.into(),
+            artifact: artifact.clone(),
+            offset: 0,
+            byte_budget: 8,
+            artifact_version: None,
+        };
+        for (id, state) in [
+            ("queued-artifact", "queued"),
+            ("retained-artifact", "succeeded"),
+        ] {
+            daemon.core.seed_test_request_status(id, state).unwrap();
+            daemon
+                .results
+                .begin(id, crate::control::catalog::Lane::Media)
+                .unwrap();
+        }
+        let queued_pin = super::super::artifact_store::PublishedArtifact::capture(
+            fixture.data.path(),
+            artifact.clone(),
+            "output.wav",
+            &context,
+        )
+        .unwrap();
+        daemon
+            .artifacts
+            .register("queued-artifact", vec![queued_pin])
+            .unwrap();
+        assert!(
+            matches!(managed_artifact_query(&daemon.core, &daemon.results, &mut daemon.artifacts, query("queued-artifact"), &context).message,
+            ResponseMessage::Artifact { availability: Availability::Unknown, bytes, .. } if bytes.is_empty())
+        );
+        daemon.artifacts.forget("queued-artifact").unwrap();
+        let pin = super::super::artifact_store::PublishedArtifact::capture(
+            fixture.data.path(),
+            artifact.clone(),
+            "output.wav",
+            &context,
+        )
+        .unwrap();
+        daemon
+            .artifacts
+            .register("retained-artifact", vec![pin])
+            .unwrap();
+        daemon
+            .results
+            .terminal("retained-artifact", ResultTerminal::Succeeded)
+            .unwrap();
+        daemon.results.evict_terminal("retained-artifact").unwrap();
+        assert!(
+            matches!(managed_artifact_query(&daemon.core, &daemon.results, &mut daemon.artifacts, query("retained-artifact"), &context).message,
+            ResponseMessage::Artifact { availability: Availability::Expired, bytes, .. } if bytes.is_empty())
+        );
+        assert!(daemon
+            .artifacts
+            .read_chunk("retained-artifact", &artifact, 0, 8, None, &context)
+            .is_err());
+        drop(daemon);
+        let mut restarted = fixture.bind(fixture.config(1)).unwrap();
+        assert!(
+            matches!(managed_artifact_query(&restarted.core, &restarted.results, &mut restarted.artifacts, query("retained-artifact"), &context).message,
+            ResponseMessage::Artifact { availability: Availability::Unknown, bytes, .. } if bytes.is_empty())
+        );
+        drop(restarted);
         fixture.released();
     }
 
