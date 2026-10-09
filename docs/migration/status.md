@@ -10,6 +10,14 @@ runtime check.
 
 ## Current resumed checkpoint — 2026-10-09
 
+Recovery now preflights every retained runtime/role and manager observation before
+the first Stop, rather than discovering a later unsupported intent after partial
+cleanup. This does not enable mixed-runtime recovery. The remaining durable
+Stop-stage, legacy-record and pre-dispatch job-association requirements are captured
+in [crash-recovery-contract.md](crash-recovery-contract.md). The updated checkpoint
+passes **859 root tests, 1 ignored**, strict all-target Clippy, formatting and
+whitespace checks. No live service action was performed.
+
 The current slice adds bounded artifact bytes to managed Comfy/Breeze publication.
 Opaque pinned file capabilities move from the released worker to the main-thread
 registry; reference append failure removes the new registration. Additive v3
@@ -22,7 +30,7 @@ Root/file drift, wrong jobs/kinds, expiry and malformed wire/query shapes fail
 closed. The persistent descriptor quota includes pinned roots. Chunk delivery is
 post-completion retrieval, not native audio streaming or full TUI/file-save parity.
 
-Current all-target evidence: **858 root tests passed, 1 ignored**, strict all-target
+Artifact-delivery all-target evidence: **858 root tests passed, 1 ignored**, strict all-target
 Clippy, formatting and whitespace checks. A new quota fixture initially counted
 global process descriptors and raced unrelated parallel tests; it now checks
 only its retained/rejected file inodes. Joined private-daemon chunk paging,

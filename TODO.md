@@ -10,7 +10,7 @@ existing Linear migration issues rather than replacing their acceptance criteria
 
 ## Monorepo: next work
 
-Latest offline checkpoint on `feature/l3ms-monorepo`: 858 root tests passed,
+Latest offline checkpoint on `feature/l3ms-monorepo`: 859 root tests passed,
 1 ignored, strict all-target Clippy, formatting and whitespace checks pass.
 Opt-in CPU dispatch, managed-language launch, resumable native results and
 owned per-job packet/service handoff are implemented. Subsequent branch work
@@ -35,6 +35,10 @@ arbitrary path access. Full joined worker/lifecycle fixtures, full-file/TUI
 artifact consumption and crash-safe mixed-runtime recovery remain. Verified venv
 interpreter handoff preserves Python environment semantics. Real CPU native
 metadata delivery is verified; GPU switching is not.
+Recovery batch preflight is complete; next implement the durable Stop journal
+and pre-dispatch job/history association described in the
+[crash recovery contract](docs/migration/crash-recovery-contract.md). Legacy
+records lacking Stop stages remain unresolved, not implicitly safe to retry.
 
 ### Safety decisions and runtime completion — CAR-217
 

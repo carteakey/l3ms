@@ -1450,16 +1450,24 @@ fn reconcile_retained_services(
 ) -> Result<(), ()> {
     let context = recovery_context(config.recovery);
     let retained = owner.reconcile(&context).map_err(|_| ())?;
+    // Validate the complete retained set before the first name-targeted Stop.
+    // A later unsupported/unknown intent must not cause partial cleanup of an
+    // earlier service. Mixed-runtime admission remains closed until durable
+    // stop-stage and job/history association are implemented.
+    preflight_retained_runtime_intents(
+        &config.runtime,
+        retained.iter().map(|observation| &observation.intent),
+    )?;
+    if retained.iter().any(|observation| {
+        matches!(
+            observation.observation,
+            ReconcileResult::AbsentNow | ReconcileResult::Unknown
+        )
+    }) {
+        return Err(());
+    }
     let mut stopped = Vec::with_capacity(retained.len());
     for observation in retained {
-        if observation.intent.runtime_identity() != Some(&config.runtime)
-            || !matches!(
-                observation.intent.launch_role(),
-                ServiceLaunchRole::IsolatedEngineSupervisor(_)
-            )
-        {
-            return Err(());
-        }
         match observation.observation {
             ReconcileResult::Owned(service) => {
                 let receipt = owner.stop(&service, &context).map_err(|_| ())?;
@@ -1475,6 +1483,23 @@ fn reconcile_retained_services(
     observe_gpu_idle_retry(gpu, &context, config.recovery)?;
     for observation in &stopped {
         retire_stopped_retry(owner, observation, cgroups, &context)?;
+    }
+    Ok(())
+}
+
+fn preflight_retained_runtime_intents<'a>(
+    runtime: &RuntimeIdentity,
+    intents: impl IntoIterator<Item = &'a super::managed_service::ServiceIntentRecord>,
+) -> Result<(), ()> {
+    for intent in intents {
+        if intent.runtime_identity() != Some(runtime)
+            || !matches!(
+                intent.launch_role(),
+                ServiceLaunchRole::IsolatedEngineSupervisor(_)
+            )
+        {
+            return Err(());
+        }
     }
     Ok(())
 }
@@ -2131,6 +2156,45 @@ impl<'de> Deserialize<'de> for UniqueJson {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn retained_runtime_preflight_rejects_whole_mixed_or_legacy_batch() {
+        use super::super::managed_service::ServiceIntentRecord;
+        let language = RuntimeIdentity::new(Lane::Language, "llama-swap").unwrap();
+        let media = RuntimeIdentity::new(Lane::Media, "comfyui").unwrap();
+        let coordinator =
+            super::super::engine_transport::CoordinatorIdentityDescriptor::capture_current()
+                .unwrap();
+        let intent = |suffix: u128, runtime: Option<RuntimeIdentity>, role: ServiceLaunchRole| {
+            ServiceIntentRecord::from_persisted_parts_with_role(
+                "coordinator".into(),
+                format!("l3ms-coordinator-{suffix:032x}.service"),
+                "b".repeat(64),
+                30_000,
+                runtime,
+                role,
+            )
+            .unwrap()
+        };
+        let supported = intent(
+            1,
+            Some(language.clone()),
+            ServiceLaunchRole::IsolatedEngineSupervisor(coordinator),
+        );
+        let unsupported = intent(
+            2,
+            Some(media),
+            ServiceLaunchRole::IsolatedEngineSupervisor(coordinator),
+        );
+        let legacy = intent(3, None, ServiceLaunchRole::Ordinary);
+        let ordinary_language = intent(4, Some(language.clone()), ServiceLaunchRole::Ordinary);
+        assert!(preflight_retained_runtime_intents(&language, []).is_ok());
+        assert!(preflight_retained_runtime_intents(&language, [&supported]).is_ok());
+        for denied in [&unsupported, &legacy, &ordinary_language] {
+            assert!(preflight_retained_runtime_intents(&language, [&supported, denied]).is_err());
+            assert!(preflight_retained_runtime_intents(&language, [denied, &supported]).is_err());
+        }
+    }
 
     #[test]
     fn resident_cleanup_cannot_release_an_unproven_local_job() {

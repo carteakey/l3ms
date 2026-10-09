@@ -10,6 +10,10 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Preflight the complete retained-service batch before startup cleanup sends
+  any Stop, preventing partial cleanup when a later intent is unsupported or
+  unverifiable. Keep mixed-runtime recovery gated pending durable Stop stages
+  and exact job/history association.
 - Deliver completed managed Comfy/Breeze artifacts through additive v3,
   read-only coordinator chunks and an explicit `--artifact-chunk` CLI command.
   Pin published files behind exact request/reference matching, require durable
