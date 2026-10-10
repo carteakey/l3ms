@@ -1,12 +1,12 @@
 //! One-shot, private-socket actions for the Stack Catalog workbench.
 //!
-//! Submit preparation is synchronous and bounded by the shared strict reader;
-//! its opaque envelope can only be consumed once by the dedicated worker. The
-//! worker does no service discovery, startup, retry, history write, or payload
-//! logging. Every caller supplies the explicit coordinator socket directory.
+//! Typed Submit preparation is synchronous; its opaque envelope can only be
+//! consumed once by the dedicated worker. The worker does no service discovery,
+//! startup, retry, history write, or payload logging. Every caller supplies the
+//! explicit coordinator socket directory.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::Arc;
@@ -21,17 +21,15 @@ use super::ipc::{
 };
 use super::result_consumer::NativeOutput;
 use super::runtime::{Cancellation, OperationContext};
-use super::submission_file::{self, SubmissionFileError};
 use super::task_form::{self, TaskFormDraft, TaskFormError};
 
 const ACTION_TIMEOUT: Duration = Duration::from_secs(3);
 const ACTION_QUEUE_CAPACITY: usize = 1;
 const EVENT_QUEUE_CAPACITY: usize = 4;
 
-/// A fixed failure while preparing a caller-owned request file.
+/// A fixed failure while preparing an in-memory typed task form.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PreparationError {
-    SubmitFile(SubmissionFileError),
     TaskForm(TaskFormError),
     SelectedProfileMismatch,
 }
@@ -39,7 +37,6 @@ pub enum PreparationError {
 impl std::fmt::Display for PreparationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::SubmitFile(error) => error.fmt(f),
             Self::TaskForm(error) => error.fmt(f),
             Self::SelectedProfileMismatch => {
                 f.write_str("submit profile does not match the selected Stack Catalog profile")
@@ -103,17 +100,6 @@ impl std::fmt::Debug for PreparedSubmission {
     }
 }
 
-/// Read once through the shared strict file contract and require exact lane
-/// and profile identity with the currently selected Stack Catalog row.
-pub fn prepare_submission(
-    path: &Path,
-    catalog: &Catalog,
-    selected_profile: &ProfileKey,
-) -> Result<PreparedSubmission, PreparationError> {
-    let envelope = submission_file::read(path, catalog).map_err(PreparationError::SubmitFile)?;
-    prepare_validated_envelope(envelope, selected_profile)
-}
-
 /// Construct an opaque one-shot submission from the in-memory native task
 /// form. `build_submit` performs the bounded envelope and refreshed-catalog
 /// validation before this function accepts the envelope for enqueue.
@@ -130,8 +116,6 @@ fn prepare_validated_envelope(
     envelope: RequestEnvelope,
     selected_profile: &ProfileKey,
 ) -> Result<PreparedSubmission, PreparationError> {
-    ipc::validate_request_envelope(&envelope)
-        .map_err(|_| PreparationError::SubmitFile(SubmissionFileError::Invalid))?;
     let ClientRequest::Submit {
         request_id,
         request,
@@ -139,11 +123,9 @@ fn prepare_validated_envelope(
     } = envelope
         .clone()
         .into_client_request()
-        .map_err(|_| PreparationError::SubmitFile(SubmissionFileError::Invalid))?
+        .map_err(|_| PreparationError::TaskForm(TaskFormError::InvalidRequest))?
     else {
-        return Err(PreparationError::SubmitFile(
-            SubmissionFileError::WrongOperation,
-        ));
+        return Err(PreparationError::TaskForm(TaskFormError::InvalidRequest));
     };
     if request.profile() != selected_profile {
         return Err(PreparationError::SelectedProfileMismatch);
@@ -630,23 +612,20 @@ mod tests {
         Catalog::load(env!("CARGO_MANIFEST_DIR")).unwrap()
     }
 
-    fn language_submit(id: &str) -> RequestEnvelope {
-        RequestEnvelope::v1(WireRequestMessage::Submit {
-            request_id: id.into(),
-            timeout_ms: 5_000,
-            request: ipc::WireInferenceRequest::Language {
-                profile_id: "gemma-4-26b-qat-mtp".into(),
+    fn language_draft(id: &str) -> TaskFormDraft {
+        TaskFormDraft::new(
+            ProfileKey::new(Lane::Language, "gemma-4-26b-qat-mtp").unwrap(),
+            super::super::catalog::Task::new("chat").unwrap(),
+            id.into(),
+            5_000,
+            task_form::TaskFields::Language {
                 turns: vec![ipc::WireChatTurn {
                     role: ipc::WireChatRole::User,
                     content: "private-submit-payload".into(),
                 }],
                 max_tokens: 64,
             },
-        })
-    }
-
-    fn write_submit(path: &Path, id: &str) {
-        std::fs::write(path, serde_json::to_vec(&language_submit(id)).unwrap()).unwrap();
+        )
     }
 
     fn receive_event(worker: &mut CoordinatorWorkbench) -> WorkbenchEvent {
@@ -666,17 +645,20 @@ mod tests {
     #[test]
     fn preparation_enforces_selected_profile_and_hides_request_body() {
         let catalog = fixture_catalog();
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("submit.json");
-        write_submit(&path, "caller:workbench-id");
         let selected = ProfileKey::new(Lane::Language, "gemma-4-26b-qat-mtp").unwrap();
-        let prepared = prepare_submission(&path, &catalog, &selected).unwrap();
+        let prepared = prepare_task_form_submission(
+            &catalog,
+            language_draft("caller:workbench-id"),
+            &selected,
+        )
+        .unwrap();
         assert_eq!(prepared.request_id(), "caller:workbench-id");
         assert_eq!(prepared.lane(), Lane::Language);
         assert!(!format!("{prepared:?}").contains("private-submit-payload"));
         let wrong = ProfileKey::new(Lane::Decisions, "nagi-small").unwrap();
         assert_eq!(
-            prepare_submission(&path, &catalog, &wrong).unwrap_err(),
+            prepare_task_form_submission(&catalog, language_draft("caller:workbench-id"), &wrong)
+                .unwrap_err(),
             PreparationError::SelectedProfileMismatch
         );
     }
@@ -832,11 +814,13 @@ mod tests {
         });
 
         let catalog = fixture_catalog();
-        let directory_request = tempfile::tempdir().unwrap();
-        let submit_file = directory_request.path().join("request.json");
-        write_submit(&submit_file, "caller:workbench-id");
         let selected = ProfileKey::new(Lane::Language, "gemma-4-26b-qat-mtp").unwrap();
-        let prepared = prepare_submission(&submit_file, &catalog, &selected).unwrap();
+        let prepared = prepare_task_form_submission(
+            &catalog,
+            language_draft("caller:workbench-id"),
+            &selected,
+        )
+        .unwrap();
         let mut worker = CoordinatorWorkbench::start().unwrap();
         let retained = worker.submit(socket.clone(), prepared).unwrap();
         assert_eq!(retained.request_id(), "caller:workbench-id");

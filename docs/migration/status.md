@@ -8,7 +8,28 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
-## Current replacement slice — 2026-10-10
+## Current deletion checkpoint — 2026-10-10
+
+Retired only generic coordinator envelope-file submission: CLI
+`--request-submit`, Stack `s`, file preparation and the `submission_file` module.
+Typed forms (`f`), observe/cancel/results, native CPU tasks and original
+llama-swap/standalone workflows remain. The keyboard integration test now uses
+typed forms and verifies the retired key does not dispatch. The historical
+file-submit Nagi probe refuses `--run` before any daemon/model work.
+
+This cut removes **714 net whole-`src/` lines** (including tests/comments/blanks),
+and deletes a parser/duplicate entry-point concept rather than relocating it.
+Cumulative source change against `702b4cd` is still **+2,425**; control scope is
+**61,799 lines**. This is the first removal, not the target platform reduction.
+Verification: **877 root tests passed, 1 ignored**, 17 decision-maintenance
+Python tests, formatting, strict Clippy and CLI build pass. No live service
+action or model run was needed for this cut.
+
+Next reuse the original Chat owner for explicit Stack language selection;
+embedding/media form callers still block broader coordinator deletion. Remove
+those dependencies only after their native workflows are replaced.
+
+## Previous speech replacement slice — 2026-10-10
 
 Standard CPU Breeze speech now uses the same direct typed operation and
 foreground UI owner as CPU decisions, not a second worker or IPC result store.

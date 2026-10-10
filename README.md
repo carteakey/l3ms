@@ -162,25 +162,24 @@ not text or audio bytes. See [real CPU speech evidence](docs/migration/direct-sp
 
 The older opt-in path remains while its callers are replaced under the
 [simplification plan](docs/migration/simplification-plan.md).
-On Linux, submit, observe or cancel a coordinator request using an explicitly
+On Linux, observe or cancel a coordinator request using an explicitly
 configured private socket directory:
 
 ```bash
-l3ms --request-submit /path/to/request.json --coordinator-socket-dir /path/to/private/socket-dir
 l3ms --coordinator-status request-123 --coordinator-socket-dir /path/to/private/socket-dir
 l3ms --coordinator-cancel request-123 --coordinator-socket-dir /path/to/private/socket-dir
 l3ms --request-output request-123 --request-lane decisions --coordinator-socket-dir /path/to/private/socket-dir
 ```
 
 These commands use a three-second IPC deadline and return compact JSON. They do
-not start a daemon or fall back to a direct engine. Submit requires a strict
-native request file with a caller-owned ID; a lost reply means query that ID,
-not resubmit. A missing
+not start a daemon or fall back to a direct engine. Generic envelope-file
+submission has been retired; remaining coordinator tasks use the typed Stack
+form (`f`) with a caller-owned ID. A lost reply means query that ID, not resubmit. A missing
 coordinator fails explicitly. Cancellation acceptance is not proof that active
 work has finished; query the same request ID for its terminal status. Service
 installation and general GPU/media dispatch remain gated by migration acceptance.
-An opt-in foreground CPU coordinator and Stack Catalog keyboard actions (`s`
-submit file, `o` observe/output, `c` cancel) are described in the
+An opt-in foreground CPU coordinator and Stack Catalog keyboard actions (`f`
+typed form, `o` observe/output, `c` cancel) are described in the
 [foreground coordinator guide](docs/migration/foreground-coordinator.md).
 Native output is sensitive and should not enter shared logs.
 An opt-in [authenticated loopback HTTP gateway](docs/migration/http-gateway.md)

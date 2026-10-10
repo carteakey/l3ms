@@ -105,7 +105,6 @@ const MODEL_PAGE_SIZE: usize = 50;
 const DOWNLOAD_PAGE_SIZE: usize = 50;
 const DOWNLOAD_ESTIMATE_TIMEOUT: Duration = Duration::from_secs(180);
 const DOWNLOAD_DISK_TIMEOUT: Duration = Duration::from_secs(3);
-const MAX_STACK_INPUT_BYTES: usize = 4096;
 const MAX_STACK_ID_INPUT_BYTES: usize = 128;
 const MAX_STACK_OUTPUT_PREVIEW_CHARS: usize = 4096;
 
@@ -235,7 +234,6 @@ enum InputMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CoordinatorInputAction {
-    SubmitFile,
     ObserveId,
     CancelId,
 }
@@ -2519,14 +2517,7 @@ impl App {
                     InputMode::ChatSystemPrompt => self.chat_system_prompt.push(character),
                     InputMode::ChatEndpoint => self.chat_endpoint_draft.push(character),
                     InputMode::CoordinatorInput => {
-                        let max_bytes = if matches!(
-                            self.coordinator_input_action,
-                            Some(CoordinatorInputAction::SubmitFile)
-                        ) {
-                            MAX_STACK_INPUT_BYTES
-                        } else {
-                            MAX_STACK_ID_INPUT_BYTES
-                        };
+                        let max_bytes = MAX_STACK_ID_INPUT_BYTES;
                         if self.coordinator_input.len() + character.len_utf8() <= max_bytes
                             && !character.is_control()
                         {
@@ -3111,7 +3102,6 @@ impl App {
                 select_next_table(&mut self.stack_catalog_state, count);
             }
             StackCatalogRefresh => self.refresh_stack_catalog(),
-            StackCatalogSubmit => self.begin_coordinator_input(CoordinatorInputAction::SubmitFile),
             StackCatalogForm => self.begin_task_form(),
             StackCatalogObserve => self.begin_coordinator_observe(),
             StackCatalogCancel => self.begin_coordinator_cancel(),
@@ -4351,7 +4341,6 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => Some(CommandId::StackCatalogSelectPrevious),
             KeyCode::Down | KeyCode::Char('j') => Some(CommandId::StackCatalogSelectNext),
             KeyCode::Char('r') => Some(CommandId::StackCatalogRefresh),
-            KeyCode::Char('s') => Some(CommandId::StackCatalogSubmit),
             KeyCode::Char('f') => Some(CommandId::StackCatalogForm),
             KeyCode::Char('o') => Some(CommandId::StackCatalogObserve),
             KeyCode::Char('c') => Some(CommandId::StackCatalogCancel),
@@ -4491,10 +4480,6 @@ impl App {
                 }
                 Err(PreparationError::TaskForm(error)) => {
                     self.status = error.to_string();
-                    return;
-                }
-                Err(_) => {
-                    self.status = "Native task form is invalid for the refreshed catalog".into();
                     return;
                 }
             };
@@ -4970,20 +4955,10 @@ impl App {
                         .into();
                 return;
             }
-            if action == CoordinatorInputAction::SubmitFile
-                && self.coordinator_request_id.is_some()
-                && !self.coordinator_request_terminal
-            {
-                self.status = "Caller ID remains ambiguous or nonterminal; observe or cancel it before another Submit".into();
-                return;
-            }
             self.coordinator_input.clear();
             self.coordinator_input_action = Some(action);
             self.input_mode = InputMode::CoordinatorInput;
             self.status = match action {
-                CoordinatorInputAction::SubmitFile => {
-                    "Enter an explicit v1 Submit JSON file path".into()
-                }
                 CoordinatorInputAction::ObserveId => {
                     "Enter the caller-supplied request ID to observe".into()
                 }
@@ -5049,99 +5024,8 @@ impl App {
         }
         #[cfg(target_os = "linux")]
         match action {
-            CoordinatorInputAction::SubmitFile => self.submit_coordinator_file(&value),
             CoordinatorInputAction::ObserveId => self.enqueue_coordinator_observe_for(&value),
             CoordinatorInputAction::CancelId => self.enqueue_coordinator_cancel_for(&value),
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    fn submit_coordinator_file(&mut self, raw_path: &str) {
-        if self.direct_native_job.is_some() || self.direct_native_admission_closed {
-            self.status = "A foreground CPU task is active or interrupted; coordinator Submit is unavailable until cleanup or recovery".into();
-            return;
-        }
-        if self.coordinator_action_pending
-            || (self.coordinator_request_id.is_some() && !self.coordinator_request_terminal)
-        {
-            self.status =
-                "Caller ID remains ambiguous or nonterminal; observe or cancel it before another Submit".into();
-            return;
-        }
-        let Some(socket_directory) = self.stack_coordinator_socket_dir.clone() else {
-            self.status =
-                "No explicit private coordinator socket is configured in shared settings".into();
-            return;
-        };
-        let Some(catalog) = self.stack_catalog.as_ref() else {
-            self.status = "Refresh the Stack Catalog before submitting".into();
-            return;
-        };
-        let Some(profile) = self
-            .stack_catalog_state
-            .selected()
-            .and_then(|index| catalog.list().get(index))
-            .map(|profile| profile.key.clone())
-        else {
-            self.status = "Select a manifest profile before submitting".into();
-            return;
-        };
-        let path = PathBuf::from(expand_tilde(raw_path.trim()));
-        let prepared = match coordinator_workbench::prepare_submission(&path, catalog, &profile) {
-            Ok(prepared) => prepared,
-            Err(PreparationError::SelectedProfileMismatch) => {
-                self.status =
-                    "Submit profile does not match the selected Stack Catalog profile".into();
-                return;
-            }
-            Err(_) => {
-                self.status = "Submit file is invalid, unavailable, or does not satisfy the strict request contract".into();
-                return;
-            }
-        };
-        if self.coordinator_request_id.as_deref() == Some(prepared.request_id()) {
-            self.status = "Use a new caller-supplied ID after a terminal request; this ID will not be replayed".into();
-            return;
-        }
-        if !self.ensure_coordinator_worker() {
-            return;
-        }
-        let request_id = prepared.request_id().to_owned();
-        let lane = prepared.lane();
-        let previous_request = (
-            self.coordinator_request_id.clone(),
-            self.coordinator_request_lane,
-            self.coordinator_request_terminal,
-        );
-        // Retain caller identity in the UI before handing the opaque request
-        // to the worker, which may dispatch immediately after enqueue.
-        self.coordinator_request_id = Some(request_id.clone());
-        self.coordinator_request_lane = Some(lane);
-        self.coordinator_request_terminal = false;
-        let result = self
-            .coordinator_workbench
-            .as_mut()
-            .expect("worker initialized")
-            .submit(socket_directory, prepared);
-        match result {
-            Ok(_) => {
-                self.clear_direct_native_result_display();
-                self.coordinator_output = None;
-                self.coordinator_decision_metadata = None;
-                self.coordinator_output_complete = false;
-                self.coordinator_results_available = false;
-                self.coordinator_action_pending = true;
-                self.status =
-                    "Caller ID retained; submitting once to the configured private coordinator"
-                        .into();
-            }
-            Err(_) => {
-                self.coordinator_request_id = previous_request.0;
-                self.coordinator_request_lane = previous_request.1;
-                self.coordinator_request_terminal = previous_request.2;
-                self.status =
-                    "Coordinator worker did not accept the request; nothing was dispatched".into();
-            }
         }
     }
 
@@ -7013,7 +6897,7 @@ impl App {
                     if self.coordinator_action_pending {
                         "action pending…"
                     } else {
-                        "idle · f/s/o/c"
+                        "idle · f/o/c"
                     }
                 )
             };
@@ -7975,7 +7859,6 @@ fn create_private_direct_speech_directory(data_root: &Path, job_id: u64) -> Resu
 
 fn coordinator_prompt(action: Option<CoordinatorInputAction>) -> &'static str {
     match action {
-        Some(CoordinatorInputAction::SubmitFile) => "Submit file path",
         Some(CoordinatorInputAction::ObserveId) => "Caller request ID to observe",
         Some(CoordinatorInputAction::CancelId) => "Caller request ID to cancel",
         None => "Coordinator input",
@@ -9435,6 +9318,40 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    fn submit_coordinator_chat_form(app: &mut App, request_id: &str, prompt: &str) {
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+            .unwrap();
+        for character in request_id.chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        for character in "5000".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        for character in format!(r#"[{{"role":"user","content":"{prompt}"}}]"#).chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        for character in "32".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL))
+            .unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
     fn wait_for_direct_native(app: &mut App) {
         let deadline = Instant::now() + Duration::from_secs(8);
         while app.direct_native_job.is_some() && Instant::now() < deadline {
@@ -10061,15 +9978,17 @@ mod tests {
         use std::os::unix::net::UnixListener;
 
         use crate::control::ipc::{
-            self, AcceptedOperation, ClientRequest, RequestEnvelope, RequestStatus,
-            ResponseEnvelope, ResponseMessage, WireChatRole, WireChatTurn, WireInferenceRequest,
-            WireRequestMessage,
+            self, AcceptedOperation, ClientRequest, RequestStatus, ResponseEnvelope,
+            ResponseMessage,
         };
         use crate::control::result_buffer::{
             ResultBuffer, ResultEvent, ResultTerminal, MAX_PAGE_BYTES,
         };
 
         const REQUEST_ID: &str = "caller:keyboard-workbench";
+        const NEXT_REQUEST_ID: &str = "caller:keyboard-workbench-next";
+        const PRIVATE_PROMPT: &str = "private user prompt";
+        const SECOND_PRIVATE_PROMPT: &str = "second private prompt";
         const SECRET_RESULT: &str = "native output stays in the private result panel";
 
         let fixture = AppFixture::new();
@@ -10087,47 +10006,28 @@ mod tests {
         settings.stack.coordinator_socket_dir = Some(socket_directory.path().display().to_string());
         crate::settings::save_settings_in(fixture.data.path(), &settings).unwrap();
 
-        let submit_path = fixture.root.join("explicit-submit.json");
-        let submit = RequestEnvelope::v1(WireRequestMessage::Submit {
-            request_id: REQUEST_ID.into(),
-            timeout_ms: 5_000,
-            request: WireInferenceRequest::Language {
-                profile_id: "local-chat".into(),
-                turns: vec![WireChatTurn {
-                    role: WireChatRole::User,
-                    content: "private user prompt".into(),
-                }],
-                max_tokens: 32,
-            },
-        });
-        fs::write(&submit_path, serde_json::to_vec(&submit).unwrap()).unwrap();
-        let next_submit_path = fixture.root.join("explicit-submit-next.json");
-        let next_submit = RequestEnvelope::v1(WireRequestMessage::Submit {
-            request_id: "caller:keyboard-workbench-next".into(),
-            timeout_ms: 5_000,
-            request: WireInferenceRequest::Language {
-                profile_id: "local-chat".into(),
-                turns: vec![WireChatTurn {
-                    role: WireChatRole::User,
-                    content: "second private prompt".into(),
-                }],
-                max_tokens: 32,
-            },
-        });
-        fs::write(&next_submit_path, serde_json::to_vec(&next_submit).unwrap()).unwrap();
-
         let server = thread::spawn(move || {
             let mut submitted = listener.accept().unwrap().0;
             let ipc::IncomingRequest::Control(ClientRequest::Submit {
                 request_id,
+                timeout,
                 request,
-                ..
             }) = ipc::read_incoming_request(&mut submitted).unwrap()
             else {
-                panic!("keyboard s should issue exactly one Submit")
+                panic!("typed task form should issue exactly one Submit")
             };
             assert_eq!(request_id, REQUEST_ID);
+            assert_eq!(timeout.as_millis(), 5_000);
             assert_eq!(request.profile().profile_id.as_str(), "local-chat");
+            let crate::control::requests::InferenceRequest::Chat {
+                turns, max_tokens, ..
+            } = request
+            else {
+                panic!("typed form retains the language-native chat shape")
+            };
+            assert_eq!(max_tokens, 32);
+            assert_eq!(turns.len(), 1);
+            assert_eq!(turns[0].content, PRIVATE_PROMPT);
             drop(submitted); // Lost acknowledgment must not trigger a replay.
 
             let mut status_stream = listener.accept().unwrap().0;
@@ -10197,12 +10097,19 @@ mod tests {
             .unwrap();
 
             let mut next_submit_stream = listener.accept().unwrap().0;
-            let ipc::IncomingRequest::Control(ClientRequest::Submit { request_id, .. }) =
-                ipc::read_incoming_request(&mut next_submit_stream).unwrap()
+            let ipc::IncomingRequest::Control(ClientRequest::Submit {
+                request_id,
+                request,
+                ..
+            }) = ipc::read_incoming_request(&mut next_submit_stream).unwrap()
             else {
-                panic!("a new explicit Submit is allowed after observing terminal status")
+                panic!("a new typed Submit is allowed after observing terminal status")
             };
-            assert_eq!(request_id, "caller:keyboard-workbench-next");
+            assert_eq!(request_id, NEXT_REQUEST_ID);
+            let crate::control::requests::InferenceRequest::Chat { turns, .. } = request else {
+                panic!("second typed form retains the language-native chat shape")
+            };
+            assert_eq!(turns[0].content, SECOND_PRIVATE_PROMPT);
             ipc::write_response(
                 &mut next_submit_stream,
                 &ResponseEnvelope::v1(ResponseMessage::Accepted {
@@ -10232,15 +10139,11 @@ mod tests {
         app.stack_catalog_state.select(Some(selected));
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
             .unwrap();
-        assert_eq!(app.input_mode, InputMode::CoordinatorInput);
-        for character in submit_path.display().to_string().chars() {
-            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
-                .unwrap();
-        }
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
-            .unwrap();
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.coordinator_workbench.is_none());
+        submit_coordinator_chat_form(&mut app, REQUEST_ID, PRIVATE_PROMPT);
         assert_eq!(app.coordinator_request_id.as_deref(), Some(REQUEST_ID));
-        assert!(!app.status.contains("private user prompt"));
+        assert!(!app.status.contains(PRIVATE_PROMPT));
 
         let deadline = Instant::now() + Duration::from_secs(3);
         while app.coordinator_action_pending && Instant::now() < deadline {
@@ -10250,11 +10153,13 @@ mod tests {
         assert!(!app.coordinator_action_pending);
         assert!(app.status.contains("acknowledgment unavailable"));
         assert_eq!(app.coordinator_request_id.as_deref(), Some(REQUEST_ID));
-        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
             .unwrap();
         assert_eq!(app.input_mode, InputMode::Normal);
         assert_eq!(app.coordinator_request_id.as_deref(), Some(REQUEST_ID));
-        assert!(app.status.contains("ambiguous or nonterminal"));
+        assert!(app
+            .status
+            .contains("Caller ID remains ambiguous or nonterminal"));
 
         app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE))
             .unwrap();
@@ -10286,20 +10191,8 @@ mod tests {
         assert!(app.status.contains("Cancel acknowledged"));
         assert!(!app.status.contains(SECRET_RESULT));
 
-        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
-            .unwrap();
-        assert_eq!(app.input_mode, InputMode::CoordinatorInput);
-        assert_eq!(app.coordinator_request_id.as_deref(), Some(REQUEST_ID));
-        for character in next_submit_path.display().to_string().chars() {
-            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
-                .unwrap();
-        }
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
-            .unwrap();
-        assert_eq!(
-            app.coordinator_request_id.as_deref(),
-            Some("caller:keyboard-workbench-next")
-        );
+        submit_coordinator_chat_form(&mut app, NEXT_REQUEST_ID, SECOND_PRIVATE_PROMPT);
+        assert_eq!(app.coordinator_request_id.as_deref(), Some(NEXT_REQUEST_ID));
         let deadline = Instant::now() + Duration::from_secs(3);
         while app.coordinator_action_pending && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(5));
@@ -10460,50 +10353,6 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
         assert!(!terminal_text(&terminal).contains(PRIVATE_TURN));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn invalid_explicit_submit_file_uses_fixed_error_and_never_starts_a_worker() {
-        let fixture = AppFixture::new();
-        write_stack_fixture(&fixture);
-        let socket_directory = tempfile::tempdir().unwrap();
-        let mut settings = crate::settings::Settings::default();
-        settings.stack.coordinator_socket_dir = Some(socket_directory.path().display().to_string());
-        crate::settings::save_settings_in(fixture.data.path(), &settings).unwrap();
-        let submit_path = fixture.root.join("invalid-submit.json");
-        fs::write(&submit_path, "private invalid file contents").unwrap();
-
-        let mut app = fixture.app();
-        app.handle_key(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE))
-            .unwrap();
-        let selected = app
-            .stack_catalog
-            .as_ref()
-            .unwrap()
-            .list()
-            .iter()
-            .position(|profile| profile.key.profile_id.as_str() == "local-chat")
-            .unwrap();
-        app.stack_catalog_state.select(Some(selected));
-        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
-            .unwrap();
-        for character in submit_path.display().to_string().chars() {
-            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
-                .unwrap();
-        }
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
-            .unwrap();
-
-        assert!(app.status.contains("strict request contract"));
-        assert!(!app.status.contains("private invalid file contents"));
-        assert!(!app.status.contains(&submit_path.display().to_string()));
-        assert!(!app.log.iter().any(|line| {
-            line.contains("private invalid file contents")
-                || line.contains(&submit_path.display().to_string())
-        }));
-        assert!(app.coordinator_workbench.is_none());
-        assert!(app.coordinator_request_id.is_none());
     }
 
     #[test]

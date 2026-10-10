@@ -42,7 +42,7 @@ const MAX_COORDINATOR_ARTIFACT_CHUNK_JSON_BYTES: usize = 160 * 1024;
     about = "L3MS launcher (TUI + interactive model and bench CLI)",
     group(
         ArgGroup::new("action")
-            .args(["run", "run_profile", "bench", "list", "quickstart", "settings", "export_profile", "import_profile", "compare_results", "coordinator_status", "coordinator_cancel", "request_results", "request_submit", "request_output", "artifact_chunk", "coordinator_cpu_daemon", "coordinator_managed_session", "coordinator_http_gateway"])
+            .args(["run", "run_profile", "bench", "list", "quickstart", "settings", "export_profile", "import_profile", "compare_results", "coordinator_status", "coordinator_cancel", "request_results", "request_output", "artifact_chunk", "coordinator_cpu_daemon", "coordinator_managed_session", "coordinator_http_gateway"])
             .multiple(false)
     )
 )]
@@ -120,10 +120,6 @@ struct Cli {
     /// Read one bounded retained-results page by caller-owned request ID.
     #[arg(long, value_name = "ID")]
     request_results: Option<String>,
-
-    /// Submit one strict v1 request envelope from a bounded JSON file.
-    #[arg(long, value_name = "PATH")]
-    request_submit: Option<PathBuf>,
 
     /// Read currently retained and reassembled native output for one request.
     #[arg(long, value_name = "ID")]
@@ -307,7 +303,6 @@ fn coordinator_options_present(cli: &Cli) -> bool {
     cli.coordinator_status.is_some()
         || cli.coordinator_cancel.is_some()
         || cli.request_results.is_some()
-        || cli.request_submit.is_some()
         || cli.request_output.is_some()
         || cli.artifact_chunk.is_some()
         || cli.artifact_kind.is_some()
@@ -426,7 +421,6 @@ fn dispatch(cli: Cli) -> Result<u8> {
     let configured_socket_dir = if (cli.coordinator_status.is_some()
         || cli.coordinator_cancel.is_some()
         || cli.request_results.is_some()
-        || cli.request_submit.is_some()
         || cli.request_output.is_some()
         || cli.artifact_chunk.is_some())
         && cli.coordinator_socket_dir.is_none()
@@ -588,7 +582,6 @@ fn coordinator_cpu_daemon_action(cli: &Cli) -> Result<Option<&Path>> {
         || cli.coordinator_status.is_some()
         || cli.coordinator_cancel.is_some()
         || cli.request_results.is_some()
-        || cli.request_submit.is_some()
         || cli.request_output.is_some()
         || cli.artifact_chunk.is_some()
         || cli.artifact_kind.is_some()
@@ -614,7 +607,6 @@ fn coordinator_managed_session_action(cli: &Cli) -> Result<Option<&Path>> {
         || cli.coordinator_status.is_some()
         || cli.coordinator_cancel.is_some()
         || cli.request_results.is_some()
-        || cli.request_submit.is_some()
         || cli.request_output.is_some()
         || cli.artifact_chunk.is_some()
         || cli.artifact_kind.is_some()
@@ -641,7 +633,6 @@ fn coordinator_output_spec(cli: &Cli) -> Result<Option<(&str, crate::control::ca
             if cli.coordinator_status.is_some()
                 || cli.coordinator_cancel.is_some()
                 || cli.request_results.is_some()
-                || cli.request_submit.is_some()
             {
                 bail!("--request-output must be the only coordinator operation");
             }
@@ -679,7 +670,6 @@ fn coordinator_artifact_chunk_spec(cli: &Cli) -> Result<Option<ArtifactChunkSpec
     if cli.coordinator_status.is_some()
         || cli.coordinator_cancel.is_some()
         || cli.request_results.is_some()
-        || cli.request_submit.is_some()
         || cli.request_output.is_some()
         || cli.request_lane.is_some()
         || cli.coordinator_cpu_daemon.is_some()
@@ -802,7 +792,6 @@ fn coordinator_action(
         cli.coordinator_status.is_some(),
         cli.coordinator_cancel.is_some(),
         cli.request_results.is_some(),
-        cli.request_submit.is_some(),
     ]
     .into_iter()
     .filter(|present| *present)
@@ -814,13 +803,11 @@ fn coordinator_action(
         cli.coordinator_status.as_deref(),
         cli.coordinator_cancel.as_deref(),
         cli.request_results.as_deref(),
-        cli.request_submit.as_deref(),
     ) {
-        (Some(request_id), None, None, None) => Some(ParsedCoordinatorAction::Status(request_id)),
-        (None, Some(request_id), None, None) => Some(ParsedCoordinatorAction::Cancel(request_id)),
-        (None, None, Some(request_id), None) => Some(ParsedCoordinatorAction::Results(request_id)),
-        (None, None, None, Some(path)) => Some(ParsedCoordinatorAction::Submit(path)),
-        (None, None, None, None) => None,
+        (Some(request_id), None, None) => Some(ParsedCoordinatorAction::Status(request_id)),
+        (None, Some(request_id), None) => Some(ParsedCoordinatorAction::Cancel(request_id)),
+        (None, None, Some(request_id)) => Some(ParsedCoordinatorAction::Results(request_id)),
+        (None, None, None) => None,
         _ => bail!("choose only one coordinator operation"),
     };
 
@@ -862,7 +849,6 @@ fn coordinator_action(
                 byte_budget,
             )
         }
-        ParsedCoordinatorAction::Submit(path) => read_submit_envelope(path)?,
     };
     Ok(Some((request, socket_directory)))
 }
@@ -885,23 +871,6 @@ enum ParsedCoordinatorAction<'a> {
     Status(&'a str),
     Cancel(&'a str),
     Results(&'a str),
-    Submit(&'a Path),
-}
-
-fn read_submit_envelope(path: &Path) -> Result<crate::control::ipc::RequestEnvelope> {
-    let root = repository_root().map_err(|_| anyhow::anyhow!("submit request file is invalid"))?;
-    let data_root = crate::state_store::data_root()
-        .map_err(|_| anyhow::anyhow!("submit request file is invalid"))?;
-    let resolved = load_current_stack_settings_in(&root, &data_root)
-        .map_err(|_| anyhow::anyhow!("submit request file is invalid"))?;
-    let catalog = Catalog::load_from_roots(
-        &root,
-        &resolved.media_toolkit_root,
-        &resolved.decisions_toolkit_root,
-    )
-    .map_err(|_| anyhow::anyhow!("submit request file is invalid"))?;
-    crate::control::submission_file::read(path, &catalog)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
 
 fn configured_coordinator_socket_dir() -> Result<Option<PathBuf>> {
@@ -2147,32 +2116,12 @@ mod tests {
         ])
         .is_err());
 
-        let cli = Cli::try_parse_from(["l3ms", "--request-submit", "request.json"]).unwrap();
-        assert_eq!(
-            cli.request_submit.as_deref(),
-            Some(Path::new("request.json"))
-        );
-        assert!(Cli::try_parse_from([
-            "l3ms",
-            "--request-submit",
-            "request.json",
-            "--request-results",
-            "request-1",
-        ])
-        .is_err());
+        assert!(Cli::try_parse_from(["l3ms", "--request-submit", "request.json"]).is_err());
         let cli = Cli::try_parse_from(["l3ms", "--coordinator-cpu-daemon", "daemon.json"]).unwrap();
         assert_eq!(
             cli.coordinator_cpu_daemon.as_deref(),
             Some(Path::new("daemon.json"))
         );
-        assert!(Cli::try_parse_from([
-            "l3ms",
-            "--coordinator-cpu-daemon",
-            "daemon.json",
-            "--request-submit",
-            "request.json",
-        ])
-        .is_err());
         assert!(Cli::try_parse_from([
             "l3ms",
             "--coordinator-cpu-daemon",
@@ -2197,15 +2146,6 @@ mod tests {
             "stack",
         ])
         .is_err());
-        assert!(Cli::try_parse_from([
-            "l3ms",
-            "--request-submit",
-            "request.json",
-            "--list",
-            "stack",
-        ])
-        .is_err());
-
         let cli = Cli::try_parse_from([
             "l3ms",
             "--request-results",
@@ -2232,8 +2172,6 @@ mod tests {
         )
         .is_err());
         let cli = Cli::try_parse_from(["l3ms", "--coordinator-status", "request-1"]).unwrap();
-        assert!(coordinator_action(&cli, None).is_err());
-        let cli = Cli::try_parse_from(["l3ms", "--request-submit", "request.json"]).unwrap();
         assert!(coordinator_action(&cli, None).is_err());
         assert!(Cli::try_parse_from([
             "l3ms",
@@ -2607,335 +2545,6 @@ mod tests {
             cpu_coordinator_report_json(report),
             r#"{"completed_exchanges":7,"failed_connections":2,"stopped":"deadline"}"#
         );
-    }
-
-    fn valid_submit_envelope() -> crate::control::ipc::RequestEnvelope {
-        use crate::control::ipc::{
-            RequestEnvelope, WireChatRole, WireChatTurn, WireInferenceRequest, WireRequestMessage,
-        };
-
-        RequestEnvelope::v1(WireRequestMessage::Submit {
-            request_id: "caller:cli-submit-1".into(),
-            timeout_ms: 15_000,
-            request: WireInferenceRequest::Language {
-                profile_id: "gemma-4-26b-qat-mtp".into(),
-                turns: vec![WireChatTurn {
-                    role: WireChatRole::User,
-                    content: "private submit prompt".into(),
-                }],
-                max_tokens: 32,
-            },
-        })
-    }
-
-    fn write_submit_envelope(path: &Path, envelope: &crate::control::ipc::RequestEnvelope) {
-        let bytes = serde_json::to_vec(envelope).unwrap();
-        std::fs::write(path, bytes).unwrap();
-    }
-
-    #[test]
-    fn submit_selection_resolves_explicit_or_shared_socket_and_preserves_envelope() {
-        let root = tempfile::tempdir().unwrap();
-        let file = root.path().join("submit.json");
-        write_submit_envelope(&file, &valid_submit_envelope());
-        let shared_socket = PathBuf::from("/run/user/1000/shared-l3ms");
-        let cli =
-            Cli::try_parse_from(["l3ms", "--request-submit", file.to_str().unwrap()]).unwrap();
-        let Some((request, directory)) =
-            coordinator_action(&cli, Some(shared_socket.clone())).unwrap()
-        else {
-            panic!("submit action should be present");
-        };
-        assert_eq!(directory, shared_socket);
-        assert_eq!(request.version, crate::control::ipc::PROTOCOL_VERSION);
-        let crate::control::ipc::WireRequestMessage::Submit {
-            request_id,
-            timeout_ms,
-            request:
-                crate::control::ipc::WireInferenceRequest::Language {
-                    profile_id,
-                    turns,
-                    max_tokens,
-                },
-        } = request.message
-        else {
-            panic!("submit envelope should be preserved");
-        };
-        assert!(request_id == "caller:cli-submit-1");
-        assert!(timeout_ms == 15_000);
-        assert!(profile_id == "gemma-4-26b-qat-mtp");
-        assert!(turns.len() == 1 && turns[0].content == "private submit prompt");
-        assert!(max_tokens == 32);
-
-        for args in [
-            vec![
-                "l3ms",
-                "--request-submit",
-                file.to_str().unwrap(),
-                "--after-cursor",
-                "1",
-                "--coordinator-socket-dir",
-                "/run/user/1000/explicit-l3ms",
-            ],
-            vec![
-                "l3ms",
-                "--request-submit",
-                file.to_str().unwrap(),
-                "--result-page-bytes",
-                "2048",
-                "--coordinator-socket-dir",
-                "/run/user/1000/explicit-l3ms",
-            ],
-            vec![
-                "l3ms",
-                "--request-submit",
-                file.to_str().unwrap(),
-                "--extra",
-                "",
-                "--coordinator-socket-dir",
-                "/run/user/1000/explicit-l3ms",
-            ],
-        ] {
-            let cli = Cli::try_parse_from(args).unwrap();
-            assert!(coordinator_action(&cli, None).is_err());
-        }
-
-        let explicit_socket = PathBuf::from("/run/user/1000/explicit-l3ms");
-        let cli = Cli::try_parse_from([
-            "l3ms",
-            "--request-submit",
-            file.to_str().unwrap(),
-            "--coordinator-socket-dir",
-            explicit_socket.to_str().unwrap(),
-        ])
-        .unwrap();
-        let Some((_, directory)) =
-            coordinator_action(&cli, Some(PathBuf::from("/run/user/1000/shared-l3ms"))).unwrap()
-        else {
-            panic!("explicit submit action should be present");
-        };
-        assert_eq!(directory, explicit_socket);
-    }
-
-    #[test]
-    fn submit_rejects_invalid_version_operation_and_native_payload_before_connect() {
-        use crate::control::ipc::{RequestEnvelope, WireInferenceRequest, WireRequestMessage};
-
-        let directory = tempfile::tempdir().unwrap();
-        let file = directory.path().join("request.json");
-        let invalid_envelopes = [
-            RequestEnvelope {
-                version: crate::control::ipc::RESULTS_PROTOCOL_VERSION,
-                message: valid_submit_envelope().message,
-            },
-            RequestEnvelope::v1(WireRequestMessage::Status {
-                request_id: "caller:submit-status".into(),
-            }),
-            RequestEnvelope::v1(WireRequestMessage::Submit {
-                request_id: "caller:invalid-native".into(),
-                timeout_ms: 5_000,
-                request: WireInferenceRequest::Language {
-                    profile_id: "gemma-4-26b-qat-mtp".into(),
-                    turns: Vec::new(),
-                    max_tokens: 0,
-                },
-            }),
-        ];
-
-        for envelope in invalid_envelopes {
-            write_submit_envelope(&file, &envelope);
-            let cli = Cli::try_parse_from([
-                "l3ms",
-                "--request-submit",
-                file.to_str().unwrap(),
-                "--coordinator-socket-dir",
-                directory.path().to_str().unwrap(),
-            ])
-            .unwrap();
-            let error = dispatch(cli).unwrap_err();
-            assert!(error.to_string().contains("submit request file"));
-            assert!(!error.to_string().contains("private submit prompt"));
-            assert!(!directory.path().join("coordinator.sock").exists());
-        }
-
-        let invalid_role_shape = serde_json::json!({
-            "version": 1,
-            "message": {
-                "type": "submit",
-                "request_id": "caller:strict-json",
-                "timeout_ms": 5000,
-                "request": {
-                    "lane": "language",
-                    "profile_id": "gemma-4-26b-qat-mtp",
-                    "turns": [{ "role": "user", "content": "secret" }],
-                    "max_tokens": 16,
-                    "unknown": true
-                }
-            }
-        });
-        std::fs::write(&file, serde_json::to_vec(&invalid_role_shape).unwrap()).unwrap();
-        let cli = Cli::try_parse_from([
-            "l3ms",
-            "--request-submit",
-            file.to_str().unwrap(),
-            "--coordinator-socket-dir",
-            directory.path().to_str().unwrap(),
-        ])
-        .unwrap();
-        let error = dispatch(cli).unwrap_err();
-        assert!(error.to_string().contains("submit request file is invalid"));
-        assert!(!error.to_string().contains("secret"));
-        assert!(!directory.path().join("coordinator.sock").exists());
-    }
-
-    #[test]
-    fn submit_file_must_be_regular_nonsymlink_and_bounded() {
-        use crate::control::ipc::MAX_FRAME_BYTES;
-
-        let directory = tempfile::tempdir().unwrap();
-        let regular = directory.path().join("regular.json");
-        write_submit_envelope(&regular, &valid_submit_envelope());
-        let oversized = directory.path().join("oversized.json");
-        std::fs::write(&oversized, vec![b'x'; MAX_FRAME_BYTES + 1]).unwrap();
-
-        let oversized_error = read_submit_envelope(&oversized).err().unwrap();
-        assert!(oversized_error
-            .to_string()
-            .contains("submit request file exceeds the size limit"));
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::symlink;
-
-            let symbolic = directory.path().join("symbolic.json");
-            symlink(&regular, &symbolic).unwrap();
-            assert_eq!(
-                read_submit_envelope(&symbolic).err().unwrap().to_string(),
-                "submit request file is unavailable or unsafe"
-            );
-
-            let fifo = directory.path().join("request.fifo");
-            let fifo_c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
-            // SAFETY: fifo_c is a valid nul-terminated path and the FIFO lives
-            // inside this test's private temporary directory.
-            assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
-            assert_eq!(
-                read_submit_envelope(&fifo).err().unwrap().to_string(),
-                "submit request file is unavailable or unsafe"
-            );
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn submit_cli_delegates_exact_request_to_the_shared_client() {
-        use crate::control::ipc::{
-            AcceptedOperation, ClientRequest, RequestStatus, ResponseEnvelope, ResponseMessage,
-        };
-        use crate::control::requests::InferenceRequest;
-        use std::os::unix::fs::PermissionsExt;
-        use std::os::unix::net::UnixListener;
-
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let socket_path = directory.path().join("coordinator.sock");
-        let listener = UnixListener::bind(&socket_path).unwrap();
-        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600)).unwrap();
-
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let ClientRequest::Submit {
-                request_id,
-                request,
-                timeout,
-            } = crate::control::ipc::read_request(&mut stream).unwrap()
-            else {
-                panic!("server should receive a submit");
-            };
-            assert!(request_id == "caller:cli-submit-1");
-            assert!(timeout == std::time::Duration::from_millis(15_000));
-            let InferenceRequest::Chat {
-                turns, max_tokens, ..
-            } = request
-            else {
-                panic!("server should receive the language request");
-            };
-            assert!(turns.len() == 1 && turns[0].content == "private submit prompt");
-            assert!(max_tokens == 32);
-            crate::control::ipc::write_response(
-                &mut stream,
-                &ResponseEnvelope::v1(ResponseMessage::Accepted {
-                    request_id: "caller:cli-submit-1".into(),
-                    operation: AcceptedOperation::Submit,
-                    state: RequestStatus::Queued,
-                }),
-            )
-            .unwrap();
-        });
-
-        let file = directory.path().join("submit.json");
-        write_submit_envelope(&file, &valid_submit_envelope());
-        let cli = Cli::try_parse_from([
-            "l3ms",
-            "--request-submit",
-            file.to_str().unwrap(),
-            "--coordinator-socket-dir",
-            directory.path().to_str().unwrap(),
-        ])
-        .unwrap();
-        assert_eq!(dispatch(cli).unwrap(), 0);
-        server.join().unwrap();
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn submit_lost_ack_is_not_retried() {
-        use std::os::unix::fs::PermissionsExt;
-        use std::os::unix::net::UnixListener;
-
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let socket_path = directory.path().join("coordinator.sock");
-        let listener = UnixListener::bind(&socket_path).unwrap();
-        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600)).unwrap();
-
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let _ = crate::control::ipc::read_request(&mut stream).unwrap();
-            let _ = stream.shutdown(std::net::Shutdown::Both);
-            drop(stream);
-            listener.set_nonblocking(true).unwrap();
-            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
-            let mut extra_connections = 0;
-            while std::time::Instant::now() < deadline {
-                match listener.accept() {
-                    Ok((stream, _)) => {
-                        extra_connections += 1;
-                        drop(stream);
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(std::time::Duration::from_millis(5));
-                    }
-                    Err(_) => break,
-                }
-            }
-            extra_connections
-        });
-
-        let file = directory.path().join("submit.json");
-        write_submit_envelope(&file, &valid_submit_envelope());
-        let cli = Cli::try_parse_from([
-            "l3ms",
-            "--request-submit",
-            file.to_str().unwrap(),
-            "--coordinator-socket-dir",
-            directory.path().to_str().unwrap(),
-        ])
-        .unwrap();
-        let error = dispatch(cli).unwrap_err();
-        assert!(!error.to_string().contains("private submit prompt"));
-        assert!(!error.to_string().contains(file.to_str().unwrap()));
-        assert_eq!(server.join().unwrap(), 0);
     }
 
     #[test]

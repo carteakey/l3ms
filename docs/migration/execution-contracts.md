@@ -17,10 +17,11 @@ request cooperative cleanup while the listener/host owner remains held through
 the bounded attempt. Unknown cleanup records interruption and closes admission.
 See [foreground-coordinator.md](foreground-coordinator.md) for operator setup.
 
-Submit clients share `submission_file::read`: bounded regular nofollow input,
-strict v1 Submit, native validation against refreshed caller catalog, exact
-caller ID, fixed errors and no IO beyond reading. The daemon remains the durable
-acceptance authority. A lost acknowledgment never authorizes client replay.
+Generic envelope-file submission and its shared parser have been retired.
+Remaining Stack task forms build typed native requests, validate the refreshed
+catalog and retain the caller ID before dispatch. The daemon remains the durable
+acceptance authority for this older path. A lost acknowledgment never authorizes
+client replay; CPU direct decisions/speech do not use this path.
 
 `ResultConsumer` reconstructs from cursor zero transactionally under the 8 MiB
 serialized-event cap, with contiguous request-correlated cursors, selected-lane

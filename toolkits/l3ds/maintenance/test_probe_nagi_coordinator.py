@@ -39,6 +39,15 @@ def completed_row(request_id: str, result_state: str = "succeeded") -> dict[str,
 
 
 class ProbeNagiOfflineSafetyTests(unittest.TestCase):
+    def test_retired_run_does_not_start_a_daemon_or_prepare_a_fixture(self) -> None:
+        with mock.patch.object(sys, "argv", [str(SCRIPT), "--run"]), \
+             mock.patch.object(probe, "validate_binary") as validate, \
+             mock.patch.object(probe, "run_acceptance") as run, \
+             mock.patch("builtins.print"):
+            self.assertEqual(probe.main(), 1)
+        validate.assert_not_called()
+        run.assert_not_called()
+
     def test_native_metadata_requires_exact_positive_integer_nanoseconds(self) -> None:
         response = {
             "request_id": "fixture", "complete": True,

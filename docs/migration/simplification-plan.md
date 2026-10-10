@@ -206,3 +206,16 @@ Still temporary overlap: this slice adds 1,233 net root source lines, and no
 platform module is retired yet. Next replace remaining coordinator form callers
 with native media/language workflows and delete the displaced caller dependency
 closure. Do not extend the managed daemon, owned-job helpers or recovery platform.
+
+### First caller-first deletion checkpoint — 2026-10-10
+
+Retired generic envelope-file Submit from CLI/Stack, its parser and file-specific
+workbench preparation. Typed forms and observe/cancel/results stay; all native
+task implementations and original standalone commands remain. Net whole-root
+source reduction: 714 lines, including tests; cumulative change since `702b4cd`
+is still +2,425, so the broader reduction target is not met.
+
+Next reuse the existing Chat tab/client for exact Stack language model selection,
+not another chat execution owner. Native embeddings/media still need replacement
+before removing the full coordinator closure. Historical probe entry points must
+fail before launching retired infrastructure, not silently run a broken test.

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Opt-in, bounded CPU-only Nagi-Smol acceptance through the foreground coordinator.
 
-Default mode prints a plan and performs no model work. ``--run`` makes exactly
-one caller-ID submit, then uses only read-only status/results/output queries.
+Default mode prints the historical plan and performs no model work. ``--run``
+is retired with the generic coordinator file-submit entry point; use direct
+CPU decision acceptance instead. Helpers remain for bounded direct-run probes.
 All model/cache access is forced offline; no service manager or GPU utility is
 used. Uncertain cleanup leaves the private fixture in place.
 """
@@ -1125,15 +1126,12 @@ def main() -> int:
             )
         )
         return 0
-    try:
-        binary = validate_binary(args.binary)
-        result = run_acceptance(binary, args.timeout_seconds)
-    except ProbeFailure as error:
-        result = {
-            "ok": False,
-            "error": error.category,
-            "temporary_fixture_retained": False,
-        }
+    result = {
+        "ok": False,
+        "error": "historical coordinator file-submit probe retired; use direct CPU decisions",
+        "temporary_fixture_retained": False,
+        "model_loads": 0,
+    }
     print(json.dumps(result, separators=(",", ":")))
     return 0 if result.get("ok") else 1
 

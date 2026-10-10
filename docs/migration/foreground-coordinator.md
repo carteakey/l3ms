@@ -46,9 +46,10 @@ connection limits also trigger shutdown. An uncertain worker does not become a
 successful cleanup; durable interruption prevents optimistic restart admission.
 Forced termination such as SIGKILL cannot provide cleanup acknowledgment.
 
-From another terminal, `--request-submit PATH` reads one strict v1 Submit envelope
-with a caller-selected stable request ID. Use `--coordinator-socket-dir DIRECTORY`
-or the shared coordinator setting. Acceptance is durable before its reply; a
+Generic CLI envelope-file submission has been retired; use the typed Stack form
+for remaining coordinator tasks, or direct CPU tasks without a coordinator.
+Use `--coordinator-socket-dir DIRECTORY` or the shared coordinator setting for
+observation/cancellation. Acceptance is durable before its reply; a
 lost reply means query that same ID with `--coordinator-status ID`, not resubmit.
 `--coordinator-cancel ID` requests cancellation, and `--request-results ID` reads
 one bounded v2 native result page. Results are memory-only; durable status survives
@@ -71,9 +72,9 @@ created and no inference is started/retried. Unknown/expired data returns no
 bytes; durable success after a daemon restart does not restore access. Full-file
 saving, TUI consumption and native streaming remain separate acceptance work.
 
-For example, the Submit file for an operator-prepared native CPU decision profile
-has this shape. Replace `your-native-cpu-profile` with its actual catalog ID;
-this example does not install a profile or turn an existing CUDA profile into CPU.
+For reference, the internal wire envelope for a typed CPU decision form has this
+shape. This is not a supported CLI input file. Replace `your-native-cpu-profile`
+with its actual catalog ID; this example does not install a profile or turn CUDA into CPU.
 
 ```json
 {
@@ -106,7 +107,7 @@ Unknown, expired, malformed, or incomplete output fails explicitly. Neither
 result action submits work or retries inference.
 
 In the Stack Catalog (F8/Alt+8), configure the same private socket directory and
-select a native profile. `s` opens a strict request-file input, `o` observes a
+select a native profile. `o` observes a
 retained or entered ID and displays native output in a private panel, and `c`
 requests cancellation. `f` opens a native task form for the captured catalog
 profile: chat turns or an embedding text-batch JSON array, media workflow JSON

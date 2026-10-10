@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### Breaking changes
+- Retire branch-added generic `--request-submit` envelope-file submission and
+  the Stack Catalog `s` action. Use typed forms (`f`) for remaining coordinator
+  tasks or `--run-profile` for supported direct CPU tasks. Keep observe/cancel,
+  native tasks and original standalone workflows. The historical file-submit
+  Nagi probe now refuses `--run` before any daemon/model work.
 - Extracted image/audio/video tooling into the standalone `l2m2` repository.
   Removed `--media` and `--list media`; `--list all` no longer needs a media
   manifest. Moved Qwen Image/Edit and LTX download entries and media docs.

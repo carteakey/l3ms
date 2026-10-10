@@ -10,6 +10,21 @@ existing Linear migration issues rather than replacing their acceptance criteria
 
 ## Monorepo: next work
 
+Latest simplification cut: retire branch-added generic `--request-submit` and
+Stack `s` file submission, remove `submission_file` and its workbench adapter.
+Typed `f` forms, observe/cancel/results, direct CPU tasks and original standalone
+commands remain. This removes **714 net root source lines**, including tests;
+the parser/duplicate entry point is gone, not relocated. The typed keyboard
+integration test retains submit/observe/cancel/results coverage. Current root
+suite: **877 passed, 1 ignored**; 17 decision-maintenance Python tests pass.
+Cumulative `src/` change against `702b4cd` remains **+2,425 lines**.
+
+Next concrete slice: hand Stack language chat selection to the existing Chat
+tab/client with an exact model match, rather than build another chat owner.
+Then replace native embedding/media form callers before deleting the remaining
+coordinator dependency closure. Keep explicit unsupported tasks honest and
+preserve standalone access; do not remove unreplaced working paths.
+
 **Revised direction:** follow the [simplification plan](docs/migration/simplification-plan.md).
 Next finish native TTS/media wrapper workflows, then delete displaced
 infrastructure. Do not build the Stop journal
@@ -28,7 +43,7 @@ WAV paths in CLI/TUI. Real offline CPU execution passed; see
 Next other native media, GPU switching, platform deletion and UI polish in the
 [execution plan](docs/migration/simplification-plan.md#execution-plan--parallel-audit-resolved-2026-10-09).
 
-Latest replacement checkpoint on `feature/l3ms-monorepo`: **884 root tests
+Previous speech replacement checkpoint on `feature/l3ms-monorepo`: **884 root tests
 passed, 1 ignored**; six media-toolkit Rust tests, 14 downloader and 17 media
 Python tests pass, along with strict all-target Clippy, formatting and shell
 syntax checks. Real CPU speech and UI lifecycle fixtures passed. This slice adds

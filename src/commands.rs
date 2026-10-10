@@ -76,7 +76,6 @@ pub enum CommandId {
     StackCatalogSelectPrevious,
     StackCatalogSelectNext,
     StackCatalogRefresh,
-    StackCatalogSubmit,
     StackCatalogForm,
     StackCatalogObserve,
     StackCatalogCancel,
@@ -177,7 +176,7 @@ pub enum CommandId {
 impl CommandId {
     /// Every command identifier. Kept in declaration order for completeness
     /// checks and integrations which want to validate their dispatch table.
-    pub const ALL: [Self; 104] = [
+    pub const ALL: [Self; 103] = [
         Self::Quit,
         Self::ShowHelp,
         Self::ShowPalette,
@@ -193,7 +192,6 @@ impl CommandId {
         Self::StackCatalogSelectPrevious,
         Self::StackCatalogSelectNext,
         Self::StackCatalogRefresh,
-        Self::StackCatalogSubmit,
         Self::StackCatalogForm,
         Self::StackCatalogObserve,
         Self::StackCatalogCancel,
@@ -302,7 +300,6 @@ impl CommandId {
             Self::StackCatalogSelectPrevious => "stack-catalog.select-previous",
             Self::StackCatalogSelectNext => "stack-catalog.select-next",
             Self::StackCatalogRefresh => "stack-catalog.refresh",
-            Self::StackCatalogSubmit => "stack-catalog.submit",
             Self::StackCatalogForm => "stack-catalog.form",
             Self::StackCatalogObserve => "stack-catalog.observe",
             Self::StackCatalogCancel => "stack-catalog.cancel",
@@ -671,15 +668,6 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Stack Catalog: refresh manifests",
         true,
         ["reload"]
-    ),
-    command!(
-        StackCatalogSubmit,
-        StackCatalog,
-        "s",
-        "Submit request file",
-        "Stack Catalog: submit one explicit request file",
-        true,
-        ["coordinator", "request", "run", "inference"]
     ),
     command!(
         StackCatalogForm,

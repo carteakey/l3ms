@@ -1,5 +1,10 @@
 # Nagi local acceptance — 2026-10-07
 
+Historical evidence: generic coordinator envelope-file submission is now retired.
+The old probe's `--run` refuses before starting a daemon or loading models;
+its bounded helper functions remain usable by direct-run acceptance probes.
+Use [direct CPU acceptance](direct-decision-acceptance.md) for the current path.
+
 The owner approved the separate environment and required model acquisition.
 Original decision environments, CUDA manifests and live services were not changed.
 This is CPU native execution evidence, not a GPU-latency or routing-quality claim.
