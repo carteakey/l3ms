@@ -23,6 +23,8 @@ pub mod decision;
 #[cfg(target_os = "linux")]
 pub mod decision_worker;
 #[cfg(target_os = "linux")]
+pub(crate) mod direct_run;
+#[cfg(target_os = "linux")]
 pub mod engine_health;
 #[cfg(target_os = "linux")]
 pub mod engine_helper;

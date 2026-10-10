@@ -2,7 +2,8 @@
 
 use std::env;
 use std::ffi::{OsStr, OsString};
-use std::io::{self, Write};
+use std::fs::OpenOptions;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(target_os = "linux")]
@@ -27,6 +28,10 @@ const COORDINATOR_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_COORDINATOR_RESPONSE_BYTES: usize = 2 * 1024;
 const MAX_COORDINATOR_RESULTS_ENVELOPE_BYTES: usize = 4 * 1024;
 const MAX_COORDINATOR_NATIVE_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_DIRECT_DECISION_INPUT_BYTES: usize = 1024 * 1024;
+const MAX_DIRECT_DECISION_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
+const DEFAULT_DIRECT_DECISION_TIMEOUT_MS: u64 = 300_000;
+const MAX_DIRECT_DECISION_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;
 #[cfg(target_os = "linux")]
 const MAX_COORDINATOR_ARTIFACT_CHUNK_JSON_BYTES: usize = 160 * 1024;
 
@@ -37,7 +42,7 @@ const MAX_COORDINATOR_ARTIFACT_CHUNK_JSON_BYTES: usize = 160 * 1024;
     about = "L3MS launcher (TUI + interactive model and bench CLI)",
     group(
         ArgGroup::new("action")
-            .args(["run", "bench", "list", "quickstart", "settings", "export_profile", "import_profile", "compare_results", "coordinator_status", "coordinator_cancel", "request_results", "request_submit", "request_output", "artifact_chunk", "coordinator_cpu_daemon", "coordinator_managed_session", "coordinator_http_gateway"])
+            .args(["run", "run_profile", "bench", "list", "quickstart", "settings", "export_profile", "import_profile", "compare_results", "coordinator_status", "coordinator_cancel", "request_results", "request_submit", "request_output", "artifact_chunk", "coordinator_cpu_daemon", "coordinator_managed_session", "coordinator_http_gateway"])
             .multiple(false)
     )
 )]
@@ -50,6 +55,22 @@ struct Cli {
         default_missing_value = ""
     )]
     run: Option<String>,
+
+    /// Execute one explicit local CPU decision profile with a native JSON input file.
+    #[arg(long, value_name = "NAMESPACED_ID", requires_all = ["task", "input"])]
+    run_profile: Option<String>,
+
+    /// Declared task name required by --run-profile.
+    #[arg(long, value_name = "TASK", requires = "run_profile")]
+    task: Option<String>,
+
+    /// Native decision input JSON file required by --run-profile.
+    #[arg(long, value_name = "PATH", requires = "run_profile")]
+    input: Option<PathBuf>,
+
+    /// Bound the local decision operation (default 300000 milliseconds).
+    #[arg(long, value_name = "MILLISECONDS", requires = "run_profile")]
+    task_timeout_ms: Option<u64>,
 
     /// Interactively select and execute a benchmark script.
     #[arg(
@@ -178,6 +199,100 @@ enum RequestOutputLane {
     Decisions,
 }
 
+struct DirectDecisionSpec<'a> {
+    profile: &'a str,
+    task: &'a str,
+    input: &'a Path,
+    timeout_ms: u64,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectDecisionInput {
+    state: serde_json::Value,
+    questions: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DirectInputError {
+    TooLarge,
+    Invalid,
+}
+
+impl std::fmt::Display for DirectInputError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::TooLarge => "decision input exceeds the 1 MiB limit",
+            Self::Invalid => "decision input must be a strict JSON object with state and questions",
+        })
+    }
+}
+
+impl std::error::Error for DirectInputError {}
+
+fn parse_direct_decision_input(bytes: &[u8]) -> Result<DirectDecisionInput, DirectInputError> {
+    if bytes.len() > MAX_DIRECT_DECISION_INPUT_BYTES {
+        return Err(DirectInputError::TooLarge);
+    }
+    serde_json::from_slice(bytes).map_err(|_| DirectInputError::Invalid)
+}
+
+fn direct_decision_spec(cli: &Cli) -> Result<Option<DirectDecisionSpec<'_>>> {
+    let Some(profile) = cli.run_profile.as_deref() else {
+        if cli.task.is_some() || cli.input.is_some() || cli.task_timeout_ms.is_some() {
+            bail!("--task, --input, and --task-timeout-ms require --run-profile");
+        }
+        return Ok(None);
+    };
+    if cli.extra.is_some() {
+        bail!("--extra cannot be used with --run-profile");
+    }
+    if coordinator_options_present(cli) {
+        bail!("--run-profile cannot be combined with coordinator options");
+    }
+    let task = cli
+        .task
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("--run-profile requires --task"))?;
+    let input = cli
+        .input
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("--run-profile requires --input"))?;
+    let timeout_ms = cli
+        .task_timeout_ms
+        .unwrap_or(DEFAULT_DIRECT_DECISION_TIMEOUT_MS);
+    if timeout_ms == 0 || timeout_ms > MAX_DIRECT_DECISION_TIMEOUT_MS {
+        bail!("--task-timeout-ms must be between 1 and 86400000");
+    }
+    Ok(Some(DirectDecisionSpec {
+        profile,
+        task,
+        input,
+        timeout_ms,
+    }))
+}
+
+fn coordinator_options_present(cli: &Cli) -> bool {
+    cli.coordinator_status.is_some()
+        || cli.coordinator_cancel.is_some()
+        || cli.request_results.is_some()
+        || cli.request_submit.is_some()
+        || cli.request_output.is_some()
+        || cli.artifact_chunk.is_some()
+        || cli.artifact_kind.is_some()
+        || cli.artifact_path.is_some()
+        || cli.artifact_offset.is_some()
+        || cli.artifact_byte_budget.is_some()
+        || cli.artifact_version.is_some()
+        || cli.request_lane.is_some()
+        || cli.coordinator_cpu_daemon.is_some()
+        || cli.coordinator_managed_session.is_some()
+        || cli.coordinator_http_gateway.is_some()
+        || cli.after_cursor.is_some()
+        || cli.result_page_bytes.is_some()
+        || cli.coordinator_socket_dir.is_some()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ArtifactChunkKind {
     #[value(name = "local_job")]
@@ -262,6 +377,9 @@ fn isolated_engine_action(arguments: Vec<OsString>) -> Option<Result<u8>> {
 }
 
 fn dispatch(cli: Cli) -> Result<u8> {
+    if let Some(code) = direct_decision_action(&cli)? {
+        return Ok(code);
+    }
     if let Some(config_path) = http_gateway_action(&cli)? {
         return run_http_gateway_action(config_path);
     }
@@ -1448,6 +1566,125 @@ fn is_repository_root(path: &Path) -> bool {
         && path.join("bench-models").is_dir()
 }
 
+fn direct_decision_action(cli: &Cli) -> Result<Option<u8>> {
+    let Some(spec) = direct_decision_spec(cli)? else {
+        return Ok(None);
+    };
+    run_direct_decision(&spec).map(Some)
+}
+
+#[cfg(target_os = "linux")]
+fn run_direct_decision(spec: &DirectDecisionSpec<'_>) -> Result<u8> {
+    let profile = spec
+        .profile
+        .parse::<crate::control::catalog::ProfileKey>()
+        .map_err(|_| anyhow::anyhow!("--run-profile must be a valid namespaced profile ID"))?;
+    if profile.lane != crate::control::catalog::Lane::Decisions {
+        bail!("--run-profile must select a decisions profile");
+    }
+    let task = crate::control::catalog::Task::new(spec.task.to_owned())
+        .map_err(|_| anyhow::anyhow!("--task is invalid"))?;
+    let input = read_direct_decision_input(spec.input)?;
+
+    let repository_root =
+        repository_root().map_err(|_| anyhow::anyhow!("repository location is unavailable"))?;
+    let data_root = crate::state_store::data_root()
+        .map_err(|_| anyhow::anyhow!("stack settings are unavailable"))?;
+    let settings = load_current_stack_settings_in(&repository_root, &data_root)
+        .map_err(|_| anyhow::anyhow!("stack settings are unavailable"))?;
+    let catalog = Catalog::load_from_roots(
+        &repository_root,
+        &settings.media_toolkit_root,
+        &settings.decisions_toolkit_root,
+    )
+    .map_err(|_| anyhow::anyhow!("stack catalog is unavailable"))?;
+
+    let draft = crate::control::task_form::TaskFormDraft::new(
+        profile,
+        task,
+        "direct".to_owned(),
+        spec.timeout_ms,
+        crate::control::task_form::TaskFields::Decisions {
+            state: input.state,
+            questions: input.questions,
+        },
+    );
+    let (request, timeout) = crate::control::task_form::build_direct_decision(&catalog, draft)
+        .map_err(|_| anyhow::anyhow!("decision request is invalid"))?;
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| anyhow::anyhow!("decision timeout is invalid"))?;
+    let signals = crate::control::foreground_shutdown::ShutdownSignals::install()
+        .map_err(|_| anyhow::anyhow!("could not install decision cancellation handler"))?;
+    let context = crate::control::runtime::OperationContext::new(deadline, &signals);
+    let result = crate::control::direct_run::run_cpu_decision(&catalog, &request, &context)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    println!("{}", direct_decision_output_json(&result)?);
+    Ok(0)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_direct_decision(_: &DirectDecisionSpec<'_>) -> Result<u8> {
+    bail!("native CPU decision execution is supported only on Linux");
+}
+
+#[cfg(target_os = "linux")]
+fn read_direct_decision_input(path: &Path) -> Result<DirectDecisionInput> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|_| anyhow::anyhow!("decision input file is unavailable"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| anyhow::anyhow!("decision input file is unavailable"))?;
+    if !metadata.is_file() || metadata.len() > MAX_DIRECT_DECISION_INPUT_BYTES as u64 {
+        bail!("decision input must be a regular file no larger than 1 MiB");
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take((MAX_DIRECT_DECISION_INPUT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| anyhow::anyhow!("decision input file could not be read"))?;
+    parse_direct_decision_input(&bytes).map_err(|error| anyhow::anyhow!(error.to_string()))
+}
+
+#[derive(serde::Serialize)]
+struct DirectDecisionOutput<'a> {
+    answers: &'a serde_json::Map<String, serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    native_latency_ns: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    native_usage: Option<&'a serde_json::Map<String, serde_json::Value>>,
+}
+
+fn direct_decision_output_json(
+    result: &crate::control::decision::NativeDecisionResult,
+) -> Result<String> {
+    let crate::control::requests::InferenceResult::Decision { answers } = &result.result else {
+        bail!("native decision runner returned an incompatible result");
+    };
+    let response = DirectDecisionOutput {
+        answers,
+        native_latency_ns: result
+            .native_latency
+            .map(|latency| u64::try_from(latency.as_nanos()))
+            .transpose()
+            .map_err(|_| anyhow::anyhow!("native decision latency is out of range"))?,
+        native_usage: result.native_usage.as_ref(),
+    };
+    let mut writer = BoundedJsonWriter::new(MAX_DIRECT_DECISION_OUTPUT_BYTES);
+    if serde_json::to_writer(&mut writer, &response).is_err() {
+        if writer.exceeded {
+            bail!("native decision output exceeds the 2 MiB limit");
+        }
+        bail!("native decision output could not be encoded");
+    }
+    String::from_utf8(writer.bytes)
+        .map_err(|_| anyhow::anyhow!("native decision output could not be encoded"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1465,6 +1702,139 @@ mod tests {
             error.to_string(),
             "isolated engine helper: invalid launch arguments"
         );
+    }
+
+    #[test]
+    fn direct_decision_action_requires_explicit_inputs_and_uses_bounded_default() {
+        let cli = Cli::try_parse_from([
+            "l3ms",
+            "--run-profile",
+            "decisions:nagi-smol-cpu",
+            "--task",
+            "decision",
+            "--input",
+            "input.json",
+        ])
+        .unwrap();
+        let Some(spec) = direct_decision_spec(&cli).unwrap() else {
+            panic!("direct decision action is present");
+        };
+        assert_eq!(spec.profile, "decisions:nagi-smol-cpu");
+        assert_eq!(spec.task, "decision");
+        assert_eq!(spec.input, Path::new("input.json"));
+        assert_eq!(spec.timeout_ms, DEFAULT_DIRECT_DECISION_TIMEOUT_MS);
+
+        let cli = Cli::try_parse_from([
+            "l3ms",
+            "--run-profile",
+            "decisions:nagi-smol-cpu",
+            "--task",
+            "decision",
+            "--input",
+            "input.json",
+            "--task-timeout-ms",
+            "1200",
+        ])
+        .unwrap();
+        let Some(spec) = direct_decision_spec(&cli).unwrap() else {
+            panic!("direct decision action is present");
+        };
+        assert_eq!(spec.timeout_ms, 1200);
+    }
+
+    #[test]
+    fn direct_decision_action_rejects_other_actions_extra_and_coordinator_options() {
+        assert!(Cli::try_parse_from([
+            "l3ms",
+            "--run-profile",
+            "decisions:nagi-smol-cpu",
+            "--task",
+            "decision",
+            "--input",
+            "input.json",
+            "--quickstart",
+        ])
+        .is_err());
+
+        let cli = Cli::try_parse_from([
+            "l3ms",
+            "--run-profile",
+            "decisions:nagi-smol-cpu",
+            "--task",
+            "decision",
+            "--input",
+            "input.json",
+            "--extra",
+            "--unsafe",
+        ])
+        .unwrap();
+        assert!(direct_decision_spec(&cli).is_err());
+
+        let cli = Cli::try_parse_from([
+            "l3ms",
+            "--run-profile",
+            "decisions:nagi-smol-cpu",
+            "--task",
+            "decision",
+            "--input",
+            "input.json",
+            "--coordinator-socket-dir",
+            "/private/socket",
+        ])
+        .unwrap();
+        assert!(direct_decision_spec(&cli).is_err());
+    }
+
+    #[test]
+    fn direct_decision_input_requires_unique_known_top_level_fields_and_is_bounded() {
+        let valid = br#"{"state":{"ready":true},"questions":{"route":{"type":"choice","options":["yes"]}}}"#;
+        let parsed = parse_direct_decision_input(valid).unwrap();
+        assert_eq!(parsed.state["ready"], true);
+        assert!(parsed.questions.contains_key("route"));
+
+        for invalid in [
+            br#"{"state":{},"state":{},"questions":{}}"#.as_slice(),
+            br#"{"state":{},"questions":{},"unexpected":true}"#.as_slice(),
+            br#"{"state":{}}"#.as_slice(),
+            br#"[]"#.as_slice(),
+            br#"{"state":{},"questions":{}} trailing"#.as_slice(),
+        ] {
+            assert!(parse_direct_decision_input(invalid).is_err());
+        }
+
+        let oversized = vec![b' '; MAX_DIRECT_DECISION_INPUT_BYTES + 1];
+        assert_eq!(
+            parse_direct_decision_input(&oversized).err(),
+            Some(DirectInputError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn direct_decision_output_preserves_native_latency_and_enforces_size_limit() {
+        let mut answers = serde_json::Map::new();
+        answers.insert("answer".into(), serde_json::json!("yes"));
+        let result = crate::control::decision::NativeDecisionResult {
+            result: crate::control::requests::InferenceResult::Decision { answers },
+            native_latency: Some(std::time::Duration::from_nanos(1234)),
+            native_usage: None,
+        };
+        let output: serde_json::Value =
+            serde_json::from_str(&direct_decision_output_json(&result).unwrap()).unwrap();
+        assert_eq!(output["answers"]["answer"], "yes");
+        assert_eq!(output["native_latency_ns"], 1234);
+        assert!(output.get("native_usage").is_none());
+
+        let mut answers = serde_json::Map::new();
+        answers.insert(
+            "answer".into(),
+            serde_json::Value::String("x".repeat(MAX_DIRECT_DECISION_OUTPUT_BYTES)),
+        );
+        let oversized = crate::control::decision::NativeDecisionResult {
+            result: crate::control::requests::InferenceResult::Decision { answers },
+            native_latency: None,
+            native_usage: None,
+        };
+        assert!(direct_decision_output_json(&oversized).is_err());
     }
 
     #[test]

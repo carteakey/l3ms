@@ -8,7 +8,33 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
-## Current resumed checkpoint — 2026-10-09
+## Current replacement slice — 2026-10-10
+
+The first direct CPU decision path now bypasses coordinator IPC in the CLI and
+Stack native task form. Both call the same typed request builder and native
+runner. A separate declared `nagi-smol-cpu` profile preserves existing CUDA
+profiles. Execution uses installed cached weights, stdin payloads and bounded
+process-group cleanup, with no runtime installation, inference retry or fallback.
+
+Two real offline CLI runs passed, including the actual branch CPU profile;
+native latency was approximately 1.61 seconds. The harness verified child
+identity release. See [direct-decision-acceptance.md](direct-decision-acceptance.md)
+for exact evidence and limits. No live services or originals were changed.
+
+The old platform is not yet retired: other task lanes still have old opt-in
+callers. This is temporary replacement overlap and currently **adds LOC**, not
+the promised reduction. Next replace native TTS/media callers, consolidate the
+foreground job/result owner and remove the displaced coordinator dependency
+closure. Manual interactive acceptance and GPU switching remain unfinished.
+
+Verification: **876 root tests passed, 1 ignored**; two standalone decision
+toolkit tests, strict all-target Clippy, formatting and whitespace checks pass.
+CLI build/catalog smoke passed. Whole `src/` net change against `702b4cd` is
+**+1,906 lines**, including tests/comments/blanks and the new module. Control
+scope is now **61,432 lines** versus 60,729 baseline. No relocation or test
+deletion is counted as reduction; no concepts/platform modules were retired yet.
+
+## Previous planning checkpoint — 2026-10-09
 
 **Direction changed by the user:** simplify to an operator-owned native-engine
 wrapper and reduce LOC. The [simplification plan](simplification-plan.md) governs

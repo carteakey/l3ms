@@ -10,6 +10,10 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Add direct, bounded Linux CPU-local Nagi/Laya decision execution shared by
+  the native task form and `--run-profile --task --input`, without a coordinator
+  socket. Add an explicit `nagi-smol-cpu` profile; preserve existing CUDA profiles
+  and require installed runtimes/weights rather than implicit fallback/downloads.
 - Reorient monorepo delivery around a smaller native-engine wrapper, shared
   operator workflows and substantial control-code reduction. Defer hardened
   daemon/IPC/crash-recovery infrastructure as required delivery scope; retain

@@ -1,4 +1,4 @@
-//! Typed, in-memory construction of the existing lane-native Submit envelope.
+//! Typed, in-memory construction for lane-native requests and Submit envelopes.
 //!
 //! A draft names its catalog profile and declared task explicitly. Its fields
 //! stay native to the selected lane; this module supplies no generic prompt,
@@ -6,18 +6,20 @@
 
 use std::fmt;
 use std::io::{self, Write};
+use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use super::catalog::{Catalog, ProfileKey, Task};
+use super::catalog::{Catalog, Lane, ProfileKey, Task};
 use super::ipc::{
     self, ClientRequest, RequestEnvelope, WireChatTurn, WireInferenceRequest, WireMediaInput,
     WireRequestMessage, WireSpeechMode, MAX_FRAME_BYTES,
 };
-use super::requests::SpeechMode;
+use super::requests::{InferenceRequest, SpeechMode};
 
 const ENVELOPE_OVERHEAD_BUDGET: usize = 2048;
+const MAX_DIRECT_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;
 /// Maximum UTF-8 bytes accepted into one editable native field.
 pub const MAX_TASK_FORM_FIELD_BYTES: usize = 512 * 1024;
 /// Aggregate typed-form input leaves room for the native IPC envelope.
@@ -99,18 +101,93 @@ pub enum TaskFormError {
 impl fmt::Display for TaskFormError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::InvalidRequest => "caller request ID, timeout, or envelope is invalid",
+            Self::InvalidRequest => "task form request or timeout is invalid",
             Self::CatalogUnavailable => "the selected catalog could not be refreshed",
             Self::ProfileTaskMismatch => {
                 "selected profile or declared task does not match the refreshed catalog"
             }
             Self::InvalidNativeFields => "native task fields are invalid for the selected profile",
-            Self::FrameTooLarge => "native request exceeds the bounded IPC frame",
+            Self::FrameTooLarge => "native request exceeds the bounded input limit",
         })
     }
 }
 
 impl std::error::Error for TaskFormError {}
+
+/// Build a typed CPU-decision request for direct in-process execution.
+///
+/// The legacy caller ID remains in `TaskFormDraft` for compatibility with the
+/// IPC submit builder, but is ignored here. This validates the selected
+/// decisions profile against a refreshed catalog and returns the caller's
+/// bounded operation timeout without constructing a wire envelope.
+pub fn build_direct_decision(
+    catalog: &Catalog,
+    draft: TaskFormDraft,
+) -> Result<(InferenceRequest, Duration), TaskFormError> {
+    let TaskFormDraft {
+        selected_profile,
+        declared_task,
+        request_id: _,
+        timeout_ms,
+        fields,
+    } = draft;
+
+    if timeout_ms == 0 || timeout_ms > MAX_DIRECT_TIMEOUT_MS {
+        return Err(TaskFormError::InvalidRequest);
+    }
+    if selected_profile.lane != Lane::Decisions || declared_task.as_str() != "decision" {
+        return Err(TaskFormError::ProfileTaskMismatch);
+    }
+    let TaskFields::Decisions { state, questions } = fields else {
+        return Err(TaskFormError::InvalidNativeFields);
+    };
+    preflight_direct_decision_fields(&state, &questions)?;
+
+    let refreshed = catalog
+        .refresh()
+        .map_err(|_| TaskFormError::CatalogUnavailable)?;
+    let original_profile = catalog
+        .inspect(&selected_profile)
+        .ok_or(TaskFormError::ProfileTaskMismatch)?;
+    let refreshed_profile = refreshed
+        .inspect(&selected_profile)
+        .ok_or(TaskFormError::ProfileTaskMismatch)?;
+    if refreshed_profile != original_profile
+        || refreshed_profile.disabled
+        || !refreshed_profile
+            .tasks
+            .iter()
+            .any(|task| task.as_str() == declared_task.as_str())
+    {
+        return Err(TaskFormError::ProfileTaskMismatch);
+    }
+
+    let request = InferenceRequest::Decision {
+        profile: selected_profile,
+        state,
+        questions,
+    };
+    request
+        .validate(&refreshed)
+        .map_err(|_| TaskFormError::InvalidNativeFields)?;
+
+    Ok((request, Duration::from_millis(timeout_ms)))
+}
+
+fn preflight_direct_decision_fields(
+    state: &Value,
+    questions: &Map<String, Value>,
+) -> Result<(), TaskFormError> {
+    let state_bytes = bounded_json_len(state)?;
+    let question_bytes = bounded_json_len(questions)?;
+    if state_bytes > MAX_TASK_FORM_FIELD_BYTES
+        || question_bytes > MAX_TASK_FORM_FIELD_BYTES
+        || state_bytes.saturating_add(question_bytes) > MAX_TASK_FORM_TOTAL_BYTES
+    {
+        return Err(TaskFormError::FrameTooLarge);
+    }
+    Ok(())
+}
 
 /// Convert one draft into a validated v1 native Submit envelope. The method
 /// refreshes only the already-loaded manifest roots; it never probes or starts
@@ -372,6 +449,21 @@ mod tests {
         }
     }
 
+    fn direct_error(
+        result: Result<
+            (
+                super::super::requests::InferenceRequest,
+                std::time::Duration,
+            ),
+            TaskFormError,
+        >,
+    ) -> TaskFormError {
+        match result {
+            Err(error) => error,
+            Ok(_) => panic!("expected a fixed direct task-form error"),
+        }
+    }
+
     fn language_fields() -> TaskFields {
         TaskFields::Language {
             turns: vec![
@@ -550,6 +642,169 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn direct_decision_builder_ignores_legacy_id_and_returns_typed_request() {
+        let mut questions = Map::new();
+        questions.insert(
+            "route".into(),
+            json!({"type": "choice", "criteria": {"yes": "Proceed", "no": "Stop"}}),
+        );
+        let draft = TaskFormDraft::new(
+            profile(super::super::catalog::Lane::Decisions, "nagi-smol"),
+            task("decision"),
+            "not a wire request ID".into(),
+            120_000,
+            TaskFields::Decisions {
+                state: json!({"ready": true}),
+                questions,
+            },
+        );
+
+        let (request, timeout) = build_direct_decision(&catalog(), draft).unwrap();
+        assert_eq!(timeout, std::time::Duration::from_secs(120));
+        let super::super::requests::InferenceRequest::Decision {
+            profile: selected,
+            state,
+            questions,
+        } = request
+        else {
+            panic!("direct decision fields build an inference request")
+        };
+        assert_eq!(
+            selected,
+            profile(super::super::catalog::Lane::Decisions, "nagi-smol")
+        );
+        assert_eq!(state, json!({"ready": true}));
+        assert_eq!(questions["route"]["type"], "choice");
+    }
+
+    #[test]
+    fn direct_decision_builder_rejects_wrong_profile_fields_and_timeout() {
+        let catalog = catalog();
+        let fields = || TaskFields::Decisions {
+            state: json!({"ready": true}),
+            questions: Map::from_iter([("route".into(), json!({"type": "rank"}))]),
+        };
+
+        assert_eq!(
+            direct_error(build_direct_decision(
+                &catalog,
+                TaskFormDraft::new(
+                    profile(super::super::catalog::Lane::Media, "breeze-tts-2"),
+                    task("decision"),
+                    String::new(),
+                    30_000,
+                    fields(),
+                ),
+            )),
+            TaskFormError::ProfileTaskMismatch
+        );
+        assert_eq!(
+            direct_error(build_direct_decision(
+                &catalog,
+                TaskFormDraft::new(
+                    profile(super::super::catalog::Lane::Decisions, "nagi-smol"),
+                    task("not-decision"),
+                    String::new(),
+                    30_000,
+                    fields(),
+                ),
+            )),
+            TaskFormError::ProfileTaskMismatch
+        );
+        assert_eq!(
+            direct_error(build_direct_decision(
+                &catalog,
+                TaskFormDraft::new(
+                    profile(super::super::catalog::Lane::Decisions, "nagi-smol"),
+                    task("decision"),
+                    String::new(),
+                    30_000,
+                    language_fields(),
+                ),
+            )),
+            TaskFormError::InvalidNativeFields
+        );
+        for timeout_ms in [0, MAX_DIRECT_TIMEOUT_MS + 1] {
+            assert_eq!(
+                direct_error(build_direct_decision(
+                    &catalog,
+                    TaskFormDraft::new(
+                        profile(super::super::catalog::Lane::Decisions, "nagi-smol"),
+                        task("decision"),
+                        String::new(),
+                        timeout_ms,
+                        fields(),
+                    ),
+                )),
+                TaskFormError::InvalidRequest
+            );
+        }
+        assert_eq!(
+            direct_error(build_direct_decision(
+                &catalog,
+                TaskFormDraft::new(
+                    profile(super::super::catalog::Lane::Decisions, "nagi-smol"),
+                    task("decision"),
+                    String::new(),
+                    30_000,
+                    TaskFields::Decisions {
+                        state: json!([]),
+                        questions: Map::from_iter([("route".into(), json!({"type": "rank"}))]),
+                    },
+                ),
+            )),
+            TaskFormError::InvalidNativeFields
+        );
+    }
+
+    #[test]
+    fn direct_decision_builder_rejects_catalog_route_drift() {
+        let temporary = TempDir::new().unwrap();
+        let root = temporary.path();
+        fs::create_dir_all(root.join("toolkits/l2m2")).unwrap();
+        fs::create_dir_all(root.join("toolkits/l3ds")).unwrap();
+        fs::write(
+            root.join("llama-swap.yaml"),
+            "models:\n  fixture-chat:\n    cmd: server\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("toolkits/l2m2/media-runtimes.json"),
+            r#"{"schema_version":1,"profiles":[]}"#,
+        )
+        .unwrap();
+        let decision_manifest = root.join("toolkits/l3ds/decision-runtimes.json");
+        fs::write(
+            &decision_manifest,
+            r#"{"version":"1.0","profiles":[{"id":"fixture-decision","name":"Fixture","engine":"nagi","type":"local","device":"cpu","model":"fixture","entrypoint":"run.py"}]}"#,
+        )
+        .unwrap();
+        let catalog = Catalog::load(root).unwrap();
+        fs::write(
+            &decision_manifest,
+            r#"{"version":"1.0","profiles":[{"id":"fixture-decision","name":"Fixture","engine":"laya","type":"local","device":"cpu","model":"fixture","entrypoint":"run.py"}]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            direct_error(build_direct_decision(
+                &catalog,
+                TaskFormDraft::new(
+                    profile(super::super::catalog::Lane::Decisions, "fixture-decision"),
+                    task("decision"),
+                    String::new(),
+                    30_000,
+                    TaskFields::Decisions {
+                        state: json!({"ready": true}),
+                        questions: Map::from_iter([("route".into(), json!({"type": "rank"}))]),
+                    },
+                ),
+            )),
+            TaskFormError::ProfileTaskMismatch
+        );
     }
 
     #[test]

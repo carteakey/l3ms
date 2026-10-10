@@ -18,6 +18,21 @@
       "entrypoint": "decision-models/runner.py"
     },
     {
+      "id": "nagi-smol-cpu",
+      "name": "Nagi-Smol v0 (CPU)",
+      "engine": "nagi",
+      "tier": "smol",
+      "type": "local",
+      "model": "nagisanzeninz/nagi-smol-v0",
+      "backbone": "ModernBERT-large / M2'",
+      "device": "cpu",
+      "fallback_device": "cpu",
+      "vram_gb": 0.0,
+      "expected_latency_ms": 1600,
+      "description": "Explicit CPU execution; prior shared-host probes were about 1.6 seconds per forward pass, not a real-time or accuracy guarantee",
+      "entrypoint": "decision-models/runner.py"
+    },
+    {
       "id": "nagi-big",
       "name": "Nagi-Big v3 (4B)",
       "engine": "nagi",

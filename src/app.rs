@@ -24,6 +24,13 @@ use crate::control::coordinator_workbench::{
 };
 use crate::control::requests::SpeechMode;
 use crate::control::result_consumer::NativeOutput;
+#[cfg(target_os = "linux")]
+use crate::control::{
+    decision::NativeDecisionResult,
+    direct_run::{self, DirectRunError},
+    runtime::{Cancellation, OperationContext},
+    task_form::build_direct_decision,
+};
 use crate::{
     chat::{
         detect_chat_server, detected_servers, terminate_detected_server, ChatClient,
@@ -44,7 +51,7 @@ use crate::{
     download_ui::{DownloadFocus, DownloadUiState, ModelField},
     downloader_command::downloader_command_prefix,
     gguf::{self, GgufFile},
-    job_history::JobHistory,
+    job_history::{CrossToolkitJobStart, CrossToolkitJobUpdate, JobHistory},
     llama_swap::{SwapClient, SwapModel, DEFAULT_BASE_URL},
     prompt_store::{list_prompts, load_prompt, prompts_path},
     script_editor::ScriptEditorState,
@@ -376,6 +383,7 @@ impl TaskFormValues {
 struct TaskFormEditor {
     profile: crate::control::catalog::ProfileKey,
     profile_snapshot: CatalogProfile,
+    direct_cpu_decision: bool,
     declared_tasks: Vec<String>,
     selected_task: Option<usize>,
     media_operation: Option<TaskFormMediaOperation>,
@@ -388,9 +396,11 @@ struct TaskFormEditor {
 
 impl TaskFormEditor {
     fn new(profile: &CatalogProfile) -> Self {
+        let direct_cpu_decision = is_direct_cpu_decision_profile(profile);
         let mut editor = Self {
             profile: profile.key.clone(),
             profile_snapshot: profile.clone(),
+            direct_cpu_decision,
             declared_tasks: profile
                 .tasks
                 .iter()
@@ -404,16 +414,22 @@ impl TaskFormEditor {
             cursor_byte: 0,
             values: TaskFormValues::default(),
         };
+        if direct_cpu_decision {
+            // Foreground local work has no caller ID to retain. A useful
+            // bounded timeout keeps the CPU path keyboard-first.
+            editor.values.timeout = "30000".into();
+            editor.values.decision_state = "{}".into();
+        }
         editor.refresh_fields();
         editor
     }
 
     fn refresh_fields(&mut self) {
-        let mut fields = vec![
-            TaskFormField::RequestId,
-            TaskFormField::Timeout,
-            TaskFormField::DeclaredTask,
-        ];
+        let mut fields = Vec::with_capacity(8);
+        if !self.direct_cpu_decision {
+            fields.push(TaskFormField::RequestId);
+        }
+        fields.extend([TaskFormField::Timeout, TaskFormField::DeclaredTask]);
         match self.profile.lane {
             Lane::Language => {
                 if self
@@ -690,7 +706,11 @@ impl TaskFormEditor {
     }
 
     fn to_draft(&self) -> Result<TaskFormDraft, TaskFormError> {
-        let request_id = self.values.request_id.clone();
+        let request_id = if self.direct_cpu_decision {
+            String::new()
+        } else {
+            self.values.request_id.clone()
+        };
         let timeout_ms = self
             .values
             .timeout
@@ -884,6 +904,63 @@ struct PendingDownloadPreflight {
     worker: Option<thread::JoinHandle<()>>,
 }
 
+#[cfg(target_os = "linux")]
+struct DirectDecisionJob {
+    job_id: u64,
+    cancellation: Arc<AtomicBool>,
+    receiver: mpsc::Receiver<DirectDecisionCompletion>,
+    worker: thread::JoinHandle<()>,
+}
+
+#[cfg(target_os = "linux")]
+struct DirectDecisionCompletion {
+    job_id: u64,
+    outcome: Result<NativeDecisionResult, DirectRunError>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+enum DirectDecisionState {
+    Running,
+    CancelRequested,
+    Succeeded,
+    Cancelled,
+    Failed,
+    Interrupted,
+}
+
+#[cfg(target_os = "linux")]
+impl DirectDecisionState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::CancelRequested => "cancellation requested · waiting for cleanup",
+            Self::Succeeded => "succeeded",
+            Self::Cancelled => "cancelled · owned process cleanup confirmed",
+            Self::Failed => "failed",
+            Self::Interrupted => "interrupted · ownership/recovery required",
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct DirectDecisionSummary {
+    job_id: u64,
+    profile_id: String,
+    state: DirectDecisionState,
+    native_latency: Option<Duration>,
+}
+
+#[cfg(target_os = "linux")]
+struct DirectDecisionCancellation(Arc<AtomicBool>);
+
+#[cfg(target_os = "linux")]
+impl Cancellation for DirectDecisionCancellation {
+    fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
 enum BackgroundEvent {
     Models(Result<Vec<SwapModel>, String>),
     ModelAction {
@@ -1016,6 +1093,12 @@ struct App {
     coordinator_results_available: bool,
     #[cfg(target_os = "linux")]
     coordinator_workbench: Option<CoordinatorWorkbench>,
+    #[cfg(target_os = "linux")]
+    direct_decision_job: Option<DirectDecisionJob>,
+    #[cfg(target_os = "linux")]
+    direct_decision_admission_closed: bool,
+    #[cfg(target_os = "linux")]
+    direct_decision_summary: Option<DirectDecisionSummary>,
 
     download: DownloadUiState,
     download_page: usize,
@@ -1181,6 +1264,12 @@ impl App {
             coordinator_results_available: false,
             #[cfg(target_os = "linux")]
             coordinator_workbench: None,
+            #[cfg(target_os = "linux")]
+            direct_decision_job: None,
+            #[cfg(target_os = "linux")]
+            direct_decision_admission_closed: false,
+            #[cfg(target_os = "linux")]
+            direct_decision_summary: None,
             download,
             download_page: 0,
             download_state: TableState::default().with_selected(Some(0)),
@@ -1774,6 +1863,8 @@ impl App {
         }
         #[cfg(target_os = "linux")]
         self.drain_coordinator_events();
+        #[cfg(target_os = "linux")]
+        self.drain_direct_decision_result();
     }
 
     #[cfg(target_os = "linux")]
@@ -4254,23 +4345,44 @@ impl App {
         }
         #[cfg(target_os = "linux")]
         {
-            if self.coordinator_action_pending
-                || (self.coordinator_request_id.is_some() && !self.coordinator_request_terminal)
-            {
-                self.status = "Caller ID remains ambiguous or nonterminal; observe or cancel it before another Submit".into();
-                return;
-            }
-            if self.stack_coordinator_socket_dir.is_none() {
-                self.status =
-                    "No explicit private coordinator socket is configured in shared settings"
-                        .into();
-                return;
-            }
             let Some(profile) = self.selected_stack_profile().cloned() else {
                 self.status =
                     "Select a manifest profile before opening the native task form".into();
                 return;
             };
+            if is_direct_cpu_decision_profile(&profile) {
+                if self.coordinator_action_pending
+                    || (self.coordinator_request_id.is_some() && !self.coordinator_request_terminal)
+                {
+                    self.status = "A coordinator request is pending or nonterminal; observe or cancel it before starting a foreground decision".into();
+                    return;
+                }
+                if self.direct_decision_admission_closed {
+                    self.status = "CPU decision admission is closed after uncertain process cleanup; inspect Jobs and recover the runner before retrying".into();
+                    return;
+                }
+                if self.direct_decision_job.is_some() {
+                    self.status = "A foreground CPU decision is still running; press c to cancel and wait for cleanup".into();
+                    return;
+                }
+            } else {
+                if self.direct_decision_job.is_some() || self.direct_decision_admission_closed {
+                    self.status = "A foreground CPU decision is active or interrupted; finish cleanup or recovery before using the coordinator lane".into();
+                    return;
+                }
+                if self.coordinator_action_pending
+                    || (self.coordinator_request_id.is_some() && !self.coordinator_request_terminal)
+                {
+                    self.status = "Caller ID remains ambiguous or nonterminal; observe or cancel it before another Submit".into();
+                    return;
+                }
+                if self.stack_coordinator_socket_dir.is_none() {
+                    self.status =
+                        "No explicit private coordinator socket is configured in shared settings"
+                            .into();
+                    return;
+                }
+            }
             if profile.tasks.is_empty() {
                 self.status = "Selected profile declares no task forms".into();
                 return;
@@ -4288,6 +4400,18 @@ impl App {
         }
         #[cfg(target_os = "linux")]
         {
+            if self
+                .task_form_editor
+                .as_ref()
+                .is_some_and(|editor| editor.direct_cpu_decision)
+            {
+                self.submit_direct_cpu_decision();
+                return;
+            }
+            if self.direct_decision_job.is_some() || self.direct_decision_admission_closed {
+                self.status = "A foreground CPU decision is active or interrupted; finish cleanup or recovery before using the coordinator lane".into();
+                return;
+            }
             if self.coordinator_action_pending
                 || (self.coordinator_request_id.is_some() && !self.coordinator_request_terminal)
             {
@@ -4370,6 +4494,7 @@ impl App {
                 .submit(socket_directory, prepared);
             match result {
                 Ok(_) => {
+                    self.clear_direct_decision_result_display();
                     self.coordinator_output = None;
                     self.coordinator_decision_metadata = None;
                     self.coordinator_output_complete = false;
@@ -4391,6 +4516,312 @@ impl App {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    fn submit_direct_cpu_decision(&mut self) {
+        if self.coordinator_action_pending
+            || (self.coordinator_request_id.is_some() && !self.coordinator_request_terminal)
+        {
+            self.status = "A coordinator request is pending or nonterminal; observe or cancel it before starting a foreground decision".into();
+            return;
+        }
+        if self.direct_decision_admission_closed {
+            self.status = "CPU decision admission is closed after uncertain process cleanup; inspect Jobs and recover the runner before retrying".into();
+            return;
+        }
+        if self.direct_decision_job.is_some() {
+            self.status = "A foreground CPU decision is still running; press c to cancel and wait for cleanup".into();
+            return;
+        }
+        let Some(catalog) = self.stack_catalog.as_ref() else {
+            self.status = "Refresh the Stack Catalog before running a CPU decision".into();
+            return;
+        };
+        let Some(editor) = self.task_form_editor.as_ref() else {
+            self.status = "Native task form is not open".into();
+            return;
+        };
+        if !editor.direct_cpu_decision
+            || catalog.inspect(&editor.profile) != Some(&editor.profile_snapshot)
+        {
+            self.status =
+                "Selected CPU decision profile changed; refresh and reopen the form".into();
+            return;
+        }
+        let profile_id = editor.profile.profile_id.as_str().to_owned();
+        let draft = match editor.to_draft() {
+            Ok(draft) => draft,
+            Err(error) => {
+                self.status = error.to_string();
+                return;
+            }
+        };
+        let catalog = catalog.clone();
+        let (request, timeout) = match build_direct_decision(&catalog, draft) {
+            Ok(request) => request,
+            Err(error) => {
+                self.status = error.to_string();
+                return;
+            }
+        };
+
+        // The cross-toolkit history contract has metadata only: no caller ID,
+        // command, argv, prompt, state, or native answer is persisted.
+        let job_id = match self.job_history.begin_cross_toolkit(CrossToolkitJobStart {
+            toolkit: "l3ds".into(),
+            profile: Some(profile_id.clone()),
+            task: Some("decision".into()),
+            request_id: None,
+        }) {
+            Ok(job_id) => job_id,
+            Err(_) => {
+                self.status = "Could not create safe CPU decision job history".into();
+                return;
+            }
+        };
+        self.jobs_state.select(Some(0));
+        if self
+            .job_history
+            .update_cross_toolkit(
+                job_id,
+                CrossToolkitJobUpdate {
+                    result_state: Some("running".into()),
+                    ..CrossToolkitJobUpdate::default()
+                },
+            )
+            .is_err()
+        {
+            self.finish_direct_decision_history(job_id, "failed");
+            self.status = "Could not mark CPU decision as running".into();
+            return;
+        }
+        if self.job_history.persist_in(&self.data_root).is_err() {
+            let _ = self.job_history.update_cross_toolkit(
+                job_id,
+                CrossToolkitJobUpdate {
+                    result_state: Some("failed".into()),
+                    ..CrossToolkitJobUpdate::default()
+                },
+            );
+            self.status =
+                "Safe CPU decision job history could not be saved; nothing was started".into();
+            return;
+        }
+
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let worker_cancellation = cancellation.clone();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let deadline = Instant::now() + timeout;
+        let worker = match thread::Builder::new()
+            .name(format!("l3ds-direct-decision-{job_id}"))
+            .spawn(move || {
+                let cancellation = DirectDecisionCancellation(worker_cancellation);
+                let context = OperationContext::new(deadline, &cancellation);
+                let outcome = direct_run::run_cpu_decision(&catalog, &request, &context);
+                let _ = sender.send(DirectDecisionCompletion { job_id, outcome });
+            }) {
+            Ok(worker) => worker,
+            Err(_) => {
+                self.finish_direct_decision_history(job_id, "failed");
+                self.direct_decision_summary = Some(DirectDecisionSummary {
+                    job_id,
+                    profile_id,
+                    state: DirectDecisionState::Failed,
+                    native_latency: None,
+                });
+                self.status = "Could not start the foreground CPU decision worker".into();
+                return;
+            }
+        };
+
+        self.coordinator_output = None;
+        self.coordinator_decision_metadata = None;
+        self.coordinator_output_complete = false;
+        self.coordinator_results_available = false;
+        self.direct_decision_summary = Some(DirectDecisionSummary {
+            job_id,
+            profile_id: profile_id.clone(),
+            state: DirectDecisionState::Running,
+            native_latency: None,
+        });
+        self.direct_decision_job = Some(DirectDecisionJob {
+            job_id,
+            cancellation,
+            receiver,
+            worker,
+        });
+        self.task_form_editor = None;
+        self.input_mode = InputMode::Normal;
+        self.status = format!("CPU decision #{job_id} running · press c to cancel");
+        self.push_log(format!("CPU decision #{job_id} started"));
+    }
+
+    #[cfg(target_os = "linux")]
+    fn begin_direct_decision_cancel(&mut self) -> bool {
+        let Some(job) = self.direct_decision_job.as_ref() else {
+            return false;
+        };
+        job.cancellation.store(true, Ordering::Release);
+        if let Some(summary) = self
+            .direct_decision_summary
+            .as_mut()
+            .filter(|summary| summary.job_id == job.job_id)
+        {
+            summary.state = DirectDecisionState::CancelRequested;
+        }
+        self.status = format!(
+            "CPU decision #{} cancellation requested · waiting for process cleanup",
+            job.job_id
+        );
+        true
+    }
+
+    #[cfg(target_os = "linux")]
+    fn finish_direct_decision_history(&mut self, job_id: u64, result_state: &str) {
+        let updated = self
+            .job_history
+            .update_cross_toolkit(
+                job_id,
+                CrossToolkitJobUpdate {
+                    result_state: Some(result_state.to_owned()),
+                    ..CrossToolkitJobUpdate::default()
+                },
+            )
+            .is_ok();
+        if updated {
+            self.persist_jobs("CPU decision finish");
+        } else {
+            self.push_log("CPU decision job history update failed");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn apply_direct_decision_completion(
+        &mut self,
+        expected_job_id: u64,
+        completion: Option<DirectDecisionCompletion>,
+    ) {
+        if self
+            .direct_decision_summary
+            .as_ref()
+            .is_none_or(|summary| summary.job_id != expected_job_id)
+        {
+            return;
+        }
+        let Some(completion) = completion.filter(|completion| completion.job_id == expected_job_id)
+        else {
+            self.direct_decision_admission_closed = true;
+            if let Some(summary) = self.direct_decision_summary.as_mut() {
+                summary.state = DirectDecisionState::Interrupted;
+            }
+            self.finish_direct_decision_history(expected_job_id, "interrupted");
+            self.coordinator_output = None;
+            self.coordinator_decision_metadata = None;
+            self.coordinator_output_complete = false;
+            self.coordinator_results_available = false;
+            self.status = format!(
+                "CPU decision #{expected_job_id} interrupted without a confirmed worker result; inspect Jobs and recover the runner before retrying"
+            );
+            return;
+        };
+
+        match completion.outcome {
+            Ok(result) => match result.result {
+                crate::control::requests::InferenceResult::Decision { answers } => {
+                    // Temporary coupling: the existing native result panel is
+                    // answer-only. Timing stays in local status metadata, and
+                    // native usage is intentionally not persisted or rendered
+                    // until the result-consumer API can construct its metadata type.
+                    self.coordinator_output = Some(NativeOutput::Decisions {
+                        answers: vec![answers],
+                    });
+                    self.coordinator_decision_metadata = None;
+                    self.coordinator_output_complete = true;
+                    self.coordinator_results_available = true;
+                    self.finish_direct_decision_history(expected_job_id, "succeeded");
+                    if let Some(summary) = self.direct_decision_summary.as_mut() {
+                        summary.state = DirectDecisionState::Succeeded;
+                        summary.native_latency = result.native_latency;
+                    }
+                    let latency = result.native_latency.map_or_else(String::new, |latency| {
+                        format!(" · native latency {:.2} ms", latency.as_secs_f64() * 1000.0)
+                    });
+                    self.status = format!("CPU decision #{expected_job_id} succeeded{latency}");
+                    self.push_log(format!("CPU decision #{expected_job_id} completed"));
+                }
+                _ => {
+                    self.finish_direct_decision_history(expected_job_id, "failed");
+                    if let Some(summary) = self.direct_decision_summary.as_mut() {
+                        summary.state = DirectDecisionState::Failed;
+                    }
+                    self.status = format!(
+                        "CPU decision #{expected_job_id} returned an unexpected result lane"
+                    );
+                }
+            },
+            Err(error) if error.blocks_following_work() => {
+                self.direct_decision_admission_closed = true;
+                self.finish_direct_decision_history(expected_job_id, "interrupted");
+                if let Some(summary) = self.direct_decision_summary.as_mut() {
+                    summary.state = DirectDecisionState::Interrupted;
+                }
+                self.status = format!("CPU decision #{expected_job_id} interrupted: {error}; inspect Jobs and recover the runner before retrying");
+                self.push_log(format!(
+                    "CPU decision #{expected_job_id} requires runner recovery"
+                ));
+            }
+            Err(error) if error.cancellation_confirmed() => {
+                self.finish_direct_decision_history(expected_job_id, "cancelled");
+                if let Some(summary) = self.direct_decision_summary.as_mut() {
+                    summary.state = DirectDecisionState::Cancelled;
+                }
+                self.status = format!(
+                    "CPU decision #{expected_job_id} cancelled · owned process cleanup confirmed"
+                );
+                self.push_log(format!("CPU decision #{expected_job_id} cancelled"));
+            }
+            Err(error) => {
+                self.finish_direct_decision_history(expected_job_id, "failed");
+                if let Some(summary) = self.direct_decision_summary.as_mut() {
+                    summary.state = DirectDecisionState::Failed;
+                }
+                self.status = format!("CPU decision #{expected_job_id} failed: {error}");
+                self.push_log(format!("CPU decision #{expected_job_id} failed: {error}"));
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn drain_direct_decision_result(&mut self) {
+        let Some(job) = self.direct_decision_job.as_ref() else {
+            return;
+        };
+        let job_id = job.job_id;
+        match job.receiver.try_recv() {
+            Ok(completion) => {
+                let Some(job) = self.direct_decision_job.take() else {
+                    return;
+                };
+                if job.job_id != completion.job_id {
+                    self.direct_decision_job = Some(job);
+                    return;
+                }
+                if job.worker.join().is_err() {
+                    self.apply_direct_decision_completion(job_id, None);
+                } else {
+                    self.apply_direct_decision_completion(job_id, Some(completion));
+                }
+            }
+            Err(mpsc::TryRecvError::Disconnected) if job.worker.is_finished() => {
+                let Some(job) = self.direct_decision_job.take() else {
+                    return;
+                };
+                let _ = job.worker.join();
+                self.apply_direct_decision_completion(job_id, None);
+            }
+            Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => {}
+        }
+    }
+
     fn begin_coordinator_input(&mut self, action: CoordinatorInputAction) {
         if self.coordinator_action_pending {
             self.status = "A coordinator action is already pending".into();
@@ -4403,6 +4834,10 @@ impl App {
         }
         #[cfg(target_os = "linux")]
         {
+            if self.direct_decision_job.is_some() || self.direct_decision_admission_closed {
+                self.status = "A foreground CPU decision is active or interrupted; coordinator input is unavailable until cleanup or recovery".into();
+                return;
+            }
             if self.stack_coordinator_socket_dir.is_none() {
                 self.status =
                     "No explicit private coordinator socket is configured in shared settings"
@@ -4440,6 +4875,10 @@ impl App {
         }
         #[cfg(target_os = "linux")]
         {
+            if self.direct_decision_job.is_some() || self.direct_decision_admission_closed {
+                self.status = "A foreground CPU decision is active or interrupted; coordinator observation is unavailable until cleanup or recovery".into();
+                return;
+            }
             if self.coordinator_request_id.is_some() {
                 self.enqueue_coordinator_observe();
             } else {
@@ -4455,6 +4894,13 @@ impl App {
         }
         #[cfg(target_os = "linux")]
         {
+            if self.begin_direct_decision_cancel() {
+                return;
+            }
+            if self.direct_decision_admission_closed {
+                self.status = "CPU decision admission is closed after uncertain process cleanup; recover the runner before other coordinator actions".into();
+                return;
+            }
             if self.coordinator_request_id.is_some() {
                 self.enqueue_coordinator_cancel();
             } else {
@@ -4485,6 +4931,10 @@ impl App {
 
     #[cfg(target_os = "linux")]
     fn submit_coordinator_file(&mut self, raw_path: &str) {
+        if self.direct_decision_job.is_some() || self.direct_decision_admission_closed {
+            self.status = "A foreground CPU decision is active or interrupted; coordinator Submit is unavailable until cleanup or recovery".into();
+            return;
+        }
         if self.coordinator_action_pending
             || (self.coordinator_request_id.is_some() && !self.coordinator_request_terminal)
         {
@@ -4549,6 +4999,7 @@ impl App {
             .submit(socket_directory, prepared);
         match result {
             Ok(_) => {
+                self.clear_direct_decision_result_display();
                 self.coordinator_output = None;
                 self.coordinator_decision_metadata = None;
                 self.coordinator_output_complete = false;
@@ -4597,6 +5048,10 @@ impl App {
 
     #[cfg(target_os = "linux")]
     fn enqueue_coordinator_observe_for(&mut self, raw_id: &str) {
+        if self.direct_decision_job.is_some() || self.direct_decision_admission_closed {
+            self.status = "A foreground CPU decision is active or interrupted; coordinator observation is unavailable until cleanup or recovery".into();
+            return;
+        }
         if self.coordinator_action_pending {
             self.status = "A coordinator action is already pending".into();
             return;
@@ -4631,6 +5086,7 @@ impl App {
         );
         match result {
             Ok(()) => {
+                self.clear_direct_decision_result_display();
                 if self.coordinator_request_id.is_none() {
                     self.coordinator_request_id = Some(request_id);
                     self.coordinator_request_lane = Some(lane);
@@ -4657,6 +5113,10 @@ impl App {
 
     #[cfg(target_os = "linux")]
     fn enqueue_coordinator_cancel_for(&mut self, raw_id: &str) {
+        if self.direct_decision_job.is_some() || self.direct_decision_admission_closed {
+            self.status = "A foreground CPU decision is active or interrupted; coordinator cancellation is unavailable until cleanup or recovery".into();
+            return;
+        }
         if self.coordinator_action_pending {
             self.status = "A coordinator action is already pending".into();
             return;
@@ -4680,6 +5140,7 @@ impl App {
             .cancel(socket_directory, request_id.clone());
         match result {
             Ok(()) => {
+                self.clear_direct_decision_result_display();
                 if self.coordinator_request_id.is_none() {
                     self.coordinator_request_id = Some(request_id);
                     self.coordinator_request_lane = self
@@ -4690,6 +5151,16 @@ impl App {
                 self.status = "Sending one cancel request for the retained caller ID".into();
             }
             Err(_) => self.status = "Could not enqueue cancellation; caller ID retained".into(),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn clear_direct_decision_result_display(&mut self) {
+        if self.direct_decision_summary.take().is_some() {
+            self.coordinator_output = None;
+            self.coordinator_decision_metadata = None;
+            self.coordinator_output_complete = false;
+            self.coordinator_results_available = false;
         }
     }
 
@@ -6341,48 +6812,117 @@ impl App {
                 .wrap(Wrap { trim: false }),
             info[0],
         );
-        let retained = self.coordinator_request_id.as_deref().unwrap_or("none");
-        let lane = self.coordinator_request_lane.map_or("—", Lane::as_str);
-        let lifecycle = if self.coordinator_request_id.is_none() {
-            "no caller ID retained"
-        } else if self.coordinator_request_terminal {
-            "terminal observed · next Submit requires a different caller ID"
+        #[cfg(target_os = "linux")]
+        let show_direct_decision = self.direct_decision_job.is_some()
+            || self.direct_decision_admission_closed
+            || self.direct_decision_summary.is_some()
+            || self
+                .selected_stack_profile()
+                .is_some_and(is_direct_cpu_decision_profile);
+        #[cfg(not(target_os = "linux"))]
+        let show_direct_decision = false;
+        #[cfg(target_os = "linux")]
+        let direct_result_visible = self
+            .direct_decision_summary
+            .as_ref()
+            .is_some_and(|summary| {
+                matches!(summary.state, DirectDecisionState::Succeeded)
+                    && self.selected_stack_profile().is_some_and(|profile| {
+                        is_direct_cpu_decision_profile(profile)
+                            && profile.key.profile_id.as_str() == summary.profile_id
+                    })
+            });
+        #[cfg(not(target_os = "linux"))]
+        let direct_result_visible = false;
+        #[cfg(target_os = "linux")]
+        let (action_text, action_title) = if show_direct_decision {
+            let text = self.direct_decision_summary.as_ref().map_or_else(
+                || "CPU-local Nagi/Laya decisions run in the foreground. No caller ID, coordinator socket, or observe step.\nf open form · c cancels an active run".to_owned(),
+                |summary| {
+                    let latency = summary.native_latency.map_or_else(
+                        String::new,
+                        |latency| format!("\nnative latency: {:.2} ms", latency.as_secs_f64() * 1000.0),
+                    );
+                    format!(
+                        "Foreground job #{} · decisions:{}\nstate: {}{}\n{}",
+                        summary.job_id,
+                        summary.profile_id,
+                        summary.state.label(),
+                        latency,
+                        if self.direct_decision_admission_closed {
+                            "admission closed · inspect Jobs and recover runner before retrying"
+                        } else if self.direct_decision_job.is_some() {
+                            "c cancel · waits for process-group cleanup"
+                        } else {
+                            "f run again · c only applies while active"
+                        }
+                    )
+                },
+            );
+            (text, "Foreground CPU decision")
         } else {
-            "ambiguous or nonterminal · observe/cancel before another Submit"
+            let retained = self.coordinator_request_id.as_deref().unwrap_or("none");
+            let lane = self.coordinator_request_lane.map_or("—", Lane::as_str);
+            let lifecycle = if self.coordinator_request_id.is_none() {
+                "no caller ID retained"
+            } else if self.coordinator_request_terminal {
+                "terminal observed · next Submit requires a different caller ID"
+            } else {
+                "ambiguous or nonterminal · observe/cancel before another Submit"
+            };
+            let socket = if self.stack_coordinator_socket_dir.is_some() {
+                "explicit socket configured"
+            } else {
+                "no explicit socket configured"
+            };
+            let text = if self.input_mode == InputMode::CoordinatorInput {
+                format!(
+                    "{}\n> {}",
+                    coordinator_prompt(self.coordinator_input_action),
+                    self.coordinator_input
+                )
+            } else {
+                format!(
+                    "{socket}\nretained ID: {retained}\nlane: {lane}\n{lifecycle}\n{}",
+                    if self.coordinator_action_pending {
+                        "action pending…"
+                    } else {
+                        "idle · f/s/o/c"
+                    }
+                )
+            };
+            (text, "Coordinator · opt-in only")
         };
-        let socket = if self.stack_coordinator_socket_dir.is_some() {
-            "explicit socket configured"
-        } else {
-            "no explicit socket configured"
-        };
-        let action_text = if self.input_mode == InputMode::CoordinatorInput {
-            format!(
-                "{}\n> {}",
-                coordinator_prompt(self.coordinator_input_action),
-                self.coordinator_input
-            )
-        } else {
-            format!(
-                "{socket}\nretained ID: {retained}\nlane: {lane}\n{lifecycle}\n{}",
-                if self.coordinator_action_pending {
-                    "action pending…"
-                } else {
-                    "idle · f/s/o/c"
-                }
+        #[cfg(not(target_os = "linux"))]
+        let (action_text, action_title) = {
+            let retained = self.coordinator_request_id.as_deref().unwrap_or("none");
+            let lane = self.coordinator_request_lane.map_or("—", Lane::as_str);
+            let lifecycle = if self.coordinator_request_id.is_none() {
+                "no caller ID retained"
+            } else if self.coordinator_request_terminal {
+                "terminal observed · next Submit requires a different caller ID"
+            } else {
+                "ambiguous or nonterminal · observe/cancel before another Submit"
+            };
+            let socket = if self.stack_coordinator_socket_dir.is_some() {
+                "explicit socket configured"
+            } else {
+                "no explicit socket configured"
+            };
+            (
+                format!("{socket}\nretained ID: {retained}\nlane: {lane}\n{lifecycle}"),
+                "Coordinator · opt-in only",
             )
         };
         frame.render_widget(
             Paragraph::new(action_text)
                 .style(theme::text())
-                .block(
-                    theme::block()
-                        .title("Coordinator · opt-in only")
-                        .borders(Borders::ALL),
-                )
+                .block(theme::block().title(action_title).borders(Borders::ALL))
                 .wrap(Wrap { trim: false }),
             info[1],
         );
-        if self.input_mode == InputMode::CoordinatorInput {
+        #[cfg(target_os = "linux")]
+        if !show_direct_decision && self.input_mode == InputMode::CoordinatorInput {
             frame.set_cursor_position((
                 info[1].x.saturating_add(
                     3 + coordinator_prompt(self.coordinator_input_action).len() as u16,
@@ -6390,9 +6930,15 @@ impl App {
                 info[1].y.saturating_add(2),
             ));
         }
-        let output_text = self.coordinator_output.as_ref().map_or_else(
+        let output_text = if show_direct_decision && !direct_result_visible {
+            "Native decision output is hidden until its completed CPU profile is selected."
+                .to_owned()
+        } else {
+            self.coordinator_output.as_ref().map_or_else(
             || {
-                if self.coordinator_results_available {
+                if show_direct_decision {
+                    "Native decision answers appear here after the foreground CPU run completes.".to_owned()
+                } else if self.coordinator_results_available {
                     "No native output in the latest page.".to_owned()
                 } else {
                     "Native results are shown here only after pressing o. No result body is copied to logs or history.".to_owned()
@@ -6403,13 +6949,18 @@ impl App {
                 self.coordinator_output_complete,
                 self.coordinator_decision_metadata.as_ref(),
             ),
-        );
+            )
+        };
         frame.render_widget(
             Paragraph::new(output_text)
                 .style(theme::text())
                 .block(
                     theme::block()
-                        .title("Private native result panel · explicit observation only")
+                        .title(if show_direct_decision {
+                            "Native decision result"
+                        } else {
+                            "Private native result panel · explicit observation only"
+                        })
                         .borders(Borders::ALL),
                 )
                 .wrap(Wrap { trim: false }),
@@ -6509,7 +7060,11 @@ impl App {
             panes[1],
         );
         frame.render_widget(
-            Paragraph::new("Tab/Shift+Tab move fields · ↑/↓ choose task/kind/mode · Enter inserts newline · Ctrl+Enter submits once · Esc clears draft")
+            Paragraph::new(if editor.direct_cpu_decision {
+                "Tab/Shift+Tab move fields · ↑/↓ choose task · Enter inserts newline · Ctrl+Enter runs once · Esc clears draft · c cancels active run"
+            } else {
+                "Tab/Shift+Tab move fields · ↑/↓ choose task/kind/mode · Enter inserts newline · Ctrl+Enter submits once · Esc clears draft"
+            })
                 .style(theme::warning())
                 .block(theme::block().borders(Borders::ALL))
                 .wrap(Wrap { trim: false }),
@@ -7090,6 +7645,12 @@ fn readiness_label(readiness: Readiness) -> &'static str {
     }
 }
 
+fn is_direct_cpu_decision_profile(profile: &CatalogProfile) -> bool {
+    profile.key.lane == Lane::Decisions
+        && profile.device.as_ref() == Some(&Device::Cpu)
+        && matches!(profile.runtime.as_str(), "nagi" | "laya")
+}
+
 fn coordinator_prompt(action: Option<CoordinatorInputAction>) -> &'static str {
     match action {
         Some(CoordinatorInputAction::SubmitFile) => "Submit file path",
@@ -7209,6 +7770,23 @@ impl Drop for App {
                     let _ = worker.join();
                 }
             }
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(job) = self.direct_decision_job.take() {
+            // Once a child exists, the direct runner bounds process-group
+            // cleanup with its five-second recovery policy. Join (rather than
+            // detach) before dropping App so a model child cannot outlive this
+            // foreground job owner. This is not a wall-clock bound on local
+            // catalog preflight I/O.
+            job.cancellation.store(true, Ordering::Release);
+            let job_id = job.job_id;
+            let joined = job.worker.join().is_ok();
+            let completion = if joined {
+                job.receiver.try_recv().ok()
+            } else {
+                None
+            };
+            self.apply_direct_decision_completion(job_id, completion);
         }
         if self.running_process.is_some() {
             self.stop_running_process();
@@ -8414,6 +8992,261 @@ mod tests {
         fs::create_dir_all(&decisions).unwrap();
         fs::write(media.join("media-runtimes.json"), r#"{"schema_version":1,"profiles":[{"id":"breeze","name":"Speech fixture","runtime":"audio.cpp","tasks":["tts","clon","design"],"script":"media-models/speech.sh"}]}"#).unwrap();
         fs::write(decisions.join("decision-runtimes.json"), r#"{"version":"1.0","profiles":[{"id":"nagi","name":"Decision fixture","engine":"nagi","type":"local","model":"org/nagi","device":"cpu","entrypoint":"decision-models/runner.py"}]}"#).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn write_direct_decision_runner(fixture: &AppFixture, marker: &Path, wait: bool) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let decisions = fixture.root.join("toolkits/l3ds");
+        fs::create_dir_all(decisions.join(".venv/bin")).unwrap();
+        fs::create_dir_all(decisions.join("decision-models")).unwrap();
+        let guard = crate::control::process::executable_fixture_guard();
+        let interpreter = decisions.join(".venv/bin/python");
+        fs::write(&interpreter, "#!/bin/sh\nexec /bin/sh \"$@\"\n").unwrap();
+        fs::set_permissions(&interpreter, fs::Permissions::from_mode(0o700)).unwrap();
+        let response = serde_json::json!({
+            "engine": "nagi-native",
+            "answers": {"route": {"choice": "yes"}},
+            "latency_ms": 1.25,
+            "usage": {"fixture_count": 1}
+        })
+        .to_string();
+        let body = if wait {
+            let late_marker = marker.with_extension("late");
+            format!(
+                "#!/bin/sh\ncat >/dev/null\nprintf started > '{}'\nsleep 30\nprintf late > '{}'\nprintf '%s\\n' '{}'\n",
+                marker.display(),
+                late_marker.display(),
+                response.replace('\'', "'\\''")
+            )
+        } else {
+            format!(
+                "#!/bin/sh\ncat >/dev/null\nprintf started > '{}'\nprintf '%s\\n' '{}'\n",
+                marker.display(),
+                response.replace('\'', "'\\''")
+            )
+        };
+        let runner = decisions.join("decision-models/runner.py");
+        fs::write(&runner, body).unwrap();
+        fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
+        drop(guard);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn open_direct_decision_form(app: &mut App) {
+        app.handle_key(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE))
+            .unwrap();
+        let index = app
+            .stack_catalog
+            .as_ref()
+            .unwrap()
+            .list()
+            .iter()
+            .position(|profile| profile.key.profile_id.as_str() == "nagi")
+            .unwrap();
+        app.stack_catalog_state.select(Some(index));
+        assert!(app.stack_coordinator_socket_dir.is_none());
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+            .unwrap();
+        let editor = app.task_form_editor.as_mut().unwrap();
+        assert!(editor.direct_cpu_decision);
+        assert!(!editor.fields.contains(&TaskFormField::RequestId));
+        assert_eq!(editor.values.timeout, "30000");
+        editor.selected_task = Some(0);
+        editor.values.decision_state = r#"{"private_prompt":"decision-private-secret"}"#.into();
+        editor.values.decision_questions =
+            r#"{"route":{"type":"choice","criteria":{"yes":"Proceed","no":"Stop"}}}"#.into();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wait_for_direct_decision(app: &mut App) {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while app.direct_decision_job.is_some() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+            app.drain_background_events();
+        }
+        app.drain_background_events();
+        assert!(
+            app.direct_decision_job.is_none(),
+            "direct CPU decision did not finish"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cpu_decision_form_runs_without_socket_and_persists_only_redacted_metadata() {
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        let marker = fixture.root.join("runner-started");
+        write_direct_decision_runner(&fixture, &marker, false);
+        let mut app = fixture.app();
+        open_direct_decision_form(&mut app);
+        app.submit_task_form();
+        assert!(app.direct_decision_job.is_some());
+        assert!(app.coordinator_workbench.is_none());
+        assert!(app.task_form_editor.is_none());
+        wait_for_direct_decision(&mut app);
+
+        let summary = app.direct_decision_summary.as_ref().unwrap();
+        assert!(matches!(summary.state, DirectDecisionState::Succeeded));
+        assert_eq!(
+            summary.native_latency,
+            Some(Duration::from_nanos(1_250_000))
+        );
+        assert!(app.status.contains("succeeded"));
+        assert!(!app.status.contains("decision-private-secret"));
+        assert!(app
+            .log
+            .iter()
+            .all(|line| !line.contains("decision-private-secret")));
+        let job = &app.job_history.records()[0];
+        assert!(job.command.is_empty());
+        assert_eq!(job.metadata.toolkit.as_deref(), Some("l3ds"));
+        assert_eq!(job.metadata.task.as_deref(), Some("decision"));
+        assert!(job.metadata.request_id.is_none());
+        assert_eq!(job.metadata.result_state.as_deref(), Some("succeeded"));
+        let persisted =
+            fs::read_to_string(crate::state_store::jobs_path_in(&fixture.data)).unwrap();
+        assert!(!persisted.contains("decision-private-secret"));
+        assert!(!persisted.contains("argv"));
+        assert!(marker.exists());
+
+        let language_index = app
+            .stack_catalog
+            .as_ref()
+            .unwrap()
+            .list()
+            .iter()
+            .position(|profile| profile.key.lane == Lane::Language)
+            .unwrap();
+        app.stack_catalog_state.select(Some(language_index));
+        let mut terminal = Terminal::new(TestBackend::new(140, 45)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(terminal_text(&terminal).contains("output is hidden"));
+        app.clear_direct_decision_result_display();
+        assert!(app.coordinator_output.is_none());
+        assert!(app.direct_decision_summary.is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cpu_decision_history_save_failure_prevents_launch() {
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        let marker = fixture.root.join("runner-started");
+        write_direct_decision_runner(&fixture, &marker, false);
+        let mut app = fixture.app();
+        // A directory where the history file belongs makes persistence fail
+        // deterministically, without relying on the test user's privileges.
+        fs::create_dir(crate::state_store::jobs_path_in(&fixture.data)).unwrap();
+        open_direct_decision_form(&mut app);
+        app.submit_task_form();
+        assert!(app.direct_decision_job.is_none());
+        assert!(!marker.exists());
+        assert!(app.status.contains("nothing was started"));
+        assert_eq!(
+            app.job_history.records()[0]
+                .metadata
+                .result_state
+                .as_deref(),
+            Some("failed")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cpu_decision_cancel_keeps_job_busy_until_cleanup_and_rejects_a_second_form() {
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        let marker = fixture.root.join("runner-started");
+        write_direct_decision_runner(&fixture, &marker, true);
+        let mut app = fixture.app();
+        open_direct_decision_form(&mut app);
+        app.submit_task_form();
+        let job_id = app.direct_decision_job.as_ref().unwrap().job_id;
+        let start_deadline = Instant::now() + Duration::from_secs(3);
+        while !marker.exists() && Instant::now() < start_deadline {
+            thread::sleep(Duration::from_millis(10));
+            app.drain_background_events();
+        }
+        assert!(marker.exists(), "fake native runner did not start");
+
+        let language_index = app
+            .stack_catalog
+            .as_ref()
+            .unwrap()
+            .list()
+            .iter()
+            .position(|profile| profile.key.lane == Lane::Language)
+            .unwrap();
+        app.stack_catalog_state.select(Some(language_index));
+        app.begin_task_form();
+        assert!(app.task_form_editor.is_none());
+        assert!(app.status.contains("foreground CPU decision is active"));
+        app.begin_coordinator_observe();
+        assert!(app
+            .status
+            .contains("coordinator observation is unavailable"));
+        assert!(app.coordinator_workbench.is_none());
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.direct_decision_job.as_ref().unwrap().job_id, job_id);
+        assert_eq!(
+            app.job_history.records()[0]
+                .metadata
+                .result_state
+                .as_deref(),
+            Some("running")
+        );
+        assert!(app.status.contains("cancellation requested"));
+
+        wait_for_direct_decision(&mut app);
+        assert!(!app.direct_decision_admission_closed);
+        assert!(matches!(
+            app.direct_decision_summary.as_ref().unwrap().state,
+            DirectDecisionState::Cancelled
+        ));
+        assert_eq!(
+            app.job_history.records()[0]
+                .metadata
+                .result_state
+                .as_deref(),
+            Some("cancelled")
+        );
+        assert!(app
+            .log
+            .iter()
+            .all(|line| !line.contains("decision-private-secret")));
+        let persisted =
+            fs::read_to_string(crate::state_store::jobs_path_in(&fixture.data)).unwrap();
+        assert!(!persisted.contains("decision-private-secret"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dropping_app_cancels_and_joins_the_direct_cpu_child() {
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        let marker = fixture.root.join("runner-started");
+        let late_marker = marker.with_extension("late");
+        write_direct_decision_runner(&fixture, &marker, true);
+        let mut app = fixture.app();
+        open_direct_decision_form(&mut app);
+        app.submit_task_form();
+        let start_deadline = Instant::now() + Duration::from_secs(3);
+        while !marker.exists() && Instant::now() < start_deadline {
+            thread::sleep(Duration::from_millis(10));
+            app.drain_background_events();
+        }
+        assert!(marker.exists(), "fake native runner did not start");
+
+        drop(app);
+        assert!(!late_marker.exists(), "native runner outlived App shutdown");
+        let persisted =
+            fs::read_to_string(crate::state_store::jobs_path_in(&fixture.data)).unwrap();
+        assert!(persisted.contains("cancelled"));
+        assert!(!persisted.contains("decision-private-secret"));
     }
 
     #[test]

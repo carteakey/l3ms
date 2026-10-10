@@ -109,6 +109,37 @@ and `toolkits/l3ds`; layered settings can override them with
 `L3MS_HOST_SETTINGS_DIR` selects a host settings directory before user
 settings are applied.
 
+### Direct CPU decisions (Linux)
+
+Run a prepared local Nagi/Laya CPU profile without a daemon or socket:
+
+```bash
+l3ms --run-profile decisions:nagi-smol-cpu --task decision --input /path/to/input.json --task-timeout-ms 120000
+```
+
+The input is native JSON with exactly `state` and `questions` at the top level,
+for example:
+
+```json
+{"state":{"ready":true},"questions":{"route":{"type":"choice","criteria":{"accept":"The worker is ready.","reject":"The worker is not ready."}}}}
+```
+
+Install the [decision toolkit runtime](toolkits/l3ds/README.md) and model weights
+first; this command does not download them, start services, or fall back from
+CUDA to CPU. It returns native `answers` and optional `native_latency_ns` and
+`native_usage`. Input files are bounded to 1 MiB; Ctrl-C and the task timeout
+cancel the owned process group. Results are sensitive: stdout is intentional
+output, not a shared log. Other task lanes still await direct-path replacement.
+
+In the TUI, open Stack Catalog (`F8`), select a supported CPU decision profile,
+press `f`, choose `decision`, fill the native fields and press `Ctrl+Enter`.
+Press `c` to cancel; the job stays busy until cleanup is confirmed. History stores
+metadata only, while native answers stay in the in-memory result panel.
+
+### Temporary coordinator path
+
+The older opt-in path remains while its callers are replaced under the
+[simplification plan](docs/migration/simplification-plan.md).
 On Linux, submit, observe or cancel a coordinator request using an explicitly
 configured private socket directory:
 

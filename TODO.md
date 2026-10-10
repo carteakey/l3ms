@@ -11,18 +11,30 @@ existing Linear migration issues rather than replacing their acceptance criteria
 ## Monorepo: next work
 
 **Revised direction:** follow the [simplification plan](docs/migration/simplification-plan.md).
-Next trace the native execution/job-owner path, connect end-to-end wrapper
-workflows, then delete displaced infrastructure. Do not build the Stop journal
+Next finish native TTS/media wrapper workflows, then delete displaced
+infrastructure. Do not build the Stop journal
 next. Older infrastructure entries below are historical inventory, not the
 current implementation order or required hardened-platform acceptance scope.
 
-Parallel audit is complete. First implementation slice: de-wire the task form
-and execute a prepared CPU-local decision through one CLI/TUI direct operation,
-using existing native recipes/process supervision and safe job metadata. Then
-native media/TTS, GPU switching, platform deletion and UI polish in the
+Parallel audit is complete. The first CPU-local decision implementation now
+shares a direct typed operation across CLI and the Stack native form, using
+existing recipes/process supervision and safe TUI job metadata. Real offline
+CLI Nagi execution passed, including the explicit CPU profile; this is not
+full interactive, media or GPU acceptance. See
+[direct decision evidence](docs/migration/direct-decision-acceptance.md).
+Next native media/TTS, GPU switching, platform deletion and UI polish in the
 [execution plan](docs/migration/simplification-plan.md#execution-plan--parallel-audit-resolved-2026-10-09).
 
-Latest offline checkpoint on `feature/l3ms-monorepo`: 859 root tests passed,
+Latest replacement checkpoint on `feature/l3ms-monorepo`: **876 root tests
+passed, 1 ignored**; two standalone decision-toolkit tests, strict all-target
+Clippy, formatting and whitespace checks pass. Real offline Nagi CLI execution
+and UI lifecycle fixtures passed. Whole `src/` net change is **+1,906 lines**
+including tests/comments/blanks; no platform modules removed yet. Next generalize
+the same foreground owner for native speech/media, verify declared backends and
+output files, then retire replaced coordinator callers and their dependency
+closure. Do not expand owned-job helpers or the managed daemon for this slice.
+
+Earlier retained platform checkpoint (historical inventory, not next work): 859 root tests passed,
 1 ignored, strict all-target Clippy, formatting and whitespace checks pass.
 Opt-in CPU dispatch, managed-language launch, resumable native results and
 owned per-job packet/service handoff are implemented. Subsequent branch work

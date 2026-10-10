@@ -176,3 +176,21 @@ Keep necessary GPU checks even if their current module appears in the candidate.
 Report each implementation checkpoint as: user workflow gained, concepts/modules
 removed, net LOC change across the whole `src/` tree (so relocation cannot count),
 verification, and next concrete slice. Test count alone is not a progress metric.
+
+### First direct replacement checkpoint — 2026-10-10
+
+CPU-local Nagi/Laya decisions now share a typed direct operation across the CLI
+and Stack form. Real offline Nagi CLI execution passed with the branch's explicit
+CPU profile; see [acceptance evidence](direct-decision-acceptance.md). This is a
+partial caller replacement, not full slice acceptance or a LOC reduction yet.
+No platform module was removed in this checkpoint.
+
+The next slice must generalize this foreground inference owner for native
+speech/media, not grow `managed_session`, owned-job helpers or IPC. Reuse native
+recipe/process execution and normal validated output files. Breeze currently
+declares CUDA and its native wrapper hardcodes the CUDA backend: retain that
+profile unchanged. A CPU TTS option requires an explicitly declared profile,
+route-derived backend and a verified CPU-capable audio.cpp build; never silently
+reinterpret a CUDA profile. Otherwise GPU TTS must wait for the small native
+switching path and its live acceptance. Consolidate one result/job owner as lanes
+move, then remove displaced caller dependencies inward.
