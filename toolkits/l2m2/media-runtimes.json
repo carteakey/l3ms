@@ -93,6 +93,26 @@
       ]
     },
     {
+      "id": "breeze-tts-2-cpu",
+      "name": "Breeze-TTS-2 CPU speech",
+      "runtime": "audio.cpp",
+      "device": "cpu",
+      "variant": "Breeze-TTS-2 Q8_0 GGUF, explicitly selected CPU backend",
+      "tasks": ["tts"],
+      "inputs": ["text"],
+      "status": "experimental-local",
+      "script": "media-models/generate-breeze-tts-2.sh",
+      "description": "Explicit CPU standard offline speech for the direct L3MS runner. No CUDA fallback; CPU performance and quality require local acceptance.",
+      "requirements": [
+        "audio.cpp audiocpp_cli with CPU backend and breeze_tts loader",
+        "Breeze-TTS-2 Q8_0 GGUF package and model spec available locally"
+      ],
+      "notes": [
+        "The standalone CPU profile passes --backend cpu; direct script calls must select it explicitly because the script default remains CUDA.",
+        "The direct wrapper currently accepts only standard offline TTS on this profile."
+      ]
+    },
+    {
       "id": "blender-3d",
       "name": "Blender 3D scene & mesh generation",
       "runtime": "Blender 5.2 / blender-mcp",

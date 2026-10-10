@@ -19,6 +19,7 @@ Options:
   --text TEXT               Input text to synthesize (required unless --text-file)
   --text-file PATH          Read input text from a UTF-8 text file
   --task TASK               Generation task: tts (default), clon, or design
+  --backend BACKEND         Explicit cpu or cuda backend (default: cuda; no fallback)
   --instruction TEXT        Voice design or style prompt (default: "Speak clearly and naturally.")
   --voice-ref PATH          Reference speaker WAV audio (required for --task clon)
   --reference-text TEXT     Transcript for reference speaker audio
@@ -110,6 +111,7 @@ output_dir="${L3MS_MEDIA_OUTPUT_DIR:-${HOME}/media-output}"
 text=""
 text_file=""
 task="tts"
+backend="cuda"
 instruction="Speak clearly and naturally."
 voice_ref=""
 reference_text=""
@@ -145,6 +147,11 @@ while (($#)); do
         --task)
             (($# >= 2)) || { echo "Missing value for --task" >&2; exit 2; }
             task="$2"
+            shift 2
+            ;;
+        --backend)
+            (($# >= 2)) || { echo "Missing value for --backend" >&2; exit 2; }
+            backend="$2"
             shift 2
             ;;
         --instruction)
@@ -260,6 +267,11 @@ while (($#)); do
             ;;
     esac
 done
+
+case "$backend" in
+    cpu|cuda) ;;
+    *) echo "Unsupported backend: $backend (expected cpu or cuda)" >&2; exit 2 ;;
+esac
 
 if [[ -n "$text_file" ]]; then
     [[ -f "$text_file" ]] || { echo "Text file not found: $text_file" >&2; exit 1; }
@@ -377,7 +389,7 @@ args=(
     --family breeze_tts
     --model "$model_path"
     --model-spec-override "$spec_path"
-    --backend cuda
+    --backend "$backend"
     --threads "${L3MS_BREEZE_TTS_THREADS:-8}"
     --text "$text"
     --mode "$mode"

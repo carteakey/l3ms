@@ -6,6 +6,7 @@
 
 use std::fmt;
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -16,7 +17,8 @@ use super::ipc::{
     self, ClientRequest, RequestEnvelope, WireChatTurn, WireInferenceRequest, WireMediaInput,
     WireRequestMessage, WireSpeechMode, MAX_FRAME_BYTES,
 };
-use super::requests::{InferenceRequest, SpeechMode};
+use super::native_commands::CPU_BREEZE_PROFILE_ID;
+use super::requests::{InferenceRequest, SpeechInput, SpeechMode};
 
 const ENVELOPE_OVERHEAD_BUDGET: usize = 2048;
 const MAX_DIRECT_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;
@@ -114,13 +116,12 @@ impl fmt::Display for TaskFormError {
 
 impl std::error::Error for TaskFormError {}
 
-/// Build a typed CPU-decision request for direct in-process execution.
+/// Build a typed request for the supported direct CPU execution slice.
 ///
-/// The legacy caller ID remains in `TaskFormDraft` for compatibility with the
-/// IPC submit builder, but is ignored here. This validates the selected
-/// decisions profile against a refreshed catalog and returns the caller's
-/// bounded operation timeout without constructing a wire envelope.
-pub fn build_direct_decision(
+/// The legacy caller ID remains available to the IPC submit builder but is
+/// ignored here. Decision fields and standard speech stay typed in memory;
+/// this function constructs no wire envelope or output-directory path.
+pub fn build_direct_native(
     catalog: &Catalog,
     draft: TaskFormDraft,
 ) -> Result<(InferenceRequest, Duration), TaskFormError> {
@@ -135,13 +136,52 @@ pub fn build_direct_decision(
     if timeout_ms == 0 || timeout_ms > MAX_DIRECT_TIMEOUT_MS {
         return Err(TaskFormError::InvalidRequest);
     }
-    if selected_profile.lane != Lane::Decisions || declared_task.as_str() != "decision" {
-        return Err(TaskFormError::ProfileTaskMismatch);
-    }
-    let TaskFields::Decisions { state, questions } = fields else {
-        return Err(TaskFormError::InvalidNativeFields);
+    let request = match fields {
+        TaskFields::Decisions { state, questions } => {
+            if selected_profile.lane != Lane::Decisions || declared_task.as_str() != "decision" {
+                return Err(TaskFormError::ProfileTaskMismatch);
+            }
+            preflight_direct_decision_fields(&state, &questions)?;
+            InferenceRequest::Decision {
+                profile: selected_profile.clone(),
+                state,
+                questions,
+            }
+        }
+        TaskFields::Speech {
+            text,
+            mode,
+            instruction,
+            voice_reference,
+            reference_text,
+        } => {
+            if selected_profile.lane != Lane::Media
+                || selected_profile.profile_id.as_str() != CPU_BREEZE_PROFILE_ID
+                || declared_task.as_str() != "tts"
+            {
+                return Err(TaskFormError::ProfileTaskMismatch);
+            }
+            if mode != SpeechMode::Standard
+                || instruction.is_some()
+                || voice_reference.is_some()
+                || reference_text.is_some()
+            {
+                return Err(TaskFormError::InvalidNativeFields);
+            }
+            preflight_direct_speech_fields(&text, &instruction, &voice_reference, &reference_text)?;
+            InferenceRequest::Media {
+                profile: selected_profile.clone(),
+                input: super::requests::MediaInput::Speech(SpeechInput {
+                    text,
+                    mode,
+                    instruction,
+                    voice_reference: voice_reference.map(PathBuf::from),
+                    reference_text,
+                }),
+            }
+        }
+        _ => return Err(TaskFormError::InvalidNativeFields),
     };
-    preflight_direct_decision_fields(&state, &questions)?;
 
     let refreshed = catalog
         .refresh()
@@ -162,16 +202,35 @@ pub fn build_direct_decision(
         return Err(TaskFormError::ProfileTaskMismatch);
     }
 
-    let request = InferenceRequest::Decision {
-        profile: selected_profile,
-        state,
-        questions,
-    };
     request
         .validate(&refreshed)
         .map_err(|_| TaskFormError::InvalidNativeFields)?;
 
     Ok((request, Duration::from_millis(timeout_ms)))
+}
+
+fn preflight_direct_speech_fields(
+    text: &str,
+    instruction: &Option<String>,
+    voice_reference: &Option<String>,
+    reference_text: &Option<String>,
+) -> Result<(), TaskFormError> {
+    let mut total = 0usize;
+    for size in [
+        bounded_json_len(&text)?,
+        bounded_json_len(instruction)?,
+        bounded_json_len(voice_reference)?,
+        bounded_json_len(reference_text)?,
+    ] {
+        if size > MAX_TASK_FORM_FIELD_BYTES {
+            return Err(TaskFormError::FrameTooLarge);
+        }
+        total = total.saturating_add(size);
+    }
+    if total > MAX_TASK_FORM_TOTAL_BYTES {
+        return Err(TaskFormError::FrameTooLarge);
+    }
+    Ok(())
 }
 
 fn preflight_direct_decision_fields(
@@ -424,6 +483,41 @@ mod tests {
         Catalog::load(env!("CARGO_MANIFEST_DIR")).unwrap()
     }
 
+    fn cpu_breeze_catalog() -> (TempDir, Catalog) {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        fs::create_dir_all(root.join("toolkits/l2m2")).unwrap();
+        fs::create_dir_all(root.join("toolkits/l3ds")).unwrap();
+        fs::write(
+            root.join("llama-swap.yaml"),
+            "models:\n  fixture-chat:\n    cmd: server\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("toolkits/l2m2/media-runtimes.json"),
+            serde_json::json!({
+                "schema_version": 1,
+                "profiles": [{
+                    "id": CPU_BREEZE_PROFILE_ID,
+                    "name": "CPU Breeze fixture",
+                    "runtime": "audio.cpp",
+                    "device": "cpu",
+                    "tasks": ["tts"],
+                    "script": "media-models/generate-breeze-tts-2.sh"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            root.join("toolkits/l3ds/decision-runtimes.json"),
+            r#"{"version":"1.0","profiles":[]}"#,
+        )
+        .unwrap();
+        let catalog = Catalog::load(root).unwrap();
+        (temporary, catalog)
+    }
+
     fn profile(lane: super::super::catalog::Lane, id: &str) -> ProfileKey {
         ProfileKey::new(lane, id).unwrap()
     }
@@ -645,7 +739,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_decision_builder_ignores_legacy_id_and_returns_typed_request() {
+    fn direct_native_builder_ignores_legacy_id_and_returns_typed_decision() {
         let mut questions = Map::new();
         questions.insert(
             "route".into(),
@@ -662,7 +756,7 @@ mod tests {
             },
         );
 
-        let (request, timeout) = build_direct_decision(&catalog(), draft).unwrap();
+        let (request, timeout) = build_direct_native(&catalog(), draft).unwrap();
         assert_eq!(timeout, std::time::Duration::from_secs(120));
         let super::super::requests::InferenceRequest::Decision {
             profile: selected,
@@ -681,7 +775,86 @@ mod tests {
     }
 
     #[test]
-    fn direct_decision_builder_rejects_wrong_profile_fields_and_timeout() {
+    fn direct_native_builder_accepts_only_standard_cpu_breeze_speech() {
+        let (_temporary, catalog) = cpu_breeze_catalog();
+        let draft = TaskFormDraft::new(
+            profile(super::super::catalog::Lane::Media, CPU_BREEZE_PROFILE_ID),
+            task("tts"),
+            "ignored legacy id".into(),
+            120_000,
+            TaskFields::Speech {
+                text: "local speech input".into(),
+                mode: SpeechMode::Standard,
+                instruction: None,
+                voice_reference: None,
+                reference_text: None,
+            },
+        );
+
+        let (request, timeout) = build_direct_native(&catalog, draft).unwrap();
+        assert_eq!(timeout, std::time::Duration::from_secs(120));
+        let super::super::requests::InferenceRequest::Media {
+            profile: selected,
+            input: super::super::requests::MediaInput::Speech(input),
+        } = request
+        else {
+            panic!("direct speech fields build a typed media request")
+        };
+        assert_eq!(selected.profile_id.as_str(), CPU_BREEZE_PROFILE_ID);
+        assert_eq!(input.mode, SpeechMode::Standard);
+        assert_eq!(input.text, "local speech input");
+        assert!(input.instruction.is_none());
+
+        let mut instruction_draft = TaskFormDraft::new(
+            profile(super::super::catalog::Lane::Media, CPU_BREEZE_PROFILE_ID),
+            task("tts"),
+            String::new(),
+            30_000,
+            speech_fields(SpeechMode::Standard),
+        );
+        if let TaskFields::Speech { instruction, .. } = &mut instruction_draft.fields {
+            *instruction = Some("calm clear delivery".into());
+        }
+        assert_eq!(
+            direct_error(build_direct_native(&catalog, instruction_draft)),
+            TaskFormError::InvalidNativeFields
+        );
+
+        for mode in [
+            SpeechMode::VoiceDesign,
+            SpeechMode::VoiceClone,
+            SpeechMode::Streaming,
+        ] {
+            let result = build_direct_native(
+                &catalog,
+                TaskFormDraft::new(
+                    profile(super::super::catalog::Lane::Media, CPU_BREEZE_PROFILE_ID),
+                    task("tts"),
+                    String::new(),
+                    30_000,
+                    speech_fields(mode),
+                ),
+            );
+            assert_eq!(direct_error(result), TaskFormError::InvalidNativeFields);
+        }
+
+        assert_eq!(
+            direct_error(build_direct_native(
+                &catalog,
+                TaskFormDraft::new(
+                    profile(super::super::catalog::Lane::Media, "breeze-tts-2"),
+                    task("tts"),
+                    String::new(),
+                    30_000,
+                    speech_fields(SpeechMode::Standard),
+                ),
+            )),
+            TaskFormError::ProfileTaskMismatch
+        );
+    }
+
+    #[test]
+    fn direct_native_builder_rejects_wrong_profile_fields_and_timeout() {
         let catalog = catalog();
         let fields = || TaskFields::Decisions {
             state: json!({"ready": true}),
@@ -689,7 +862,7 @@ mod tests {
         };
 
         assert_eq!(
-            direct_error(build_direct_decision(
+            direct_error(build_direct_native(
                 &catalog,
                 TaskFormDraft::new(
                     profile(super::super::catalog::Lane::Media, "breeze-tts-2"),
@@ -702,7 +875,7 @@ mod tests {
             TaskFormError::ProfileTaskMismatch
         );
         assert_eq!(
-            direct_error(build_direct_decision(
+            direct_error(build_direct_native(
                 &catalog,
                 TaskFormDraft::new(
                     profile(super::super::catalog::Lane::Decisions, "nagi-smol"),
@@ -715,7 +888,7 @@ mod tests {
             TaskFormError::ProfileTaskMismatch
         );
         assert_eq!(
-            direct_error(build_direct_decision(
+            direct_error(build_direct_native(
                 &catalog,
                 TaskFormDraft::new(
                     profile(super::super::catalog::Lane::Decisions, "nagi-smol"),
@@ -729,7 +902,7 @@ mod tests {
         );
         for timeout_ms in [0, MAX_DIRECT_TIMEOUT_MS + 1] {
             assert_eq!(
-                direct_error(build_direct_decision(
+                direct_error(build_direct_native(
                     &catalog,
                     TaskFormDraft::new(
                         profile(super::super::catalog::Lane::Decisions, "nagi-smol"),
@@ -743,7 +916,7 @@ mod tests {
             );
         }
         assert_eq!(
-            direct_error(build_direct_decision(
+            direct_error(build_direct_native(
                 &catalog,
                 TaskFormDraft::new(
                     profile(super::super::catalog::Lane::Decisions, "nagi-smol"),
@@ -761,7 +934,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_decision_builder_rejects_catalog_route_drift() {
+    fn direct_native_builder_rejects_catalog_route_drift() {
         let temporary = TempDir::new().unwrap();
         let root = temporary.path();
         fs::create_dir_all(root.join("toolkits/l2m2")).unwrap();
@@ -790,7 +963,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            direct_error(build_direct_decision(
+            direct_error(build_direct_native(
                 &catalog,
                 TaskFormDraft::new(
                     profile(super::super::catalog::Lane::Decisions, "fixture-decision"),

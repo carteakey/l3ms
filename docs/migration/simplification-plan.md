@@ -194,3 +194,15 @@ route-derived backend and a verified CPU-capable audio.cpp build; never silently
 reinterpret a CUDA profile. Otherwise GPU TTS must wait for the small native
 switching path and its live acceptance. Consolidate one result/job owner as lanes
 move, then remove displaced caller dependencies inward.
+
+### Shared CPU speech replacement checkpoint — 2026-10-10
+
+Standard CPU Breeze now shares the direct decision foreground owner, typed
+builder and runner. Real cached-weight CLI execution and file delivery pass;
+see [speech acceptance](direct-speech-acceptance.md). CUDA defaults remain intact.
+No coordinator IPC or second result store was added for this lane.
+
+Still temporary overlap: this slice adds 1,233 net root source lines, and no
+platform module is retired yet. Next replace remaining coordinator form callers
+with native media/language workflows and delete the displaced caller dependency
+closure. Do not extend the managed daemon, owned-job helpers or recovery platform.

@@ -28,10 +28,10 @@ const COORDINATOR_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_COORDINATOR_RESPONSE_BYTES: usize = 2 * 1024;
 const MAX_COORDINATOR_RESULTS_ENVELOPE_BYTES: usize = 4 * 1024;
 const MAX_COORDINATOR_NATIVE_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
-const MAX_DIRECT_DECISION_INPUT_BYTES: usize = 1024 * 1024;
-const MAX_DIRECT_DECISION_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
-const DEFAULT_DIRECT_DECISION_TIMEOUT_MS: u64 = 300_000;
-const MAX_DIRECT_DECISION_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;
+const MAX_DIRECT_NATIVE_INPUT_BYTES: usize = 1024 * 1024;
+const MAX_DIRECT_NATIVE_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
+const DEFAULT_DIRECT_NATIVE_TIMEOUT_MS: u64 = 300_000;
+const MAX_DIRECT_NATIVE_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;
 #[cfg(target_os = "linux")]
 const MAX_COORDINATOR_ARTIFACT_CHUNK_JSON_BYTES: usize = 160 * 1024;
 
@@ -56,19 +56,23 @@ struct Cli {
     )]
     run: Option<String>,
 
-    /// Execute one explicit local CPU decision profile with a native JSON input file.
+    /// Execute one explicit local CPU profile with strict native JSON input.
     #[arg(long, value_name = "NAMESPACED_ID", requires_all = ["task", "input"])]
     run_profile: Option<String>,
 
-    /// Declared task name required by --run-profile.
+    /// Declared task name (decision or tts) required by --run-profile.
     #[arg(long, value_name = "TASK", requires = "run_profile")]
     task: Option<String>,
 
-    /// Native decision input JSON file required by --run-profile.
+    /// Strict native input JSON file required by --run-profile.
     #[arg(long, value_name = "PATH", requires = "run_profile")]
     input: Option<PathBuf>,
 
-    /// Bound the local decision operation (default 300000 milliseconds).
+    /// Fresh private output directory required for speech tasks.
+    #[arg(long, value_name = "PATH", requires = "run_profile")]
+    output_dir: Option<PathBuf>,
+
+    /// Bound the local native operation (default 300000 milliseconds).
     #[arg(long, value_name = "MILLISECONDS", requires = "run_profile")]
     task_timeout_ms: Option<u64>,
 
@@ -199,10 +203,11 @@ enum RequestOutputLane {
     Decisions,
 }
 
-struct DirectDecisionSpec<'a> {
+struct DirectNativeSpec<'a> {
     profile: &'a str,
     task: &'a str,
     input: &'a Path,
+    output_dir: Option<&'a Path>,
     timeout_ms: u64,
 }
 
@@ -211,6 +216,12 @@ struct DirectDecisionSpec<'a> {
 struct DirectDecisionInput {
     state: serde_json::Value,
     questions: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectSpeechInput {
+    text: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -222,8 +233,8 @@ enum DirectInputError {
 impl std::fmt::Display for DirectInputError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
-            Self::TooLarge => "decision input exceeds the 1 MiB limit",
-            Self::Invalid => "decision input must be a strict JSON object with state and questions",
+            Self::TooLarge => "native input exceeds the 1 MiB limit",
+            Self::Invalid => "native input must be a strict JSON object for the selected task",
         })
     }
 }
@@ -231,16 +242,27 @@ impl std::fmt::Display for DirectInputError {
 impl std::error::Error for DirectInputError {}
 
 fn parse_direct_decision_input(bytes: &[u8]) -> Result<DirectDecisionInput, DirectInputError> {
-    if bytes.len() > MAX_DIRECT_DECISION_INPUT_BYTES {
+    if bytes.len() > MAX_DIRECT_NATIVE_INPUT_BYTES {
         return Err(DirectInputError::TooLarge);
     }
     serde_json::from_slice(bytes).map_err(|_| DirectInputError::Invalid)
 }
 
-fn direct_decision_spec(cli: &Cli) -> Result<Option<DirectDecisionSpec<'_>>> {
+fn parse_direct_speech_input(bytes: &[u8]) -> Result<DirectSpeechInput, DirectInputError> {
+    if bytes.len() > MAX_DIRECT_NATIVE_INPUT_BYTES {
+        return Err(DirectInputError::TooLarge);
+    }
+    serde_json::from_slice(bytes).map_err(|_| DirectInputError::Invalid)
+}
+
+fn direct_native_spec(cli: &Cli) -> Result<Option<DirectNativeSpec<'_>>> {
     let Some(profile) = cli.run_profile.as_deref() else {
-        if cli.task.is_some() || cli.input.is_some() || cli.task_timeout_ms.is_some() {
-            bail!("--task, --input, and --task-timeout-ms require --run-profile");
+        if cli.task.is_some()
+            || cli.input.is_some()
+            || cli.output_dir.is_some()
+            || cli.task_timeout_ms.is_some()
+        {
+            bail!("--task, --input, --output-dir, and --task-timeout-ms require --run-profile");
         }
         return Ok(None);
     };
@@ -258,16 +280,25 @@ fn direct_decision_spec(cli: &Cli) -> Result<Option<DirectDecisionSpec<'_>>> {
         .input
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("--run-profile requires --input"))?;
+    let output_dir = cli.output_dir.as_deref();
+    match (task, output_dir) {
+        ("decision", None) | ("tts", Some(_)) => {}
+        ("decision", Some(_)) => bail!("--output-dir is only valid with --task tts"),
+        ("tts", None) => bail!("--output-dir is required with --task tts"),
+        (_, Some(_)) => bail!("--output-dir is only valid with --task tts"),
+        _ => bail!("--run-profile supports only --task decision or --task tts"),
+    }
     let timeout_ms = cli
         .task_timeout_ms
-        .unwrap_or(DEFAULT_DIRECT_DECISION_TIMEOUT_MS);
-    if timeout_ms == 0 || timeout_ms > MAX_DIRECT_DECISION_TIMEOUT_MS {
+        .unwrap_or(DEFAULT_DIRECT_NATIVE_TIMEOUT_MS);
+    if timeout_ms == 0 || timeout_ms > MAX_DIRECT_NATIVE_TIMEOUT_MS {
         bail!("--task-timeout-ms must be between 1 and 86400000");
     }
-    Ok(Some(DirectDecisionSpec {
+    Ok(Some(DirectNativeSpec {
         profile,
         task,
         input,
+        output_dir,
         timeout_ms,
     }))
 }
@@ -377,7 +408,7 @@ fn isolated_engine_action(arguments: Vec<OsString>) -> Option<Result<u8>> {
 }
 
 fn dispatch(cli: Cli) -> Result<u8> {
-    if let Some(code) = direct_decision_action(&cli)? {
+    if let Some(code) = direct_native_action(&cli)? {
         return Ok(code);
     }
     if let Some(config_path) = http_gateway_action(&cli)? {
@@ -1566,25 +1597,30 @@ fn is_repository_root(path: &Path) -> bool {
         && path.join("bench-models").is_dir()
 }
 
-fn direct_decision_action(cli: &Cli) -> Result<Option<u8>> {
-    let Some(spec) = direct_decision_spec(cli)? else {
+fn direct_native_action(cli: &Cli) -> Result<Option<u8>> {
+    let Some(spec) = direct_native_spec(cli)? else {
         return Ok(None);
     };
-    run_direct_decision(&spec).map(Some)
+    run_direct_native(&spec).map(Some)
 }
 
 #[cfg(target_os = "linux")]
-fn run_direct_decision(spec: &DirectDecisionSpec<'_>) -> Result<u8> {
+fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
     let profile = spec
         .profile
         .parse::<crate::control::catalog::ProfileKey>()
         .map_err(|_| anyhow::anyhow!("--run-profile must be a valid namespaced profile ID"))?;
-    if profile.lane != crate::control::catalog::Lane::Decisions {
-        bail!("--run-profile must select a decisions profile");
+    let expected_lane = match spec.task {
+        "decision" => crate::control::catalog::Lane::Decisions,
+        "tts" => crate::control::catalog::Lane::Media,
+        _ => bail!("--run-profile supports only --task decision or --task tts"),
+    };
+    if profile.lane != expected_lane {
+        bail!("--run-profile profile lane does not match --task");
     }
     let task = crate::control::catalog::Task::new(spec.task.to_owned())
         .map_err(|_| anyhow::anyhow!("--task is invalid"))?;
-    let input = read_direct_decision_input(spec.input)?;
+    let input = read_direct_native_input(spec.input, spec.task)?;
 
     let repository_root =
         repository_root().map_err(|_| anyhow::anyhow!("repository location is unavailable"))?;
@@ -1599,55 +1635,94 @@ fn run_direct_decision(spec: &DirectDecisionSpec<'_>) -> Result<u8> {
     )
     .map_err(|_| anyhow::anyhow!("stack catalog is unavailable"))?;
 
+    let (fields, output_dir) = match input {
+        DirectNativeInput::Decision(input) => (
+            crate::control::task_form::TaskFields::Decisions {
+                state: input.state,
+                questions: input.questions,
+            },
+            None,
+        ),
+        DirectNativeInput::Speech(input) => (
+            crate::control::task_form::TaskFields::Speech {
+                text: input.text,
+                mode: crate::control::requests::SpeechMode::Standard,
+                instruction: None,
+                voice_reference: None,
+                reference_text: None,
+            },
+            spec.output_dir,
+        ),
+    };
     let draft = crate::control::task_form::TaskFormDraft::new(
         profile,
         task,
         "direct".to_owned(),
         spec.timeout_ms,
-        crate::control::task_form::TaskFields::Decisions {
-            state: input.state,
-            questions: input.questions,
-        },
+        fields,
     );
-    let (request, timeout) = crate::control::task_form::build_direct_decision(&catalog, draft)
-        .map_err(|_| anyhow::anyhow!("decision request is invalid"))?;
+    let (request, timeout) = crate::control::task_form::build_direct_native(&catalog, draft)
+        .map_err(|_| anyhow::anyhow!("native request is invalid"))?;
     let deadline = Instant::now()
         .checked_add(timeout)
-        .ok_or_else(|| anyhow::anyhow!("decision timeout is invalid"))?;
+        .ok_or_else(|| anyhow::anyhow!("native task timeout is invalid"))?;
     let signals = crate::control::foreground_shutdown::ShutdownSignals::install()
-        .map_err(|_| anyhow::anyhow!("could not install decision cancellation handler"))?;
+        .map_err(|_| anyhow::anyhow!("could not install native task cancellation handler"))?;
     let context = crate::control::runtime::OperationContext::new(deadline, &signals);
-    let result = crate::control::direct_run::run_cpu_decision(&catalog, &request, &context)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    println!("{}", direct_decision_output_json(&result)?);
+    let result =
+        crate::control::direct_run::run_cpu_native(&catalog, &request, output_dir, &context)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let output = match result {
+        crate::control::direct_run::DirectRunResult::Decision(result) => {
+            direct_decision_output_json(&result)?
+        }
+        crate::control::direct_run::DirectRunResult::Speech(result) => {
+            direct_speech_output_json(&result)?
+        }
+    };
+    println!("{output}");
     Ok(0)
 }
 
 #[cfg(not(target_os = "linux"))]
-fn run_direct_decision(_: &DirectDecisionSpec<'_>) -> Result<u8> {
-    bail!("native CPU decision execution is supported only on Linux");
+fn run_direct_native(_: &DirectNativeSpec<'_>) -> Result<u8> {
+    bail!("native CPU execution is supported only on Linux");
 }
 
 #[cfg(target_os = "linux")]
-fn read_direct_decision_input(path: &Path) -> Result<DirectDecisionInput> {
+enum DirectNativeInput {
+    Decision(DirectDecisionInput),
+    Speech(DirectSpeechInput),
+}
+
+#[cfg(target_os = "linux")]
+fn read_direct_native_input(path: &Path, task: &str) -> Result<DirectNativeInput> {
     use std::os::unix::fs::OpenOptionsExt;
 
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
         .open(path)
-        .map_err(|_| anyhow::anyhow!("decision input file is unavailable"))?;
+        .map_err(|_| anyhow::anyhow!("native input file is unavailable"))?;
     let metadata = file
         .metadata()
-        .map_err(|_| anyhow::anyhow!("decision input file is unavailable"))?;
-    if !metadata.is_file() || metadata.len() > MAX_DIRECT_DECISION_INPUT_BYTES as u64 {
-        bail!("decision input must be a regular file no larger than 1 MiB");
+        .map_err(|_| anyhow::anyhow!("native input file is unavailable"))?;
+    if !metadata.is_file() || metadata.len() > MAX_DIRECT_NATIVE_INPUT_BYTES as u64 {
+        bail!("native input must be a regular file no larger than 1 MiB");
     }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take((MAX_DIRECT_DECISION_INPUT_BYTES + 1) as u64)
+    file.take((MAX_DIRECT_NATIVE_INPUT_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
-        .map_err(|_| anyhow::anyhow!("decision input file could not be read"))?;
-    parse_direct_decision_input(&bytes).map_err(|error| anyhow::anyhow!(error.to_string()))
+        .map_err(|_| anyhow::anyhow!("native input file could not be read"))?;
+    match task {
+        "decision" => parse_direct_decision_input(&bytes)
+            .map(DirectNativeInput::Decision)
+            .map_err(|error| anyhow::anyhow!(error.to_string())),
+        "tts" => parse_direct_speech_input(&bytes)
+            .map(DirectNativeInput::Speech)
+            .map_err(|error| anyhow::anyhow!(error.to_string())),
+        _ => bail!("--run-profile supports only --task decision or --task tts"),
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -1674,7 +1749,7 @@ fn direct_decision_output_json(
             .map_err(|_| anyhow::anyhow!("native decision latency is out of range"))?,
         native_usage: result.native_usage.as_ref(),
     };
-    let mut writer = BoundedJsonWriter::new(MAX_DIRECT_DECISION_OUTPUT_BYTES);
+    let mut writer = BoundedJsonWriter::new(MAX_DIRECT_NATIVE_OUTPUT_BYTES);
     if serde_json::to_writer(&mut writer, &response).is_err() {
         if writer.exceeded {
             bail!("native decision output exceeds the 2 MiB limit");
@@ -1683,6 +1758,54 @@ fn direct_decision_output_json(
     }
     String::from_utf8(writer.bytes)
         .map_err(|_| anyhow::anyhow!("native decision output could not be encoded"))
+}
+
+#[derive(serde::Serialize)]
+struct DirectSpeechOutput {
+    mode: &'static str,
+    artifacts: Vec<DirectSpeechArtifactOutput>,
+}
+
+#[derive(serde::Serialize)]
+struct DirectSpeechArtifactOutput {
+    path: PathBuf,
+    native_kind: &'static str,
+}
+
+fn direct_speech_output_json(
+    result: &crate::control::media_execution::MediaExecutionResult,
+) -> Result<String> {
+    let artifacts = result
+        .artifacts()
+        .iter()
+        .map(|artifact| DirectSpeechArtifactOutput {
+            path: result.output_root().join(artifact.relative_path()),
+            native_kind: match artifact.kind() {
+                crate::control::media_execution::MediaArtifactKind::FinalWave => "final_wave",
+                crate::control::media_execution::MediaArtifactKind::StreamingChunk => {
+                    "streaming_chunk"
+                }
+            },
+        })
+        .collect();
+    let response = DirectSpeechOutput {
+        mode: match result.mode() {
+            crate::control::requests::SpeechMode::Standard => "standard",
+            crate::control::requests::SpeechMode::VoiceDesign => "voice_design",
+            crate::control::requests::SpeechMode::VoiceClone => "voice_clone",
+            crate::control::requests::SpeechMode::Streaming => "streaming",
+        },
+        artifacts,
+    };
+    let mut writer = BoundedJsonWriter::new(MAX_DIRECT_NATIVE_OUTPUT_BYTES);
+    if serde_json::to_writer(&mut writer, &response).is_err() {
+        if writer.exceeded {
+            bail!("native speech output exceeds the 2 MiB limit");
+        }
+        bail!("native speech output could not be encoded");
+    }
+    String::from_utf8(writer.bytes)
+        .map_err(|_| anyhow::anyhow!("native speech output could not be encoded"))
 }
 
 #[cfg(test)]
@@ -1705,7 +1828,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_decision_action_requires_explicit_inputs_and_uses_bounded_default() {
+    fn direct_native_action_requires_explicit_inputs_and_uses_bounded_default() {
         let cli = Cli::try_parse_from([
             "l3ms",
             "--run-profile",
@@ -1716,13 +1839,14 @@ mod tests {
             "input.json",
         ])
         .unwrap();
-        let Some(spec) = direct_decision_spec(&cli).unwrap() else {
-            panic!("direct decision action is present");
+        let Some(spec) = direct_native_spec(&cli).unwrap() else {
+            panic!("direct native action is present");
         };
         assert_eq!(spec.profile, "decisions:nagi-smol-cpu");
         assert_eq!(spec.task, "decision");
         assert_eq!(spec.input, Path::new("input.json"));
-        assert_eq!(spec.timeout_ms, DEFAULT_DIRECT_DECISION_TIMEOUT_MS);
+        assert_eq!(spec.output_dir, None);
+        assert_eq!(spec.timeout_ms, DEFAULT_DIRECT_NATIVE_TIMEOUT_MS);
 
         let cli = Cli::try_parse_from([
             "l3ms",
@@ -1736,14 +1860,75 @@ mod tests {
             "1200",
         ])
         .unwrap();
-        let Some(spec) = direct_decision_spec(&cli).unwrap() else {
-            panic!("direct decision action is present");
+        let Some(spec) = direct_native_spec(&cli).unwrap() else {
+            panic!("direct native action is present");
         };
         assert_eq!(spec.timeout_ms, 1200);
     }
 
     #[test]
-    fn direct_decision_action_rejects_other_actions_extra_and_coordinator_options() {
+    fn direct_native_speech_requires_output_directory_and_rejects_it_elsewhere() {
+        let args = [
+            "l3ms",
+            "--run-profile",
+            "media:breeze-tts-2-cpu",
+            "--task",
+            "tts",
+            "--input",
+            "input.json",
+            "--output-dir",
+            "/private/job-1",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+        let Some(spec) = direct_native_spec(&cli).unwrap() else {
+            panic!("direct speech action is present");
+        };
+        assert_eq!(spec.task, "tts");
+        assert_eq!(spec.output_dir, Some(Path::new("/private/job-1")));
+
+        let missing_output = Cli::try_parse_from([
+            "l3ms",
+            "--run-profile",
+            "media:breeze-tts-2-cpu",
+            "--task",
+            "tts",
+            "--input",
+            "input.json",
+        ])
+        .unwrap();
+        assert!(direct_native_spec(&missing_output).is_err());
+
+        let decision_with_output = Cli::try_parse_from([
+            "l3ms",
+            "--run-profile",
+            "decisions:nagi-smol-cpu",
+            "--task",
+            "decision",
+            "--input",
+            "input.json",
+            "--output-dir",
+            "/private/job-1",
+        ])
+        .unwrap();
+        assert!(direct_native_spec(&decision_with_output).is_err());
+
+        let unsupported_task = Cli::try_parse_from([
+            "l3ms",
+            "--run-profile",
+            "media:breeze-tts-2-cpu",
+            "--task",
+            "clon",
+            "--input",
+            "input.json",
+        ])
+        .unwrap();
+        assert!(direct_native_spec(&unsupported_task).is_err());
+
+        assert!(Cli::try_parse_from(["l3ms", "--output-dir", "/private/job-1"]).is_err());
+    }
+
+    #[test]
+    fn direct_native_action_rejects_other_actions_extra_and_coordinator_options() {
         assert!(Cli::try_parse_from([
             "l3ms",
             "--run-profile",
@@ -1768,7 +1953,7 @@ mod tests {
             "--unsafe",
         ])
         .unwrap();
-        assert!(direct_decision_spec(&cli).is_err());
+        assert!(direct_native_spec(&cli).is_err());
 
         let cli = Cli::try_parse_from([
             "l3ms",
@@ -1782,7 +1967,7 @@ mod tests {
             "/private/socket",
         ])
         .unwrap();
-        assert!(direct_decision_spec(&cli).is_err());
+        assert!(direct_native_spec(&cli).is_err());
     }
 
     #[test]
@@ -1802,9 +1987,31 @@ mod tests {
             assert!(parse_direct_decision_input(invalid).is_err());
         }
 
-        let oversized = vec![b' '; MAX_DIRECT_DECISION_INPUT_BYTES + 1];
+        let oversized = vec![b' '; MAX_DIRECT_NATIVE_INPUT_BYTES + 1];
         assert_eq!(
             parse_direct_decision_input(&oversized).err(),
+            Some(DirectInputError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn direct_speech_input_requires_unique_known_text_field_and_is_bounded() {
+        let parsed = parse_direct_speech_input(br#"{"text":"hello"}"#).unwrap();
+        assert_eq!(parsed.text, "hello");
+
+        for invalid in [
+            br#"{"text":"hello","text":"again"}"#.as_slice(),
+            br#"{"text":"hello","unexpected":true}"#.as_slice(),
+            br#"{"text":1}"#.as_slice(),
+            br#"[]"#.as_slice(),
+            br#"{"text":"hello"} trailing"#.as_slice(),
+        ] {
+            assert!(parse_direct_speech_input(invalid).is_err());
+        }
+
+        let oversized = vec![b' '; MAX_DIRECT_NATIVE_INPUT_BYTES + 1];
+        assert_eq!(
+            parse_direct_speech_input(&oversized).err(),
             Some(DirectInputError::TooLarge)
         );
     }
@@ -1827,7 +2034,7 @@ mod tests {
         let mut answers = serde_json::Map::new();
         answers.insert(
             "answer".into(),
-            serde_json::Value::String("x".repeat(MAX_DIRECT_DECISION_OUTPUT_BYTES)),
+            serde_json::Value::String("x".repeat(MAX_DIRECT_NATIVE_OUTPUT_BYTES)),
         );
         let oversized = crate::control::decision::NativeDecisionResult {
             result: crate::control::requests::InferenceResult::Decision { answers },

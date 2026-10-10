@@ -87,6 +87,15 @@ pub fn filter_profiles(profiles: Vec<MediaProfile>, filter: &str) -> Vec<MediaPr
     if filter.is_empty() {
         return profiles;
     }
+    if profiles
+        .iter()
+        .any(|profile| profile.id.to_ascii_lowercase() == filter)
+    {
+        return profiles
+            .into_iter()
+            .filter(|profile| profile.id.to_ascii_lowercase() == filter)
+            .collect();
+    }
 
     profiles
         .into_iter()
@@ -156,14 +165,17 @@ pub fn interactive_media(root: &Path, filter: &str, extra: &str) -> Result<u8> {
     };
 
     let profile = &profiles[index];
-    let extra_args = parse_extra_args(extra)?;
+    let extra_args = profile_extra_args(&profile.id, extra)?;
     let script = safe_script_path(root, &profile.script)?;
     let command = command_for_script(&script, &extra_args);
     println!("$ {}", format_command(&command));
 
-    let status = Command::new(&command.program)
-        .args(&command.args)
-        .current_dir(root)
+    let mut process = Command::new(&command.program);
+    process.args(&command.args).current_dir(root);
+    if profile.id == "breeze-tts-2-cpu" {
+        process.env("CUDA_VISIBLE_DEVICES", "");
+    }
+    let status = process
         .status()
         .with_context(|| format!("failed to execute media profile {:?}", profile.id))?;
     let code = status.code().unwrap_or(1);
@@ -219,6 +231,26 @@ fn parse_extra_args(raw: &str) -> Result<Vec<String>> {
         return Ok(Vec::new());
     }
     shell_words::split(raw).context("invalid --extra value")
+}
+
+fn profile_extra_args(profile_id: &str, extra: &str) -> Result<Vec<String>> {
+    let mut args = parse_extra_args(extra)?;
+    if profile_id == "breeze-tts-2-cpu" {
+        let mut options = args.iter();
+        while let Some(option) = options.next() {
+            anyhow::ensure!(
+                option != "--backend" && !option.starts_with("--backend="),
+                "the CPU Breeze profile fixes its backend; use the CUDA profile for CUDA"
+            );
+            // All native Breeze options except these switches take a value.
+            // A text value spelling '--backend' is not a backend override.
+            if !matches!(option.as_str(), "--check" | "--help" | "-h" | "--") {
+                options.next();
+            }
+        }
+        args.extend(["--backend".into(), "cpu".into()]);
+    }
+    Ok(args)
 }
 
 fn command_for_script(path: &Path, extra_args: &[String]) -> CommandSpec {
@@ -282,6 +314,31 @@ mod tests {
         assert_eq!(filter_profiles(profiles.clone(), "VIDEO").len(), 2);
         assert_eq!(filter_profiles(profiles.clone(), "LTX")[0].id, "ltx-2.5");
         assert_eq!(filter_profiles(profiles, "").len(), 2);
+    }
+
+    #[test]
+    fn exact_cuda_profile_id_does_not_select_added_cpu_variant() {
+        let profiles = vec![
+            profile("breeze-tts-2", "audio.cpp", "tts"),
+            profile("breeze-tts-2-cpu", "audio.cpp", "tts"),
+        ];
+        assert_eq!(filter_profiles(profiles.clone(), "breeze-tts-2").len(), 1);
+        assert_eq!(filter_profiles(profiles, "breeze").len(), 2);
+    }
+
+    #[test]
+    fn cpu_profile_fixes_backend_without_changing_cuda_defaults() {
+        assert_eq!(
+            profile_extra_args("breeze-tts-2-cpu", "--text 'CPU speech'").unwrap(),
+            ["--text", "CPU speech", "--backend", "cpu"]
+        );
+        assert!(profile_extra_args("breeze-tts-2-cpu", "--backend cuda").is_err());
+        assert!(profile_extra_args("breeze-tts-2-cpu", "--backend=cpu").is_err());
+        assert!(profile_extra_args("breeze-tts-2-cpu", "--text '--backend'").is_ok());
+        assert_eq!(
+            profile_extra_args("breeze-tts-2", "--check").unwrap(),
+            ["--check"]
+        );
     }
 
     #[test]

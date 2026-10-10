@@ -32,6 +32,7 @@ use super::requests::{InferenceRequest, MediaInput, SpeechInput, SpeechMode};
 use super::routes::{resolve_profile_route, NativeRoute, ResolvedProfileRoute};
 
 const BREEZE_PROFILE_ID: &str = "breeze-tts-2";
+pub(crate) const CPU_BREEZE_PROFILE_ID: &str = "breeze-tts-2-cpu";
 const BREEZE_SCRIPT: &str = "media-models/generate-breeze-tts-2.sh";
 const DECISION_PYTHON: &str = ".venv/bin/python";
 const BASH_EXECUTABLE: &str = "/bin/bash";
@@ -256,7 +257,7 @@ fn prepare_native_command_inner(
         InferenceRequest::Media {
             input: MediaInput::Speech(input),
             ..
-        } => breeze_speech_recipe(key, &verified, input),
+        } => breeze_speech_recipe(key, &route, &verified, input),
         InferenceRequest::Media {
             input: MediaInput::Workflow { .. },
             ..
@@ -388,13 +389,32 @@ fn ensure_no_simulation_args(arguments: &[String]) -> Result<()> {
 
 fn breeze_speech_recipe(
     key: &ProfileKey,
+    route: &ResolvedProfileRoute,
     verified: &VerifiedNativePath,
     input: &SpeechInput,
 ) -> Result<NativeCommandRecipe> {
+    let cpu_profile = key.profile_id.as_str() == CPU_BREEZE_PROFILE_ID;
     ensure!(
-        key.lane == Lane::Media && key.profile_id.as_str() == BREEZE_PROFILE_ID,
-        "speech inputs are supported only by the Breeze-TTS-2 media profile"
+        key.lane == Lane::Media
+            && (key.profile_id.as_str() == BREEZE_PROFILE_ID || cpu_profile)
+            && route.profile == *key,
+        "speech inputs are supported only by declared Breeze-TTS-2 media profiles"
     );
+    if cpu_profile {
+        ensure!(
+            route.runtime.lane == Lane::Media
+                && route.runtime.as_str() == "audio.cpp"
+                && route.device.as_ref() == Some(&Device::Cpu)
+                && input.mode == SpeechMode::Standard
+                && input.instruction.is_none(),
+            "the CPU Breeze profile supports only standard CPU speech"
+        );
+    } else {
+        ensure!(
+            route.device.as_ref() != Some(&Device::Cpu),
+            "the CUDA Breeze profile cannot be dispatched as CPU speech"
+        );
+    }
     ensure!(
         verified.kind == NativeEntrypointKind::MediaScript,
         "Breeze speech request resolved to a non-media entrypoint"
@@ -436,6 +456,10 @@ fn breeze_speech_recipe(
             "offline"
         })?,
     ];
+    if cpu_profile {
+        argv.push(text_argument("--backend")?);
+        argv.push(text_argument("cpu")?);
+    }
     if let Some(instruction) = &input.instruction {
         argv.push(text_argument("--instruction")?);
         argv.push(text_argument(instruction)?);
@@ -1040,6 +1064,7 @@ mod tests {
             );
             assert_eq!(args[1..3], ["--task", expected_wrapper_task]);
             assert_eq!(args[3..5], ["--text", "speech prompt"]);
+            assert!(!args.iter().any(|arg| arg == "--backend"));
             let mode_index = args.iter().position(|arg| arg == "--mode").unwrap();
             assert_eq!(args[mode_index + 1], expected_mode);
             assert!(!args.iter().any(|arg| arg == "--simulate"));
@@ -1077,6 +1102,44 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn cpu_breeze_uses_explicit_backend_only_for_the_cpu_profile() {
+        let fixture = Fixture::new(CPU_BREEZE_PROFILE_ID, BREEZE_SCRIPT, &["tts"]);
+        fixture.write_media_script(BREEZE_SCRIPT);
+        let manifest_path = fixture.media_root.join("media-runtimes.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["profiles"][0]["device"] = serde_json::json!("cpu");
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let catalog = fixture.catalog();
+        let request = speech_request(CPU_BREEZE_PROFILE_ID, SpeechMode::Standard, &fixture);
+        let accepted =
+            super::super::routes::resolve_profile_route(&catalog, request.profile()).unwrap();
+        let recipe = prepare_native_command_for_route(&catalog, &request, &accepted).unwrap();
+        let args = argv_strings(&recipe);
+        let backend = args.iter().position(|arg| arg == "--backend").unwrap();
+        assert_eq!(&args[backend..backend + 2], ["--backend", "cpu"]);
+
+        let mut cuda = accepted.clone();
+        cuda.device = Some(Device::Cuda);
+        assert!(prepare_native_command_for_route(&catalog, &request, &cuda).is_err());
+
+        let cuda_fixture = Fixture::new(BREEZE_PROFILE_ID, BREEZE_SCRIPT, &["tts"]);
+        cuda_fixture.write_media_script(BREEZE_SCRIPT);
+        let cuda_manifest_path = cuda_fixture.media_root.join("media-runtimes.json");
+        let mut cuda_manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&cuda_manifest_path).unwrap()).unwrap();
+        cuda_manifest["profiles"][0]["device"] = serde_json::json!("cpu");
+        fs::write(
+            &cuda_manifest_path,
+            serde_json::to_vec(&cuda_manifest).unwrap(),
+        )
+        .unwrap();
+        let cuda_catalog = cuda_fixture.catalog();
+        let cuda_request = speech_request(BREEZE_PROFILE_ID, SpeechMode::Standard, &cuda_fixture);
+        assert!(prepare_native_command(&cuda_catalog, &cuda_request).is_err());
     }
 
     #[test]
@@ -1154,7 +1217,7 @@ mod tests {
         assert!(prepare_native_command(&catalog, &request)
             .unwrap_err()
             .to_string()
-            .contains("only by the Breeze-TTS-2"));
+            .contains("only by declared Breeze-TTS-2"));
     }
 
     #[test]

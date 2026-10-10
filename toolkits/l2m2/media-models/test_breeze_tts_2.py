@@ -113,6 +113,7 @@ class BreezeTts2ScriptTests(unittest.TestCase):
         self.assertEqual(standard.returncode, 0, standard.stderr)
         standard_args = self.calls()[-1]
         self.assertEqual(self.option_value(standard_args, "--task"), "tts")
+        self.assertEqual(self.option_value(standard_args, "--backend"), "cuda")
         self.assertEqual(self.option_value(standard_args, "--text"), "A standard voice.")
         self.assertIn("instruction=Speak clearly and naturally.", standard_args)
 
@@ -131,6 +132,15 @@ class BreezeTts2ScriptTests(unittest.TestCase):
         design_args = self.calls()[-1]
         self.assertEqual(self.option_value(design_args, "--task"), "tts")
         self.assertIn("instruction=warm narrator", design_args)
+
+    def test_cpu_backend_is_explicit_and_invalid_backend_never_launches(self):
+        result = self.run_script("--backend", "cpu", "--text", "CPU speech.")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.option_value(self.calls()[-1], "--backend"), "cpu")
+        calls = self.calls()
+        invalid = self.run_script("--backend", "automatic", "--text", "No fallback.")
+        self.assertEqual(invalid.returncode, 2)
+        self.assertEqual(self.calls(), calls)
 
     def test_voice_cloning_keeps_native_task_and_reference_arguments(self):
         output = self.root / "clone.wav"

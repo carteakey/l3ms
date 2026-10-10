@@ -129,12 +129,34 @@ first; this command does not download them, start services, or fall back from
 CUDA to CPU. It returns native `answers` and optional `native_latency_ns` and
 `native_usage`. Input files are bounded to 1 MiB; Ctrl-C and the task timeout
 cancel the owned process group. Results are sensitive: stdout is intentional
-output, not a shared log. Other task lanes still await direct-path replacement.
+output, not a shared log. GPU and other media tasks still await direct-path replacement.
 
 In the TUI, open Stack Catalog (`F8`), select a supported CPU decision profile,
 press `f`, choose `decision`, fill the native fields and press `Ctrl+Enter`.
 Press `c` to cancel; the job stays busy until cleanup is confirmed. History stores
 metadata only, while native answers stay in the in-memory result panel.
+
+### Direct CPU speech (Linux)
+
+With an installed CPU-capable audio.cpp runtime and cached Breeze weights:
+
+```bash
+mkdir -m 700 /absolute/path/to/new-speech-output
+l3ms --run-profile media:breeze-tts-2-cpu --task tts --input /path/to/speech.json --output-dir /absolute/path/to/new-speech-output --task-timeout-ms 120000
+```
+
+Input is strictly `{"text":"Hello."}` (at most 1 MiB). The output directory must
+already exist, be private and owned by you, and contain no prior result files.
+The command returns JSON with `mode`, and validated `artifacts` containing
+absolute `path` and `native_kind`; it does not stream audio bytes.
+This explicit CPU profile supports standard text-only speech, not cloning,
+design or streaming. The original CUDA profile and script default are unchanged.
+
+In Stack Catalog (`F8`), select `breeze-tts-2-cpu`, press `f`, choose `tts`, enter
+text and press `Ctrl+Enter`. The same foreground owner handles execution,
+cancellation (`c`) and results; the TUI allocates a fresh private output directory
+under its data root. History stores metadata and relative artifact references,
+not text or audio bytes. See [real CPU speech evidence](docs/migration/direct-speech-acceptance.md).
 
 ### Temporary coordinator path
 

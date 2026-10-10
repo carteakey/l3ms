@@ -22,17 +22,21 @@ existing recipes/process supervision and safe TUI job metadata. Real offline
 CLI Nagi execution passed, including the explicit CPU profile; this is not
 full interactive, media or GPU acceptance. See
 [direct decision evidence](docs/migration/direct-decision-acceptance.md).
-Next native media/TTS, GPU switching, platform deletion and UI polish in the
+Standard CPU Breeze speech now shares that foreground owner and returns validated
+WAV paths in CLI/TUI. Real offline CPU execution passed; see
+[speech evidence](docs/migration/direct-speech-acceptance.md).
+Next other native media, GPU switching, platform deletion and UI polish in the
 [execution plan](docs/migration/simplification-plan.md#execution-plan--parallel-audit-resolved-2026-10-09).
 
-Latest replacement checkpoint on `feature/l3ms-monorepo`: **876 root tests
-passed, 1 ignored**; two standalone decision-toolkit tests, strict all-target
-Clippy, formatting and whitespace checks pass. Real offline Nagi CLI execution
-and UI lifecycle fixtures passed. Whole `src/` net change is **+1,906 lines**
-including tests/comments/blanks; no platform modules removed yet. Next generalize
-the same foreground owner for native speech/media, verify declared backends and
-output files, then retire replaced coordinator callers and their dependency
-closure. Do not expand owned-job helpers or the managed daemon for this slice.
+Latest replacement checkpoint on `feature/l3ms-monorepo`: **884 root tests
+passed, 1 ignored**; six media-toolkit Rust tests, 14 downloader and 17 media
+Python tests pass, along with strict all-target Clippy, formatting and shell
+syntax checks. Real CPU speech and UI lifecycle fixtures passed. This slice adds
+**1,233 net root source lines**; cumulative change against `702b4cd` is **+3,139**,
+including tests/comments/blanks. No platform modules removed yet. Next replace
+remaining coordinator form callers with native workflows, then retire their
+dependency closure. Keep language routing in llama-swap; do not expand owned-job
+helpers or the managed daemon.
 
 Earlier retained platform checkpoint (historical inventory, not next work): 859 root tests passed,
 1 ignored, strict all-target Clippy, formatting and whitespace checks pass.

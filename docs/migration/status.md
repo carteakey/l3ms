@@ -10,6 +10,33 @@ runtime check.
 
 ## Current replacement slice — 2026-10-10
 
+Standard CPU Breeze speech now uses the same direct typed operation and
+foreground UI owner as CPU decisions, not a second worker or IPC result store.
+The explicit `breeze-tts-2-cpu` profile selects `--backend cpu` with empty CUDA
+visibility. The original CUDA profile/default and standalone selection remain
+unchanged. CLI accepts strict text JSON and a caller-owned private output
+directory; the TUI allocates fresh directories and persists only safe metadata
+and relative artifact references.
+
+The final real offline CLI run passed in **4.81 seconds wall time**, producing
+a validated 24 kHz mono PCM16 WAV. Process birth identities were released;
+no GPU service was stopped. See [speech evidence](direct-speech-acceptance.md).
+This is execution/artifact evidence, not speech-quality or interactive acceptance.
+
+Verification: **884 root tests passed, 1 ignored**; six standalone media Rust
+tests, 14 downloader and 17 media Python tests, strict Clippy, formatting, shell
+syntax and whitespace checks pass. This slice adds **1,233 net source lines**;
+whole `src/` change against `702b4cd` is **+3,139**, including tests/comments/blanks.
+Control scope is **61,959 lines** versus 60,729 baseline. No platform modules
+were removed. Remaining native media/GPU callers and inward dependency deletion
+are next; overlap is still temporary, not the promised LOC reduction.
+
+Config/script rollback snapshots were saved under the existing `.toolkit`
+symlink (therefore in the original toolkit's ignored snapshot directory).
+Original runtime scripts/configs, weights and live services were not changed.
+
+## Previous direct decision checkpoint — 2026-10-10
+
 The first direct CPU decision path now bypasses coordinator IPC in the CLI and
 Stack native task form. Both call the same typed request builder and native
 runner. A separate declared `nagi-smol-cpu` profile preserves existing CUDA

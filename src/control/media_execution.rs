@@ -19,10 +19,11 @@ use super::catalog::{Catalog, Device};
 use super::cuda_device::CudaDevice;
 use super::native_commands::{
     prepare_breeze_speech_recipe, prepare_breeze_speech_recipe_for_route, NativeOutputExpectation,
+    CPU_BREEZE_PROFILE_ID,
 };
 use super::process::{self, ProcessFailureDisposition, ProcessFailureKind, ProcessLimits};
 use super::requests::{InferenceRequest, MediaInput, SpeechMode};
-use super::routes::ResolvedProfileRoute;
+use super::routes::{NativeRoute, ResolvedProfileRoute};
 use super::runtime::{OperationContext, RecoveryPolicy};
 
 const OUTPUT_NAME: &str = "result.wav";
@@ -147,6 +148,7 @@ pub fn execute_breeze_speech(
         BreezeBinding {
             route: None,
             device: None,
+            hide_cuda: false,
         },
         job_directory,
         context,
@@ -172,6 +174,7 @@ pub fn execute_breeze_speech_for_route(
         BreezeBinding {
             route: Some(accepted_route),
             device: None,
+            hide_cuda: false,
         },
         job_directory,
         context,
@@ -200,6 +203,37 @@ pub fn execute_breeze_speech_on_device(
         BreezeBinding {
             route: Some(accepted_route),
             device: Some(device),
+            hide_cuda: false,
+        },
+        job_directory,
+        context,
+        recovery,
+    )
+}
+
+/// Execute the standard Breeze profile explicitly declared for CPU.
+///
+/// The accepted route must identify `media:breeze-tts-2-cpu` and declare CPU;
+/// the child receives an empty CUDA visibility setting and a route-derived CPU
+/// backend flag. The output directory remains caller-owned.
+pub fn execute_breeze_speech_on_cpu(
+    catalog: &Catalog,
+    request: &InferenceRequest,
+    accepted_route: &ResolvedProfileRoute,
+    job_directory: &Path,
+    context: &OperationContext<'_>,
+    recovery: RecoveryPolicy,
+) -> Result<MediaExecutionResult, MediaExecutionFailure> {
+    if !is_cpu_breeze_standard_route(request, accepted_route) {
+        return Err(not_dispatched(MediaExecutionErrorKind::InvalidRequest));
+    }
+    execute_breeze_inner(
+        catalog,
+        request,
+        BreezeBinding {
+            route: Some(accepted_route),
+            device: None,
+            hide_cuda: true,
         },
         job_directory,
         context,
@@ -210,6 +244,29 @@ pub fn execute_breeze_speech_on_device(
 struct BreezeBinding<'a> {
     route: Option<&'a ResolvedProfileRoute>,
     device: Option<&'a CudaDevice>,
+    hide_cuda: bool,
+}
+
+fn is_cpu_breeze_standard_route(request: &InferenceRequest, route: &ResolvedProfileRoute) -> bool {
+    let InferenceRequest::Media {
+        profile,
+        input: MediaInput::Speech(input),
+    } = request
+    else {
+        return false;
+    };
+    matches!(
+        &route.native_route,
+        NativeRoute::MediaScript { path }
+            if path.file_name().and_then(|name| name.to_str()) == Some("generate-breeze-tts-2.sh")
+    ) && profile == &route.profile
+        && profile.lane == super::catalog::Lane::Media
+        && profile.profile_id.as_str() == CPU_BREEZE_PROFILE_ID
+        && route.runtime.lane == super::catalog::Lane::Media
+        && route.runtime.as_str() == "audio.cpp"
+        && route.device.as_ref() == Some(&Device::Cpu)
+        && input.mode == SpeechMode::Standard
+        && input.instruction.is_none()
 }
 
 /// Re-read the bounded native artifact contract after the owner has stopped
@@ -249,6 +306,9 @@ fn execute_breeze_inner(
     ) {
         return Err(not_dispatched(MediaExecutionErrorKind::InvalidRequest));
     }
+    if request.profile().profile_id.as_str() == CPU_BREEZE_PROFILE_ID && !binding.hide_cuda {
+        return Err(not_dispatched(MediaExecutionErrorKind::InvalidRequest));
+    }
 
     let output_root = validate_job_directory(job_directory)?;
     ensure_absent(&output_root.join(OUTPUT_NAME))?;
@@ -270,6 +330,9 @@ fn execute_breeze_inner(
     command.args(&recipe.argv).current_dir(&recipe.cwd);
     if let Some(device) = binding.device {
         device.apply_to(&mut command);
+    }
+    if binding.hide_cuda {
+        command.env("CUDA_VISIBLE_DEVICES", "");
     }
     let limits = ProcessLimits::new(0, MAX_CAPTURE_BYTES)
         .map_err(|error| process_failure(error.disposition(), error.kind()))?;
@@ -400,9 +463,15 @@ fn discover_artifacts(
             relative_path: PathBuf::from(CHUNKS_NAME).join(name),
             kind: MediaArtifactKind::StreamingChunk,
         }));
-    } else if fs::symlink_metadata(root.join(CHUNKS_NAME)).is_ok() {
-        // A non-streaming run has no native contract for chunk output.
-        return Err(invalid_artifact());
+    } else {
+        match fs::symlink_metadata(root.join(CHUNKS_NAME)) {
+            Ok(_) => {
+                // A non-streaming run has no native contract for chunk output.
+                return Err(invalid_artifact());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(invalid_artifact()),
+        }
     }
 
     check_after_child(context)?;
@@ -936,6 +1005,75 @@ fi
             ProcessFailureDisposition::NoChildSpawned
         );
         assert!(!rejected_output.join(OUTPUT_NAME).exists());
+    }
+
+    #[test]
+    fn cpu_breeze_requires_cpu_profile_and_hides_cuda_from_the_child() {
+        let fixture = Fixture::new();
+        let manifest_path = fixture.media_root.join("media-runtimes.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["profiles"][0]["id"] = serde_json::json!(CPU_BREEZE_PROFILE_ID);
+        manifest["profiles"][0]["device"] = serde_json::json!("cpu");
+        manifest["profiles"][0]["tasks"] = serde_json::json!(["tts"]);
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        fs::write(
+            fixture
+                .media_root
+                .join("media-models/generate-breeze-tts-2.sh"),
+            format!(
+                "[[ \"${{CUDA_VISIBLE_DEVICES-unset}}\" == \"\" ]] || exit 8\n{FIXTURE_SCRIPT}"
+            ),
+        )
+        .unwrap();
+
+        let catalog = fixture.catalog();
+        let request = InferenceRequest::Media {
+            profile: ProfileKey::new(Lane::Media, CPU_BREEZE_PROFILE_ID).unwrap(),
+            input: MediaInput::Speech(SpeechInput {
+                text: "fixture speech".into(),
+                mode: SpeechMode::Standard,
+                instruction: None,
+                voice_reference: None,
+                reference_text: None,
+            }),
+        };
+        let accepted =
+            crate::control::routes::resolve_profile_route(&catalog, request.profile()).unwrap();
+        let output = fixture.output_directory("cpu-selected");
+        let result = execute_breeze_speech_on_cpu(
+            &catalog,
+            &request,
+            &accepted,
+            &output,
+            &context(&NeverCancel, Duration::from_secs(5)),
+            recovery(),
+        )
+        .unwrap();
+        assert_eq!(result.mode(), SpeechMode::Standard);
+        assert_eq!(result.artifacts().len(), 1);
+        assert_eq!(
+            result.artifacts()[0].relative_path(),
+            Path::new(OUTPUT_NAME)
+        );
+
+        let mut wrong_device = accepted.clone();
+        wrong_device.device = Some(Device::Cuda);
+        let rejected_output = fixture.output_directory("cpu-route-rejected");
+        let error = execute_breeze_speech_on_cpu(
+            &catalog,
+            &request,
+            &wrong_device,
+            &rejected_output,
+            &context(&NeverCancel, Duration::from_secs(5)),
+            recovery(),
+        )
+        .expect_err("CPU executor rejects a non-CPU accepted route");
+        assert_eq!(
+            error.disposition(),
+            ProcessFailureDisposition::NoChildSpawned
+        );
+        assert_eq!(fs::read_dir(&rejected_output).unwrap().count(), 0);
     }
 
     #[test]

@@ -10,6 +10,11 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Extend the shared direct CPU operation and foreground UI job owner to standard
+  Breeze speech. Add strict `--task tts` text input and private `--output-dir`
+  artifact delivery, without a socket or daemon. Declare a separate CPU profile;
+  preserve CUDA defaults and standalone exact-profile selection. Verify a real
+  offline CPU run and validated WAV; GPU switching remains unfinished.
 - Add direct, bounded Linux CPU-local Nagi/Laya decision execution shared by
   the native task form and `--run-profile --task --input`, without a coordinator
   socket. Add an explicit `nagi-smol-cpu` profile; preserve existing CUDA profiles

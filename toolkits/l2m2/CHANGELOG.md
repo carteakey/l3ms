@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add an explicit CPU Breeze profile for standard offline speech and a validated
+  `--backend cpu|cuda` native script option. Keep the CUDA default and existing
+  profile unchanged; backend availability is not proof of inference acceptance.
+
 - Declare Breeze-TTS-2's CUDA device explicitly in its native manifest so
   accepted routes can validate GPU admission without guessing from prose.
   This does not pin a physical GPU or prove live inference/release.

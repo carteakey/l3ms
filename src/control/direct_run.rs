@@ -1,23 +1,37 @@
-//! Direct, in-process execution for the first CPU-local decision slice.
+//! Direct, bounded execution for explicitly supported CPU-local native work.
 //!
-//! This module accepts only an explicitly declared CPU Nagi/Laya route. It
-//! does not start services, install runtimes, select a fallback, or retry an
-//! attempted inference. Native input and output stay out of its errors.
+//! This module currently accepts CPU-local Nagi/Laya decisions and standard
+//! Breeze speech. It does not start services, install runtimes, select a
+//! fallback, or retry an attempted inference. Native input and output stay out
+//! of its errors.
 
 use std::error::Error;
 use std::fmt;
+use std::path::Path;
 use std::time::Duration;
 
 use super::catalog::{Catalog, Device, Lane};
 use super::decision::{
     execute_accepted_cpu_decision, DecisionExecutionError, NativeDecisionResult,
 };
-use super::process::ProcessFailureDisposition;
-use super::requests::InferenceRequest;
+use super::media_execution::{
+    execute_breeze_speech_on_cpu, MediaExecutionErrorKind, MediaExecutionFailure,
+    MediaExecutionResult,
+};
+use super::native_commands::CPU_BREEZE_PROFILE_ID;
+use super::process::{ProcessFailureDisposition, ProcessFailureKind};
+use super::requests::{InferenceRequest, MediaInput, SpeechMode};
 use super::routes::{resolve_profile_route, NativeRoute, ResolvedProfileRoute};
 use super::runtime::{OperationContext, RecoveryPolicy};
 
 const PROCESS_RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Result of one direct native operation. The payloads intentionally do not
+/// implement `Debug`: native answers and filesystem paths are not log data.
+pub enum DirectRunResult {
+    Decision(NativeDecisionResult),
+    Speech(MediaExecutionResult),
+}
 
 /// Fixed failure categories with no request body, path, runner output, or OS
 /// error retained.
@@ -76,15 +90,15 @@ impl DirectRunError {
 impl fmt::Display for DirectRunError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self.kind {
-            DirectRunErrorKind::InvalidRequest => "CPU decision request is invalid",
-            DirectRunErrorKind::CatalogUnavailable => "decision catalog is unavailable",
-            DirectRunErrorKind::UnsupportedRoute => "CPU decision route is unsupported",
-            DirectRunErrorKind::Cancelled => "CPU decision was cancelled",
-            DirectRunErrorKind::DeadlineExceeded => "CPU decision timed out",
-            DirectRunErrorKind::ExecutionFailed => "CPU decision execution failed",
-            DirectRunErrorKind::InvalidOutput => "CPU decision returned invalid output",
+            DirectRunErrorKind::InvalidRequest => "direct native request is invalid",
+            DirectRunErrorKind::CatalogUnavailable => "native catalog is unavailable",
+            DirectRunErrorKind::UnsupportedRoute => "direct native route is unsupported",
+            DirectRunErrorKind::Cancelled => "native operation was cancelled",
+            DirectRunErrorKind::DeadlineExceeded => "native operation timed out",
+            DirectRunErrorKind::ExecutionFailed => "native execution failed",
+            DirectRunErrorKind::InvalidOutput => "native output is invalid",
             DirectRunErrorKind::OwnershipUncertain => {
-                "CPU decision process cleanup is uncertain; stop before continuing"
+                "native process cleanup is uncertain; stop before continuing"
             }
         })
     }
@@ -92,35 +106,58 @@ impl fmt::Display for DirectRunError {
 
 impl Error for DirectRunError {}
 
-/// Execute one already-built decision request on its declared CPU-local Nagi
-/// or Laya route.
+/// Execute one already-built native request on a supported CPU-local route.
 ///
 /// The current catalog is refreshed before dispatch, then the accepted route
-/// is rechecked by the native command adapter. Cancellation and the caller's
+/// is rechecked by the native command adapter. Speech requires a caller-owned,
+/// fresh output directory; decisions reject one. Cancellation and the caller's
 /// deadline are honored by the bounded process runner; its separate cleanup
 /// budget is fixed at five seconds. If cleanup is uncertain, callers must not
 /// clear their busy state or start another operation.
-pub fn run_cpu_decision(
+pub fn run_cpu_native(
     catalog: &Catalog,
     request: &InferenceRequest,
+    speech_output_directory: Option<&Path>,
     context: &OperationContext<'_>,
-) -> Result<NativeDecisionResult, DirectRunError> {
-    if !matches!(request, InferenceRequest::Decision { .. }) {
+) -> Result<DirectRunResult, DirectRunError> {
+    let is_decision = matches!(request, InferenceRequest::Decision { .. });
+    let is_standard_speech = matches!(
+        request,
+        InferenceRequest::Media {
+            input: MediaInput::Speech(input),
+            ..
+        } if input.mode == SpeechMode::Standard
+    );
+    if !((is_decision && speech_output_directory.is_none())
+        || (is_standard_speech && speech_output_directory.is_some()))
+    {
         return Err(DirectRunError::new(
             DirectRunErrorKind::InvalidRequest,
             ProcessFailureDisposition::NoChildSpawned,
         ));
     }
-    if context.check_active("direct CPU decision").is_err() {
+    if context.check_active("direct native operation").is_err() {
         return Err(inactive_error(context));
     }
 
+    let original_profile = catalog.inspect(request.profile()).ok_or_else(|| {
+        DirectRunError::new(
+            DirectRunErrorKind::InvalidRequest,
+            ProcessFailureDisposition::NoChildSpawned,
+        )
+    })?;
     let catalog = catalog.refresh().map_err(|_| {
         DirectRunError::new(
             DirectRunErrorKind::CatalogUnavailable,
             ProcessFailureDisposition::NoChildSpawned,
         )
     })?;
+    if catalog.inspect(request.profile()) != Some(original_profile) {
+        return Err(DirectRunError::new(
+            DirectRunErrorKind::InvalidRequest,
+            ProcessFailureDisposition::NoChildSpawned,
+        ));
+    }
     request.validate(&catalog).map_err(|_| {
         DirectRunError::new(
             DirectRunErrorKind::InvalidRequest,
@@ -133,17 +170,42 @@ pub fn run_cpu_decision(
             ProcessFailureDisposition::NoChildSpawned,
         )
     })?;
-    if !is_cpu_local_nagi_or_laya(request, &route) {
-        return Err(DirectRunError::new(
-            DirectRunErrorKind::UnsupportedRoute,
-            ProcessFailureDisposition::NoChildSpawned,
-        ));
-    }
-
     let recovery = RecoveryPolicy::new(PROCESS_RECOVERY_TIMEOUT)
         .expect("fixed process recovery timeout is valid");
-    execute_accepted_cpu_decision(&catalog, request, &route, context, recovery)
-        .map_err(|error| execution_error(error, context))
+    if is_decision {
+        if !is_cpu_local_nagi_or_laya(request, &route) {
+            return Err(DirectRunError::new(
+                DirectRunErrorKind::UnsupportedRoute,
+                ProcessFailureDisposition::NoChildSpawned,
+            ));
+        }
+        execute_accepted_cpu_decision(&catalog, request, &route, context, recovery)
+            .map(DirectRunResult::Decision)
+            .map_err(|error| execution_error(error, context))
+    } else if is_standard_speech {
+        if !is_cpu_breeze_standard_route(request, &route) {
+            return Err(DirectRunError::new(
+                DirectRunErrorKind::UnsupportedRoute,
+                ProcessFailureDisposition::NoChildSpawned,
+            ));
+        }
+        let output_directory = speech_output_directory.expect("validated speech output directory");
+        execute_breeze_speech_on_cpu(
+            &catalog,
+            request,
+            &route,
+            output_directory,
+            context,
+            recovery,
+        )
+        .map(DirectRunResult::Speech)
+        .map_err(|error| media_execution_error(error, context))
+    } else {
+        Err(DirectRunError::new(
+            DirectRunErrorKind::InvalidRequest,
+            ProcessFailureDisposition::NoChildSpawned,
+        ))
+    }
 }
 
 fn is_cpu_local_nagi_or_laya(request: &InferenceRequest, route: &ResolvedProfileRoute) -> bool {
@@ -161,6 +223,28 @@ fn is_cpu_local_nagi_or_laya(request: &InferenceRequest, route: &ResolvedProfile
         && profile_type == "local"
 }
 
+fn is_cpu_breeze_standard_route(request: &InferenceRequest, route: &ResolvedProfileRoute) -> bool {
+    let InferenceRequest::Media {
+        profile,
+        input: MediaInput::Speech(input),
+    } = request
+    else {
+        return false;
+    };
+    matches!(
+        &route.native_route,
+        NativeRoute::MediaScript { path }
+            if path.file_name().and_then(|name| name.to_str()) == Some("generate-breeze-tts-2.sh")
+    ) && profile == &route.profile
+        && profile.lane == Lane::Media
+        && profile.profile_id.as_str() == CPU_BREEZE_PROFILE_ID
+        && route.runtime.lane == Lane::Media
+        && route.runtime.as_str() == "audio.cpp"
+        && route.device.as_ref() == Some(&Device::Cpu)
+        && input.mode == SpeechMode::Standard
+        && input.instruction.is_none()
+}
+
 fn inactive_error(context: &OperationContext<'_>) -> DirectRunError {
     let kind = if context.is_cancelled() {
         DirectRunErrorKind::Cancelled
@@ -176,7 +260,7 @@ fn execution_error(
 ) -> DirectRunError {
     match error {
         DecisionExecutionError::NotDispatched => {
-            if context.check_active("direct CPU decision").is_err() {
+            if context.check_active("direct native operation").is_err() {
                 inactive_error(context)
             } else {
                 DirectRunError::new(
@@ -205,6 +289,50 @@ fn execution_error(
             DirectRunError::new(kind, process)
         }
     }
+}
+
+fn media_execution_error(
+    error: MediaExecutionFailure,
+    context: &OperationContext<'_>,
+) -> DirectRunError {
+    let disposition = error.disposition();
+    if disposition == ProcessFailureDisposition::NoChildSpawned
+        && context.check_active("direct native operation").is_err()
+    {
+        return inactive_error(context);
+    }
+    let kind = if disposition == ProcessFailureDisposition::OwnershipUncertain {
+        DirectRunErrorKind::OwnershipUncertain
+    } else {
+        match error.kind() {
+            MediaExecutionErrorKind::InvalidArtifact
+            | MediaExecutionErrorKind::ArtifactTooLarge
+            | MediaExecutionErrorKind::TooManyArtifacts => DirectRunErrorKind::InvalidOutput,
+            MediaExecutionErrorKind::InvalidRequest => DirectRunErrorKind::InvalidRequest,
+            MediaExecutionErrorKind::Process(ProcessFailureKind::Cancelled) => {
+                DirectRunErrorKind::Cancelled
+            }
+            MediaExecutionErrorKind::Process(ProcessFailureKind::DeadlineExceeded) => {
+                DirectRunErrorKind::DeadlineExceeded
+            }
+            MediaExecutionErrorKind::Process(_) => {
+                if context.is_cancelled()
+                    && disposition != ProcessFailureDisposition::NoChildSpawned
+                {
+                    DirectRunErrorKind::Cancelled
+                } else if context.remaining().is_zero()
+                    && disposition != ProcessFailureDisposition::NoChildSpawned
+                {
+                    DirectRunErrorKind::DeadlineExceeded
+                } else {
+                    DirectRunErrorKind::ExecutionFailed
+                }
+            }
+            MediaExecutionErrorKind::InvalidOutputDirectory
+            | MediaExecutionErrorKind::OutputAlreadyExists => DirectRunErrorKind::InvalidRequest,
+        }
+    };
+    DirectRunError::new(kind, disposition)
 }
 
 #[cfg(test)]
@@ -323,7 +451,11 @@ mod tests {
     fn direct_runner_returns_native_output_once_without_replay() {
         let (_root, catalog, request, launch_marker) =
             fixture("nagi", "local", "cpu", &native_response("nagi-native"));
-        let result = run_cpu_decision(&catalog, &request, &context(&NeverCancel)).unwrap();
+        let DirectRunResult::Decision(result) =
+            run_cpu_native(&catalog, &request, None, &context(&NeverCancel)).unwrap()
+        else {
+            panic!("direct decision returns native decision result")
+        };
 
         let InferenceResult::Decision { answers } = result.result else {
             panic!("decision runner returns native answers")
@@ -347,7 +479,7 @@ mod tests {
                 device,
                 &native_response("nagi-native"),
             );
-            let error = run_cpu_decision(&catalog, &request, &context(&NeverCancel))
+            let error = run_cpu_native(&catalog, &request, None, &context(&NeverCancel))
                 .err()
                 .expect("unsupported route is rejected");
             assert_eq!(error.kind(), DirectRunErrorKind::UnsupportedRoute);
@@ -361,6 +493,27 @@ mod tests {
     }
 
     #[test]
+    fn direct_runner_rejects_catalog_drift_before_launch() {
+        let (root, catalog, request, launch_marker) =
+            fixture("nagi", "local", "cpu", &native_response("nagi-native"));
+        let manifest_path = root.path().join("toolkits/l3ds/decision-runtimes.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["profiles"][0]["device"] = json!("cuda");
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        let error = run_cpu_native(&catalog, &request, None, &context(&NeverCancel))
+            .err()
+            .expect("catalog drift is rejected before dispatch");
+        assert_eq!(error.kind(), DirectRunErrorKind::InvalidRequest);
+        assert_eq!(
+            error.disposition(),
+            ProcessFailureDisposition::NoChildSpawned
+        );
+        assert!(!launch_marker.exists());
+    }
+
+    #[test]
     fn direct_runner_rejects_non_decision_request_without_launch() {
         let (_root, catalog, _request, launch_marker) =
             fixture("nagi", "local", "cpu", &native_response("nagi-native"));
@@ -368,7 +521,7 @@ mod tests {
             profile: ProfileKey::new(Lane::Language, "fixture-chat").unwrap(),
             input: vec!["private input".into()],
         };
-        let error = run_cpu_decision(&catalog, &request, &context(&NeverCancel))
+        let error = run_cpu_native(&catalog, &request, None, &context(&NeverCancel))
             .err()
             .expect("non-decision request is rejected");
         assert_eq!(error.kind(), DirectRunErrorKind::InvalidRequest);
@@ -383,7 +536,7 @@ mod tests {
     fn invalid_native_output_is_not_replayed() {
         let (_root, catalog, request, launch_marker) =
             fixture("nagi", "local", "cpu", "{\"engine\":\"wrong\"}");
-        let error = run_cpu_decision(&catalog, &request, &context(&NeverCancel))
+        let error = run_cpu_native(&catalog, &request, None, &context(&NeverCancel))
             .err()
             .expect("invalid native output is rejected");
         assert_eq!(error.kind(), DirectRunErrorKind::InvalidOutput);
@@ -406,7 +559,7 @@ mod tests {
         assert!(!error.cancellation_confirmed());
         assert_eq!(
             error.to_string(),
-            "CPU decision process cleanup is uncertain; stop before continuing"
+            "native process cleanup is uncertain; stop before continuing"
         );
     }
 

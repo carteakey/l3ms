@@ -26,10 +26,9 @@ use crate::control::requests::SpeechMode;
 use crate::control::result_consumer::NativeOutput;
 #[cfg(target_os = "linux")]
 use crate::control::{
-    decision::NativeDecisionResult,
-    direct_run::{self, DirectRunError},
+    direct_run::{self, DirectRunError, DirectRunResult},
     runtime::{Cancellation, OperationContext},
-    task_form::build_direct_decision,
+    task_form::build_direct_native,
 };
 use crate::{
     chat::{
@@ -384,6 +383,7 @@ struct TaskFormEditor {
     profile: crate::control::catalog::ProfileKey,
     profile_snapshot: CatalogProfile,
     direct_cpu_decision: bool,
+    direct_cpu_standard_tts: bool,
     declared_tasks: Vec<String>,
     selected_task: Option<usize>,
     media_operation: Option<TaskFormMediaOperation>,
@@ -397,15 +397,21 @@ struct TaskFormEditor {
 impl TaskFormEditor {
     fn new(profile: &CatalogProfile) -> Self {
         let direct_cpu_decision = is_direct_cpu_decision_profile(profile);
+        let direct_cpu_standard_tts = is_direct_cpu_standard_tts_profile(profile);
+        let mut declared_tasks = profile
+            .tasks
+            .iter()
+            .map(|task| task.as_str().to_owned())
+            .collect::<Vec<_>>();
+        if direct_cpu_standard_tts {
+            declared_tasks.retain(|task| task == "tts");
+        }
         let mut editor = Self {
             profile: profile.key.clone(),
             profile_snapshot: profile.clone(),
             direct_cpu_decision,
-            declared_tasks: profile
-                .tasks
-                .iter()
-                .map(|task| task.as_str().to_owned())
-                .collect(),
+            direct_cpu_standard_tts,
+            declared_tasks,
             selected_task: None,
             media_operation: None,
             speech_mode: None,
@@ -414,22 +420,36 @@ impl TaskFormEditor {
             cursor_byte: 0,
             values: TaskFormValues::default(),
         };
-        if direct_cpu_decision {
+        if direct_cpu_decision || direct_cpu_standard_tts {
             // Foreground local work has no caller ID to retain. A useful
             // bounded timeout keeps the CPU path keyboard-first.
             editor.values.timeout = "30000".into();
+        }
+        if direct_cpu_decision {
             editor.values.decision_state = "{}".into();
+        }
+        if direct_cpu_standard_tts {
+            editor.selected_task = Some(0);
+            editor.media_operation = Some(TaskFormMediaOperation::Speech);
+            editor.speech_mode = Some(SpeechMode::Standard);
         }
         editor.refresh_fields();
         editor
     }
 
+    fn is_direct_cpu_native(&self) -> bool {
+        self.direct_cpu_decision || self.direct_cpu_standard_tts
+    }
+
     fn refresh_fields(&mut self) {
         let mut fields = Vec::with_capacity(8);
-        if !self.direct_cpu_decision {
+        if !self.is_direct_cpu_native() {
             fields.push(TaskFormField::RequestId);
         }
-        fields.extend([TaskFormField::Timeout, TaskFormField::DeclaredTask]);
+        fields.push(TaskFormField::Timeout);
+        if !self.direct_cpu_standard_tts {
+            fields.push(TaskFormField::DeclaredTask);
+        }
         match self.profile.lane {
             Lane::Language => {
                 if self
@@ -447,22 +467,26 @@ impl TaskFormEditor {
                 TaskFormField::DecisionQuestions,
             ]),
             Lane::Media => {
-                fields.push(TaskFormField::MediaOperation);
-                match self.media_operation {
-                    Some(TaskFormMediaOperation::Workflow) => {
-                        fields.push(TaskFormField::MediaWorkflowGraph);
+                if self.direct_cpu_standard_tts {
+                    fields.push(TaskFormField::SpeechText);
+                } else {
+                    fields.push(TaskFormField::MediaOperation);
+                    match self.media_operation {
+                        Some(TaskFormMediaOperation::Workflow) => {
+                            fields.push(TaskFormField::MediaWorkflowGraph);
+                        }
+                        Some(TaskFormMediaOperation::Script) => {
+                            fields.push(TaskFormField::MediaScriptArgv);
+                        }
+                        Some(TaskFormMediaOperation::Speech) => fields.extend([
+                            TaskFormField::SpeechText,
+                            TaskFormField::SpeechMode,
+                            TaskFormField::SpeechInstruction,
+                            TaskFormField::SpeechVoiceReference,
+                            TaskFormField::SpeechReferenceText,
+                        ]),
+                        None => {}
                     }
-                    Some(TaskFormMediaOperation::Script) => {
-                        fields.push(TaskFormField::MediaScriptArgv);
-                    }
-                    Some(TaskFormMediaOperation::Speech) => fields.extend([
-                        TaskFormField::SpeechText,
-                        TaskFormField::SpeechMode,
-                        TaskFormField::SpeechInstruction,
-                        TaskFormField::SpeechVoiceReference,
-                        TaskFormField::SpeechReferenceText,
-                    ]),
-                    None => {}
                 }
             }
         }
@@ -706,7 +730,7 @@ impl TaskFormEditor {
     }
 
     fn to_draft(&self) -> Result<TaskFormDraft, TaskFormError> {
-        let request_id = if self.direct_cpu_decision {
+        let request_id = if self.is_direct_cpu_native() {
             String::new()
         } else {
             self.values.request_id.clone()
@@ -905,22 +929,22 @@ struct PendingDownloadPreflight {
 }
 
 #[cfg(target_os = "linux")]
-struct DirectDecisionJob {
+struct DirectNativeJob {
     job_id: u64,
     cancellation: Arc<AtomicBool>,
-    receiver: mpsc::Receiver<DirectDecisionCompletion>,
+    receiver: mpsc::Receiver<DirectNativeCompletion>,
     worker: thread::JoinHandle<()>,
 }
 
 #[cfg(target_os = "linux")]
-struct DirectDecisionCompletion {
+struct DirectNativeCompletion {
     job_id: u64,
-    outcome: Result<NativeDecisionResult, DirectRunError>,
+    outcome: Result<DirectRunResult, DirectRunError>,
 }
 
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy)]
-enum DirectDecisionState {
+enum DirectNativeState {
     Running,
     CancelRequested,
     Succeeded,
@@ -930,7 +954,7 @@ enum DirectDecisionState {
 }
 
 #[cfg(target_os = "linux")]
-impl DirectDecisionState {
+impl DirectNativeState {
     fn label(self) -> &'static str {
         match self {
             Self::Running => "running",
@@ -944,18 +968,20 @@ impl DirectDecisionState {
 }
 
 #[cfg(target_os = "linux")]
-struct DirectDecisionSummary {
+struct DirectNativeSummary {
     job_id: u64,
+    lane: Lane,
     profile_id: String,
-    state: DirectDecisionState,
-    native_latency: Option<Duration>,
+    task: String,
+    state: DirectNativeState,
+    result: Option<DirectRunResult>,
 }
 
 #[cfg(target_os = "linux")]
-struct DirectDecisionCancellation(Arc<AtomicBool>);
+struct DirectNativeCancellation(Arc<AtomicBool>);
 
 #[cfg(target_os = "linux")]
-impl Cancellation for DirectDecisionCancellation {
+impl Cancellation for DirectNativeCancellation {
     fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Acquire)
     }
@@ -1094,11 +1120,11 @@ struct App {
     #[cfg(target_os = "linux")]
     coordinator_workbench: Option<CoordinatorWorkbench>,
     #[cfg(target_os = "linux")]
-    direct_decision_job: Option<DirectDecisionJob>,
+    direct_native_job: Option<DirectNativeJob>,
     #[cfg(target_os = "linux")]
-    direct_decision_admission_closed: bool,
+    direct_native_admission_closed: bool,
     #[cfg(target_os = "linux")]
-    direct_decision_summary: Option<DirectDecisionSummary>,
+    direct_native_summary: Option<DirectNativeSummary>,
 
     download: DownloadUiState,
     download_page: usize,
@@ -1265,11 +1291,11 @@ impl App {
             #[cfg(target_os = "linux")]
             coordinator_workbench: None,
             #[cfg(target_os = "linux")]
-            direct_decision_job: None,
+            direct_native_job: None,
             #[cfg(target_os = "linux")]
-            direct_decision_admission_closed: false,
+            direct_native_admission_closed: false,
             #[cfg(target_os = "linux")]
-            direct_decision_summary: None,
+            direct_native_summary: None,
             download,
             download_page: 0,
             download_state: TableState::default().with_selected(Some(0)),
@@ -1864,7 +1890,7 @@ impl App {
         #[cfg(target_os = "linux")]
         self.drain_coordinator_events();
         #[cfg(target_os = "linux")]
-        self.drain_direct_decision_result();
+        self.drain_direct_native_result();
     }
 
     #[cfg(target_os = "linux")]
@@ -4350,24 +4376,24 @@ impl App {
                     "Select a manifest profile before opening the native task form".into();
                 return;
             };
-            if is_direct_cpu_decision_profile(&profile) {
+            if is_direct_cpu_native_profile(&profile) {
                 if self.coordinator_action_pending
                     || (self.coordinator_request_id.is_some() && !self.coordinator_request_terminal)
                 {
-                    self.status = "A coordinator request is pending or nonterminal; observe or cancel it before starting a foreground decision".into();
+                    self.status = "A coordinator request is pending or nonterminal; observe or cancel it before starting a foreground CPU run".into();
                     return;
                 }
-                if self.direct_decision_admission_closed {
-                    self.status = "CPU decision admission is closed after uncertain process cleanup; inspect Jobs and recover the runner before retrying".into();
+                if self.direct_native_admission_closed {
+                    self.status = "Foreground CPU admission is closed after uncertain process cleanup; inspect Jobs and recover the runner before retrying".into();
                     return;
                 }
-                if self.direct_decision_job.is_some() {
-                    self.status = "A foreground CPU decision is still running; press c to cancel and wait for cleanup".into();
+                if self.direct_native_job.is_some() {
+                    self.status = "A foreground CPU task is still running; press c to cancel and wait for cleanup".into();
                     return;
                 }
             } else {
-                if self.direct_decision_job.is_some() || self.direct_decision_admission_closed {
-                    self.status = "A foreground CPU decision is active or interrupted; finish cleanup or recovery before using the coordinator lane".into();
+                if self.direct_native_job.is_some() || self.direct_native_admission_closed {
+                    self.status = "A foreground CPU task is active or interrupted; finish cleanup or recovery before using the coordinator lane".into();
                     return;
                 }
                 if self.coordinator_action_pending
@@ -4389,7 +4415,12 @@ impl App {
             }
             self.task_form_editor = Some(TaskFormEditor::new(&profile));
             self.input_mode = InputMode::TaskForm;
-            self.status = "Native task form open · choose the declared task explicitly".into();
+            self.status = if is_direct_cpu_native_profile(&profile) {
+                "Foreground CPU task form open · request stays in memory; run once with Ctrl+Enter"
+                    .into()
+            } else {
+                "Native task form open · choose the declared task explicitly".into()
+            };
         }
     }
 
@@ -4403,13 +4434,13 @@ impl App {
             if self
                 .task_form_editor
                 .as_ref()
-                .is_some_and(|editor| editor.direct_cpu_decision)
+                .is_some_and(TaskFormEditor::is_direct_cpu_native)
             {
-                self.submit_direct_cpu_decision();
+                self.submit_direct_cpu_native();
                 return;
             }
-            if self.direct_decision_job.is_some() || self.direct_decision_admission_closed {
-                self.status = "A foreground CPU decision is active or interrupted; finish cleanup or recovery before using the coordinator lane".into();
+            if self.direct_native_job.is_some() || self.direct_native_admission_closed {
+                self.status = "A foreground CPU task is active or interrupted; finish cleanup or recovery before using the coordinator lane".into();
                 return;
             }
             if self.coordinator_action_pending
@@ -4494,7 +4525,7 @@ impl App {
                 .submit(socket_directory, prepared);
             match result {
                 Ok(_) => {
-                    self.clear_direct_decision_result_display();
+                    self.clear_direct_native_result_display();
                     self.coordinator_output = None;
                     self.coordinator_decision_metadata = None;
                     self.coordinator_output_complete = false;
@@ -4517,36 +4548,38 @@ impl App {
     }
 
     #[cfg(target_os = "linux")]
-    fn submit_direct_cpu_decision(&mut self) {
+    fn submit_direct_cpu_native(&mut self) {
         if self.coordinator_action_pending
             || (self.coordinator_request_id.is_some() && !self.coordinator_request_terminal)
         {
-            self.status = "A coordinator request is pending or nonterminal; observe or cancel it before starting a foreground decision".into();
+            self.status = "A coordinator request is pending or nonterminal; observe or cancel it before starting a foreground CPU run".into();
             return;
         }
-        if self.direct_decision_admission_closed {
-            self.status = "CPU decision admission is closed after uncertain process cleanup; inspect Jobs and recover the runner before retrying".into();
+        if self.direct_native_admission_closed {
+            self.status = "Foreground CPU admission is closed after uncertain process cleanup; inspect Jobs and recover the runner before retrying".into();
             return;
         }
-        if self.direct_decision_job.is_some() {
-            self.status = "A foreground CPU decision is still running; press c to cancel and wait for cleanup".into();
+        if self.direct_native_job.is_some() {
+            self.status =
+                "A foreground CPU task is still running; press c to cancel and wait for cleanup"
+                    .into();
             return;
         }
         let Some(catalog) = self.stack_catalog.as_ref() else {
-            self.status = "Refresh the Stack Catalog before running a CPU decision".into();
+            self.status = "Refresh the Stack Catalog before running a foreground CPU task".into();
             return;
         };
         let Some(editor) = self.task_form_editor.as_ref() else {
             self.status = "Native task form is not open".into();
             return;
         };
-        if !editor.direct_cpu_decision
+        if !editor.is_direct_cpu_native()
             || catalog.inspect(&editor.profile) != Some(&editor.profile_snapshot)
         {
-            self.status =
-                "Selected CPU decision profile changed; refresh and reopen the form".into();
+            self.status = "Selected CPU profile changed; refresh and reopen the form".into();
             return;
         }
+        let lane = editor.profile.lane;
         let profile_id = editor.profile.profile_id.as_str().to_owned();
         let draft = match editor.to_draft() {
             Ok(draft) => draft,
@@ -4556,25 +4589,36 @@ impl App {
             }
         };
         let catalog = catalog.clone();
-        let (request, timeout) = match build_direct_decision(&catalog, draft) {
+        let (request, timeout) = match build_direct_native(&catalog, draft) {
             Ok(request) => request,
             Err(error) => {
                 self.status = error.to_string();
                 return;
             }
         };
+        let task = request.task().to_owned();
+        let task_label = direct_native_task_label(&task);
 
         // The cross-toolkit history contract has metadata only: no caller ID,
-        // command, argv, prompt, state, or native answer is persisted.
+        // command, argv, speech text, decision state, or native result is
+        // persisted. Artifact references are added only after validated TTS.
+        let toolkit = match lane {
+            Lane::Decisions => "l3ds",
+            Lane::Media => "l2m2",
+            Lane::Language => {
+                self.status = "The foreground CPU runner does not accept language work".into();
+                return;
+            }
+        };
         let job_id = match self.job_history.begin_cross_toolkit(CrossToolkitJobStart {
-            toolkit: "l3ds".into(),
+            toolkit: toolkit.into(),
             profile: Some(profile_id.clone()),
-            task: Some("decision".into()),
+            task: Some(task.clone()),
             request_id: None,
         }) {
             Ok(job_id) => job_id,
             Err(_) => {
-                self.status = "Could not create safe CPU decision job history".into();
+                self.status = "Could not create safe foreground CPU job history".into();
                 return;
             }
         };
@@ -4590,8 +4634,8 @@ impl App {
             )
             .is_err()
         {
-            self.finish_direct_decision_history(job_id, "failed");
-            self.status = "Could not mark CPU decision as running".into();
+            self.finish_direct_native_history(job_id, "failed", None);
+            self.status = "Could not mark foreground CPU task as running".into();
             return;
         }
         if self.job_history.persist_in(&self.data_root).is_err() {
@@ -4603,32 +4647,53 @@ impl App {
                 },
             );
             self.status =
-                "Safe CPU decision job history could not be saved; nothing was started".into();
+                "Safe foreground CPU job history could not be saved; nothing was started".into();
             return;
         }
+
+        let speech_output_directory = if is_direct_standard_speech_request(&request) {
+            match create_private_direct_speech_directory(&self.data_root, job_id) {
+                Ok(directory) => Some(directory),
+                Err(()) => {
+                    self.finish_direct_native_history(job_id, "failed", None);
+                    self.status = "Could not allocate a fresh private CPU speech output directory; nothing was started".into();
+                    return;
+                }
+            }
+        } else {
+            None
+        };
 
         let cancellation = Arc::new(AtomicBool::new(false));
         let worker_cancellation = cancellation.clone();
         let (sender, receiver) = mpsc::sync_channel(1);
         let deadline = Instant::now() + timeout;
+        let worker_task = task.clone();
         let worker = match thread::Builder::new()
-            .name(format!("l3ds-direct-decision-{job_id}"))
+            .name(format!("l3ms-direct-{toolkit}-{job_id}"))
             .spawn(move || {
-                let cancellation = DirectDecisionCancellation(worker_cancellation);
+                let cancellation = DirectNativeCancellation(worker_cancellation);
                 let context = OperationContext::new(deadline, &cancellation);
-                let outcome = direct_run::run_cpu_decision(&catalog, &request, &context);
-                let _ = sender.send(DirectDecisionCompletion { job_id, outcome });
+                let outcome = direct_run::run_cpu_native(
+                    &catalog,
+                    &request,
+                    speech_output_directory.as_deref(),
+                    &context,
+                );
+                let _ = sender.send(DirectNativeCompletion { job_id, outcome });
             }) {
             Ok(worker) => worker,
             Err(_) => {
-                self.finish_direct_decision_history(job_id, "failed");
-                self.direct_decision_summary = Some(DirectDecisionSummary {
+                self.finish_direct_native_history(job_id, "failed", None);
+                self.direct_native_summary = Some(DirectNativeSummary {
                     job_id,
+                    lane,
                     profile_id,
-                    state: DirectDecisionState::Failed,
-                    native_latency: None,
+                    task,
+                    state: DirectNativeState::Failed,
+                    result: None,
                 });
-                self.status = "Could not start the foreground CPU decision worker".into();
+                self.status = "Could not start the foreground CPU task worker".into();
                 return;
             }
         };
@@ -4637,13 +4702,15 @@ impl App {
         self.coordinator_decision_metadata = None;
         self.coordinator_output_complete = false;
         self.coordinator_results_available = false;
-        self.direct_decision_summary = Some(DirectDecisionSummary {
+        self.direct_native_summary = Some(DirectNativeSummary {
             job_id,
+            lane,
             profile_id: profile_id.clone(),
-            state: DirectDecisionState::Running,
-            native_latency: None,
+            task: worker_task.clone(),
+            state: DirectNativeState::Running,
+            result: None,
         });
-        self.direct_decision_job = Some(DirectDecisionJob {
+        self.direct_native_job = Some(DirectNativeJob {
             job_id,
             cancellation,
             receiver,
@@ -4651,57 +4718,70 @@ impl App {
         });
         self.task_form_editor = None;
         self.input_mode = InputMode::Normal;
-        self.status = format!("CPU decision #{job_id} running · press c to cancel");
-        self.push_log(format!("CPU decision #{job_id} started"));
+        self.status = format!("{task_label} #{job_id} running · press c to cancel");
+        self.push_log(format!("{task_label} #{job_id} started"));
     }
 
     #[cfg(target_os = "linux")]
-    fn begin_direct_decision_cancel(&mut self) -> bool {
-        let Some(job) = self.direct_decision_job.as_ref() else {
+    fn begin_direct_native_cancel(&mut self) -> bool {
+        let Some(job) = self.direct_native_job.as_ref() else {
             return false;
         };
         job.cancellation.store(true, Ordering::Release);
         if let Some(summary) = self
-            .direct_decision_summary
+            .direct_native_summary
             .as_mut()
             .filter(|summary| summary.job_id == job.job_id)
         {
-            summary.state = DirectDecisionState::CancelRequested;
+            summary.state = DirectNativeState::CancelRequested;
         }
+        let label = self
+            .direct_native_summary
+            .as_ref()
+            .filter(|summary| summary.job_id == job.job_id)
+            .map_or("foreground CPU task", |summary| {
+                direct_native_task_label(&summary.task)
+            });
         self.status = format!(
-            "CPU decision #{} cancellation requested · waiting for process cleanup",
+            "{label} #{} cancellation requested · waiting for process cleanup",
             job.job_id
         );
         true
     }
 
     #[cfg(target_os = "linux")]
-    fn finish_direct_decision_history(&mut self, job_id: u64, result_state: &str) {
+    fn finish_direct_native_history(
+        &mut self,
+        job_id: u64,
+        result_state: &str,
+        artifact_refs: Option<Vec<String>>,
+    ) {
         let updated = self
             .job_history
             .update_cross_toolkit(
                 job_id,
                 CrossToolkitJobUpdate {
                     result_state: Some(result_state.to_owned()),
+                    artifact_refs,
                     ..CrossToolkitJobUpdate::default()
                 },
             )
             .is_ok();
         if updated {
-            self.persist_jobs("CPU decision finish");
+            self.persist_jobs("foreground CPU task finish");
         } else {
-            self.push_log("CPU decision job history update failed");
+            self.push_log("Foreground CPU job history update failed");
         }
     }
 
     #[cfg(target_os = "linux")]
-    fn apply_direct_decision_completion(
+    fn apply_direct_native_completion(
         &mut self,
         expected_job_id: u64,
-        completion: Option<DirectDecisionCompletion>,
+        completion: Option<DirectNativeCompletion>,
     ) {
         if self
-            .direct_decision_summary
+            .direct_native_summary
             .as_ref()
             .is_none_or(|summary| summary.job_id != expected_job_id)
         {
@@ -4709,114 +4789,160 @@ impl App {
         }
         let Some(completion) = completion.filter(|completion| completion.job_id == expected_job_id)
         else {
-            self.direct_decision_admission_closed = true;
-            if let Some(summary) = self.direct_decision_summary.as_mut() {
-                summary.state = DirectDecisionState::Interrupted;
+            self.direct_native_admission_closed = true;
+            if let Some(summary) = self.direct_native_summary.as_mut() {
+                summary.state = DirectNativeState::Interrupted;
             }
-            self.finish_direct_decision_history(expected_job_id, "interrupted");
+            self.finish_direct_native_history(expected_job_id, "interrupted", None);
             self.coordinator_output = None;
             self.coordinator_decision_metadata = None;
             self.coordinator_output_complete = false;
             self.coordinator_results_available = false;
-            self.status = format!(
-                "CPU decision #{expected_job_id} interrupted without a confirmed worker result; inspect Jobs and recover the runner before retrying"
-            );
+            let label = self
+                .direct_native_summary
+                .as_ref()
+                .map_or("foreground CPU task", |summary| {
+                    direct_native_task_label(&summary.task)
+                });
+            self.status = format!("{label} #{expected_job_id} interrupted without a confirmed worker result; inspect Jobs and recover the runner before retrying");
             return;
         };
 
         match completion.outcome {
-            Ok(result) => match result.result {
-                crate::control::requests::InferenceResult::Decision { answers } => {
-                    // Temporary coupling: the existing native result panel is
-                    // answer-only. Timing stays in local status metadata, and
-                    // native usage is intentionally not persisted or rendered
-                    // until the result-consumer API can construct its metadata type.
-                    self.coordinator_output = Some(NativeOutput::Decisions {
-                        answers: vec![answers],
-                    });
-                    self.coordinator_decision_metadata = None;
-                    self.coordinator_output_complete = true;
-                    self.coordinator_results_available = true;
-                    self.finish_direct_decision_history(expected_job_id, "succeeded");
-                    if let Some(summary) = self.direct_decision_summary.as_mut() {
-                        summary.state = DirectDecisionState::Succeeded;
-                        summary.native_latency = result.native_latency;
-                    }
-                    let latency = result.native_latency.map_or_else(String::new, |latency| {
-                        format!(" · native latency {:.2} ms", latency.as_secs_f64() * 1000.0)
-                    });
-                    self.status = format!("CPU decision #{expected_job_id} succeeded{latency}");
-                    self.push_log(format!("CPU decision #{expected_job_id} completed"));
+            Ok(result) if self.direct_native_result_matches_task(expected_job_id, &result) => {
+                let artifact_refs = direct_native_artifact_refs(&self.data_root, &result);
+                let latency = direct_native_latency(&result);
+                self.finish_direct_native_history(expected_job_id, "succeeded", artifact_refs);
+                if let Some(summary) = self
+                    .direct_native_summary
+                    .as_mut()
+                    .filter(|summary| summary.job_id == expected_job_id)
+                {
+                    summary.state = DirectNativeState::Succeeded;
+                    summary.result = Some(result);
                 }
-                _ => {
-                    self.finish_direct_decision_history(expected_job_id, "failed");
-                    if let Some(summary) = self.direct_decision_summary.as_mut() {
-                        summary.state = DirectDecisionState::Failed;
-                    }
-                    self.status = format!(
-                        "CPU decision #{expected_job_id} returned an unexpected result lane"
-                    );
+                let label = self
+                    .direct_native_summary
+                    .as_ref()
+                    .map_or("foreground CPU task", |summary| {
+                        direct_native_task_label(&summary.task)
+                    });
+                let latency = latency.map_or_else(String::new, |latency| {
+                    format!(" · native latency {:.2} ms", latency.as_secs_f64() * 1000.0)
+                });
+                self.status = format!("{label} #{expected_job_id} succeeded{latency}");
+                self.push_log(format!("{label} #{expected_job_id} completed"));
+            }
+            Ok(_) => {
+                self.finish_direct_native_history(expected_job_id, "failed", None);
+                if let Some(summary) = self
+                    .direct_native_summary
+                    .as_mut()
+                    .filter(|summary| summary.job_id == expected_job_id)
+                {
+                    summary.state = DirectNativeState::Failed;
+                    summary.result = None;
                 }
-            },
+                self.status = format!(
+                    "Foreground CPU job #{expected_job_id} returned an unexpected result lane"
+                );
+            }
             Err(error) if error.blocks_following_work() => {
-                self.direct_decision_admission_closed = true;
-                self.finish_direct_decision_history(expected_job_id, "interrupted");
-                if let Some(summary) = self.direct_decision_summary.as_mut() {
-                    summary.state = DirectDecisionState::Interrupted;
+                self.direct_native_admission_closed = true;
+                self.finish_direct_native_history(expected_job_id, "interrupted", None);
+                if let Some(summary) = self.direct_native_summary.as_mut() {
+                    summary.state = DirectNativeState::Interrupted;
                 }
-                self.status = format!("CPU decision #{expected_job_id} interrupted: {error}; inspect Jobs and recover the runner before retrying");
+                let label = self
+                    .direct_native_summary
+                    .as_ref()
+                    .map_or("foreground CPU task", |summary| {
+                        direct_native_task_label(&summary.task)
+                    });
+                self.status = format!("{label} #{expected_job_id} interrupted: {error}; inspect Jobs and recover the runner before retrying");
                 self.push_log(format!(
-                    "CPU decision #{expected_job_id} requires runner recovery"
+                    "{label} #{expected_job_id} requires runner recovery"
                 ));
             }
             Err(error) if error.cancellation_confirmed() => {
-                self.finish_direct_decision_history(expected_job_id, "cancelled");
-                if let Some(summary) = self.direct_decision_summary.as_mut() {
-                    summary.state = DirectDecisionState::Cancelled;
+                self.finish_direct_native_history(expected_job_id, "cancelled", None);
+                if let Some(summary) = self.direct_native_summary.as_mut() {
+                    summary.state = DirectNativeState::Cancelled;
                 }
+                let label = self
+                    .direct_native_summary
+                    .as_ref()
+                    .map_or("foreground CPU task", |summary| {
+                        direct_native_task_label(&summary.task)
+                    });
                 self.status = format!(
-                    "CPU decision #{expected_job_id} cancelled · owned process cleanup confirmed"
+                    "{label} #{expected_job_id} cancelled · owned process cleanup confirmed"
                 );
-                self.push_log(format!("CPU decision #{expected_job_id} cancelled"));
+                self.push_log(format!("{label} #{expected_job_id} cancelled"));
             }
             Err(error) => {
-                self.finish_direct_decision_history(expected_job_id, "failed");
-                if let Some(summary) = self.direct_decision_summary.as_mut() {
-                    summary.state = DirectDecisionState::Failed;
+                self.finish_direct_native_history(expected_job_id, "failed", None);
+                if let Some(summary) = self.direct_native_summary.as_mut() {
+                    summary.state = DirectNativeState::Failed;
                 }
-                self.status = format!("CPU decision #{expected_job_id} failed: {error}");
-                self.push_log(format!("CPU decision #{expected_job_id} failed: {error}"));
+                let label = self
+                    .direct_native_summary
+                    .as_ref()
+                    .map_or("foreground CPU task", |summary| {
+                        direct_native_task_label(&summary.task)
+                    });
+                self.status = format!("{label} #{expected_job_id} failed: {error}");
+                self.push_log(format!("{label} #{expected_job_id} failed: {error}"));
             }
         }
     }
 
     #[cfg(target_os = "linux")]
-    fn drain_direct_decision_result(&mut self) {
-        let Some(job) = self.direct_decision_job.as_ref() else {
+    fn direct_native_result_matches_task(&self, job_id: u64, result: &DirectRunResult) -> bool {
+        self.direct_native_summary
+            .as_ref()
+            .filter(|summary| summary.job_id == job_id)
+            .is_some_and(|summary| match (summary.task.as_str(), result) {
+                ("decision", DirectRunResult::Decision(native)) => matches!(
+                    &native.result,
+                    crate::control::requests::InferenceResult::Decision { .. }
+                ),
+                ("tts", DirectRunResult::Speech(native)) => {
+                    native.mode() == SpeechMode::Standard
+                        && summary.lane == Lane::Media
+                        && summary.profile_id == "breeze-tts-2-cpu"
+                }
+                _ => false,
+            })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn drain_direct_native_result(&mut self) {
+        let Some(job) = self.direct_native_job.as_ref() else {
             return;
         };
         let job_id = job.job_id;
         match job.receiver.try_recv() {
             Ok(completion) => {
-                let Some(job) = self.direct_decision_job.take() else {
+                let Some(job) = self.direct_native_job.take() else {
                     return;
                 };
                 if job.job_id != completion.job_id {
-                    self.direct_decision_job = Some(job);
+                    self.direct_native_job = Some(job);
                     return;
                 }
                 if job.worker.join().is_err() {
-                    self.apply_direct_decision_completion(job_id, None);
+                    self.apply_direct_native_completion(job_id, None);
                 } else {
-                    self.apply_direct_decision_completion(job_id, Some(completion));
+                    self.apply_direct_native_completion(job_id, Some(completion));
                 }
             }
             Err(mpsc::TryRecvError::Disconnected) if job.worker.is_finished() => {
-                let Some(job) = self.direct_decision_job.take() else {
+                let Some(job) = self.direct_native_job.take() else {
                     return;
                 };
                 let _ = job.worker.join();
-                self.apply_direct_decision_completion(job_id, None);
+                self.apply_direct_native_completion(job_id, None);
             }
             Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => {}
         }
@@ -4834,8 +4960,8 @@ impl App {
         }
         #[cfg(target_os = "linux")]
         {
-            if self.direct_decision_job.is_some() || self.direct_decision_admission_closed {
-                self.status = "A foreground CPU decision is active or interrupted; coordinator input is unavailable until cleanup or recovery".into();
+            if self.direct_native_job.is_some() || self.direct_native_admission_closed {
+                self.status = "A foreground CPU task is active or interrupted; coordinator input is unavailable until cleanup or recovery".into();
                 return;
             }
             if self.stack_coordinator_socket_dir.is_none() {
@@ -4875,8 +5001,8 @@ impl App {
         }
         #[cfg(target_os = "linux")]
         {
-            if self.direct_decision_job.is_some() || self.direct_decision_admission_closed {
-                self.status = "A foreground CPU decision is active or interrupted; coordinator observation is unavailable until cleanup or recovery".into();
+            if self.direct_native_job.is_some() || self.direct_native_admission_closed {
+                self.status = "A foreground CPU task is active or interrupted; coordinator observation is unavailable until cleanup or recovery".into();
                 return;
             }
             if self.coordinator_request_id.is_some() {
@@ -4894,11 +5020,11 @@ impl App {
         }
         #[cfg(target_os = "linux")]
         {
-            if self.begin_direct_decision_cancel() {
+            if self.begin_direct_native_cancel() {
                 return;
             }
-            if self.direct_decision_admission_closed {
-                self.status = "CPU decision admission is closed after uncertain process cleanup; recover the runner before other coordinator actions".into();
+            if self.direct_native_admission_closed {
+                self.status = "Foreground CPU admission is closed after uncertain process cleanup; recover the runner before other coordinator actions".into();
                 return;
             }
             if self.coordinator_request_id.is_some() {
@@ -4931,8 +5057,8 @@ impl App {
 
     #[cfg(target_os = "linux")]
     fn submit_coordinator_file(&mut self, raw_path: &str) {
-        if self.direct_decision_job.is_some() || self.direct_decision_admission_closed {
-            self.status = "A foreground CPU decision is active or interrupted; coordinator Submit is unavailable until cleanup or recovery".into();
+        if self.direct_native_job.is_some() || self.direct_native_admission_closed {
+            self.status = "A foreground CPU task is active or interrupted; coordinator Submit is unavailable until cleanup or recovery".into();
             return;
         }
         if self.coordinator_action_pending
@@ -4999,7 +5125,7 @@ impl App {
             .submit(socket_directory, prepared);
         match result {
             Ok(_) => {
-                self.clear_direct_decision_result_display();
+                self.clear_direct_native_result_display();
                 self.coordinator_output = None;
                 self.coordinator_decision_metadata = None;
                 self.coordinator_output_complete = false;
@@ -5048,8 +5174,8 @@ impl App {
 
     #[cfg(target_os = "linux")]
     fn enqueue_coordinator_observe_for(&mut self, raw_id: &str) {
-        if self.direct_decision_job.is_some() || self.direct_decision_admission_closed {
-            self.status = "A foreground CPU decision is active or interrupted; coordinator observation is unavailable until cleanup or recovery".into();
+        if self.direct_native_job.is_some() || self.direct_native_admission_closed {
+            self.status = "A foreground CPU task is active or interrupted; coordinator observation is unavailable until cleanup or recovery".into();
             return;
         }
         if self.coordinator_action_pending {
@@ -5086,7 +5212,7 @@ impl App {
         );
         match result {
             Ok(()) => {
-                self.clear_direct_decision_result_display();
+                self.clear_direct_native_result_display();
                 if self.coordinator_request_id.is_none() {
                     self.coordinator_request_id = Some(request_id);
                     self.coordinator_request_lane = Some(lane);
@@ -5113,8 +5239,8 @@ impl App {
 
     #[cfg(target_os = "linux")]
     fn enqueue_coordinator_cancel_for(&mut self, raw_id: &str) {
-        if self.direct_decision_job.is_some() || self.direct_decision_admission_closed {
-            self.status = "A foreground CPU decision is active or interrupted; coordinator cancellation is unavailable until cleanup or recovery".into();
+        if self.direct_native_job.is_some() || self.direct_native_admission_closed {
+            self.status = "A foreground CPU task is active or interrupted; coordinator cancellation is unavailable until cleanup or recovery".into();
             return;
         }
         if self.coordinator_action_pending {
@@ -5140,7 +5266,7 @@ impl App {
             .cancel(socket_directory, request_id.clone());
         match result {
             Ok(()) => {
-                self.clear_direct_decision_result_display();
+                self.clear_direct_native_result_display();
                 if self.coordinator_request_id.is_none() {
                     self.coordinator_request_id = Some(request_id);
                     self.coordinator_request_lane = self
@@ -5155,8 +5281,8 @@ impl App {
     }
 
     #[cfg(target_os = "linux")]
-    fn clear_direct_decision_result_display(&mut self) {
-        if self.direct_decision_summary.take().is_some() {
+    fn clear_direct_native_result_display(&mut self) {
+        if self.direct_native_summary.take().is_some() {
             self.coordinator_output = None;
             self.coordinator_decision_metadata = None;
             self.coordinator_output_complete = false;
@@ -6813,45 +6939,45 @@ impl App {
             info[0],
         );
         #[cfg(target_os = "linux")]
-        let show_direct_decision = self.direct_decision_job.is_some()
-            || self.direct_decision_admission_closed
-            || self.direct_decision_summary.is_some()
+        let show_direct_native = self.direct_native_job.is_some()
+            || self.direct_native_admission_closed
+            || self.direct_native_summary.is_some()
             || self
                 .selected_stack_profile()
-                .is_some_and(is_direct_cpu_decision_profile);
+                .is_some_and(is_direct_cpu_native_profile);
         #[cfg(not(target_os = "linux"))]
-        let show_direct_decision = false;
+        let show_direct_native = false;
         #[cfg(target_os = "linux")]
-        let direct_result_visible = self
-            .direct_decision_summary
-            .as_ref()
-            .is_some_and(|summary| {
-                matches!(summary.state, DirectDecisionState::Succeeded)
-                    && self.selected_stack_profile().is_some_and(|profile| {
-                        is_direct_cpu_decision_profile(profile)
-                            && profile.key.profile_id.as_str() == summary.profile_id
-                    })
-            });
+        let direct_result_visible = self.direct_native_summary.as_ref().is_some_and(|summary| {
+            matches!(summary.state, DirectNativeState::Succeeded)
+                && self.selected_stack_profile().is_some_and(|profile| {
+                    is_direct_cpu_native_profile(profile)
+                        && profile.key.lane == summary.lane
+                        && profile.key.profile_id.as_str() == summary.profile_id
+                })
+        });
         #[cfg(not(target_os = "linux"))]
         let direct_result_visible = false;
         #[cfg(target_os = "linux")]
-        let (action_text, action_title) = if show_direct_decision {
-            let text = self.direct_decision_summary.as_ref().map_or_else(
-                || "CPU-local Nagi/Laya decisions run in the foreground. No caller ID, coordinator socket, or observe step.\nf open form · c cancels an active run".to_owned(),
+        let (action_text, action_title) = if show_direct_native {
+            let text = self.direct_native_summary.as_ref().map_or_else(
+                || "CPU-local Nagi/Laya decisions and standard Breeze speech run in the foreground. No caller ID, coordinator socket, or observe step.\nf open form · c cancels an active run".to_owned(),
                 |summary| {
-                    let latency = summary.native_latency.map_or_else(
+                    let latency = summary.result.as_ref().and_then(direct_native_latency).map_or_else(
                         String::new,
                         |latency| format!("\nnative latency: {:.2} ms", latency.as_secs_f64() * 1000.0),
                     );
                     format!(
-                        "Foreground job #{} · decisions:{}\nstate: {}{}\n{}",
+                        "Foreground job #{} · {}:{} · task {}\nstate: {}{}\n{}",
                         summary.job_id,
+                        summary.lane.as_str(),
                         summary.profile_id,
+                        summary.task,
                         summary.state.label(),
                         latency,
-                        if self.direct_decision_admission_closed {
+                        if self.direct_native_admission_closed {
                             "admission closed · inspect Jobs and recover runner before retrying"
-                        } else if self.direct_decision_job.is_some() {
+                        } else if self.direct_native_job.is_some() {
                             "c cancel · waits for process-group cleanup"
                         } else {
                             "f run again · c only applies while active"
@@ -6859,7 +6985,7 @@ impl App {
                     )
                 },
             );
-            (text, "Foreground CPU decision")
+            (text, "Foreground CPU task")
         } else {
             let retained = self.coordinator_request_id.as_deref().unwrap_or("none");
             let lane = self.coordinator_request_lane.map_or("—", Lane::as_str);
@@ -6922,7 +7048,7 @@ impl App {
             info[1],
         );
         #[cfg(target_os = "linux")]
-        if !show_direct_decision && self.input_mode == InputMode::CoordinatorInput {
+        if !show_direct_native && self.input_mode == InputMode::CoordinatorInput {
             frame.set_cursor_position((
                 info[1].x.saturating_add(
                     3 + coordinator_prompt(self.coordinator_input_action).len() as u16,
@@ -6930,15 +7056,20 @@ impl App {
                 info[1].y.saturating_add(2),
             ));
         }
-        let output_text = if show_direct_decision && !direct_result_visible {
-            "Native decision output is hidden until its completed CPU profile is selected."
-                .to_owned()
+        let output_text = if show_direct_native {
+            if direct_result_visible {
+                self.direct_native_summary
+                    .as_ref()
+                    .and_then(|summary| summary.result.as_ref())
+                    .map(direct_native_result_preview)
+                    .unwrap_or_else(|| "Foreground CPU result is not available.".into())
+            } else {
+                "Foreground CPU result is hidden until its completed profile is selected.".into()
+            }
         } else {
             self.coordinator_output.as_ref().map_or_else(
             || {
-                if show_direct_decision {
-                    "Native decision answers appear here after the foreground CPU run completes.".to_owned()
-                } else if self.coordinator_results_available {
+                if self.coordinator_results_available {
                     "No native output in the latest page.".to_owned()
                 } else {
                     "Native results are shown here only after pressing o. No result body is copied to logs or history.".to_owned()
@@ -6956,8 +7087,8 @@ impl App {
                 .style(theme::text())
                 .block(
                     theme::block()
-                        .title(if show_direct_decision {
-                            "Native decision result"
+                        .title(if show_direct_native {
+                            "Foreground CPU result"
                         } else {
                             "Private native result panel · explicit observation only"
                         })
@@ -6984,8 +7115,13 @@ impl App {
             .split(area);
         frame.render_widget(
             Paragraph::new(format!(
-                "Profile: {} · choose the task explicitly from its declared list",
-                editor.profile
+                "Profile: {}{}",
+                editor.profile,
+                if editor.direct_cpu_standard_tts {
+                    " · standard CPU speech · no caller ID or coordinator"
+                } else {
+                    " · choose the task explicitly from its declared list"
+                }
             ))
             .style(theme::text())
             .block(
@@ -7060,8 +7196,8 @@ impl App {
             panes[1],
         );
         frame.render_widget(
-            Paragraph::new(if editor.direct_cpu_decision {
-                "Tab/Shift+Tab move fields · ↑/↓ choose task · Enter inserts newline · Ctrl+Enter runs once · Esc clears draft · c cancels active run"
+            Paragraph::new(if editor.is_direct_cpu_native() {
+                "Tab/Shift+Tab move fields · Enter inserts newline · Ctrl+Enter runs once · Esc clears draft · c cancels active run"
             } else {
                 "Tab/Shift+Tab move fields · ↑/↓ choose task/kind/mode · Enter inserts newline · Ctrl+Enter submits once · Esc clears draft"
             })
@@ -7651,6 +7787,192 @@ fn is_direct_cpu_decision_profile(profile: &CatalogProfile) -> bool {
         && matches!(profile.runtime.as_str(), "nagi" | "laya")
 }
 
+fn is_direct_cpu_standard_tts_profile(profile: &CatalogProfile) -> bool {
+    profile.key.lane == Lane::Media
+        && profile.key.profile_id.as_str() == "breeze-tts-2-cpu"
+        && profile.runtime.as_str() == "audio.cpp"
+        && profile.device.as_ref() == Some(&Device::Cpu)
+        && profile.tasks.iter().any(|task| task.as_str() == "tts")
+}
+
+#[cfg(target_os = "linux")]
+fn is_direct_cpu_native_profile(profile: &CatalogProfile) -> bool {
+    is_direct_cpu_decision_profile(profile) || is_direct_cpu_standard_tts_profile(profile)
+}
+
+#[cfg(target_os = "linux")]
+fn direct_native_task_label(task: &str) -> &'static str {
+    match task {
+        "decision" => "CPU decision",
+        "tts" => "CPU speech",
+        _ => "Foreground CPU task",
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn is_direct_standard_speech_request(request: &crate::control::requests::InferenceRequest) -> bool {
+    matches!(
+        request,
+        crate::control::requests::InferenceRequest::Media {
+            input: crate::control::requests::MediaInput::Speech(input),
+            ..
+        } if input.mode == SpeechMode::Standard
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn direct_native_latency(result: &DirectRunResult) -> Option<Duration> {
+    match result {
+        DirectRunResult::Decision(result) => result.native_latency,
+        DirectRunResult::Speech(_) => None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn direct_native_artifact_refs(data_root: &Path, result: &DirectRunResult) -> Option<Vec<String>> {
+    let DirectRunResult::Speech(result) = result else {
+        return None;
+    };
+    let canonical_data_root = fs::canonicalize(data_root).ok()?;
+    let prefix = result
+        .output_root()
+        .strip_prefix(canonical_data_root)
+        .ok()?;
+    if prefix.as_os_str().is_empty()
+        || !prefix
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    result
+        .artifacts()
+        .iter()
+        .map(|artifact| {
+            let relative = artifact.relative_path();
+            if relative.is_absolute()
+                || !relative
+                    .components()
+                    .all(|component| matches!(component, std::path::Component::Normal(_)))
+            {
+                return None;
+            }
+            prefix.join(relative).to_str().map(str::to_owned)
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn direct_native_result_preview(result: &DirectRunResult) -> String {
+    let rendered = match result {
+        DirectRunResult::Decision(result) => match &result.result {
+            crate::control::requests::InferenceResult::Decision { answers } => {
+                serde_json::to_string_pretty(std::slice::from_ref(answers))
+                    .unwrap_or_else(|_| "Decision output could not be rendered".into())
+            }
+            _ => "Unexpected native result lane".into(),
+        },
+        DirectRunResult::Speech(result) => result
+            .artifacts()
+            .iter()
+            .map(|artifact| {
+                format!(
+                    "{:?}: {}",
+                    artifact.kind(),
+                    result
+                        .output_root()
+                        .join(artifact.relative_path())
+                        .display()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    let rendered = rendered
+        .chars()
+        .map(|character| {
+            if character.is_control() && character != '\n' && character != '\t' {
+                '�'
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    let mut preview = rendered
+        .chars()
+        .take(MAX_STACK_OUTPUT_PREVIEW_CHARS)
+        .collect::<String>();
+    if rendered.chars().count() > MAX_STACK_OUTPUT_PREVIEW_CHARS {
+        preview.push_str("\n… output truncated");
+    }
+    preview
+}
+
+#[cfg(target_os = "linux")]
+fn create_private_direct_speech_directory(data_root: &Path, job_id: u64) -> Result<PathBuf, ()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+
+    static NEXT_DIRECTORY_NONCE: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+
+    let data_metadata = fs::symlink_metadata(data_root).map_err(|_| ())?;
+    let uid = unsafe { libc::geteuid() };
+    if data_metadata.file_type().is_symlink()
+        || !data_metadata.is_dir()
+        || data_metadata.uid() != uid
+        || data_metadata.mode() & 0o022 != 0
+    {
+        return Err(());
+    }
+    let canonical_data_root = fs::canonicalize(data_root).map_err(|_| ())?;
+    let artifact_root = canonical_data_root.join("native-media");
+    match fs::DirBuilder::new().mode(0o700).create(&artifact_root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(_) => return Err(()),
+    }
+    let artifact_metadata = fs::symlink_metadata(&artifact_root).map_err(|_| ())?;
+    if artifact_metadata.file_type().is_symlink()
+        || !artifact_metadata.is_dir()
+        || artifact_metadata.uid() != uid
+        || artifact_metadata.permissions().mode() & 0o7777 != 0o700
+    {
+        return Err(());
+    }
+    let artifact_root = fs::canonicalize(&artifact_root).map_err(|_| ())?;
+    if !artifact_root.starts_with(&canonical_data_root) {
+        return Err(());
+    }
+
+    let timestamp = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_err(|_| ())?
+        .as_nanos();
+    for _ in 0..32 {
+        let nonce = NEXT_DIRECTORY_NONCE.fetch_add(1, Ordering::Relaxed);
+        let output_directory = artifact_root.join(format!("cpu-job-{job_id}-{timestamp}-{nonce}"));
+        match fs::DirBuilder::new().mode(0o700).create(&output_directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return Err(()),
+        }
+        let output_metadata = fs::symlink_metadata(&output_directory).map_err(|_| ())?;
+        if output_metadata.file_type().is_symlink()
+            || !output_metadata.is_dir()
+            || output_metadata.uid() != uid
+            || output_metadata.permissions().mode() & 0o7777 != 0o700
+        {
+            return Err(());
+        }
+        let output_directory = fs::canonicalize(&output_directory).map_err(|_| ())?;
+        if !output_directory.starts_with(&artifact_root) {
+            return Err(());
+        }
+        return Ok(output_directory);
+    }
+    Err(())
+}
+
 fn coordinator_prompt(action: Option<CoordinatorInputAction>) -> &'static str {
     match action {
         Some(CoordinatorInputAction::SubmitFile) => "Submit file path",
@@ -7772,7 +8094,7 @@ impl Drop for App {
             }
         }
         #[cfg(target_os = "linux")]
-        if let Some(job) = self.direct_decision_job.take() {
+        if let Some(job) = self.direct_native_job.take() {
             // Once a child exists, the direct runner bounds process-group
             // cleanup with its five-second recovery policy. Join (rather than
             // detach) before dropping App so a model child cannot outlive this
@@ -7786,7 +8108,7 @@ impl Drop for App {
             } else {
                 None
             };
-            self.apply_direct_decision_completion(job_id, completion);
+            self.apply_direct_native_completion(job_id, completion);
         }
         if self.running_process.is_some() {
             self.stop_running_process();
@@ -9034,6 +9356,59 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    fn write_direct_cpu_tts_runner(fixture: &AppFixture, marker: &Path, wait: bool) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let media = fixture.root.join("toolkits/l2m2");
+        fs::create_dir_all(media.join("media-models")).unwrap();
+        fs::write(
+            media.join("media-runtimes.json"),
+            r#"{"schema_version":1,"profiles":[{"id":"breeze-tts-2-cpu","name":"CPU Breeze fixture","runtime":"audio.cpp","device":"cpu","tasks":["tts"],"script":"media-models/generate-breeze-tts-2.sh"}]}"#,
+        )
+        .unwrap();
+        let late_marker = marker.with_extension("late");
+        let marker_command = format!("printf started > '{}'\n", marker.display());
+        let wait_command = if wait {
+            format!("sleep 30\nprintf late > '{}'\n", late_marker.display())
+        } else {
+            String::new()
+        };
+        let wrapper = format!(
+            "#!/bin/bash\nset -eu\noutput=\nwhile (($#)); do\n  if [[ $1 == --output ]]; then output=$2; shift 2; else shift; fi\ndone\n[ -n \"$output\" ]\n{marker_command}{wait_command}printf '\\x52\\x49\\x46\\x46\\x26\\x00\\x00\\x00\\x57\\x41\\x56\\x45\\x66\\x6d\\x74\\x20\\x10\\x00\\x00\\x00\\x01\\x00\\x01\\x00\\x40\\x1f\\x00\\x00\\x80\\x3e\\x00\\x00\\x02\\x00\\x10\\x00\\x64\\x61\\x74\\x61\\x02\\x00\\x00\\x00\\x00\\x00' > \"$output\"\n"
+        );
+        let script = media.join("media-models/generate-breeze-tts-2.sh");
+        fs::write(&script, wrapper).unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn open_direct_cpu_tts_form(app: &mut App, text: &str) {
+        app.handle_key(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE))
+            .unwrap();
+        let index = app
+            .stack_catalog
+            .as_ref()
+            .unwrap()
+            .list()
+            .iter()
+            .position(|profile| profile.key.profile_id.as_str() == "breeze-tts-2-cpu")
+            .unwrap();
+        app.stack_catalog_state.select(Some(index));
+        assert!(app.stack_coordinator_socket_dir.is_none());
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+            .unwrap();
+        let editor = app.task_form_editor.as_mut().unwrap();
+        assert!(editor.direct_cpu_standard_tts);
+        assert!(!editor.fields.contains(&TaskFormField::RequestId));
+        assert!(!editor.fields.contains(&TaskFormField::MediaOperation));
+        assert!(!editor.fields.contains(&TaskFormField::SpeechMode));
+        assert!(!editor.fields.contains(&TaskFormField::SpeechInstruction));
+        assert_eq!(editor.values.timeout, "30000");
+        assert_eq!(editor.declared_tasks, ["tts"]);
+        editor.values.speech_text = text.into();
+    }
+
+    #[cfg(target_os = "linux")]
     fn open_direct_decision_form(app: &mut App) {
         app.handle_key(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE))
             .unwrap();
@@ -9060,15 +9435,15 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    fn wait_for_direct_decision(app: &mut App) {
+    fn wait_for_direct_native(app: &mut App) {
         let deadline = Instant::now() + Duration::from_secs(8);
-        while app.direct_decision_job.is_some() && Instant::now() < deadline {
+        while app.direct_native_job.is_some() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(10));
             app.drain_background_events();
         }
         app.drain_background_events();
         assert!(
-            app.direct_decision_job.is_none(),
+            app.direct_native_job.is_none(),
             "direct CPU decision did not finish"
         );
     }
@@ -9083,17 +9458,17 @@ mod tests {
         let mut app = fixture.app();
         open_direct_decision_form(&mut app);
         app.submit_task_form();
-        assert!(app.direct_decision_job.is_some());
+        assert!(app.direct_native_job.is_some());
         assert!(app.coordinator_workbench.is_none());
         assert!(app.task_form_editor.is_none());
-        wait_for_direct_decision(&mut app);
+        wait_for_direct_native(&mut app);
 
-        let summary = app.direct_decision_summary.as_ref().unwrap();
-        assert!(matches!(summary.state, DirectDecisionState::Succeeded));
-        assert_eq!(
-            summary.native_latency,
-            Some(Duration::from_nanos(1_250_000))
-        );
+        let summary = app.direct_native_summary.as_ref().unwrap();
+        assert!(matches!(summary.state, DirectNativeState::Succeeded));
+        let Some(DirectRunResult::Decision(native)) = summary.result.as_ref() else {
+            panic!("direct CPU decision result was not retained");
+        };
+        assert_eq!(native.native_latency, Some(Duration::from_nanos(1_250_000)));
         assert!(app.status.contains("succeeded"));
         assert!(!app.status.contains("decision-private-secret"));
         assert!(app
@@ -9123,10 +9498,134 @@ mod tests {
         app.stack_catalog_state.select(Some(language_index));
         let mut terminal = Terminal::new(TestBackend::new(140, 45)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
-        assert!(terminal_text(&terminal).contains("output is hidden"));
-        app.clear_direct_decision_result_display();
+        assert!(terminal_text(&terminal).contains("result is hidden"));
+        app.clear_direct_native_result_display();
         assert!(app.coordinator_output.is_none());
-        assert!(app.direct_decision_summary.is_none());
+        assert!(app.direct_native_summary.is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cpu_standard_tts_runs_without_socket_and_keeps_only_path_metadata() {
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        let marker = fixture.root.join("tts-runner-started");
+        write_direct_cpu_tts_runner(&fixture, &marker, false);
+        let mut app = fixture.app();
+        open_direct_cpu_tts_form(&mut app, "tts-private-secret");
+        app.submit_task_form();
+        assert!(app.direct_native_job.is_some());
+        assert!(app.coordinator_workbench.is_none());
+        assert!(app.task_form_editor.is_none());
+        wait_for_direct_native(&mut app);
+
+        let summary = app.direct_native_summary.as_ref().unwrap();
+        assert!(matches!(summary.state, DirectNativeState::Succeeded));
+        assert_eq!(summary.task, "tts");
+        let Some(DirectRunResult::Speech(result)) = summary.result.as_ref() else {
+            panic!("direct CPU speech artifact was not retained");
+        };
+        assert_eq!(result.artifacts().len(), 1);
+        assert_eq!(
+            result.artifacts()[0].relative_path(),
+            Path::new("result.wav")
+        );
+        assert!(result.output_root().join("result.wav").is_file());
+        let retry_directory =
+            create_private_direct_speech_directory(fixture.data.path(), 1).unwrap();
+        assert_ne!(retry_directory, result.output_root());
+        assert!(result.output_root().join("result.wav").is_file());
+        assert!(app.status.contains("CPU speech"));
+        assert!(!app.status.contains("tts-private-secret"));
+        assert!(app
+            .log
+            .iter()
+            .all(|line| !line.contains("tts-private-secret")));
+
+        let job = &app.job_history.records()[0];
+        assert!(job.command.is_empty());
+        assert_eq!(job.metadata.toolkit.as_deref(), Some("l2m2"));
+        assert_eq!(job.metadata.task.as_deref(), Some("tts"));
+        assert!(job.metadata.request_id.is_none());
+        assert_eq!(job.metadata.result_state.as_deref(), Some("succeeded"));
+        let artifact_ref = job.metadata.artifact_refs.first().unwrap();
+        assert!(artifact_ref.starts_with("native-media/cpu-job-1-"));
+        assert!(artifact_ref.ends_with("/result.wav"));
+        let persisted =
+            fs::read_to_string(crate::state_store::jobs_path_in(&fixture.data)).unwrap();
+        assert!(!persisted.contains("tts-private-secret"));
+        assert!(!persisted.contains(result.output_root().to_str().unwrap()));
+        assert!(persisted.contains(artifact_ref));
+        assert!(marker.exists());
+
+        let displayed_path = result
+            .output_root()
+            .join("result.wav")
+            .to_string_lossy()
+            .into_owned();
+        let mut terminal = Terminal::new(TestBackend::new(140, 45)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(terminal_text(&terminal).contains(&displayed_path));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cpu_standard_tts_cancel_keeps_single_foreground_owner_until_cleanup() {
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        let marker = fixture.root.join("tts-runner-started");
+        write_direct_cpu_tts_runner(&fixture, &marker, true);
+        let mut app = fixture.app();
+        open_direct_cpu_tts_form(&mut app, "tts-private-secret");
+        app.submit_task_form();
+        let job_id = app.direct_native_job.as_ref().unwrap().job_id;
+        let start_deadline = Instant::now() + Duration::from_secs(3);
+        while !marker.exists() && Instant::now() < start_deadline {
+            thread::sleep(Duration::from_millis(10));
+            app.drain_background_events();
+        }
+        assert!(marker.exists(), "fake CPU speech runner did not start");
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.direct_native_job.as_ref().unwrap().job_id, job_id);
+        assert_eq!(
+            app.job_history.records()[0]
+                .metadata
+                .result_state
+                .as_deref(),
+            Some("running")
+        );
+        wait_for_direct_native(&mut app);
+
+        let summary = app.direct_native_summary.as_ref().unwrap();
+        assert!(matches!(summary.state, DirectNativeState::Cancelled));
+        assert!(summary.result.is_none());
+        assert!(!app.direct_native_admission_closed);
+        assert_eq!(
+            app.job_history.records()[0]
+                .metadata
+                .result_state
+                .as_deref(),
+            Some("cancelled")
+        );
+        assert!(app
+            .log
+            .iter()
+            .all(|line| !line.contains("tts-private-secret")));
+        let native_media = fixture.data.path().join("native-media");
+        let output_directory = fs::read_dir(native_media)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("cpu-job-1-"))
+            })
+            .unwrap();
+        assert!(output_directory.is_dir());
+        assert!(!output_directory.join("result.wav").exists());
+        assert!(!marker.with_extension("late").exists());
     }
 
     #[cfg(target_os = "linux")]
@@ -9142,7 +9641,7 @@ mod tests {
         fs::create_dir(crate::state_store::jobs_path_in(&fixture.data)).unwrap();
         open_direct_decision_form(&mut app);
         app.submit_task_form();
-        assert!(app.direct_decision_job.is_none());
+        assert!(app.direct_native_job.is_none());
         assert!(!marker.exists());
         assert!(app.status.contains("nothing was started"));
         assert_eq!(
@@ -9164,7 +9663,7 @@ mod tests {
         let mut app = fixture.app();
         open_direct_decision_form(&mut app);
         app.submit_task_form();
-        let job_id = app.direct_decision_job.as_ref().unwrap().job_id;
+        let job_id = app.direct_native_job.as_ref().unwrap().job_id;
         let start_deadline = Instant::now() + Duration::from_secs(3);
         while !marker.exists() && Instant::now() < start_deadline {
             thread::sleep(Duration::from_millis(10));
@@ -9183,7 +9682,7 @@ mod tests {
         app.stack_catalog_state.select(Some(language_index));
         app.begin_task_form();
         assert!(app.task_form_editor.is_none());
-        assert!(app.status.contains("foreground CPU decision is active"));
+        assert!(app.status.contains("foreground CPU task is active"));
         app.begin_coordinator_observe();
         assert!(app
             .status
@@ -9191,7 +9690,7 @@ mod tests {
         assert!(app.coordinator_workbench.is_none());
         app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
             .unwrap();
-        assert_eq!(app.direct_decision_job.as_ref().unwrap().job_id, job_id);
+        assert_eq!(app.direct_native_job.as_ref().unwrap().job_id, job_id);
         assert_eq!(
             app.job_history.records()[0]
                 .metadata
@@ -9201,11 +9700,11 @@ mod tests {
         );
         assert!(app.status.contains("cancellation requested"));
 
-        wait_for_direct_decision(&mut app);
-        assert!(!app.direct_decision_admission_closed);
+        wait_for_direct_native(&mut app);
+        assert!(!app.direct_native_admission_closed);
         assert!(matches!(
-            app.direct_decision_summary.as_ref().unwrap().state,
-            DirectDecisionState::Cancelled
+            app.direct_native_summary.as_ref().unwrap().state,
+            DirectNativeState::Cancelled
         ));
         assert_eq!(
             app.job_history.records()[0]
