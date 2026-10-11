@@ -608,22 +608,31 @@ mod tests {
         directory
     }
 
-    fn fixture_catalog() -> Catalog {
-        Catalog::load(env!("CARGO_MANIFEST_DIR")).unwrap()
+    fn embedding_catalog() -> (tempfile::TempDir, Catalog) {
+        let language_root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            language_root.path().join("llama-swap.yaml"),
+            "models:\n  fixture-embeddings:\n    cmd: llama-server --embedding\n",
+        )
+        .unwrap();
+        let repository_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let catalog = Catalog::load_from_roots(
+            language_root.path(),
+            repository_root.join("toolkits/l2m2"),
+            repository_root.join("toolkits/l3ds"),
+        )
+        .unwrap();
+        (language_root, catalog)
     }
 
-    fn language_draft(id: &str) -> TaskFormDraft {
+    fn embedding_draft(id: &str) -> TaskFormDraft {
         TaskFormDraft::new(
-            ProfileKey::new(Lane::Language, "gemma-4-26b-qat-mtp").unwrap(),
-            super::super::catalog::Task::new("chat").unwrap(),
+            ProfileKey::new(Lane::Language, "fixture-embeddings").unwrap(),
+            super::super::catalog::Task::new("embeddings").unwrap(),
             id.into(),
             5_000,
-            task_form::TaskFields::Language {
-                turns: vec![ipc::WireChatTurn {
-                    role: ipc::WireChatRole::User,
-                    content: "private-submit-payload".into(),
-                }],
-                max_tokens: 64,
+            task_form::TaskFields::LanguageEmbeddings {
+                input: vec!["private-submit-payload".into()],
             },
         )
     }
@@ -644,11 +653,11 @@ mod tests {
 
     #[test]
     fn preparation_enforces_selected_profile_and_hides_request_body() {
-        let catalog = fixture_catalog();
-        let selected = ProfileKey::new(Lane::Language, "gemma-4-26b-qat-mtp").unwrap();
+        let (_language_root, catalog) = embedding_catalog();
+        let selected = ProfileKey::new(Lane::Language, "fixture-embeddings").unwrap();
         let prepared = prepare_task_form_submission(
             &catalog,
-            language_draft("caller:workbench-id"),
+            embedding_draft("caller:workbench-id"),
             &selected,
         )
         .unwrap();
@@ -657,7 +666,7 @@ mod tests {
         assert!(!format!("{prepared:?}").contains("private-submit-payload"));
         let wrong = ProfileKey::new(Lane::Decisions, "nagi-small").unwrap();
         assert_eq!(
-            prepare_task_form_submission(&catalog, language_draft("caller:workbench-id"), &wrong)
+            prepare_task_form_submission(&catalog, embedding_draft("caller:workbench-id"), &wrong,)
                 .unwrap_err(),
             PreparationError::SelectedProfileMismatch
         );
@@ -756,12 +765,21 @@ mod tests {
         .unwrap();
         let server = thread::spawn(move || {
             let mut stream = listener.accept().unwrap().0;
-            let ipc::IncomingRequest::Control(ClientRequest::Submit { request_id, .. }) =
-                ipc::read_incoming_request(&mut stream).unwrap()
+            let ipc::IncomingRequest::Control(ClientRequest::Submit {
+                request_id,
+                request,
+                ..
+            }) = ipc::read_incoming_request(&mut stream).unwrap()
             else {
                 panic!("first workbench operation should be submit")
             };
             assert_eq!(request_id, "caller:workbench-id");
+            let crate::control::requests::InferenceRequest::Embeddings { profile, input } = request
+            else {
+                panic!("typed workbench submit should retain embeddings")
+            };
+            assert_eq!(profile.profile_id.as_str(), "fixture-embeddings");
+            assert_eq!(input, vec![String::from("private-submit-payload")]);
             drop(stream); // Simulate a lost acknowledgment; client must not retry.
 
             let mut status_stream = listener.accept().unwrap().0;
@@ -793,7 +811,13 @@ mod tests {
             buffer
                 .append(
                     &query.request_id,
-                    ResultEvent::ChatContent("secret native result".into()),
+                    ResultEvent::Embeddings {
+                        vectors: vec![vec![0.25, -0.5]],
+                        usage: crate::control::requests::EmbeddingUsage {
+                            prompt_tokens: 1,
+                            total_tokens: 1,
+                        },
+                    },
                 )
                 .unwrap();
             buffer
@@ -813,11 +837,11 @@ mod tests {
             .unwrap();
         });
 
-        let catalog = fixture_catalog();
-        let selected = ProfileKey::new(Lane::Language, "gemma-4-26b-qat-mtp").unwrap();
+        let (_language_root, catalog) = embedding_catalog();
+        let selected = ProfileKey::new(Lane::Language, "fixture-embeddings").unwrap();
         let prepared = prepare_task_form_submission(
             &catalog,
-            language_draft("caller:workbench-id"),
+            embedding_draft("caller:workbench-id"),
             &selected,
         )
         .unwrap();
@@ -848,11 +872,14 @@ mod tests {
                 assert_eq!(request_id, "caller:workbench-id");
                 assert_eq!(observation.status, RequestStatus::Succeeded);
                 assert!(observation.output_complete);
-                let Some(NativeOutput::Language { content, .. }) = &observation.output else {
-                    panic!("expected language-native output")
+                let Some(NativeOutput::LanguageEmbeddings { vectors, usage }) = &observation.output
+                else {
+                    panic!("expected language-native embeddings output")
                 };
-                assert_eq!(content, "secret native result");
-                assert!(!format!("{observed:?}").contains("secret native result"));
+                assert_eq!(vectors, &vec![vec![0.25, -0.5]]);
+                assert_eq!(usage.prompt_tokens, 1);
+                assert_eq!(usage.total_tokens, 1);
+                assert!(!format!("{observed:?}").contains("private-submit-payload"));
             }
             _ => panic!("expected native result observation"),
         }

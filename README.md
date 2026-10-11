@@ -109,6 +109,19 @@ and `toolkits/l3ds`; layered settings can override them with
 `L3MS_HOST_SETTINGS_DIR` selects a host settings directory before user
 settings are applied.
 
+### Stack language chat
+
+Connect to your chosen endpoint in the existing Chat tab first. In Stack Catalog
+(`F8`), select a language chat profile and press `f`: L3MS selects that exact
+advertised model and opens Chat, preserving your draft and conversation. It does
+not connect, send a prompt or load a model automatically. Missing/disabled models,
+a pending connection or active work are refused rather than choosing a default.
+
+This uses the current committed Chat connection, not an uncommitted endpoint
+draft, and needs no coordinator socket. Chat keeps its existing streaming,
+history and cancellation behavior. The duplicate raw-turn coordinator chat form
+is retired; embedding profiles still use their typed batch form.
+
 ### Direct CPU decisions (Linux)
 
 Run a prepared local Nagi/Laya CPU profile without a daemon or socket:

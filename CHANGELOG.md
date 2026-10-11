@@ -15,6 +15,10 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Open Stack language chat profiles in the existing Chat tab with exact model
+  selection and the current committed connection. Preserve drafts/conversations;
+  do not connect, send or load automatically. Retire the duplicate raw-turn chat
+  form while keeping embedding/media forms and coordinator observation controls.
 - Extend the shared direct CPU operation and foreground UI job owner to standard
   Breeze speech. Add strict `--task tts` text input and private `--output-dir`
   artifact delivery, without a socket or daemon. Declare a separate CPU profile;

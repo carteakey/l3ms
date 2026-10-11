@@ -38,10 +38,13 @@ use crate::{
     chat_history::ChatHistory,
     commands::{command, search_all_commands, visible_commands, CommandContext, CommandId},
     config_store::{load_config, DownloadConfig},
-    control::catalog::{Catalog, CatalogProfile, Device, Lane, Readiness},
     control::task_form::{
         TaskFields, TaskFormDraft, TaskFormError, MAX_TASK_FORM_FIELD_BYTES,
         MAX_TASK_FORM_TOTAL_BYTES,
+    },
+    control::{
+        catalog::{Catalog, CatalogProfile, Device, Lane, Readiness},
+        routes::{resolve_profile_route, NativeRoute},
     },
     download_editor::DownloadEditor,
     download_preflight::{
@@ -244,9 +247,7 @@ enum TaskFormField {
     Timeout,
     DeclaredTask,
     MediaOperation,
-    LanguageTurns,
     EmbeddingInputs,
-    MaxTokens,
     MediaWorkflowGraph,
     MediaScriptArgv,
     SpeechText,
@@ -266,9 +267,7 @@ impl TaskFormField {
             Self::Timeout => "Timeout (ms)",
             Self::DeclaredTask => "Declared task",
             Self::MediaOperation => "Media input kind",
-            Self::LanguageTurns => "Chat turns JSON",
             Self::EmbeddingInputs => "Embedding texts JSON array",
-            Self::MaxTokens => "Max tokens",
             Self::MediaWorkflowGraph => "Workflow graph JSON",
             Self::MediaScriptArgv => "Script argv JSON array",
             Self::SpeechText => "Speech text",
@@ -331,9 +330,7 @@ impl SpeechMode {
 struct TaskFormValues {
     request_id: String,
     timeout: String,
-    language_turns: String,
     embedding_inputs: String,
-    max_tokens: String,
     workflow_graph: String,
     script_argv: String,
     speech_text: String,
@@ -349,9 +346,7 @@ impl TaskFormValues {
         [
             self.request_id.len(),
             self.timeout.len(),
-            self.language_turns.len(),
             self.embedding_inputs.len(),
-            self.max_tokens.len(),
             self.workflow_graph.len(),
             self.script_argv.len(),
             self.speech_text.len(),
@@ -403,6 +398,14 @@ impl TaskFormEditor {
             .collect::<Vec<_>>();
         if direct_cpu_standard_tts {
             declared_tasks.retain(|task| task == "tts");
+        }
+        if profile.key.lane == Lane::Language
+            && profile
+                .tasks
+                .iter()
+                .any(|task| task.as_str() == "embeddings")
+        {
+            declared_tasks.retain(|task| task == "embeddings");
         }
         let mut editor = Self {
             profile: profile.key.clone(),
@@ -456,8 +459,6 @@ impl TaskFormEditor {
                     .is_some_and(|task| task == "embeddings")
                 {
                     fields.push(TaskFormField::EmbeddingInputs);
-                } else {
-                    fields.extend([TaskFormField::LanguageTurns, TaskFormField::MaxTokens]);
                 }
             }
             Lane::Decisions => fields.extend([
@@ -510,9 +511,7 @@ impl TaskFormEditor {
         match field {
             TaskFormField::RequestId => Some(&self.values.request_id),
             TaskFormField::Timeout => Some(&self.values.timeout),
-            TaskFormField::LanguageTurns => Some(&self.values.language_turns),
             TaskFormField::EmbeddingInputs => Some(&self.values.embedding_inputs),
-            TaskFormField::MaxTokens => Some(&self.values.max_tokens),
             TaskFormField::MediaWorkflowGraph => Some(&self.values.workflow_graph),
             TaskFormField::MediaScriptArgv => Some(&self.values.script_argv),
             TaskFormField::SpeechText => Some(&self.values.speech_text),
@@ -532,9 +531,7 @@ impl TaskFormEditor {
         match field {
             TaskFormField::RequestId => Some(&mut self.values.request_id),
             TaskFormField::Timeout => Some(&mut self.values.timeout),
-            TaskFormField::LanguageTurns => Some(&mut self.values.language_turns),
             TaskFormField::EmbeddingInputs => Some(&mut self.values.embedding_inputs),
-            TaskFormField::MaxTokens => Some(&mut self.values.max_tokens),
             TaskFormField::MediaWorkflowGraph => Some(&mut self.values.workflow_graph),
             TaskFormField::MediaScriptArgv => Some(&mut self.values.script_argv),
             TaskFormField::SpeechText => Some(&mut self.values.speech_text),
@@ -747,15 +744,6 @@ impl TaskFormEditor {
         let fields = match self.profile.lane {
             Lane::Language if selected_task == "embeddings" => TaskFields::LanguageEmbeddings {
                 input: serde_json::from_str(&self.values.embedding_inputs)
-                    .map_err(|_| TaskFormError::InvalidNativeFields)?,
-            },
-            Lane::Language if selected_task == "chat" => TaskFields::Language {
-                turns: serde_json::from_str(&self.values.language_turns)
-                    .map_err(|_| TaskFormError::InvalidNativeFields)?,
-                max_tokens: self
-                    .values
-                    .max_tokens
-                    .parse::<u32>()
                     .map_err(|_| TaskFormError::InvalidNativeFields)?,
             },
             Lane::Language => return Err(TaskFormError::ProfileTaskMismatch),
@@ -4354,49 +4342,57 @@ impl App {
     }
 
     fn begin_task_form(&mut self) {
+        let Some(profile) = self.selected_stack_profile().cloned() else {
+            self.status = "Select a manifest profile before opening the native task form".into();
+            return;
+        };
+
+        #[cfg(target_os = "linux")]
+        if is_direct_cpu_native_profile(&profile) {
+            if self.coordinator_action_pending
+                || (self.coordinator_request_id.is_some() && !self.coordinator_request_terminal)
+            {
+                self.status = "A coordinator request is pending or nonterminal; observe or cancel it before starting a foreground CPU run".into();
+                return;
+            }
+            if self.direct_native_admission_closed {
+                self.status = "Foreground CPU admission is closed after uncertain process cleanup; inspect Jobs and recover the runner before retrying".into();
+                return;
+            }
+            if self.direct_native_job.is_some() {
+                self.status = "A foreground CPU task is still running; press c to cancel and wait for cleanup".into();
+                return;
+            }
+        } else {
+            if self.direct_native_job.is_some() || self.direct_native_admission_closed {
+                self.status = "A foreground CPU task is active or interrupted; finish cleanup or recovery before using the coordinator lane".into();
+                return;
+            }
+            if self.coordinator_action_pending
+                || (self.coordinator_request_id.is_some() && !self.coordinator_request_terminal)
+            {
+                self.status = "Caller ID remains ambiguous or nonterminal; observe or cancel it before another Submit".into();
+                return;
+            }
+        }
+
+        if self.handoff_chat_profile_to_chat(&profile) {
+            return;
+        }
+
         #[cfg(not(target_os = "linux"))]
         {
             self.status = "The private coordinator workbench is available on Linux only".into();
         }
         #[cfg(target_os = "linux")]
         {
-            let Some(profile) = self.selected_stack_profile().cloned() else {
+            if !is_direct_cpu_native_profile(&profile)
+                && self.stack_coordinator_socket_dir.is_none()
+            {
                 self.status =
-                    "Select a manifest profile before opening the native task form".into();
+                    "No explicit private coordinator socket is configured in shared settings"
+                        .into();
                 return;
-            };
-            if is_direct_cpu_native_profile(&profile) {
-                if self.coordinator_action_pending
-                    || (self.coordinator_request_id.is_some() && !self.coordinator_request_terminal)
-                {
-                    self.status = "A coordinator request is pending or nonterminal; observe or cancel it before starting a foreground CPU run".into();
-                    return;
-                }
-                if self.direct_native_admission_closed {
-                    self.status = "Foreground CPU admission is closed after uncertain process cleanup; inspect Jobs and recover the runner before retrying".into();
-                    return;
-                }
-                if self.direct_native_job.is_some() {
-                    self.status = "A foreground CPU task is still running; press c to cancel and wait for cleanup".into();
-                    return;
-                }
-            } else {
-                if self.direct_native_job.is_some() || self.direct_native_admission_closed {
-                    self.status = "A foreground CPU task is active or interrupted; finish cleanup or recovery before using the coordinator lane".into();
-                    return;
-                }
-                if self.coordinator_action_pending
-                    || (self.coordinator_request_id.is_some() && !self.coordinator_request_terminal)
-                {
-                    self.status = "Caller ID remains ambiguous or nonterminal; observe or cancel it before another Submit".into();
-                    return;
-                }
-                if self.stack_coordinator_socket_dir.is_none() {
-                    self.status =
-                        "No explicit private coordinator socket is configured in shared settings"
-                            .into();
-                    return;
-                }
             }
             if profile.tasks.is_empty() {
                 self.status = "Selected profile declares no task forms".into();
@@ -4411,6 +4407,114 @@ impl App {
                 "Native task form open · choose the declared task explicitly".into()
             };
         }
+    }
+
+    /// Hand a chat-only language profile to the existing Chat tab, without
+    /// creating a request or changing any conversation state. `true` means
+    /// this profile owns Chat and the user should not fall through to a form.
+    fn handoff_chat_profile_to_chat(&mut self, captured_profile: &CatalogProfile) -> bool {
+        if captured_profile.key.lane != Lane::Language
+            || captured_profile.tasks.len() != 1
+            || !captured_profile
+                .tasks
+                .iter()
+                .any(|task| task.as_str() == "chat")
+        {
+            return false;
+        }
+
+        let refreshed_catalog = match self
+            .stack_catalog
+            .as_ref()
+            .and_then(|catalog| catalog.refresh().ok())
+        {
+            Some(catalog) => catalog,
+            None => {
+                self.status = "Could not revalidate the selected Chat profile; refresh Stack Catalog before retrying".into();
+                return true;
+            }
+        };
+        let refreshed_index = refreshed_catalog
+            .list()
+            .iter()
+            .position(|profile| profile.key == captured_profile.key);
+        let refreshed_profile = refreshed_catalog.inspect(&captured_profile.key).cloned();
+        self.stack_catalog = Some(refreshed_catalog);
+        self.stack_catalog_state.select(refreshed_index);
+        let Some(refreshed_profile) = refreshed_profile else {
+            self.status =
+                "Selected Chat profile disappeared; refresh Stack Catalog and select it again"
+                    .into();
+            return true;
+        };
+        if refreshed_profile.disabled {
+            self.status =
+                "Selected llama-swap profile is disabled; enable it before opening Chat".into();
+            return true;
+        }
+        if &refreshed_profile != captured_profile {
+            self.status = "Selected Chat profile changed since it was displayed; confirm the refreshed route before retrying".into();
+            return true;
+        }
+        let route = match self
+            .stack_catalog
+            .as_ref()
+            .and_then(|catalog| resolve_profile_route(catalog, &captured_profile.key).ok())
+        {
+            Some(route) => route,
+            None => {
+                self.status = "Selected Chat profile has no valid native llama-swap route".into();
+                return true;
+            }
+        };
+        let NativeRoute::LlamaSwapModel { model_id, .. } = route.native_route else {
+            self.status = "Selected Chat profile does not resolve to a llama-swap model".into();
+            return true;
+        };
+        if self.chat_connection_pending {
+            self.status =
+                "Wait for the current Chat connection or model refresh before handing off".into();
+            return true;
+        }
+        if self.chat_pending || self.chat_stream_cancellation.is_some() || self.chat_session_pending
+        {
+            self.status =
+                "Finish the active Chat response or session action before handing off".into();
+            return true;
+        }
+        let Some(client) = self.chat_client.as_ref() else {
+            self.status = "Connect Chat before opening this llama-swap profile".into();
+            return true;
+        };
+        if self.chat_endpoint_committed.as_deref() != Some(client.base_url()) {
+            self.status = "The current Chat endpoint is not a confirmed connection; reconnect before handing off".into();
+            return true;
+        }
+        let Some((model_index, model)) = self
+            .chat_models
+            .iter()
+            .enumerate()
+            .find(|(_, model)| model.id == model_id.as_str())
+        else {
+            self.status = format!(
+                "Route model {} is not advertised by the connected Chat endpoint; refresh Chat models",
+                model_id
+            );
+            return true;
+        };
+        if model.disabled {
+            self.status = format!("Route model {} is disabled in Chat", model_id);
+            return true;
+        }
+
+        self.chat_model_state.select(Some(model_index));
+        self.tab = Tab::Chat;
+        self.input_mode = InputMode::ChatMessage;
+        self.status = format!(
+            "Chat selected {} · no message sent; existing draft and session preserved",
+            model_id
+        );
+        true
     }
 
     fn submit_task_form(&mut self) {
@@ -6769,7 +6873,7 @@ impl App {
                 .count()
         };
         let title = format!(
-            "{} profile(s) · language {} · media {} · decisions {} · r refresh · s file · f form · o observe · c cancel",
+            "{} profile(s) · language {} · media {} · decisions {} · r refresh · f Chat/task · o observe · c cancel",
             profiles.len(),
             count_for(Lane::Language),
             count_for(Lane::Media),
@@ -9199,6 +9303,50 @@ mod tests {
         fs::write(decisions.join("decision-runtimes.json"), r#"{"version":"1.0","profiles":[{"id":"nagi","name":"Decision fixture","engine":"nagi","type":"local","model":"org/nagi","device":"cpu","entrypoint":"decision-models/runner.py"}]}"#).unwrap();
     }
 
+    fn write_embedding_stack_fixture(fixture: &AppFixture) {
+        write_stack_fixture(fixture);
+        fs::write(
+            fixture.root.join("llama-swap.yaml"),
+            "models:\n  local-embeddings:\n    cmd: server --embedding\n",
+        )
+        .unwrap();
+    }
+
+    fn focus_stack_profile_by_id(app: &mut App, profile_id: &str) {
+        app.handle_key(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE))
+            .unwrap();
+        let index = app
+            .stack_catalog
+            .as_ref()
+            .unwrap()
+            .list()
+            .iter()
+            .position(|profile| profile.key.profile_id.as_str() == profile_id)
+            .unwrap();
+        app.stack_catalog_state.select(Some(index));
+    }
+
+    fn connect_test_chat(app: &mut App, models: Vec<SwapModel>) {
+        let endpoint = "http://connected.example";
+        app.chat_endpoint_draft = endpoint.into();
+        app.chat_endpoint_committed = Some(endpoint.into());
+        app.chat_client = Some(ChatClient::new(endpoint, None).unwrap());
+        app.chat_models = models;
+        app.chat_model_state.select(Some(0));
+    }
+
+    fn test_chat_model(id: &str, state: &str, disabled: bool) -> SwapModel {
+        SwapModel {
+            id: id.into(),
+            state: state.into(),
+            name: String::new(),
+            description: String::new(),
+            created: None,
+            disabled,
+            size_bytes: None,
+        }
+    }
+
     #[cfg(target_os = "linux")]
     fn write_direct_decision_runner(fixture: &AppFixture, marker: &Path, wait: bool) {
         use std::os::unix::fs::PermissionsExt;
@@ -9318,7 +9466,7 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    fn submit_coordinator_chat_form(app: &mut App, request_id: &str, prompt: &str) {
+    fn submit_coordinator_embedding_form(app: &mut App, request_id: &str, input: &str) {
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
             .unwrap();
         for character in request_id.chars() {
@@ -9337,13 +9485,7 @@ mod tests {
             .unwrap();
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .unwrap();
-        for character in format!(r#"[{{"role":"user","content":"{prompt}"}}]"#).chars() {
-            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
-                .unwrap();
-        }
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
-            .unwrap();
-        for character in "32".chars() {
+        for character in format!(r#"["{input}"]"#).chars() {
             app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
                 .unwrap();
         }
@@ -9715,19 +9857,19 @@ mod tests {
     #[test]
     fn task_form_requires_explicit_choices_and_handles_unicode_bounds_and_navigation() {
         let fixture = AppFixture::new();
-        write_stack_fixture(&fixture);
+        write_embedding_stack_fixture(&fixture);
         let mut app = fixture.app();
         app.handle_key(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE))
             .unwrap();
-        let chat_index = app
+        let embeddings_index = app
             .stack_catalog
             .as_ref()
             .unwrap()
             .list()
             .iter()
-            .position(|profile| profile.key.profile_id.as_str() == "local-chat")
+            .position(|profile| profile.key.profile_id.as_str() == "local-embeddings")
             .unwrap();
-        app.stack_catalog_state.select(Some(chat_index));
+        app.stack_catalog_state.select(Some(embeddings_index));
         app.stack_coordinator_socket_dir = Some(fixture.data.path().to_path_buf());
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
             .unwrap();
@@ -9761,7 +9903,11 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
             .unwrap();
         let editor = app.task_form_editor.as_ref().unwrap();
-        assert_eq!(editor.field_display(TaskFormField::DeclaredTask), "chat");
+        assert_eq!(
+            editor.field_display(TaskFormField::DeclaredTask),
+            "embeddings"
+        );
+        assert!(editor.fields.contains(&TaskFormField::EmbeddingInputs));
         assert_eq!(app.stack_catalog_state.selected(), selected_before);
         assert!(!app.status.contains('π'));
         assert!(!app.log.iter().any(|line| line.contains('π')));
@@ -9793,9 +9939,8 @@ mod tests {
         editor.values.timeout = "1000".into();
         editor.active = 2;
         assert!(editor.cycle_selector(1));
+        assert_eq!(editor.declared_tasks, ["embeddings"]);
         assert!(editor.fields.contains(&TaskFormField::EmbeddingInputs));
-        assert!(!editor.fields.contains(&TaskFormField::LanguageTurns));
-        assert!(!editor.fields.contains(&TaskFormField::MaxTokens));
         editor.values.embedding_inputs = r#"["first private text","second private text"]"#.into();
         let envelope =
             crate::control::task_form::build_submit(&catalog, editor.to_draft().unwrap()).unwrap();
@@ -9822,12 +9967,12 @@ mod tests {
     #[test]
     fn native_task_form_render_keeps_unicode_cursor_and_small_terminals_bounded() {
         let fixture = AppFixture::new();
-        write_stack_fixture(&fixture);
+        write_embedding_stack_fixture(&fixture);
         let catalog = Catalog::load(&fixture.root).unwrap();
         let profile = catalog
             .list()
             .iter()
-            .find(|profile| profile.key.profile_id.as_str() == "local-chat")
+            .find(|profile| profile.key.profile_id.as_str() == "local-embeddings")
             .unwrap();
         let mut app = fixture.app();
         let mut editor = TaskFormEditor::new(profile);
@@ -9871,31 +10016,32 @@ mod tests {
     #[test]
     fn task_form_bounds_each_field_and_aggregate_before_typing_more() {
         let fixture = AppFixture::new();
-        write_stack_fixture(&fixture);
+        write_embedding_stack_fixture(&fixture);
         let catalog = Catalog::load(&fixture.root).unwrap();
         let profile = catalog
             .list()
             .iter()
-            .find(|profile| profile.key.profile_id.as_str() == "local-chat")
+            .find(|profile| profile.key.profile_id.as_str() == "local-embeddings")
             .unwrap();
         let mut editor = TaskFormEditor::new(profile);
+        editor.selected_task = Some(0);
+        editor.refresh_fields();
         editor.values.request_id = "a".repeat(MAX_STACK_ID_INPUT_BYTES);
         editor.sync_cursor();
         assert!(!editor.insert_char('x'));
 
         editor.values.request_id = "a".repeat(MAX_STACK_ID_INPUT_BYTES);
         editor.values.timeout = "3".repeat(32);
-        editor.values.language_turns = "c".repeat(MAX_TASK_FORM_FIELD_BYTES);
+        editor.values.embedding_inputs = "c".repeat(MAX_TASK_FORM_FIELD_BYTES - 1);
         let remaining = MAX_TASK_FORM_TOTAL_BYTES
             - editor.values.request_id.len()
             - editor.values.timeout.len()
-            - editor.values.language_turns.len();
-        editor.values.max_tokens = "4".repeat(remaining);
+            - editor.values.embedding_inputs.len();
+        editor.values.workflow_graph = "4".repeat(remaining);
         editor.move_focus(1);
         editor.move_focus(1);
         editor.move_focus(1);
-        editor.move_focus(1);
-        assert_eq!(editor.active_field(), TaskFormField::MaxTokens);
+        assert_eq!(editor.active_field(), TaskFormField::EmbeddingInputs);
         assert!(!editor.insert_char('x'));
     }
 
@@ -9973,7 +10119,7 @@ mod tests {
     }
 
     #[test]
-    fn stack_catalog_keyboard_submit_observe_cancel_keeps_native_output_private() {
+    fn stack_catalog_typed_embedding_submit_observe_cancel_keeps_native_output_private() {
         use std::os::unix::fs::PermissionsExt;
         use std::os::unix::net::UnixListener;
 
@@ -9987,12 +10133,12 @@ mod tests {
 
         const REQUEST_ID: &str = "caller:keyboard-workbench";
         const NEXT_REQUEST_ID: &str = "caller:keyboard-workbench-next";
-        const PRIVATE_PROMPT: &str = "private user prompt";
-        const SECOND_PRIVATE_PROMPT: &str = "second private prompt";
-        const SECRET_RESULT: &str = "native output stays in the private result panel";
+        const PRIVATE_INPUT: &str = "private embedding input";
+        const SECOND_PRIVATE_INPUT: &str = "second private embedding input";
+        const RESULT_PREVIEW: &str = "Embeddings: 1 vectors";
 
         let fixture = AppFixture::new();
-        write_stack_fixture(&fixture);
+        write_embedding_stack_fixture(&fixture);
         let socket_directory = tempfile::tempdir().unwrap();
         fs::set_permissions(socket_directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let listener =
@@ -10018,16 +10164,12 @@ mod tests {
             };
             assert_eq!(request_id, REQUEST_ID);
             assert_eq!(timeout.as_millis(), 5_000);
-            assert_eq!(request.profile().profile_id.as_str(), "local-chat");
-            let crate::control::requests::InferenceRequest::Chat {
-                turns, max_tokens, ..
-            } = request
+            assert_eq!(request.profile().profile_id.as_str(), "local-embeddings");
+            let crate::control::requests::InferenceRequest::Embeddings { input, .. } = request
             else {
-                panic!("typed form retains the language-native chat shape")
+                panic!("typed form retains the language-native embeddings shape")
             };
-            assert_eq!(max_tokens, 32);
-            assert_eq!(turns.len(), 1);
-            assert_eq!(turns[0].content, PRIVATE_PROMPT);
+            assert_eq!(input, [PRIVATE_INPUT]);
             drop(submitted); // Lost acknowledgment must not trigger a replay.
 
             let mut status_stream = listener.accept().unwrap().0;
@@ -10058,7 +10200,13 @@ mod tests {
             buffer
                 .append(
                     &query.request_id,
-                    ResultEvent::ChatContent(SECRET_RESULT.into()),
+                    ResultEvent::Embeddings {
+                        vectors: vec![vec![0.125, -0.25]],
+                        usage: crate::control::requests::EmbeddingUsage {
+                            prompt_tokens: 1,
+                            total_tokens: 1,
+                        },
+                    },
                 )
                 .unwrap();
             buffer
@@ -10106,10 +10254,11 @@ mod tests {
                 panic!("a new typed Submit is allowed after observing terminal status")
             };
             assert_eq!(request_id, NEXT_REQUEST_ID);
-            let crate::control::requests::InferenceRequest::Chat { turns, .. } = request else {
-                panic!("second typed form retains the language-native chat shape")
+            let crate::control::requests::InferenceRequest::Embeddings { input, .. } = request
+            else {
+                panic!("second typed form retains the language-native embeddings shape")
             };
-            assert_eq!(turns[0].content, SECOND_PRIVATE_PROMPT);
+            assert_eq!(input, [SECOND_PRIVATE_INPUT]);
             ipc::write_response(
                 &mut next_submit_stream,
                 &ResponseEnvelope::v1(ResponseMessage::Accepted {
@@ -10134,16 +10283,16 @@ mod tests {
             .unwrap()
             .list()
             .iter()
-            .position(|profile| profile.key.profile_id.as_str() == "local-chat")
+            .position(|profile| profile.key.profile_id.as_str() == "local-embeddings")
             .unwrap();
         app.stack_catalog_state.select(Some(selected));
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
             .unwrap();
         assert_eq!(app.input_mode, InputMode::Normal);
         assert!(app.coordinator_workbench.is_none());
-        submit_coordinator_chat_form(&mut app, REQUEST_ID, PRIVATE_PROMPT);
+        submit_coordinator_embedding_form(&mut app, REQUEST_ID, PRIVATE_INPUT);
         assert_eq!(app.coordinator_request_id.as_deref(), Some(REQUEST_ID));
-        assert!(!app.status.contains(PRIVATE_PROMPT));
+        assert!(!app.status.contains(PRIVATE_INPUT));
 
         let deadline = Instant::now() + Duration::from_secs(3);
         while app.coordinator_action_pending && Instant::now() < deadline {
@@ -10171,13 +10320,13 @@ mod tests {
         assert!(!app.coordinator_action_pending);
         assert!(app.coordinator_results_available);
         assert!(app.coordinator_output_complete);
-        assert!(!app.status.contains(SECRET_RESULT));
-        assert!(!app.log.iter().any(|line| line.contains(SECRET_RESULT)));
+        assert!(!app.status.contains(PRIVATE_INPUT));
+        assert!(!app.log.iter().any(|line| line.contains(PRIVATE_INPUT)));
         assert!(app.job_history.records().is_empty());
 
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
-        assert!(terminal_text(&terminal).contains(SECRET_RESULT));
+        assert!(terminal_text(&terminal).contains(RESULT_PREVIEW));
         assert!(terminal_text(&terminal).contains("Private native result panel"));
 
         app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
@@ -10189,9 +10338,9 @@ mod tests {
         }
         assert!(!app.coordinator_action_pending);
         assert!(app.status.contains("Cancel acknowledged"));
-        assert!(!app.status.contains(SECRET_RESULT));
+        assert!(!app.status.contains(PRIVATE_INPUT));
 
-        submit_coordinator_chat_form(&mut app, NEXT_REQUEST_ID, SECOND_PRIVATE_PROMPT);
+        submit_coordinator_embedding_form(&mut app, NEXT_REQUEST_ID, SECOND_PRIVATE_INPUT);
         assert_eq!(app.coordinator_request_id.as_deref(), Some(NEXT_REQUEST_ID));
         let deadline = Instant::now() + Duration::from_secs(3);
         while app.coordinator_action_pending && Instant::now() < deadline {
@@ -10215,10 +10364,10 @@ mod tests {
         };
 
         const REQUEST_ID: &str = "caller:form-ui";
-        const PRIVATE_TURN: &str = "task form payload stays private";
+        const PRIVATE_INPUT: &str = "task form payload stays private";
 
         let fixture = AppFixture::new();
-        write_stack_fixture(&fixture);
+        write_embedding_stack_fixture(&fixture);
         let socket_directory = tempfile::tempdir().unwrap();
         fs::set_permissions(socket_directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let listener =
@@ -10247,17 +10396,12 @@ mod tests {
             assert_eq!(request_id, REQUEST_ID);
             assert_eq!(timeout.as_millis(), 30_000);
             assert_eq!(request.profile().lane, Lane::Language);
-            assert_eq!(request.profile().profile_id.as_str(), "local-chat");
-            let crate::control::requests::InferenceRequest::Chat {
-                turns, max_tokens, ..
-            } = request
+            assert_eq!(request.profile().profile_id.as_str(), "local-embeddings");
+            let crate::control::requests::InferenceRequest::Embeddings { input, .. } = request
             else {
-                panic!("form retains the language-native chat shape")
+                panic!("form retains the language-native embeddings shape")
             };
-            assert_eq!(max_tokens, 64);
-            assert_eq!(turns.len(), 1);
-            assert_eq!(turns[0].role, crate::control::requests::ChatRole::User);
-            assert_eq!(turns[0].content, PRIVATE_TURN);
+            assert_eq!(input, [PRIVATE_INPUT]);
             received_sender.send(()).unwrap();
             release_receiver
                 .recv_timeout(Duration::from_secs(3))
@@ -10282,7 +10426,7 @@ mod tests {
             .unwrap()
             .list()
             .iter()
-            .position(|profile| profile.key.profile_id.as_str() == "local-chat")
+            .position(|profile| profile.key.profile_id.as_str() == "local-embeddings")
             .unwrap();
         app.stack_catalog_state.select(Some(selected_language));
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
@@ -10303,13 +10447,7 @@ mod tests {
             .unwrap();
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .unwrap();
-        for character in format!(r#"[{{"role":"user","content":"{PRIVATE_TURN}"}}]"#).chars() {
-            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
-                .unwrap();
-        }
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
-            .unwrap();
-        for character in "64".chars() {
+        for character in format!(r#"["{PRIVATE_INPUT}"]"#).chars() {
             app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
                 .unwrap();
         }
@@ -10334,8 +10472,8 @@ mod tests {
         received_receiver
             .recv_timeout(Duration::from_secs(3))
             .unwrap();
-        assert!(!app.status.contains(PRIVATE_TURN));
-        assert!(!app.log.iter().any(|line| line.contains(PRIVATE_TURN)));
+        assert!(!app.status.contains(PRIVATE_INPUT));
+        assert!(!app.log.iter().any(|line| line.contains(PRIVATE_INPUT)));
         release_sender.send(()).unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(3);
@@ -10346,13 +10484,13 @@ mod tests {
         assert!(!app.coordinator_action_pending);
         assert_eq!(app.coordinator_request_id.as_deref(), Some(REQUEST_ID));
         assert!(app.status.contains("Submit accepted"));
-        assert!(!app.status.contains(PRIVATE_TURN));
-        assert!(!app.log.iter().any(|line| line.contains(PRIVATE_TURN)));
+        assert!(!app.status.contains(PRIVATE_INPUT));
+        assert!(!app.log.iter().any(|line| line.contains(PRIVATE_INPUT)));
         server.join().unwrap();
 
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
-        assert!(!terminal_text(&terminal).contains(PRIVATE_TURN));
+        assert!(!terminal_text(&terminal).contains(PRIVATE_INPUT));
     }
 
     #[test]
@@ -10928,6 +11066,149 @@ mod tests {
         app.open_chat_sessions();
         assert!(app.status.contains("before loading"));
         assert!(!app.show_chat_sessions);
+    }
+
+    #[test]
+    fn stack_chat_handoff_selects_exact_route_and_preserves_chat_state() {
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        let mut app = fixture.app();
+        focus_stack_profile_by_id(&mut app, "local-chat");
+        connect_test_chat(
+            &mut app,
+            vec![
+                test_chat_model("other-loaded-model", "loaded", false),
+                test_chat_model("local-chat", "unloaded", false),
+            ],
+        );
+        app.chat_endpoint_draft = "http://uncommitted-draft.example".into();
+        app.chat_input = "unsent chat draft".into();
+        app.chat_system_prompt = "preserved system prompt".into();
+        app.chat_history.push("user", "earlier conversation");
+        app.chat_sessions = vec![ChatSessionSummary {
+            file_name: "saved-session.json".into(),
+            saved: "2026-10-10T00:00:00Z".into(),
+            message_count: 2,
+            json_path: PathBuf::from("saved-session.json"),
+            markdown_path: None,
+        }];
+        let previous_history = app.chat_history.clone();
+        let previous_sessions = app.chat_sessions.clone();
+        let previous_stream_id = app.chat_stream_request_id;
+
+        assert_eq!(app.selected_chat_model().unwrap().id, "other-loaded-model");
+        assert!(app.stack_coordinator_socket_dir.is_none());
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+            .unwrap();
+
+        assert_eq!(app.tab, Tab::Chat);
+        assert_eq!(app.input_mode, InputMode::ChatMessage);
+        assert_eq!(app.selected_chat_model().unwrap().id, "local-chat");
+        assert_eq!(app.chat_endpoint_draft, "http://uncommitted-draft.example");
+        assert_eq!(
+            app.chat_endpoint_committed.as_deref(),
+            Some("http://connected.example")
+        );
+        assert_eq!(
+            app.chat_client.as_ref().unwrap().base_url(),
+            "http://connected.example"
+        );
+        assert_eq!(app.chat_input, "unsent chat draft");
+        assert_eq!(app.chat_system_prompt, "preserved system prompt");
+        assert_eq!(app.chat_history, previous_history);
+        assert_eq!(app.chat_sessions, previous_sessions);
+        assert_eq!(app.chat_stream_request_id, previous_stream_id);
+        assert!(!app.chat_pending);
+        assert!(!app.chat_connection_pending);
+        assert!(app.task_form_editor.is_none());
+        assert!(app.status.contains("no message sent"));
+    }
+
+    #[test]
+    fn stack_chat_handoff_refuses_missing_disabled_disconnected_and_active_routes() {
+        #[derive(Clone, Copy)]
+        enum Refusal {
+            MissingModel,
+            DisabledProfile,
+            DisabledModel,
+            Disconnected,
+            EndpointMismatch,
+            ActiveRequest,
+            SessionPending,
+            ConnectionPending,
+            ChangedProfile,
+            CoordinatorRequestPending,
+        }
+
+        let cases = [
+            (Refusal::MissingModel, "not advertised"),
+            (Refusal::DisabledProfile, "profile is disabled"),
+            (Refusal::DisabledModel, "disabled in Chat"),
+            (Refusal::Disconnected, "Connect Chat"),
+            (Refusal::EndpointMismatch, "not a confirmed connection"),
+            (Refusal::ActiveRequest, "active Chat response"),
+            (Refusal::SessionPending, "active Chat response or session"),
+            (Refusal::ConnectionPending, "current Chat connection"),
+            (Refusal::ChangedProfile, "profile changed"),
+            (
+                Refusal::CoordinatorRequestPending,
+                "Caller ID remains ambiguous or nonterminal",
+            ),
+        ];
+
+        for (case, expected_status) in cases {
+            let fixture = AppFixture::new();
+            write_stack_fixture(&fixture);
+            if matches!(case, Refusal::DisabledProfile) {
+                fs::write(
+                    fixture.root.join("llama-swap.yaml"),
+                    "models:\n  local-chat:\n    disabled: true\n    cmd: server\n",
+                )
+                .unwrap();
+            }
+            let mut app = fixture.app();
+            focus_stack_profile_by_id(&mut app, "local-chat");
+            let advertised_models = if matches!(case, Refusal::MissingModel) {
+                vec![test_chat_model("other-model", "loaded", false)]
+            } else if matches!(case, Refusal::DisabledModel) {
+                vec![test_chat_model("local-chat", "loaded", true)]
+            } else {
+                vec![test_chat_model("local-chat", "loaded", false)]
+            };
+            connect_test_chat(&mut app, advertised_models);
+            match case {
+                Refusal::Disconnected => {
+                    app.chat_client = None;
+                    app.chat_endpoint_committed = None;
+                }
+                Refusal::ActiveRequest => app.chat_pending = true,
+                Refusal::EndpointMismatch => {
+                    app.chat_endpoint_committed = Some("http://different.example".into());
+                }
+                Refusal::SessionPending => app.chat_session_pending = true,
+                Refusal::ConnectionPending => app.chat_connection_pending = true,
+                Refusal::ChangedProfile => fs::write(
+                    fixture.root.join("llama-swap.yaml"),
+                    "models:\n  local-chat:\n    cmd: server --embedding\n",
+                )
+                .unwrap(),
+                Refusal::CoordinatorRequestPending => {
+                    app.coordinator_request_id = Some("caller:pending".into());
+                }
+                Refusal::MissingModel | Refusal::DisabledProfile | Refusal::DisabledModel => {}
+            }
+            let input_before = app.chat_input.clone();
+            app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+                .unwrap();
+
+            assert_eq!(app.tab, Tab::StackCatalog, "case: {expected_status}");
+            assert_eq!(app.input_mode, InputMode::Normal, "case: {expected_status}");
+            assert!(app.task_form_editor.is_none(), "case: {expected_status}");
+            assert!(app.status.contains(expected_status), "{}", app.status);
+            assert_eq!(app.chat_input, input_before);
+            assert!(!app.chat_connection_pending || matches!(case, Refusal::ConnectionPending));
+            assert!(!app.chat_pending || matches!(case, Refusal::ActiveRequest));
+        }
     }
 
     #[test]

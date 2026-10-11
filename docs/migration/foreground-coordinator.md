@@ -109,8 +109,12 @@ result action submits work or retries inference.
 In the Stack Catalog (F8/Alt+8), configure the same private socket directory and
 select a native profile. `o` observes a
 retained or entered ID and displays native output in a private panel, and `c`
-requests cancellation. `f` opens a native task form for the captured catalog
-profile: chat turns or an embedding text-batch JSON array, media workflow JSON
+requests cancellation. For language chat, `f` now selects the exact advertised
+model in the existing Chat tab; it does not create a coordinator request or send
+a prompt. Connect Chat explicitly first. The current committed Chat connection
+is authoritative, and draft endpoint edits are not applied by this handoff.
+For remaining tasks, `f` opens a native task form for the captured catalog
+profile: an embedding text-batch JSON array, media workflow JSON
 or an argv array, speech text/mode and
 optional cloning/design fields, or decision state/questions. Supply the caller
 ID and timeout explicitly; select the declared task and operation using the

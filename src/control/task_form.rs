@@ -14,8 +14,8 @@ use serde_json::{Map, Value};
 
 use super::catalog::{Catalog, Lane, ProfileKey, Task};
 use super::ipc::{
-    self, ClientRequest, RequestEnvelope, WireChatTurn, WireInferenceRequest, WireMediaInput,
-    WireRequestMessage, WireSpeechMode, MAX_FRAME_BYTES,
+    self, ClientRequest, RequestEnvelope, WireInferenceRequest, WireMediaInput, WireRequestMessage,
+    WireSpeechMode, MAX_FRAME_BYTES,
 };
 use super::native_commands::CPU_BREEZE_PROFILE_ID;
 use super::requests::{InferenceRequest, SpeechInput, SpeechMode};
@@ -30,10 +30,6 @@ pub const MAX_TASK_FORM_TOTAL_BYTES: usize = 900 * 1024;
 /// Lane-native keyboard fields. Script arguments are already-separated argv
 /// items: they are never parsed as a shell command or split on whitespace.
 pub enum TaskFields {
-    Language {
-        turns: Vec<WireChatTurn>,
-        max_tokens: u32,
-    },
     LanguageEmbeddings {
         input: Vec<String>,
     },
@@ -268,11 +264,6 @@ pub fn build_submit(
     let profile_id = selected_profile.profile_id.as_str().to_owned();
     let declared_task_text = declared_task.as_str();
     let request = match fields {
-        TaskFields::Language { turns, max_tokens } => WireInferenceRequest::Language {
-            profile_id,
-            turns,
-            max_tokens,
-        },
         TaskFields::LanguageEmbeddings { input } => {
             WireInferenceRequest::Embeddings { profile_id, input }
         }
@@ -374,10 +365,6 @@ fn preflight_draft(draft: &TaskFormDraft) -> Result<(), TaskFormError> {
     add_json_size(&mut total, &draft.timeout_ms)?;
 
     match &draft.fields {
-        TaskFields::Language { turns, max_tokens } => {
-            add_json_size(&mut total, turns)?;
-            add_json_size(&mut total, max_tokens)?;
-        }
         TaskFields::LanguageEmbeddings { input } => add_json_size(&mut total, input)?,
         TaskFields::MediaWorkflow { graph } => add_json_size(&mut total, graph)?,
         TaskFields::MediaScript { args } => add_json_size(&mut total, args)?,
@@ -477,7 +464,7 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
 
-    use super::super::requests::{ChatRole, SpeechInput};
+    use super::super::requests::SpeechInput;
 
     fn catalog() -> Catalog {
         Catalog::load(env!("CARGO_MANIFEST_DIR")).unwrap()
@@ -507,6 +494,30 @@ mod tests {
                 }]
             })
             .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            root.join("toolkits/l3ds/decision-runtimes.json"),
+            r#"{"version":"1.0","profiles":[]}"#,
+        )
+        .unwrap();
+        let catalog = Catalog::load(root).unwrap();
+        (temporary, catalog)
+    }
+
+    fn embedding_catalog() -> (TempDir, Catalog) {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        fs::create_dir_all(root.join("toolkits/l2m2")).unwrap();
+        fs::create_dir_all(root.join("toolkits/l3ds")).unwrap();
+        fs::write(
+            root.join("llama-swap.yaml"),
+            "models:\n  fixture-embeddings:\n    cmd: |\n      llama-server --embedding\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("toolkits/l2m2/media-runtimes.json"),
+            r#"{"schema_version":1,"profiles":[]}"#,
         )
         .unwrap();
         fs::write(
@@ -558,23 +569,13 @@ mod tests {
         }
     }
 
-    fn language_fields() -> TaskFields {
-        TaskFields::Language {
-            turns: vec![
-                WireChatTurn {
-                    role: super::super::ipc::WireChatRole::System,
-                    content: "private system instruction".into(),
-                },
-                WireChatTurn {
-                    role: super::super::ipc::WireChatRole::User,
-                    content: "private user input".into(),
-                },
-                WireChatTurn {
-                    role: super::super::ipc::WireChatRole::Assistant,
-                    content: "earlier assistant output".into(),
-                },
+    fn language_embedding_fields() -> TaskFields {
+        TaskFields::LanguageEmbeddings {
+            input: vec![
+                "private system instruction".into(),
+                "private user input".into(),
+                "earlier assistant output".into(),
             ],
-            max_tokens: 96,
         }
     }
 
@@ -621,11 +622,12 @@ mod tests {
     }
 
     #[test]
-    fn language_form_preserves_roles_and_builds_explicit_submit() {
-        let selected = profile(super::super::catalog::Lane::Language, "gemma-4-26b-qat-mtp");
+    fn language_embedding_form_builds_explicit_submit() {
+        let (_temporary, catalog) = embedding_catalog();
+        let selected = profile(super::super::catalog::Lane::Language, "fixture-embeddings");
         let envelope = build_submit(
-            &catalog(),
-            draft(selected.clone(), "chat", language_fields()),
+            &catalog,
+            draft(selected.clone(), "embeddings", language_embedding_fields()),
         )
         .unwrap();
         assert_eq!(envelope.version, ipc::PROTOCOL_VERSION);
@@ -640,20 +642,18 @@ mod tests {
         assert_eq!(request_id, "caller:form");
         assert_eq!(timeout.as_millis(), 30_000);
         assert_eq!(request.profile(), &selected);
-        let super::super::requests::InferenceRequest::Chat {
-            turns, max_tokens, ..
-        } = request
-        else {
-            panic!("language fields stay language-native")
+        assert_eq!(request.task(), "embeddings");
+        let super::super::requests::InferenceRequest::Embeddings { input, .. } = request else {
+            panic!("language embedding fields stay lane-native")
         };
-        assert_eq!(max_tokens, 96);
-        assert_eq!(turns.len(), 3);
-        assert_eq!(turns[0].role, ChatRole::System);
-        assert_eq!(turns[1].role, ChatRole::User);
-        assert_eq!(turns[2].role, ChatRole::Assistant);
-        assert_eq!(turns[0].content, "private system instruction");
-        assert_eq!(turns[1].content, "private user input");
-        assert_eq!(turns[2].content, "earlier assistant output");
+        assert_eq!(
+            input,
+            vec![
+                String::from("private system instruction"),
+                String::from("private user input"),
+                String::from("earlier assistant output"),
+            ]
+        );
     }
 
     #[test]
@@ -895,7 +895,7 @@ mod tests {
                     task("decision"),
                     String::new(),
                     30_000,
-                    language_fields(),
+                    language_embedding_fields(),
                 ),
             )),
             TaskFormError::InvalidNativeFields
@@ -1053,14 +1053,15 @@ mod tests {
 
     #[test]
     fn rejects_lane_profile_task_timeout_and_identifier_mismatch() {
-        let catalog = catalog();
+        let base_catalog = catalog();
+        let (_temporary, catalog) = embedding_catalog();
         assert_eq!(
             error(build_submit(
-                &catalog,
+                &base_catalog,
                 draft(
                     profile(super::super::catalog::Lane::Media, "breeze-tts-2"),
-                    "chat",
-                    language_fields(),
+                    "tts",
+                    language_embedding_fields(),
                 ),
             )),
             TaskFormError::ProfileTaskMismatch
@@ -1069,9 +1070,9 @@ mod tests {
             error(build_submit(
                 &catalog,
                 draft(
-                    profile(super::super::catalog::Lane::Language, "gemma-4-26b-qat-mtp"),
+                    profile(super::super::catalog::Lane::Language, "fixture-embeddings"),
                     "not-declared",
-                    language_fields(),
+                    language_embedding_fields(),
                 ),
             )),
             TaskFormError::ProfileTaskMismatch
@@ -1081,19 +1082,19 @@ mod tests {
                 &catalog,
                 draft(
                     profile(super::super::catalog::Lane::Language, "unknown-profile"),
-                    "chat",
-                    language_fields(),
+                    "embeddings",
+                    language_embedding_fields(),
                 ),
             )),
             TaskFormError::ProfileTaskMismatch
         );
 
         let invalid_id = TaskFormDraft::new(
-            profile(super::super::catalog::Lane::Language, "gemma-4-26b-qat-mtp"),
-            task("chat"),
+            profile(super::super::catalog::Lane::Language, "fixture-embeddings"),
+            task("embeddings"),
             "sk-example-fixture".into(),
             30_000,
-            language_fields(),
+            language_embedding_fields(),
         );
         assert_eq!(
             error(build_submit(&catalog, invalid_id)),
@@ -1101,11 +1102,11 @@ mod tests {
         );
 
         let invalid_timeout = TaskFormDraft::new(
-            profile(super::super::catalog::Lane::Language, "gemma-4-26b-qat-mtp"),
-            task("chat"),
+            profile(super::super::catalog::Lane::Language, "fixture-embeddings"),
+            task("embeddings"),
             "caller:bad-timeout".into(),
             0,
-            language_fields(),
+            language_embedding_fields(),
         );
         assert_eq!(
             error(build_submit(&catalog, invalid_timeout)),
@@ -1117,16 +1118,12 @@ mod tests {
     fn bounds_payload_before_clone_and_redacts_draft_debug() {
         let secret = "private-native-prompt";
         let draft = TaskFormDraft::new(
-            profile(super::super::catalog::Lane::Language, "gemma-4-26b-qat-mtp"),
-            task("chat"),
+            profile(super::super::catalog::Lane::Language, "fixture-embeddings"),
+            task("embeddings"),
             "caller:private-id".into(),
             30_000,
-            TaskFields::Language {
-                turns: vec![WireChatTurn {
-                    role: super::super::ipc::WireChatRole::User,
-                    content: secret.into(),
-                }],
-                max_tokens: 64,
+            TaskFields::LanguageEmbeddings {
+                input: vec![secret.into()],
             },
         );
         let debug = format!("{draft:?}");

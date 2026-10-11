@@ -10,6 +10,24 @@ existing Linear migration issues rather than replacing their acceptance criteria
 
 ## Monorepo: next work
 
+Current replacement: Stack chat-only language profiles now open the existing
+Chat tab on the exact enabled advertised model, using the committed connection.
+No connect, send, load or default-model fallback occurs; drafts/conversations
+stay intact. The duplicate raw-turn chat form and builder branch are retired.
+Embedding/media forms remain, and their typed submit/observe/cancel coverage is
+retained. **879 root tests passed, 1 ignored**; strict Clippy, formatting and
+build pass. This slice adds **306 net root source lines** including tests;
+cumulative source change against `702b4cd` is **+2,731**. No platform module
+was removed here, and the larger LOC reduction is not complete.
+
+Next concrete slice: native embedding batches through the existing configured
+language adapter/connection, without another chat owner or coordinator protocol.
+Keep HTTP cancellation uncertainty distinct from locally owned process cleanup.
+Then replace native media form callers and remove the displaced coordinator
+dependency closure. Do not expand the managed daemon or remove unreplaced paths.
+
+## Previous deletion checkpoint
+
 Latest simplification cut: retire branch-added generic `--request-submit` and
 Stack `s` file submission, remove `submission_file` and its workbench adapter.
 Typed `f` forms, observe/cancel/results, direct CPU tasks and original standalone
@@ -19,11 +37,8 @@ integration test retains submit/observe/cancel/results coverage. Current root
 suite: **877 passed, 1 ignored**; 17 decision-maintenance Python tests pass.
 Cumulative `src/` change against `702b4cd` remains **+2,425 lines**.
 
-Next concrete slice: hand Stack language chat selection to the existing Chat
-tab/client with an exact model match, rather than build another chat owner.
-Then replace native embedding/media form callers before deleting the remaining
-coordinator dependency closure. Keep explicit unsupported tasks honest and
-preserve standalone access; do not remove unreplaced working paths.
+The planned Stack-to-Chat handoff is now implemented in the current checkpoint
+above. Native embedding/media callers still block broad coordinator deletion.
 
 **Revised direction:** follow the [simplification plan](docs/migration/simplification-plan.md).
 Next finish native TTS/media wrapper workflows, then delete displaced

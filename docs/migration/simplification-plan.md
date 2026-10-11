@@ -219,3 +219,18 @@ Next reuse the existing Chat tab/client for exact Stack language model selection
 not another chat execution owner. Native embeddings/media still need replacement
 before removing the full coordinator closure. Historical probe entry points must
 fail before launching retired infrastructure, not silently run a broken test.
+
+### Original Chat owner replacement checkpoint — 2026-10-10
+
+Stack chat-only profiles now hand off exact model selection to the existing
+Chat tab/client, with no automatic connect/send/load. The raw-turn coordinator
+form and builder branch are removed; embedding-based fixtures retain typed
+submission/observation/cancellation coverage. Current committed connection,
+catalog drift and active-work checks keep selection explicit and side-effect free.
+
+879 tests pass (1 ignored), strict Clippy/format/build pass. This slice adds
+306 net root source lines including tests, so cumulative source change remains
++2,731 against `702b4cd`, not the promised reduction. Next native embedding
+batches through the existing language adapter, then native media and inward
+coordinator deletion. Keep HTTP cancellation uncertainty separate from local
+child cleanup; do not add another Chat owner or expand managed infrastructure.

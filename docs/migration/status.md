@@ -8,7 +8,33 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
-## Current deletion checkpoint — 2026-10-10
+## Current Chat replacement checkpoint — 2026-10-10
+
+Stack `f` on a chat-only language profile now selects the exact enabled model
+on the current committed Chat connection and opens the original Chat tab.
+It refreshes/compares the captured catalog profile before selection, checks
+connection/model identity and active-work gates, and never connects, sends or
+loads a model. Draft endpoint edits, conversation, prompt and sessions remain
+unchanged. The handoff works without coordinator configuration; embeddings
+retain their batch form. Chat now uses original streaming/history/cancel controls,
+not raw-turn coordinator submission with caller-ID observation.
+
+Removed the duplicate chat form fields and typed builder branch. Coordinator
+submit/observe/cancel/result tests were retargeted to native embeddings rather
+than discarded. New keyboard fixtures cover exact selection, preserved state,
+missing/disabled routes, catalog drift, disconnected/mismatched/pending
+connections, active chat/session work and coordinator conflict refusal.
+This is fixture evidence; manual interactive/live-server acceptance is not claimed.
+
+Verification: **879 root tests passed, 1 ignored**, strict all-target Clippy,
+formatting, whitespace checks and CLI build pass. No live services, model runs
+or original checkouts were changed. Net whole-`src/` change for this slice is
+**+306 lines**, including tests/comments/blanks; cumulative change against
+`702b4cd` is **+2,731**. Control scope is **61,823 lines**. A duplicate caller
+concept was retired, but no platform module was removed and overall reduction
+remains unfinished. Next native embedding/media callers, then inward deletion.
+
+## Previous deletion checkpoint — 2026-10-10
 
 Retired only generic coordinator envelope-file submission: CLI
 `--request-submit`, Stack `s`, file preparation and the `submission_file` module.
