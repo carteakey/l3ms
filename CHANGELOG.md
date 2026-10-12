@@ -15,6 +15,12 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Route declared Comfy workflow forms and CLI tasks through the existing native
+  adapter and foreground worker, without coordinator submission. Record a fresh
+  job ID before one submission, cancel only that job, and privately download
+  terminal outputs. Require explicit scoped-server compatibility; do not manage
+  services, retry inference or equate terminal state with GPU release. Live
+  transport/media acceptance remains pending.
 - Extend the existing CPU Breeze CLI/form/runner to offline voice design with
   strict text/instruction input, shared WAV output validation and CPU-only backend.
   Reuse one route predicate, worker and artifact path; keep cloning/streaming gated.

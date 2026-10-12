@@ -10,13 +10,21 @@ existing Linear migration issues rather than replacing their acceptance criteria
 
 ## Monorepo: next work
 
-Current embedding implementation is integrated: CLI strict `{"input":[...]}`
+Native Comfy implementation now reuses the adapter and foreground worker for
+declared graphs, scoped cancellation and private flat-file downloads. No services
+or GPU lifecycle are managed. Build/strict Clippy/fmt and local fixtures pass;
+**785 root tests pass, 121 transport tests fail under socket restrictions,
+1 is ignored**. Actual native HTTP/media acceptance remains pending. Source grows
+**1,591 net lines** in this slice; cumulative **+6,184**, no platform module removed.
+See [current evidence](docs/migration/status.md).
+
+The preceding embedding implementation is integrated: CLI strict `{"input":[...]}`
 and Stack batch forms share the native runner/language adapter, no coordinator socket/caller
 ID. UI uses the committed Chat endpoint and captured credentials; vectors stay
 out of history. Post-dispatch cancellation is remote completion uncertainty,
 not process/GPU release, and blocks overlapping Chat sends.
 
-Verification is **not fully green**: build/strict Clippy/fmt pass; 772 root tests
+Embedding checkpoint verification was **not fully green**: build/strict Clippy/fmt pass; 772 root tests
 pass, 121 fail at sandbox-restricted socket/transport operations, 1 is ignored.
 Builder/CLI validation and local cancellation guards pass. New loopback success,
 captured-auth and remote-cancel tests remain enabled but cannot execute here.
@@ -40,6 +48,12 @@ Next gates:
 - [ ] Replace remaining native media/GPU form callers, then delete their
   coordinator dependency closure. Keep existing workflows until replacements pass;
   do not expand the managed daemon.
+
+Keep this a thin wrapper: Comfy uses the existing adapter and foreground worker,
+opaque native workflow JSON and ordinary private output files. No new service,
+artifact registry, engine hierarchy or persistent execution authority. After
+transport acceptance, remove the displaced coordinator callers inward; do not
+add further platform features while the deletion target remains unmet.
 
 ## Previous Chat replacement checkpoint
 

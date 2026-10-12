@@ -26,6 +26,7 @@ use crate::control::requests::SpeechMode;
 use crate::control::result_consumer::NativeOutput;
 #[cfg(target_os = "linux")]
 use crate::control::{
+    comfy::{ComfyAdapter, ComfyContract},
     direct_run::{self, DirectRunError, DirectRunResult},
     language::LanguageAdapter,
     runtime::{Cancellation, OperationContext},
@@ -378,6 +379,7 @@ struct TaskFormEditor {
     profile_snapshot: CatalogProfile,
     direct_cpu_decision: bool,
     direct_cpu_speech: bool,
+    direct_comfy_workflow: bool,
     direct_language_embeddings: bool,
     declared_tasks: Vec<String>,
     selected_task: Option<usize>,
@@ -401,6 +403,10 @@ impl TaskFormEditor {
     ) -> Self {
         let direct_cpu_decision = is_direct_cpu_decision_profile(profile);
         let direct_cpu_speech = is_direct_cpu_speech_profile(profile);
+        #[cfg(target_os = "linux")]
+        let direct_comfy_workflow = is_direct_comfy_workflow_profile(profile);
+        #[cfg(not(target_os = "linux"))]
+        let direct_comfy_workflow = false;
         let direct_language_embeddings = direct_language_embeddings
             && profile.key.lane == Lane::Language
             && profile
@@ -428,6 +434,7 @@ impl TaskFormEditor {
             profile_snapshot: profile.clone(),
             direct_cpu_decision,
             direct_cpu_speech,
+            direct_comfy_workflow,
             direct_language_embeddings,
             declared_tasks,
             selected_task: None,
@@ -438,7 +445,11 @@ impl TaskFormEditor {
             cursor_byte: 0,
             values: TaskFormValues::default(),
         };
-        if direct_cpu_decision || direct_cpu_speech || direct_language_embeddings {
+        if direct_cpu_decision
+            || direct_cpu_speech
+            || direct_comfy_workflow
+            || direct_language_embeddings
+        {
             // Foreground native work has no caller ID to retain. A useful
             // bounded timeout keeps the direct path keyboard-first.
             editor.values.timeout = "30000".into();
@@ -449,6 +460,9 @@ impl TaskFormEditor {
         if direct_cpu_speech {
             editor.selected_task = editor.declared_tasks.iter().position(|task| task == "tts");
             editor.media_operation = Some(TaskFormMediaOperation::Speech);
+        }
+        if direct_comfy_workflow {
+            editor.media_operation = Some(TaskFormMediaOperation::Workflow);
         }
         if direct_language_embeddings {
             editor.selected_task = editor
@@ -461,7 +475,10 @@ impl TaskFormEditor {
     }
 
     fn is_direct_native(&self) -> bool {
-        self.direct_cpu_decision || self.direct_cpu_speech || self.direct_language_embeddings
+        self.direct_cpu_decision
+            || self.direct_cpu_speech
+            || self.direct_comfy_workflow
+            || self.direct_language_embeddings
     }
 
     fn refresh_fields(&mut self) {
@@ -499,6 +516,8 @@ impl TaskFormEditor {
                     {
                         fields.push(TaskFormField::SpeechInstruction);
                     }
+                } else if self.direct_comfy_workflow {
+                    fields.push(TaskFormField::MediaWorkflowGraph);
                 } else {
                     fields.push(TaskFormField::MediaOperation);
                     match self.media_operation {
@@ -997,7 +1016,7 @@ impl DirectNativeState {
             Self::Running => "running",
             Self::CancelRequested => "cancellation requested · waiting for operation outcome",
             Self::Succeeded => "succeeded",
-            Self::Cancelled => "cancelled before dispatch or with local cleanup confirmed",
+            Self::Cancelled => "cancelled · dispatch or terminal outcome confirmed",
             Self::Failed => "failed",
             Self::Interrupted => "interrupted · completion unconfirmed",
         }
@@ -1010,6 +1029,7 @@ struct DirectNativeSummary {
     lane: Lane,
     profile_id: String,
     task: String,
+    native_id: Option<String>,
     state: DirectNativeState,
     result: Option<DirectRunResult>,
 }
@@ -4404,8 +4424,9 @@ impl App {
             .as_ref()
             .is_some_and(|catalog| is_direct_native_language_embeddings_profile(&profile, catalog));
         #[cfg(target_os = "linux")]
-        let direct_native_profile =
-            is_direct_cpu_native_profile(&profile) || direct_language_embeddings;
+        let direct_native_profile = is_direct_cpu_native_profile(&profile)
+            || is_direct_comfy_workflow_profile(&profile)
+            || direct_language_embeddings;
 
         #[cfg(target_os = "linux")]
         if direct_native_profile {
@@ -4464,6 +4485,8 @@ impl App {
             self.status = if is_direct_cpu_native_profile(&profile) {
                 "Foreground CPU task form open · request stays in memory; run once with Ctrl+Enter"
                     .into()
+            } else if is_direct_comfy_workflow_profile(&profile) {
+                "Foreground Comfy workflow form open · existing server only; operator remains responsible for GPU availability".into()
             } else if direct_language_embeddings {
                 "Foreground language embeddings form open · no caller ID or coordinator; run once with Ctrl+Enter".into()
             } else {
@@ -4748,7 +4771,12 @@ impl App {
             }
         };
         let task = request.task().to_owned();
-        let task_label = direct_native_task_label(&task);
+        let comfy_request = is_direct_comfy_workflow_request(&catalog, &request);
+        let task_label = if comfy_request {
+            "Comfy workflow"
+        } else {
+            direct_native_task_label(&task)
+        };
         let language_adapter = if task == "embeddings" {
             match self.prepare_direct_embedding_adapter(&catalog, &request) {
                 Ok(adapter) => Some(adapter),
@@ -4760,10 +4788,37 @@ impl App {
         } else {
             None
         };
+        let comfy_adapter = if comfy_request {
+            match self.prepare_direct_comfy_adapter(&catalog, &request) {
+                Ok(adapter) => Some(adapter),
+                Err(message) => {
+                    self.status = message.into();
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let native_id = if comfy_request {
+            let cancellation_view = DirectNativeCancellation(cancellation.clone());
+            let candidate_context =
+                OperationContext::new(Instant::now() + timeout, &cancellation_view);
+            match crate::control::comfy::fresh_comfy_candidate(&candidate_context) {
+                Ok(native_id) => Some(native_id),
+                Err(_) => {
+                    self.status =
+                        "Could not generate a fresh Comfy job ID; nothing was started".into();
+                    return;
+                }
+            }
+        } else {
+            None
+        };
 
-        // History remains metadata-only: no caller ID, command, argv, text,
-        // embedding input, decision state, or native result is persisted.
-        // Artifact references are added only after validated speech output.
+        // History remains metadata-only: only a native Comfy job ID is added
+        // as request_id; no workflow graph, prompt, command, or native result
+        // is persisted. Output references are added only after validation.
         let toolkit = match lane {
             Lane::Language => "l3ms",
             Lane::Decisions => "l3ds",
@@ -4773,7 +4828,7 @@ impl App {
             toolkit: toolkit.into(),
             profile: Some(profile_id.clone()),
             task: Some(task.clone()),
-            request_id: None,
+            request_id: native_id.clone(),
         }) {
             Ok(job_id) => job_id,
             Err(_) => {
@@ -4810,12 +4865,20 @@ impl App {
             return;
         }
 
-        let speech_output_directory = if is_direct_cpu_speech_request(&request) {
-            match create_private_direct_speech_directory(&self.data_root, job_id) {
+        let output_directory = if is_direct_cpu_speech_request(&request) || comfy_request {
+            match create_private_direct_output_directory(
+                &self.data_root,
+                job_id,
+                if comfy_request {
+                    "comfy-job"
+                } else {
+                    "cpu-job"
+                },
+            ) {
                 Ok(directory) => Some(directory),
                 Err(()) => {
                     self.finish_direct_native_history(job_id, "failed", None);
-                    self.status = "Could not allocate a fresh private speech output directory; nothing was started".into();
+                    self.status = "Could not allocate a fresh private native output directory; nothing was started".into();
                     return;
                 }
             }
@@ -4823,21 +4886,35 @@ impl App {
             None
         };
 
-        let cancellation = Arc::new(AtomicBool::new(false));
         let worker_cancellation = cancellation.clone();
         let (sender, receiver) = mpsc::sync_channel(1);
         let deadline = Instant::now() + timeout;
         let worker_task = task.clone();
+        let worker_comfy = comfy_adapter;
+        let worker_native_id = native_id.clone();
         let worker = match thread::Builder::new()
             .name(format!("l3ms-native-{toolkit}-{job_id}"))
             .spawn(move || {
                 let cancellation = DirectNativeCancellation(worker_cancellation);
                 let context = OperationContext::new(deadline, &cancellation);
+                let connection = match (
+                    worker_comfy.as_ref(),
+                    worker_native_id.as_deref(),
+                    language_adapter.as_ref(),
+                ) {
+                    (Some(adapter), Some(native_id), _) => {
+                        Some(direct_run::DirectConnection::Comfy { adapter, native_id })
+                    }
+                    (None, _, Some(adapter)) => {
+                        Some(direct_run::DirectConnection::Language(adapter))
+                    }
+                    _ => None,
+                };
                 let outcome = direct_run::run_native(
                     &catalog,
                     &request,
-                    speech_output_directory.as_deref(),
-                    language_adapter.as_ref(),
+                    output_directory.as_deref(),
+                    connection,
                     &context,
                 );
                 let _ = sender.send(DirectNativeCompletion { job_id, outcome });
@@ -4850,6 +4927,7 @@ impl App {
                     lane,
                     profile_id,
                     task,
+                    native_id,
                     state: DirectNativeState::Failed,
                     result: None,
                 });
@@ -4867,6 +4945,7 @@ impl App {
             lane,
             profile_id: profile_id.clone(),
             task: worker_task.clone(),
+            native_id: native_id.clone(),
             state: DirectNativeState::Running,
             result: None,
         });
@@ -4878,7 +4957,9 @@ impl App {
         });
         self.task_form_editor = None;
         self.input_mode = InputMode::Normal;
-        self.status = if lane == Lane::Language {
+        self.status = if native_id.is_some() {
+            format!("{task_label} #{job_id} · Comfy ID {} saved before dispatch · press c to cancel and wait for terminal state", native_id.as_deref().unwrap_or_default())
+        } else if lane == Lane::Language {
             format!("{task_label} #{job_id} running · press c to cancel; remote completion may be uncertain")
         } else {
             format!("{task_label} #{job_id} running · press c to cancel")
@@ -4930,6 +5011,50 @@ impl App {
     }
 
     #[cfg(target_os = "linux")]
+    fn prepare_direct_comfy_adapter(
+        &self,
+        catalog: &Catalog,
+        request: &crate::control::requests::InferenceRequest,
+    ) -> Result<ComfyAdapter, &'static str> {
+        if !is_direct_comfy_workflow_request(catalog, request) {
+            return Err("Direct Comfy work requires a declared ComfyUI workflow task");
+        }
+        if self.chat_connection_pending
+            || self.chat_pending
+            || self.chat_stream_cancellation.is_some()
+            || self.chat_session_pending
+            || self.model_action_pending
+        {
+            return Err("Wait for active Chat or model operations before running a Comfy workflow");
+        }
+        if env::var("L3MS_COMFY_SCOPED_JOBS").as_deref() != Ok("1") {
+            return Err(
+                "Set L3MS_COMFY_SCOPED_JOBS=1 only after confirming canonical Comfy job IDs and atomic scoped cancellation",
+            );
+        }
+        let endpoint = match env::var("L2M2_COMFY_URL") {
+            Ok(endpoint) => endpoint,
+            Err(env::VarError::NotPresent) => "http://127.0.0.1:8188".into(),
+            Err(env::VarError::NotUnicode(_)) => {
+                return Err("The configured Comfy endpoint is invalid")
+            }
+        };
+        let api_key = match env::var("L3MS_COMFY_API_KEY") {
+            Ok(api_key) => Some(api_key),
+            Err(env::VarError::NotPresent) => None,
+            Err(env::VarError::NotUnicode(_)) => {
+                return Err("The configured Comfy API key is invalid")
+            }
+        };
+        ComfyAdapter::new(
+            &endpoint,
+            api_key.as_deref(),
+            ComfyContract::CanonicalIdsAndAtomicScopedCancellation,
+        )
+        .map_err(|_| "The configured Comfy endpoint or API key is invalid")
+    }
+
+    #[cfg(target_os = "linux")]
     fn begin_direct_native_cancel(&mut self) -> bool {
         let Some(job) = self.direct_native_job.as_ref() else {
             return false;
@@ -4946,9 +5071,7 @@ impl App {
             .direct_native_summary
             .as_ref()
             .filter(|summary| summary.job_id == job.job_id)
-            .map_or("foreground native task", |summary| {
-                direct_native_task_label(&summary.task)
-            });
+            .map_or("foreground native task", direct_native_summary_label);
         self.status = format!(
             "{label} #{} cancellation requested · waiting for operation outcome",
             job.job_id
@@ -5008,9 +5131,7 @@ impl App {
             let label = self
                 .direct_native_summary
                 .as_ref()
-                .map_or("foreground native task", |summary| {
-                    direct_native_task_label(&summary.task)
-                });
+                .map_or("foreground native task", direct_native_summary_label);
             self.status = format!("{label} #{expected_job_id} interrupted without a confirmed worker result; inspect Jobs and verify the backend before retrying");
             return;
         };
@@ -5031,9 +5152,7 @@ impl App {
                 let label = self
                     .direct_native_summary
                     .as_ref()
-                    .map_or("foreground native task", |summary| {
-                        direct_native_task_label(&summary.task)
-                    });
+                    .map_or("foreground native task", direct_native_summary_label);
                 let latency = latency.map_or_else(String::new, |latency| {
                     format!(" · native latency {:.2} ms", latency.as_secs_f64() * 1000.0)
                 });
@@ -5063,15 +5182,10 @@ impl App {
                 let label = self
                     .direct_native_summary
                     .as_ref()
-                    .map_or("foreground native task", |summary| {
-                        direct_native_task_label(&summary.task)
-                    });
-                let remote = self
-                    .direct_native_summary
-                    .as_ref()
-                    .is_some_and(|summary| summary.lane == Lane::Language);
+                    .map_or("foreground native task", direct_native_summary_label);
+                let remote = error.is_remote();
                 self.status = if remote {
-                    format!("{label} #{expected_job_id} interrupted: {error}; foreground admission is closed, verify the endpoint before retrying")
+                    format!("{label} #{expected_job_id} interrupted: {error}; foreground admission is closed, inspect the backend before retrying")
                 } else {
                     format!("{label} #{expected_job_id} interrupted: {error}; inspect Jobs and recover the runner before retrying")
                 };
@@ -5079,6 +5193,36 @@ impl App {
                     format!("{label} #{expected_job_id} remote completion unconfirmed")
                 } else {
                     format!("{label} #{expected_job_id} requires runner recovery")
+                });
+            }
+            Err(error) if error.remote_terminal_confirmed() => {
+                let cancellation_confirmed = error.cancellation_confirmed();
+                let result_state = if cancellation_confirmed {
+                    "cancelled"
+                } else {
+                    "failed"
+                };
+                self.finish_direct_native_history(expected_job_id, result_state, None);
+                if let Some(summary) = self.direct_native_summary.as_mut() {
+                    summary.state = if cancellation_confirmed {
+                        DirectNativeState::Cancelled
+                    } else {
+                        DirectNativeState::Failed
+                    };
+                }
+                let label = self
+                    .direct_native_summary
+                    .as_ref()
+                    .map_or("foreground native task", direct_native_summary_label);
+                self.status = if cancellation_confirmed {
+                    format!("{label} #{expected_job_id} cancelled · Comfy confirmed terminal cancellation")
+                } else {
+                    format!("{label} #{expected_job_id} reached a terminal Comfy state, but cancellation was not confirmed; no result was retained")
+                };
+                self.push_log(if cancellation_confirmed {
+                    format!("{label} #{expected_job_id} cancelled")
+                } else {
+                    format!("{label} #{expected_job_id} reached a terminal Comfy state")
                 });
             }
             Err(error) if error.cancellation_confirmed() => {
@@ -5089,15 +5233,19 @@ impl App {
                 let label = self
                     .direct_native_summary
                     .as_ref()
-                    .map_or("foreground native task", |summary| {
-                        direct_native_task_label(&summary.task)
-                    });
-                let remote = self
-                    .direct_native_summary
-                    .as_ref()
-                    .is_some_and(|summary| summary.lane == Lane::Language);
+                    .map_or("foreground native task", direct_native_summary_label);
+                let remote = error.is_remote();
                 self.status = if remote {
-                    format!("{label} #{expected_job_id} cancelled before remote dispatch")
+                    let backend = if self
+                        .direct_native_summary
+                        .as_ref()
+                        .is_some_and(|summary| summary.native_id.is_some())
+                    {
+                        "Comfy"
+                    } else {
+                        "remote"
+                    };
+                    format!("{label} #{expected_job_id} cancelled before {backend} dispatch")
                 } else {
                     format!(
                         "{label} #{expected_job_id} cancelled · owned process cleanup confirmed"
@@ -5113,9 +5261,7 @@ impl App {
                 let label = self
                     .direct_native_summary
                     .as_ref()
-                    .map_or("foreground native task", |summary| {
-                        direct_native_task_label(&summary.task)
-                    });
+                    .map_or("foreground native task", direct_native_summary_label);
                 self.status = format!("{label} #{expected_job_id} failed: {error}");
                 self.push_log(format!("{label} #{expected_job_id} failed: {error}"));
             }
@@ -5143,6 +5289,21 @@ impl App {
                         && summary.profile_id == "breeze-tts-2-cpu"
                 }
                 ("embeddings", DirectRunResult::Embeddings(_)) => summary.lane == Lane::Language,
+                (_, DirectRunResult::Comfy(native)) => {
+                    summary.lane == Lane::Media
+                        && summary.native_id.as_deref() == Some(native.native_id.as_str())
+                        && self.stack_catalog.as_ref().is_some_and(|catalog| {
+                            catalog.list().iter().any(|profile| {
+                                profile.key.lane == Lane::Media
+                                    && profile.key.profile_id.as_str() == summary.profile_id
+                                    && is_direct_comfy_workflow_profile(profile)
+                                    && profile
+                                        .tasks
+                                        .iter()
+                                        .any(|task| task.as_str() == summary.task)
+                            })
+                        })
+                }
                 _ => false,
             })
     }
@@ -5466,10 +5627,11 @@ impl App {
         #[cfg(target_os = "linux")]
         if (self.direct_native_job.is_some() || self.direct_native_admission_closed)
             && self.direct_native_summary.as_ref().is_some_and(|summary| {
-                summary.lane == Lane::Language && summary.task == "embeddings"
+                (summary.lane == Lane::Language && summary.task == "embeddings")
+                    || summary.native_id.is_some()
             })
         {
-            self.status = "An embedding request is active or unconfirmed; inspect its outcome before sending Chat".into();
+            self.status = "A foreground remote request is active or unconfirmed; inspect its outcome before sending Chat".into();
             return;
         }
         self.input_mode = InputMode::Normal;
@@ -7105,31 +7267,41 @@ impl App {
         #[cfg(target_os = "linux")]
         let (action_text, action_title) = if show_direct_native {
             let text = self.direct_native_summary.as_ref().map_or_else(
-                || "Nagi/Laya CPU decisions, Breeze tts/design, and connected llama-swap embeddings run in the foreground. No caller ID, coordinator socket, or observe step.\nf open task · c cancels an active run".to_owned(),
+                || "Nagi/Laya decisions, Breeze tts/design, connected embeddings, and Comfy workflows run in one foreground job. Comfy uses an existing server; operator manages GPU availability. No caller ID or coordinator for these tasks.\nf open task · c cancels an active run".to_owned(),
                 |summary| {
+                    let operator_note = if summary.native_id.is_some() {
+                        "\nExisting Comfy server · operator manages GPU availability"
+                    } else {
+                        ""
+                    };
                     let latency = summary.result.as_ref().and_then(direct_native_latency).map_or_else(
                         String::new,
                         |latency| format!("\nnative latency: {:.2} ms", latency.as_secs_f64() * 1000.0),
                     );
                     format!(
-                        "Foreground job #{} · {}:{} · task {}\nstate: {}{}\n{}",
+                        "Foreground job #{} · {}:{} · task {}\nstate: {}{}\n{}{}",
                         summary.job_id,
                         summary.lane.as_str(),
                         summary.profile_id,
                         summary.task,
                         summary.state.label(),
                         latency,
-                        if self.direct_native_admission_closed && summary.lane == Lane::Language {
+                        if self.direct_native_admission_closed && summary.native_id.is_some() {
+                            "admission closed · Comfy completion unconfirmed; inspect endpoint before retrying"
+                        } else if self.direct_native_admission_closed && summary.lane == Lane::Language {
                             "admission closed · remote completion unconfirmed; verify endpoint before retrying"
                         } else if self.direct_native_admission_closed {
                             "admission closed · inspect Jobs and recover runner before retrying"
+                        } else if self.direct_native_job.is_some() && summary.native_id.is_some() {
+                            "c cancel · waits for Comfy terminal state; server remains externally managed"
                         } else if self.direct_native_job.is_some() && summary.lane == Lane::Language {
                             "c cancel · dispatched remote work may continue"
                         } else if self.direct_native_job.is_some() {
                             "c cancel · waits for local process cleanup"
                         } else {
                             "f run again · c only applies while active"
-                        }
+                        },
+                        operator_note
                     )
                 },
             );
@@ -7265,6 +7437,8 @@ impl App {
             "CPU speech · select tts or design · no caller ID or coordinator"
         } else if editor.direct_cpu_decision {
             "CPU decision · no caller ID or coordinator"
+        } else if editor.direct_comfy_workflow {
+            "Comfy workflow · existing server only · operator manages GPU availability"
         } else if editor.direct_language_embeddings {
             "language embedding batch · connected Chat endpoint · no caller ID or coordinator"
         } else {
@@ -7951,6 +8125,14 @@ fn is_direct_cpu_native_profile(profile: &CatalogProfile) -> bool {
 }
 
 #[cfg(target_os = "linux")]
+fn is_direct_comfy_workflow_profile(profile: &CatalogProfile) -> bool {
+    profile.key.lane == Lane::Media
+        && !profile.disabled
+        && profile.runtime.as_str() == "ComfyUI"
+        && !profile.tasks.is_empty()
+}
+
+#[cfg(target_os = "linux")]
 fn is_direct_native_language_embeddings_profile(
     profile: &CatalogProfile,
     catalog: &Catalog,
@@ -7968,6 +8150,7 @@ fn is_direct_native_language_embeddings_profile(
 #[cfg(target_os = "linux")]
 fn is_direct_native_profile(profile: &CatalogProfile, catalog: &Catalog) -> bool {
     is_direct_cpu_native_profile(profile)
+        || is_direct_comfy_workflow_profile(profile)
         || is_direct_native_language_embeddings_profile(profile, catalog)
 }
 
@@ -7979,6 +8162,15 @@ fn direct_native_task_label(task: &str) -> &'static str {
         "design" => "CPU voice design",
         "embeddings" => "Language embeddings",
         _ => "Foreground native task",
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn direct_native_summary_label(summary: &DirectNativeSummary) -> &'static str {
+    if summary.native_id.is_some() {
+        "Comfy workflow"
+    } else {
+        direct_native_task_label(&summary.task)
     }
 }
 
@@ -7998,23 +8190,69 @@ fn is_direct_cpu_speech_request(request: &crate::control::requests::InferenceReq
 }
 
 #[cfg(target_os = "linux")]
+fn is_direct_comfy_workflow_request(
+    catalog: &Catalog,
+    request: &crate::control::requests::InferenceRequest,
+) -> bool {
+    let crate::control::requests::InferenceRequest::Media {
+        profile: key,
+        input: crate::control::requests::MediaInput::Workflow { task, .. },
+    } = request
+    else {
+        return false;
+    };
+    let Some(profile) = catalog.inspect(key) else {
+        return false;
+    };
+    is_direct_comfy_workflow_profile(profile)
+        && request.validate(catalog).is_ok()
+        && profile
+            .tasks
+            .iter()
+            .any(|declared| declared.as_str() == task.as_str())
+        && request.task() == task.as_str()
+        && resolve_profile_route(catalog, key)
+            .is_ok_and(|route| route.runtime.as_str() == "ComfyUI")
+}
+
+#[cfg(target_os = "linux")]
 fn direct_native_latency(result: &DirectRunResult) -> Option<Duration> {
     match result {
         DirectRunResult::Decision(result) => result.native_latency,
         DirectRunResult::Speech(_) => None,
         DirectRunResult::Embeddings(_) => None,
+        DirectRunResult::Comfy(_) => None,
     }
 }
 
 #[cfg(target_os = "linux")]
 fn direct_native_artifact_refs(data_root: &Path, result: &DirectRunResult) -> Option<Vec<String>> {
-    let DirectRunResult::Speech(result) = result else {
-        return None;
+    let (output_root, artifact_paths) = match result {
+        DirectRunResult::Speech(result) => (
+            result.output_root(),
+            result
+                .artifacts()
+                .iter()
+                .map(|artifact| artifact.relative_path())
+                .collect::<Vec<_>>(),
+        ),
+        DirectRunResult::Comfy(result) => (
+            result.output_root.as_path(),
+            result
+                .artifacts
+                .iter()
+                .map(|artifact| artifact.relative_path.as_path())
+                .collect::<Vec<_>>(),
+        ),
+        DirectRunResult::Decision(_) | DirectRunResult::Embeddings(_) => return None,
     };
     let canonical_data_root = fs::canonicalize(data_root).ok()?;
-    let prefix = result
-        .output_root()
-        .strip_prefix(canonical_data_root)
+    let canonical_output_root = fs::canonicalize(output_root).ok()?;
+    if !canonical_output_root.starts_with(&canonical_data_root) {
+        return None;
+    }
+    let prefix = canonical_output_root
+        .strip_prefix(&canonical_data_root)
         .ok()?;
     if prefix.as_os_str().is_empty()
         || !prefix
@@ -8023,19 +8261,18 @@ fn direct_native_artifact_refs(data_root: &Path, result: &DirectRunResult) -> Op
     {
         return None;
     }
-    result
-        .artifacts()
+    artifact_paths
         .iter()
-        .map(|artifact| {
-            let relative = artifact.relative_path();
-            if relative.is_absolute()
+        .map(|relative| {
+            if relative.as_os_str().is_empty()
+                || relative.is_absolute()
                 || !relative
                     .components()
                     .all(|component| matches!(component, std::path::Component::Normal(_)))
             {
                 return None;
             }
-            prefix.join(relative).to_str().map(str::to_owned)
+            prefix.join(*relative).to_str().map(str::to_owned)
         })
         .collect()
 }
@@ -8094,6 +8331,19 @@ fn direct_native_result_preview(result: &DirectRunResult) -> String {
                 samples.join("\n")
             )
         }
+        DirectRunResult::Comfy(result) => result
+            .artifacts
+            .iter()
+            .map(|artifact| {
+                format!(
+                    "{} · node {}: {}",
+                    artifact.media_type,
+                    artifact.node_id,
+                    result.output_root.join(&artifact.relative_path).display()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
     };
     let rendered = rendered
         .chars()
@@ -8116,7 +8366,11 @@ fn direct_native_result_preview(result: &DirectRunResult) -> String {
 }
 
 #[cfg(target_os = "linux")]
-fn create_private_direct_speech_directory(data_root: &Path, job_id: u64) -> Result<PathBuf, ()> {
+fn create_private_direct_output_directory(
+    data_root: &Path,
+    job_id: u64,
+    prefix: &str,
+) -> Result<PathBuf, ()> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 
     static NEXT_DIRECTORY_NONCE: std::sync::atomic::AtomicU64 =
@@ -8155,9 +8409,16 @@ fn create_private_direct_speech_directory(data_root: &Path, job_id: u64) -> Resu
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_err(|_| ())?
         .as_nanos();
+    if prefix.is_empty()
+        || !prefix
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err(());
+    }
     for _ in 0..32 {
         let nonce = NEXT_DIRECTORY_NONCE.fetch_add(1, Ordering::Relaxed);
-        let output_directory = artifact_root.join(format!("cpu-job-{job_id}-{timestamp}-{nonce}"));
+        let output_directory = artifact_root.join(format!("{prefix}-{job_id}-{timestamp}-{nonce}"));
         match fs::DirBuilder::new().mode(0o700).create(&output_directory) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -9540,6 +9801,16 @@ mod tests {
         .unwrap();
     }
 
+    #[cfg(target_os = "linux")]
+    fn write_comfy_stack_fixture(fixture: &AppFixture) {
+        write_stack_fixture(fixture);
+        fs::write(
+            fixture.root.join("toolkits/l2m2/media-runtimes.json"),
+            r#"{"schema_version":1,"profiles":[{"id":"comfy-workflow","name":"Comfy workflow fixture","runtime":"ComfyUI","tasks":["image"],"script":"media-models/workflow.json"}]}"#,
+        )
+        .unwrap();
+    }
+
     fn focus_stack_profile_by_id(app: &mut App, profile_id: &str) {
         app.handle_key(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE))
             .unwrap();
@@ -9742,6 +10013,76 @@ mod tests {
         assert_eq!(editor.declared_tasks, ["embeddings"]);
         assert_eq!(editor.values.timeout, "30000");
         editor.values.embedding_inputs = input.into();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn comfy_workflow_form_is_direct_and_keeps_raw_graph_ephemeral() {
+        let fixture = AppFixture::new();
+        write_comfy_stack_fixture(&fixture);
+        let mut app = fixture.app();
+        focus_stack_profile_by_id(&mut app, "comfy-workflow");
+        assert!(app.stack_coordinator_socket_dir.is_none());
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.input_mode, InputMode::TaskForm);
+        assert!(app
+            .status
+            .contains("operator remains responsible for GPU availability"));
+        assert!(app.coordinator_workbench.is_none());
+        let draft = {
+            let editor = app.task_form_editor.as_mut().unwrap();
+            assert!(editor.direct_comfy_workflow);
+            assert!(editor.is_direct_native());
+            assert!(!editor.fields.contains(&TaskFormField::RequestId));
+            assert!(!editor.fields.contains(&TaskFormField::MediaOperation));
+            assert!(editor.fields.contains(&TaskFormField::DeclaredTask));
+            assert!(editor.fields.contains(&TaskFormField::MediaWorkflowGraph));
+            editor.selected_task = Some(0);
+            editor.values.workflow_graph = r#"{"1":{"class_type":"SaveImage"}}"#.into();
+            editor.to_draft().unwrap()
+        };
+        let catalog = app.stack_catalog.as_ref().unwrap().clone();
+        let (request, _) = build_direct_native(&catalog, draft).unwrap();
+        assert!(is_direct_comfy_workflow_request(&catalog, &request));
+        assert!(matches!(
+            request,
+            crate::control::requests::InferenceRequest::Media {
+                input: crate::control::requests::MediaInput::Workflow { task, .. },
+                ..
+            } if task.as_str() == "image"
+        ));
+        assert!(app.job_history.records().is_empty());
+        assert!(app.direct_native_job.is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn comfy_history_artifact_refs_are_private_relative_paths_only() {
+        let data = TempDir::new().unwrap();
+        let output_root = data.path().join("native-media/comfy-job-1-123-0");
+        fs::create_dir_all(output_root.join("node-9")).unwrap();
+        fs::write(output_root.join("node-9/image.png"), b"fixture").unwrap();
+        let result = DirectRunResult::Comfy(crate::control::comfy::NativeComfyResult {
+            native_id: "12345678-1234-4234-9234-123456789abc".into(),
+            output_root,
+            artifacts: vec![crate::control::comfy::ComfyLocalArtifact {
+                relative_path: PathBuf::from("node-9/image.png"),
+                node_id: "9".into(),
+                media_type: "image".into(),
+            }],
+        });
+        assert_eq!(
+            direct_native_artifact_refs(data.path(), &result),
+            Some(vec![
+                "native-media/comfy-job-1-123-0/node-9/image.png".into()
+            ])
+        );
+        let preview = direct_native_result_preview(&result);
+        assert!(preview.contains("image · node 9"));
+        assert!(preview.contains("image.png"));
+        assert!(!preview.contains("12345678"));
     }
 
     #[cfg(target_os = "linux")]
@@ -10205,7 +10546,7 @@ mod tests {
         );
         assert!(result.output_root().join("result.wav").is_file());
         let retry_directory =
-            create_private_direct_speech_directory(fixture.data.path(), 1).unwrap();
+            create_private_direct_output_directory(fixture.data.path(), 1, "cpu-job").unwrap();
         assert_ne!(retry_directory, result.output_root());
         assert!(result.output_root().join("result.wav").is_file());
         assert!(app.status.contains("CPU speech"));
@@ -11925,6 +12266,7 @@ mod tests {
             lane: Lane::Language,
             profile_id: "fixture-embeddings".into(),
             task: "embeddings".into(),
+            native_id: None,
             state: DirectNativeState::Interrupted,
             result: None,
         });
@@ -11935,7 +12277,27 @@ mod tests {
         assert_eq!(app.chat_history, previous_history);
         assert!(app
             .status
-            .contains("embedding request is active or unconfirmed"));
+            .contains("foreground remote request is active or unconfirmed"));
+
+        app.direct_native_summary = Some(DirectNativeSummary {
+            job_id: 2,
+            lane: Lane::Media,
+            profile_id: "fixture-comfy".into(),
+            task: "image".into(),
+            native_id: Some("12345678-1234-4234-9234-123456789abc".into()),
+            state: DirectNativeState::Interrupted,
+            result: None,
+        });
+        app.chat_input = "unsent Comfy draft".into();
+        app.input_mode = InputMode::ChatMessage;
+        app.send_chat_message();
+        assert_eq!(app.chat_input, "unsent Comfy draft");
+        assert_eq!(app.input_mode, InputMode::ChatMessage);
+        assert!(!app.chat_pending);
+        assert_eq!(app.chat_history, previous_history);
+        assert!(app
+            .status
+            .contains("foreground remote request is active or unconfirmed"));
     }
 
     #[test]

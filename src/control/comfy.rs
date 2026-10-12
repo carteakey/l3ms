@@ -6,7 +6,17 @@
 //! not deduplicate IDs. Tokens are single-use and adapter-local, not a fence
 //! against direct clients or a durable ownership registry after restart.
 
-use std::{collections::BTreeMap, error::Error, fmt, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, error::Error, fmt, path::PathBuf, sync::Arc, time::Duration};
+
+#[cfg(target_os = "linux")]
+use std::{
+    ffi::{CStr, CString},
+    fs::File,
+    io::{Read, Seek, SeekFrom, Write},
+    os::fd::{AsRawFd, FromRawFd},
+    os::unix::{ffi::OsStrExt, fs::MetadataExt},
+    path::Path,
+};
 
 use serde::de::value::MapAccessDeserializer;
 use serde::de::{Error as DeError, IgnoredAny, MapAccess, SeqAccess, Visitor};
@@ -25,6 +35,12 @@ const MAX_NATIVE_OBJECT_ENTRIES: usize = 4096;
 const MAX_NATIVE_OUTPUT_ITEMS: usize = 4096;
 const MAX_NATIVE_MESSAGES: usize = 4096;
 const POLL: Duration = Duration::from_millis(25);
+const MAX_DIRECT_COMFY_ARTIFACTS: usize = 64;
+const MAX_DIRECT_COMFY_OUTPUT_BYTES: u64 = 512 * 1024 * 1024;
+#[cfg(target_os = "linux")]
+const DIRECT_COMFY_FILE_MODE: u32 = 0o600;
+#[cfg(target_os = "linux")]
+const DIRECT_COMFY_DIRECTORY_MODE: u32 = 0o700;
 
 type ComfyHttpCall<'a> = dyn Fn(
         &str,
@@ -32,6 +48,10 @@ type ComfyHttpCall<'a> = dyn Fn(
         &OperationContext<'_>,
     ) -> Result<(reqwest::StatusCode, Vec<u8>), ComfyFailure>
     + 'a;
+
+#[cfg(target_os = "linux")]
+type ComfyDownloadCall<'a> =
+    dyn Fn(&str, &mut File, u64, &OperationContext<'_>) -> Result<u64, ComfyFailure> + 'a;
 
 /// Explicit caller assertion, based on the installed server implementation.
 /// This does not discover capabilities or enable switching/admission.
@@ -558,7 +578,9 @@ impl<'session, 'host> OwnedComfySession<'session, 'host> {
 }
 
 #[cfg(target_os = "linux")]
-fn fresh_comfy_candidate(context: &OperationContext<'_>) -> Result<String, ComfyFailure> {
+pub(crate) fn fresh_comfy_candidate(
+    context: &OperationContext<'_>,
+) -> Result<String, ComfyFailure> {
     let mut bytes = [0u8; 16];
     let mut offset = 0;
     while offset < bytes.len() {
@@ -705,6 +727,32 @@ impl fmt::Debug for ComfyArtifact {
 pub struct ComfySnapshot {
     pub state: ComfyJobState,
     pub artifacts: Vec<ComfyArtifact>,
+}
+
+/// One locally downloaded Comfy output. Paths are relative to the caller's
+/// private output root; descriptor metadata remains explicit and is not
+/// reconstructed from file names.
+pub struct ComfyLocalArtifact {
+    pub relative_path: PathBuf,
+    pub node_id: String,
+    pub media_type: String,
+}
+
+/// A completed direct Comfy workflow with only terminal output files copied
+/// into the caller's private directory. This type intentionally omits Debug.
+pub struct NativeComfyResult {
+    pub native_id: String,
+    pub output_root: PathBuf,
+    pub artifacts: Vec<ComfyLocalArtifact>,
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) struct ComfyOutputRoot {
+    directory: File,
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+    uid: u32,
 }
 
 pub struct ComfyAdapter {
@@ -930,6 +978,134 @@ impl ComfyAdapter {
         })
     }
 
+    /// Collect output files only from a terminal completed snapshot. This is
+    /// read-only with respect to Comfy job state and never fetches `temp` or
+    /// `input` items.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn collect_terminal_outputs(
+        &self,
+        output_root: &ComfyOutputRoot,
+        snapshot: &ComfySnapshot,
+        context: &OperationContext<'_>,
+    ) -> Result<Vec<ComfyLocalArtifact>, ComfyFailure> {
+        if snapshot.state != ComfyJobState::Completed {
+            return Err(no_dispatch(ComfyErrorKind::InvalidRequest));
+        }
+        let outputs = snapshot
+            .artifacts
+            .iter()
+            .filter(|artifact| artifact.storage_type == "output")
+            .collect::<Vec<_>>();
+        if outputs.len() > MAX_DIRECT_COMFY_ARTIFACTS {
+            return Err(uncertain(ComfyErrorKind::TooLarge));
+        }
+        for artifact in &outputs {
+            if !valid_comfy_output_descriptor(artifact) || !supported_comfy_output_suffix(artifact)
+            {
+                return Err(uncertain(ComfyErrorKind::Protocol));
+            }
+        }
+
+        let mut total_bytes = 0_u64;
+        let mut result = Vec::with_capacity(outputs.len());
+        for (index, artifact) in outputs.into_iter().enumerate() {
+            let remaining = MAX_DIRECT_COMFY_OUTPUT_BYTES.saturating_sub(total_bytes);
+            if remaining == 0 {
+                return Err(uncertain(ComfyErrorKind::TooLarge));
+            }
+            let (local, size) =
+                self.download_output(output_root, artifact, index, remaining, context)?;
+            total_bytes = total_bytes
+                .checked_add(size)
+                .filter(|total| *total <= MAX_DIRECT_COMFY_OUTPUT_BYTES)
+                .ok_or_else(|| uncertain(ComfyErrorKind::TooLarge))?;
+            result.push(local);
+        }
+        Ok(result)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn download_output(
+        &self,
+        output_root: &ComfyOutputRoot,
+        artifact: &ComfyArtifact,
+        ordinal: usize,
+        max_bytes: u64,
+        context: &OperationContext<'_>,
+    ) -> Result<(ComfyLocalArtifact, u64), ComfyFailure> {
+        let download = |path: &str, file: &mut File, limit: u64, context: &OperationContext<'_>| {
+            self.http_download_to(path, file, limit, context)
+        };
+        self.download_output_using(
+            output_root,
+            artifact,
+            ordinal,
+            max_bytes,
+            context,
+            &download,
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    fn download_output_using(
+        &self,
+        output_root: &ComfyOutputRoot,
+        artifact: &ComfyArtifact,
+        ordinal: usize,
+        max_bytes: u64,
+        context: &OperationContext<'_>,
+        download: &ComfyDownloadCall<'_>,
+    ) -> Result<(ComfyLocalArtifact, u64), ComfyFailure> {
+        if max_bytes == 0
+            || max_bytes > MAX_DIRECT_COMFY_OUTPUT_BYTES
+            || !valid_comfy_output_descriptor(artifact)
+        {
+            return Err(no_dispatch(ComfyErrorKind::InvalidRequest));
+        }
+        active(context, DispatchDisposition::NoDispatch)?;
+        output_root
+            .verify_named_root()
+            .map_err(|_| no_dispatch(ComfyErrorKind::InvalidOwnership))?;
+        let local_name = format!("comfy-{ordinal:02}-{}", artifact.filename);
+        let (mut file, relative_path) = output_root
+            .create_output_file(&local_name)
+            .map_err(|_| no_dispatch(ComfyErrorKind::InvalidOwnership))?;
+        let path = self.view_path(artifact)?;
+        let size = download(&path, &mut file, max_bytes, context)?;
+        file.flush()
+            .map_err(|_| uncertain(ComfyErrorKind::Transport))?;
+        if size == 0 || size > max_bytes {
+            return Err(uncertain(ComfyErrorKind::TooLarge));
+        }
+        validate_comfy_output_file(&mut file, artifact, size)
+            .map_err(|_| uncertain(ComfyErrorKind::Protocol))?;
+        output_root
+            .verify_named_root()
+            .map_err(|_| uncertain(ComfyErrorKind::InvalidOwnership))?;
+        Ok((
+            ComfyLocalArtifact {
+                relative_path,
+                node_id: artifact.node_id.clone(),
+                media_type: artifact.media_type.clone(),
+            },
+            size,
+        ))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn view_path(&self, artifact: &ComfyArtifact) -> Result<String, ComfyFailure> {
+        if !valid_comfy_output_descriptor(artifact) {
+            return Err(no_dispatch(ComfyErrorKind::InvalidRequest));
+        }
+        let mut url = reqwest::Url::parse(&format!("{}/view", self.endpoint))
+            .map_err(|_| no_dispatch(ComfyErrorKind::Configuration))?;
+        url.query_pairs_mut()
+            .append_pair("filename", &artifact.filename)
+            .append_pair("subfolder", &artifact.subfolder)
+            .append_pair("type", "output");
+        Ok(url.to_string())
+    }
+
     fn cancel_using_http(
         &self,
         job: &PreparedComfyJob,
@@ -973,23 +1149,8 @@ impl ComfyAdapter {
             .build()
             .map_err(|_| no_dispatch(ComfyErrorKind::Configuration))?;
         runtime.block_on(async {
-            let builder = reqwest::Client::builder()
-                .retry(reqwest::retry::never())
-                .redirect(reqwest::redirect::Policy::none())
-                .connect_timeout(context.remaining().min(Duration::from_secs(2)))
-                .timeout(context.remaining())
-                .default_headers(
-                    auth_headers(self.api_key.as_deref())
-                        .map_err(|_| no_dispatch(ComfyErrorKind::Configuration))?,
-                );
-            #[cfg(target_os = "linux")]
-            let builder = match &self.private_engine {
-                Some(socket) => socket
-                    .configure(builder)
-                    .map_err(|_| no_dispatch(ComfyErrorKind::Configuration))?,
-                None => builder,
-            };
-            let client = builder
+            let client = self
+                .client_builder(context)?
                 .build()
                 .map_err(|_| no_dispatch(ComfyErrorKind::Configuration))?;
             let url = format!("{}{path}", self.endpoint);
@@ -1035,6 +1196,367 @@ impl ComfyAdapter {
             active(context, DispatchDisposition::Uncertain)?;
             Ok((status, bytes))
         })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn http_download_to(
+        &self,
+        path: &str,
+        file: &mut File,
+        max_bytes: u64,
+        context: &OperationContext<'_>,
+    ) -> Result<u64, ComfyFailure> {
+        active(context, DispatchDisposition::NoDispatch)?;
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return Err(no_dispatch(ComfyErrorKind::Configuration));
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| no_dispatch(ComfyErrorKind::Configuration))?;
+        runtime.block_on(async {
+            let client = self
+                .client_builder(context)?
+                .build()
+                .map_err(|_| no_dispatch(ComfyErrorKind::Configuration))?;
+            let url = if path.starts_with("http://") || path.starts_with("https://") {
+                path.to_owned()
+            } else {
+                format!("{}{path}", self.endpoint)
+            };
+            active(context, DispatchDisposition::NoDispatch)?;
+            let send = client.get(url).send();
+            tokio::pin!(send);
+            let mut response = loop {
+                active(context, DispatchDisposition::Uncertain)?;
+                match tokio::time::timeout(context.remaining().min(POLL), &mut send).await {
+                    Err(_) => continue,
+                    Ok(result) => break result.map_err(transport)?,
+                }
+            };
+            if !response.status().is_success() {
+                return Err(uncertain(ComfyErrorKind::Rejected));
+            }
+            if response
+                .content_length()
+                .is_some_and(|length| length > max_bytes)
+            {
+                return Err(uncertain(ComfyErrorKind::TooLarge));
+            }
+            let mut total = 0_u64;
+            loop {
+                active(context, DispatchDisposition::Uncertain)?;
+                let chunk = response.chunk();
+                tokio::pin!(chunk);
+                let chunk = loop {
+                    active(context, DispatchDisposition::Uncertain)?;
+                    match tokio::time::timeout(context.remaining().min(POLL), &mut chunk).await {
+                        Err(_) => continue,
+                        Ok(result) => break result.map_err(transport)?,
+                    }
+                };
+                let Some(chunk) = chunk else { break };
+                let chunk_len =
+                    u64::try_from(chunk.len()).map_err(|_| uncertain(ComfyErrorKind::TooLarge))?;
+                if chunk_len > max_bytes.saturating_sub(total) {
+                    return Err(uncertain(ComfyErrorKind::TooLarge));
+                }
+                file.write_all(&chunk)
+                    .map_err(|_| uncertain(ComfyErrorKind::Transport))?;
+                total += chunk_len;
+            }
+            active(context, DispatchDisposition::Uncertain)?;
+            Ok(total)
+        })
+    }
+
+    fn client_builder(
+        &self,
+        context: &OperationContext<'_>,
+    ) -> Result<reqwest::ClientBuilder, ComfyFailure> {
+        active(context, DispatchDisposition::NoDispatch)?;
+        let builder = reqwest::Client::builder()
+            .retry(reqwest::retry::never())
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(context.remaining().min(Duration::from_secs(2)))
+            .timeout(context.remaining())
+            .default_headers(
+                auth_headers(self.api_key.as_deref())
+                    .map_err(|_| no_dispatch(ComfyErrorKind::Configuration))?,
+            );
+        #[cfg(target_os = "linux")]
+        let builder = match &self.private_engine {
+            Some(socket) => socket
+                .configure(builder)
+                .map_err(|_| no_dispatch(ComfyErrorKind::Configuration))?,
+            None => builder,
+        };
+        Ok(builder)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl ComfyOutputRoot {
+    pub(crate) fn open_fresh(path: &Path) -> Result<Self, ComfyFailure> {
+        let directory = open_absolute_directory_nofollow(path)
+            .map_err(|_| no_dispatch(ComfyErrorKind::InvalidRequest))?;
+        let uid = unsafe { libc::geteuid() as u32 };
+        let metadata = directory
+            .metadata()
+            .map_err(|_| no_dispatch(ComfyErrorKind::InvalidRequest))?;
+        if !metadata.is_dir()
+            || metadata.uid() != uid
+            || metadata.mode() & 0o7777 != DIRECT_COMFY_DIRECTORY_MODE
+            || !directory_is_empty(&directory)
+        {
+            return Err(no_dispatch(ComfyErrorKind::InvalidRequest));
+        }
+        let root = Self {
+            directory,
+            path: path.to_path_buf(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            uid,
+        };
+        root.verify_named_root()?;
+        Ok(root)
+    }
+
+    fn verify_named_root(&self) -> Result<(), ComfyFailure> {
+        let pinned = self
+            .directory
+            .metadata()
+            .map_err(|_| no_dispatch(ComfyErrorKind::InvalidOwnership))?;
+        if !pinned.is_dir()
+            || pinned.uid() != self.uid
+            || pinned.mode() & 0o7777 != DIRECT_COMFY_DIRECTORY_MODE
+            || pinned.dev() != self.device
+            || pinned.ino() != self.inode
+        {
+            return Err(no_dispatch(ComfyErrorKind::InvalidOwnership));
+        }
+        let named = open_absolute_directory_nofollow(&self.path)
+            .map_err(|_| no_dispatch(ComfyErrorKind::InvalidOwnership))?;
+        let named = named
+            .metadata()
+            .map_err(|_| no_dispatch(ComfyErrorKind::InvalidOwnership))?;
+        if !named.is_dir()
+            || named.uid() != self.uid
+            || named.mode() & 0o7777 != DIRECT_COMFY_DIRECTORY_MODE
+            || named.dev() != self.device
+            || named.ino() != self.inode
+        {
+            return Err(no_dispatch(ComfyErrorKind::InvalidOwnership));
+        }
+        Ok(())
+    }
+
+    fn create_output_file(&self, local_name: &str) -> Result<(File, PathBuf), ComfyFailure> {
+        if local_name.is_empty()
+            || local_name.contains('/')
+            || local_name.len() > 512
+            || local_name.chars().any(char::is_control)
+        {
+            return Err(no_dispatch(ComfyErrorKind::InvalidRequest));
+        }
+        self.verify_named_root()?;
+        let filename =
+            CString::new(local_name).map_err(|_| no_dispatch(ComfyErrorKind::InvalidRequest))?;
+        let fd = unsafe {
+            libc::openat(
+                self.directory.as_raw_fd(),
+                filename.as_ptr(),
+                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                DIRECT_COMFY_FILE_MODE,
+            )
+        };
+        if fd < 0 {
+            return Err(no_dispatch(ComfyErrorKind::InvalidOwnership));
+        }
+        let file = unsafe { File::from_raw_fd(fd) };
+        let metadata = file
+            .metadata()
+            .map_err(|_| no_dispatch(ComfyErrorKind::InvalidOwnership))?;
+        if !metadata.is_file()
+            || metadata.uid() != self.uid
+            || metadata.nlink() != 1
+            || metadata.mode() & 0o7777 != DIRECT_COMFY_FILE_MODE
+        {
+            return Err(no_dispatch(ComfyErrorKind::InvalidOwnership));
+        }
+        self.verify_named_root()?;
+        Ok((file, PathBuf::from(local_name)))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn open_absolute_directory_nofollow(path: &Path) -> Result<File, ()> {
+    let raw = path.as_os_str().as_bytes();
+    if raw.first() != Some(&b'/') || raw.contains(&0) {
+        return Err(());
+    }
+    let root_name = CString::new("/").expect("literal has no NUL");
+    let root_fd = unsafe {
+        libc::open(
+            root_name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if root_fd < 0 {
+        return Err(());
+    }
+    let mut directory = unsafe { File::from_raw_fd(root_fd) };
+    for component in raw[1..].split(|byte| *byte == b'/') {
+        if component.is_empty() || component == b"." || component == b".." {
+            return Err(());
+        }
+        let name = CString::new(component).map_err(|_| ())?;
+        let fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if fd < 0 {
+            return Err(());
+        }
+        directory = unsafe { File::from_raw_fd(fd) };
+    }
+    Ok(directory)
+}
+
+#[cfg(target_os = "linux")]
+fn directory_is_empty(directory: &File) -> bool {
+    let duplicated = unsafe { libc::dup(directory.as_raw_fd()) };
+    if duplicated < 0 {
+        return false;
+    }
+    let stream = unsafe { libc::fdopendir(duplicated) };
+    if stream.is_null() {
+        unsafe { libc::close(duplicated) };
+        return false;
+    }
+    let mut empty = true;
+    loop {
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            break;
+        }
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        if name != b"." && name != b".." {
+            empty = false;
+            break;
+        }
+    }
+    unsafe { libc::closedir(stream) };
+    empty
+}
+
+#[cfg(target_os = "linux")]
+fn valid_comfy_output_descriptor(artifact: &ComfyArtifact) -> bool {
+    artifact.storage_type == "output"
+        && !artifact.node_id.is_empty()
+        && artifact.node_id.len() <= 128
+        && !artifact.node_id.chars().any(char::is_control)
+        && !artifact.media_type.is_empty()
+        && artifact.media_type.len() <= 128
+        && !artifact.media_type.chars().any(char::is_control)
+        && safe_relative(&artifact.filename, false)
+        && !artifact.filename.contains('/')
+        && safe_relative(&artifact.subfolder, true)
+}
+
+#[cfg(target_os = "linux")]
+fn supported_comfy_output_suffix(artifact: &ComfyArtifact) -> bool {
+    let Some((_, extension)) = artifact.filename.rsplit_once('.') else {
+        return false;
+    };
+    let extension = extension.to_ascii_lowercase();
+    match artifact.media_type.as_str() {
+        "image" | "images" | "gifs" => matches!(
+            extension.as_str(),
+            "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tif" | "tiff"
+        ),
+        "audio" | "audios" => {
+            matches!(extension.as_str(), "wav" | "flac" | "ogg" | "opus" | "mp3")
+        }
+        "video" | "videos" => {
+            matches!(
+                extension.as_str(),
+                "mp4" | "m4v" | "mov" | "webm" | "mkv" | "avi"
+            )
+        }
+        _ => false,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn validate_comfy_output_file(
+    file: &mut File,
+    artifact: &ComfyArtifact,
+    expected_size: u64,
+) -> Result<(), ()> {
+    let metadata = file.metadata().map_err(|_| ())?;
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() as u32 }
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o7777 != DIRECT_COMFY_FILE_MODE
+        || metadata.len() != expected_size
+        || expected_size > MAX_DIRECT_COMFY_OUTPUT_BYTES
+    {
+        return Err(());
+    }
+    file.seek(SeekFrom::Start(0)).map_err(|_| ())?;
+    let mut signature = [0u8; 16];
+    let count = file.read(&mut signature).map_err(|_| ())?;
+    if !valid_comfy_signature(
+        &artifact.media_type,
+        &artifact.filename,
+        &signature[..count],
+    ) {
+        return Err(());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn valid_comfy_signature(media_type: &str, filename: &str, bytes: &[u8]) -> bool {
+    let Some((_, extension)) = filename.rsplit_once('.') else {
+        return false;
+    };
+    let extension = extension.to_ascii_lowercase();
+    match media_type {
+        "image" | "images" | "gifs" => match extension.as_str() {
+            "png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+            "jpg" | "jpeg" => bytes.starts_with(b"\xff\xd8\xff"),
+            "webp" => bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
+            "gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
+            "bmp" => bytes.starts_with(b"BM"),
+            "tif" | "tiff" => bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*"),
+            _ => false,
+        },
+        "audio" | "audios" => match extension.as_str() {
+            "wav" => {
+                bytes.len() >= 12
+                    && matches!(&bytes[..4], b"RIFF" | b"RIFX")
+                    && &bytes[8..12] == b"WAVE"
+            }
+            "flac" => bytes.starts_with(b"fLaC"),
+            "ogg" | "opus" => bytes.starts_with(b"OggS"),
+            "mp3" => {
+                bytes.starts_with(b"ID3")
+                    || (bytes.len() >= 2 && bytes[0] == 0xff && bytes[1] & 0xe0 == 0xe0)
+            }
+            _ => false,
+        },
+        "video" | "videos" => match extension.as_str() {
+            "mp4" | "m4v" | "mov" => bytes.len() >= 12 && &bytes[4..8] == b"ftyp",
+            "webm" | "mkv" => bytes.starts_with(b"\x1a\x45\xdf\xa3"),
+            "avi" => bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"AVI ",
+            _ => false,
+        },
+        _ => false,
     }
 }
 
@@ -1636,6 +2158,102 @@ mod tests {
         );
         assert_eq!(calls.get(), 1);
     }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn terminal_output_download_is_flat_private_encoded_and_exclusive() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let output_path = temporary.path().join("output");
+        std::fs::create_dir(&output_path).unwrap();
+        std::fs::set_permissions(&output_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let output_root = ComfyOutputRoot::open_fresh(&output_path).unwrap();
+        let adapter = adapter("http://127.0.0.1:1");
+        let artifact = ComfyArtifact {
+            node_id: "7".into(),
+            media_type: "images".into(),
+            filename: "preview.png".into(),
+            subfolder: "nested & private".into(),
+            storage_type: "output".into(),
+        };
+        let png = b"\x89PNG\r\n\x1a\nfixture";
+        let calls = std::cell::Cell::new(0);
+        let download =
+            |path: &str, file: &mut File, _limit: u64, _context: &OperationContext<'_>| {
+                calls.set(calls.get() + 1);
+                assert!(path.starts_with("http://127.0.0.1:1/view?"));
+                assert!(path.contains("subfolder=nested+%26+private"));
+                assert!(path.contains("filename=preview.png"));
+                file.write_all(png)
+                    .map_err(|_| uncertain(ComfyErrorKind::Transport))?;
+                Ok(png.len() as u64)
+            };
+
+        let (local, size) = adapter
+            .download_output_using(&output_root, &artifact, 0, 1024, &context(), &download)
+            .unwrap();
+        assert_eq!(size, png.len() as u64);
+        assert_eq!(local.relative_path, PathBuf::from("comfy-00-preview.png"));
+        assert_eq!(local.node_id, "7");
+        assert_eq!(local.media_type, "images");
+        let stored = output_path.join(&local.relative_path);
+        let metadata = std::fs::metadata(&stored).unwrap();
+        assert!(metadata.is_file());
+        assert_eq!(metadata.mode() & 0o777, 0o600);
+        assert_eq!(std::fs::read(&stored).unwrap(), png);
+
+        let collision =
+            adapter.download_output_using(&output_root, &artifact, 0, 1024, &context(), &download);
+        assert!(collision.is_err());
+        assert_eq!(calls.get(), 1, "an existing output must not be reopened");
+        assert_eq!(std::fs::read(stored).unwrap(), png);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn invalid_output_roots_and_html_downloads_never_return_artifacts() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let nonempty_path = temporary.path().join("nonempty");
+        std::fs::create_dir(&nonempty_path).unwrap();
+        std::fs::set_permissions(&nonempty_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(nonempty_path.join("existing"), b"keep").unwrap();
+        assert!(ComfyOutputRoot::open_fresh(&nonempty_path).is_err());
+
+        let permissive_path = temporary.path().join("permissive");
+        std::fs::create_dir(&permissive_path).unwrap();
+        std::fs::set_permissions(&permissive_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(ComfyOutputRoot::open_fresh(&permissive_path).is_err());
+
+        let output_path = temporary.path().join("output");
+        std::fs::create_dir(&output_path).unwrap();
+        std::fs::set_permissions(&output_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let output_root = ComfyOutputRoot::open_fresh(&output_path).unwrap();
+        let adapter = adapter("http://127.0.0.1:1");
+        let artifact = ComfyArtifact {
+            node_id: "7".into(),
+            media_type: "images".into(),
+            filename: "preview.png".into(),
+            subfolder: "".into(),
+            storage_type: "output".into(),
+        };
+        let html = b"<!doctype html><title>proxy error</title>";
+        let download = |_: &str, file: &mut File, _limit: u64, _context: &OperationContext<'_>| {
+            file.write_all(html)
+                .map_err(|_| uncertain(ComfyErrorKind::Transport))?;
+            Ok(html.len() as u64)
+        };
+        let result =
+            adapter.download_output_using(&output_root, &artifact, 0, 1024, &context(), &download);
+        assert!(
+            result.is_err(),
+            "an HTML body is not a native image artifact"
+        );
+        assert_eq!(std::fs::read_dir(&output_path).unwrap().count(), 1);
+    }
+
     fn adapter(endpoint: &str) -> ComfyAdapter {
         ComfyAdapter::new(
             endpoint,

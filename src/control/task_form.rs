@@ -154,6 +154,28 @@ pub fn build_direct_native(
                 input,
             }
         }
+        TaskFields::MediaWorkflow { graph } => {
+            let Some(profile) = catalog.inspect(&selected_profile) else {
+                return Err(TaskFormError::ProfileTaskMismatch);
+            };
+            if selected_profile.lane != Lane::Media
+                || profile.runtime.lane != Lane::Media
+                || profile.runtime.as_str() != "ComfyUI"
+            {
+                return Err(TaskFormError::ProfileTaskMismatch);
+            }
+            if graph.as_object().is_none_or(|object| object.is_empty()) {
+                return Err(TaskFormError::InvalidNativeFields);
+            }
+            preflight_direct_workflow_fields(&graph)?;
+            InferenceRequest::Media {
+                profile: selected_profile.clone(),
+                input: super::requests::MediaInput::Workflow {
+                    task: declared_task.clone(),
+                    graph,
+                },
+            }
+        }
         TaskFields::Speech {
             text,
             mode,
@@ -283,6 +305,14 @@ fn preflight_direct_embedding_fields(input: &[String]) -> Result<(), TaskFormErr
         if total > MAX_TASK_FORM_TOTAL_BYTES {
             return Err(TaskFormError::FrameTooLarge);
         }
+    }
+    Ok(())
+}
+
+fn preflight_direct_workflow_fields(graph: &Value) -> Result<(), TaskFormError> {
+    let size = bounded_json_len(graph)?;
+    if size > MAX_TASK_FORM_FIELD_BYTES || size > MAX_TASK_FORM_TOTAL_BYTES {
+        return Err(TaskFormError::FrameTooLarge);
     }
     Ok(())
 }

@@ -151,6 +151,35 @@ inspect the endpoint before continuing. There is no automatic replay or GPU
 release claim. HTTP/IPC acceptance remains pending in the restricted session;
 see [migration status](docs/migration/status.md).
 
+### Direct Comfy workflows (Linux, acceptance pending)
+
+Use an already configured ComfyUI server with the pinned toolkit's canonical
+client job IDs and atomic per-job cancellation contract. Stock servers without
+that contract are not supported by this foreground path. After verifying the
+server, explicitly set `L3MS_COMFY_SCOPED_JOBS=1`; this asserts compatibility,
+not GPU ownership. `L2M2_COMFY_URL` defaults to `http://127.0.0.1:8188` and
+`L3MS_COMFY_API_KEY` optionally supplies authentication.
+
+```bash
+L3MS_COMFY_SCOPED_JOBS=1 l3ms --run-profile media:your-comfy-profile --task image --input /path/to/workflow.json --output-dir /path/to/private-empty-directory
+```
+
+Input is `{"graph":{...}}` containing a native API workflow, not a UI export.
+The selected profile must declare the image/video task and ComfyUI runtime.
+The output directory must already exist, be empty, owned by you and mode `0700`.
+Stack `f` uses the same graph form and foreground worker, with a fresh private
+output directory; history stores job metadata and relative artifact references,
+not the graph or credentials.
+
+A fresh native job ID is recorded before the single submission. Cancellation
+uses that exact job only; an acknowledgement or missing job is not proof of
+completion. Ambiguous completion blocks further foreground work: inspect the
+native job before continuing, never automatically resubmit. Completed output
+files are downloaded privately with count/size/type checks, not opened or executed.
+Terminal job state does **not** unload GPU models or fence other engine clients.
+You remain responsible for server setup and GPU availability; no services are
+started or stopped. Live transport/media acceptance remains pending.
+
 ### Direct CPU decisions (Linux)
 
 Run a prepared local Nagi/Laya CPU profile without a daemon or socket:

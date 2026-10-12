@@ -32,6 +32,7 @@ const MAX_DIRECT_NATIVE_INPUT_BYTES: usize = 1024 * 1024;
 const MAX_DIRECT_NATIVE_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_DIRECT_NATIVE_TIMEOUT_MS: u64 = 300_000;
 const MAX_DIRECT_NATIVE_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;
+const DEFAULT_DIRECT_COMFY_URL: &str = "http://127.0.0.1:8188";
 #[cfg(target_os = "linux")]
 const MAX_COORDINATOR_ARTIFACT_CHUNK_JSON_BYTES: usize = 160 * 1024;
 
@@ -56,11 +57,11 @@ struct Cli {
     )]
     run: Option<String>,
 
-    /// Execute one explicit local CPU profile with strict native JSON input.
+    /// Execute one explicit native profile with strict native JSON input.
     #[arg(long, value_name = "NAMESPACED_ID", requires_all = ["task", "input"])]
     run_profile: Option<String>,
 
-    /// Declared task name (decision, tts, design, or embeddings) required by --run-profile.
+    /// Declared task name (decision, tts, design, image, video, or embeddings) required by --run-profile.
     #[arg(long, value_name = "TASK", requires = "run_profile")]
     task: Option<String>,
 
@@ -68,7 +69,7 @@ struct Cli {
     #[arg(long, value_name = "PATH", requires = "run_profile")]
     input: Option<PathBuf>,
 
-    /// Fresh private output directory required for speech tasks.
+    /// Existing private empty output directory required for speech and Comfy workflows.
     #[arg(long, value_name = "PATH", requires = "run_profile")]
     output_dir: Option<PathBuf>,
 
@@ -229,6 +230,12 @@ struct DirectVoiceDesignInput {
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+struct DirectComfyInput {
+    graph: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DirectEmbeddingInput {
     input: Vec<String>,
 }
@@ -273,6 +280,18 @@ fn parse_direct_voice_design_input(
     serde_json::from_slice(bytes).map_err(|_| DirectInputError::Invalid)
 }
 
+fn parse_direct_comfy_input(bytes: &[u8]) -> Result<serde_json::Value, DirectInputError> {
+    if bytes.len() > MAX_DIRECT_NATIVE_INPUT_BYTES {
+        return Err(DirectInputError::TooLarge);
+    }
+    let parsed: DirectComfyInput =
+        serde_json::from_slice(bytes).map_err(|_| DirectInputError::Invalid)?;
+    if parsed.graph.is_empty() {
+        return Err(DirectInputError::Invalid);
+    }
+    Ok(serde_json::Value::Object(parsed.graph))
+}
+
 fn parse_direct_embedding_input(bytes: &[u8]) -> Result<DirectEmbeddingInput, DirectInputError> {
     if bytes.len() > MAX_DIRECT_NATIVE_INPUT_BYTES {
         return Err(DirectInputError::TooLarge);
@@ -307,15 +326,19 @@ fn direct_native_spec(cli: &Cli) -> Result<Option<DirectNativeSpec<'_>>> {
         .ok_or_else(|| anyhow::anyhow!("--run-profile requires --input"))?;
     let output_dir = cli.output_dir.as_deref();
     match (task, output_dir) {
-        ("decision", None) | ("embeddings", None) | ("tts" | "design", Some(_)) => {}
+        ("decision", None)
+        | ("embeddings", None)
+        | ("tts" | "design" | "image" | "video", Some(_)) => {}
         ("decision" | "embeddings", Some(_)) => {
-            bail!("--output-dir is only valid with speech tasks")
+            bail!("--output-dir is only valid with speech or Comfy workflow tasks")
         }
-        ("tts" | "design", None) => {
-            bail!("--output-dir is required with --task tts or --task design")
+        ("tts" | "design" | "image" | "video", None) => {
+            bail!("--output-dir is required with speech and Comfy workflow tasks")
         }
-        (_, Some(_)) => bail!("--output-dir is only valid with speech tasks"),
-        _ => bail!("--run-profile supports only --task decision, --task tts, --task design, or --task embeddings"),
+        (_, Some(_)) => bail!("--output-dir is only valid with speech or Comfy workflow tasks"),
+        _ => bail!(
+            "--run-profile supports only --task decision, --task tts, --task design, --task image, --task video, or --task embeddings"
+        ),
     }
     let timeout_ms = cli
         .task_timeout_ms
@@ -698,7 +721,9 @@ fn coordinator_artifact_chunk_spec(cli: &Cli) -> Result<Option<ArtifactChunkSpec
         || cli.artifact_offset.is_none()
         || cli.artifact_byte_budget.is_none()
     {
-        bail!("--artifact-chunk requires --artifact-kind, --artifact-path, --artifact-offset, and --artifact-byte-budget");
+        bail!(
+            "--artifact-chunk requires --artifact-kind, --artifact-path, --artifact-offset, and --artifact-byte-budget"
+        );
     }
     if cli.coordinator_status.is_some()
         || cli.coordinator_cancel.is_some()
@@ -1607,6 +1632,58 @@ fn direct_native_action(cli: &Cli) -> Result<Option<u8>> {
 }
 
 #[cfg(target_os = "linux")]
+fn direct_comfy_adapter_from_environment() -> Result<crate::control::comfy::ComfyAdapter> {
+    fn optional_environment_value(name: &str) -> Result<Option<String>> {
+        env::var_os(name)
+            .map(|value| {
+                value
+                    .into_string()
+                    .map_err(|_| anyhow::anyhow!("Comfy environment configuration is invalid"))
+            })
+            .transpose()
+    }
+
+    let scoped_jobs = optional_environment_value("L3MS_COMFY_SCOPED_JOBS")?;
+    let endpoint = optional_environment_value("L2M2_COMFY_URL")?;
+    let api_key = optional_environment_value("L3MS_COMFY_API_KEY")?;
+    direct_comfy_adapter(
+        scoped_jobs.as_deref(),
+        endpoint.as_deref(),
+        api_key.as_deref(),
+    )
+}
+
+fn direct_comfy_adapter(
+    scoped_jobs_assertion: Option<&str>,
+    endpoint: Option<&str>,
+    api_key: Option<&str>,
+) -> Result<crate::control::comfy::ComfyAdapter> {
+    if scoped_jobs_assertion != Some("1") {
+        bail!(
+            "Comfy dispatch requires L3MS_COMFY_SCOPED_JOBS=1 asserting canonical IDs and atomic scoped cancellation"
+        );
+    }
+    crate::control::comfy::ComfyAdapter::new(
+        endpoint.unwrap_or(DEFAULT_DIRECT_COMFY_URL),
+        api_key,
+        crate::control::comfy::ComfyContract::CanonicalIdsAndAtomicScopedCancellation,
+    )
+    .map_err(|_| anyhow::anyhow!("Comfy adapter configuration is invalid"))
+}
+
+#[cfg(target_os = "linux")]
+fn absolute_comfy_output_path(path: &Path) -> Result<PathBuf> {
+    let absolute_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()
+            .context("working directory is unavailable")?
+            .join(path)
+    };
+    Ok(absolute_path)
+}
+
+#[cfg(target_os = "linux")]
 fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
     let profile = spec
         .profile
@@ -1614,9 +1691,11 @@ fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
         .map_err(|_| anyhow::anyhow!("--run-profile must be a valid namespaced profile ID"))?;
     let expected_lane = match spec.task {
         "decision" => crate::control::catalog::Lane::Decisions,
-        "tts" | "design" => crate::control::catalog::Lane::Media,
+        "tts" | "design" | "image" | "video" => crate::control::catalog::Lane::Media,
         "embeddings" => crate::control::catalog::Lane::Language,
-        _ => bail!("--run-profile supports only --task decision, --task tts, --task design, or --task embeddings"),
+        _ => bail!(
+            "--run-profile supports only --task decision, --task tts, --task design, --task image, --task video, or --task embeddings"
+        ),
     };
     if profile.lane != expected_lane {
         bail!("--run-profile profile lane does not match --task");
@@ -1624,6 +1703,14 @@ fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
     let task = crate::control::catalog::Task::new(spec.task.to_owned())
         .map_err(|_| anyhow::anyhow!("--task is invalid"))?;
     let input = read_direct_native_input(spec.input, spec.task)?;
+    let is_comfy_workflow = matches!(spec.task, "image" | "video");
+    let comfy_output_directory = if is_comfy_workflow {
+        Some(absolute_comfy_output_path(spec.output_dir.ok_or_else(
+            || anyhow::anyhow!("Comfy output directory is required"),
+        )?)?)
+    } else {
+        None
+    };
 
     let repository_root =
         repository_root().map_err(|_| anyhow::anyhow!("repository location is unavailable"))?;
@@ -1666,6 +1753,10 @@ fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
             },
             spec.output_dir,
         ),
+        DirectNativeInput::ComfyWorkflow(graph) => (
+            crate::control::task_form::TaskFields::MediaWorkflow { graph },
+            spec.output_dir,
+        ),
         DirectNativeInput::Embeddings(input) => (
             crate::control::task_form::TaskFields::LanguageEmbeddings { input: input.input },
             None,
@@ -1680,6 +1771,7 @@ fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
     );
     let (request, timeout) = crate::control::task_form::build_direct_native(&catalog, draft)
         .map_err(|_| anyhow::anyhow!("native request is invalid"))?;
+    let output_dir = comfy_output_directory.as_deref().or(output_dir);
     let language = if spec.task == "embeddings" {
         let endpoint = env::var("LLAMA_SWAP_URL")
             .unwrap_or_else(|_| crate::llama_swap::DEFAULT_BASE_URL.to_owned());
@@ -1691,22 +1783,49 @@ fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
     } else {
         None
     };
+    let comfy_adapter = if is_comfy_workflow {
+        Some(direct_comfy_adapter_from_environment()?)
+    } else {
+        None
+    };
     let deadline = Instant::now()
         .checked_add(timeout)
         .ok_or_else(|| anyhow::anyhow!("native task timeout is invalid"))?;
     let signals = crate::control::foreground_shutdown::ShutdownSignals::install()
         .map_err(|_| anyhow::anyhow!("could not install native task cancellation handler"))?;
     let context = crate::control::runtime::OperationContext::new(deadline, &signals);
-    let result = crate::control::direct_run::run_native(
-        &catalog,
-        &request,
-        output_dir,
+    let native_id = if comfy_adapter.is_some() {
+        let candidate = crate::control::comfy::fresh_comfy_candidate(&context)
+            .map_err(|_| anyhow::anyhow!("Comfy job ID could not be generated"))?;
+        eprintln!("native_job_id={candidate}");
+        Some(candidate)
+    } else {
+        None
+    };
+    let connection = match (
         language.as_ref(),
-        &context,
+        comfy_adapter.as_ref(),
+        native_id.as_deref(),
+    ) {
+        (Some(adapter), None, None) => Some(
+            crate::control::direct_run::DirectConnection::Language(adapter),
+        ),
+        (None, Some(adapter), Some(native_id)) => {
+            Some(crate::control::direct_run::DirectConnection::Comfy { adapter, native_id })
+        }
+        (None, None, None) => None,
+        _ => bail!("native connection configuration is invalid"),
+    };
+    let result = crate::control::direct_run::run_native(
+        &catalog, &request, output_dir, connection, &context,
     )
     .map_err(|error| {
         if spec.task == "embeddings" && error.blocks_following_work() {
             anyhow::anyhow!("remote completion is unconfirmed; do not retry automatically")
+        } else if is_comfy_workflow && error.blocks_following_work() {
+            anyhow::anyhow!(
+                "Comfy completion is unconfirmed; do not retry or resubmit automatically"
+            )
         } else {
             anyhow::anyhow!(error.to_string())
         }
@@ -1721,6 +1840,22 @@ fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
         crate::control::direct_run::DirectRunResult::Embeddings(result) => {
             direct_embedding_output_json(&result)?
         }
+        crate::control::direct_run::DirectRunResult::Comfy(result) => {
+            if native_id.as_deref() != Some(result.native_id.as_str()) {
+                bail!("native Comfy result does not match the dispatched job ID");
+            }
+            direct_comfy_output_json(
+                &result.native_id,
+                &result.output_root,
+                result.artifacts.iter().map(|artifact| {
+                    (
+                        Path::new(&artifact.relative_path),
+                        artifact.node_id.as_str(),
+                        artifact.media_type.as_str(),
+                    )
+                }),
+            )?
+        }
     };
     println!("{output}");
     Ok(0)
@@ -1728,7 +1863,7 @@ fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
 
 #[cfg(not(target_os = "linux"))]
 fn run_direct_native(_: &DirectNativeSpec<'_>) -> Result<u8> {
-    bail!("native CPU execution is supported only on Linux");
+    bail!("direct native execution is supported only on Linux");
 }
 
 #[cfg(target_os = "linux")]
@@ -1736,6 +1871,7 @@ enum DirectNativeInput {
     Decision(DirectDecisionInput),
     Speech(DirectSpeechInput),
     VoiceDesign(DirectVoiceDesignInput),
+    ComfyWorkflow(serde_json::Value),
     Embeddings(DirectEmbeddingInput),
 }
 
@@ -1768,10 +1904,15 @@ fn read_direct_native_input(path: &Path, task: &str) -> Result<DirectNativeInput
         "design" => parse_direct_voice_design_input(&bytes)
             .map(DirectNativeInput::VoiceDesign)
             .map_err(|error| anyhow::anyhow!(error.to_string())),
+        "image" | "video" => parse_direct_comfy_input(&bytes)
+            .map(DirectNativeInput::ComfyWorkflow)
+            .map_err(|error| anyhow::anyhow!(error.to_string())),
         "embeddings" => parse_direct_embedding_input(&bytes)
             .map(DirectNativeInput::Embeddings)
             .map_err(|error| anyhow::anyhow!(error.to_string())),
-        _ => bail!("--run-profile supports only --task decision, --task tts, --task design, or --task embeddings"),
+        _ => bail!(
+            "--run-profile supports only --task decision, --task tts, --task design, --task image, --task video, or --task embeddings"
+        ),
     }
 }
 
@@ -1877,6 +2018,65 @@ fn direct_embedding_output_json(
     }
     String::from_utf8(writer.bytes)
         .map_err(|_| anyhow::anyhow!("native embedding output could not be encoded"))
+}
+
+#[derive(serde::Serialize)]
+struct DirectComfyOutput {
+    native_job_id: String,
+    artifacts: Vec<DirectComfyArtifactOutput>,
+}
+
+#[derive(serde::Serialize)]
+struct DirectComfyArtifactOutput {
+    path: PathBuf,
+    native_media_type: String,
+    node_id: String,
+}
+
+fn direct_comfy_output_json<'a>(
+    native_job_id: &str,
+    output_root: &Path,
+    artifacts: impl IntoIterator<Item = (&'a Path, &'a str, &'a str)>,
+) -> Result<String> {
+    if !output_root.is_absolute() {
+        bail!("Comfy output directory is invalid");
+    }
+    let mut serialized_artifacts = Vec::new();
+    for (relative_path, node_id, media_type) in artifacts {
+        if relative_path.as_os_str().is_empty()
+            || relative_path.is_absolute()
+            || !relative_path
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_)))
+            || relative_path
+                .to_string_lossy()
+                .contains(['\\', ':', '%', '?', '#'])
+            || node_id.is_empty()
+            || media_type.is_empty()
+            || node_id.chars().any(char::is_control)
+            || media_type.chars().any(char::is_control)
+        {
+            bail!("Comfy output artifact is invalid");
+        }
+        serialized_artifacts.push(DirectComfyArtifactOutput {
+            path: output_root.join(relative_path),
+            native_media_type: media_type.to_owned(),
+            node_id: node_id.to_owned(),
+        });
+    }
+    let response = DirectComfyOutput {
+        native_job_id: native_job_id.to_owned(),
+        artifacts: serialized_artifacts,
+    };
+    let mut writer = BoundedJsonWriter::new(MAX_DIRECT_NATIVE_OUTPUT_BYTES);
+    if serde_json::to_writer(&mut writer, &response).is_err() {
+        if writer.exceeded {
+            bail!("native Comfy output exceeds the 2 MiB limit");
+        }
+        bail!("native Comfy output could not be encoded");
+    }
+    String::from_utf8(writer.bytes)
+        .map_err(|_| anyhow::anyhow!("native Comfy output could not be encoded"))
 }
 
 #[cfg(test)]
@@ -2033,6 +2233,41 @@ mod tests {
     }
 
     #[test]
+    fn direct_native_comfy_tasks_require_explicit_output_directory() {
+        for task in ["image", "video"] {
+            let cli = Cli::try_parse_from([
+                "l3ms",
+                "--run-profile",
+                "media:fixture-comfy",
+                "--task",
+                task,
+                "--input",
+                "workflow.json",
+                "--output-dir",
+                "/private/job-1",
+            ])
+            .unwrap();
+            let Some(spec) = direct_native_spec(&cli).unwrap() else {
+                panic!("Comfy workflow action is present");
+            };
+            assert_eq!(spec.task, task);
+            assert_eq!(spec.output_dir, Some(Path::new("/private/job-1")));
+
+            let missing_output = Cli::try_parse_from([
+                "l3ms",
+                "--run-profile",
+                "media:fixture-comfy",
+                "--task",
+                task,
+                "--input",
+                "workflow.json",
+            ])
+            .unwrap();
+            assert!(direct_native_spec(&missing_output).is_err());
+        }
+    }
+
+    #[test]
     fn direct_native_embeddings_require_language_profile_and_reject_output_directory() {
         let cli = Cli::try_parse_from([
             "l3ms",
@@ -2179,6 +2414,83 @@ mod tests {
         assert_eq!(
             parse_direct_voice_design_input(&oversized).err(),
             Some(DirectInputError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn direct_comfy_input_requires_strict_nonempty_workflow_object() {
+        let parsed = parse_direct_comfy_input(
+            br#"{"graph":{"3":{"class_type":"LoadImage","inputs":{"image":"fixture.png"}}}}"#,
+        )
+        .unwrap();
+        assert!(parsed.get("3").is_some());
+
+        for invalid in [
+            br#"{"graph":{},"graph":{}}"#.as_slice(),
+            br#"{"graph":{},"unexpected":true}"#.as_slice(),
+            br#"{"graph":[]}"#.as_slice(),
+            br#"{"graph":{}}"#.as_slice(),
+            br#"[]"#.as_slice(),
+            br#"{"graph":{"3":{}}} trailing"#.as_slice(),
+        ] {
+            assert!(parse_direct_comfy_input(invalid).is_err());
+        }
+
+        let oversized = vec![b' '; MAX_DIRECT_NATIVE_INPUT_BYTES + 1];
+        assert_eq!(
+            parse_direct_comfy_input(&oversized).err(),
+            Some(DirectInputError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn direct_comfy_configuration_requires_scoped_jobs_assertion_and_uses_loopback_default() {
+        assert!(direct_comfy_adapter(None, None, None).is_err());
+        assert!(direct_comfy_adapter(Some("0"), None, None).is_err());
+        assert!(direct_comfy_adapter(Some("1"), None, None).is_ok());
+        assert!(direct_comfy_adapter(Some("1"), Some("not a URL"), None).is_err());
+    }
+
+    #[test]
+    fn direct_comfy_output_lists_absolute_validated_artifacts_and_is_bounded() {
+        let root = Path::new("/private/job-1");
+        let artifact_path = Path::new("images/result.png");
+        let output: serde_json::Value = serde_json::from_str(
+            &direct_comfy_output_json(
+                "85c2c494-e762-4f10-8c45-6a8245b43962",
+                root,
+                [(artifact_path, "4", "image/png")],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            output["native_job_id"],
+            "85c2c494-e762-4f10-8c45-6a8245b43962"
+        );
+        assert_eq!(
+            output["artifacts"][0]["path"],
+            "/private/job-1/images/result.png"
+        );
+        assert_eq!(output["artifacts"][0]["native_media_type"], "image/png");
+        assert_eq!(output["artifacts"][0]["node_id"], "4");
+        assert!(direct_comfy_output_json(
+            "id",
+            root,
+            [(Path::new("../escape.png"), "4", "image/png")],
+        )
+        .is_err());
+
+        let oversized_media_type = "x".repeat(MAX_DIRECT_NATIVE_OUTPUT_BYTES);
+        assert_eq!(
+            direct_comfy_output_json(
+                "id",
+                root,
+                [(Path::new("image.png"), "4", oversized_media_type.as_str())],
+            )
+            .unwrap_err()
+            .to_string(),
+            "native Comfy output exceeds the 2 MiB limit"
         );
     }
 

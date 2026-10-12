@@ -1,7 +1,7 @@
-//! Direct, bounded execution for explicitly supported CPU-local native work.
+//! Direct, bounded execution for explicitly supported native work.
 //!
 //! This module accepts CPU-local Nagi/Laya decisions, standard and voice-design
-//! Breeze speech, and embeddings through the existing language adapter. It does not start
+//! Breeze speech, embeddings and Comfy workflows through existing adapters. It does not start
 //! services, install runtimes, select a fallback, or retry an attempted
 //! inference. Native input and output stay out of its errors.
 
@@ -11,6 +11,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use super::catalog::{Catalog, Device, Lane};
+use super::comfy::{
+    ComfyAdapter, ComfyErrorKind, ComfyFailure, ComfyJobState, ComfyOutputRoot, NativeComfyResult,
+};
 use super::decision::{
     execute_accepted_cpu_decision, DecisionExecutionError, NativeDecisionResult,
 };
@@ -24,7 +27,7 @@ use super::requests::{
     EmbeddingPayload, InferenceRequest, InferenceResult, MediaInput, SpeechMode,
 };
 use super::routes::{resolve_profile_route, NativeRoute, ResolvedProfileRoute};
-use super::runtime::{OperationContext, RecoveryPolicy};
+use super::runtime::{NeverCancel, OperationContext, RecoveryPolicy};
 
 const PROCESS_RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -34,6 +37,16 @@ pub enum DirectRunResult {
     Decision(NativeDecisionResult),
     Speech(MediaExecutionResult),
     Embeddings(EmbeddingPayload),
+    Comfy(NativeComfyResult),
+}
+
+/// Explicit endpoint connection for one direct lane-native request.
+pub enum DirectConnection<'a> {
+    Language(&'a LanguageAdapter),
+    Comfy {
+        adapter: &'a ComfyAdapter,
+        native_id: &'a str,
+    },
 }
 
 /// Fixed failure categories with no request body, path, runner output, or OS
@@ -55,6 +68,7 @@ pub enum DirectRunErrorKind {
 enum DirectRunDisposition {
     Process(ProcessFailureDisposition),
     Remote(DispatchDisposition),
+    RemoteTerminal { cancellation_confirmed: bool },
 }
 
 /// A redacted failure plus whether local ownership or remote completion is uncertain.
@@ -84,6 +98,15 @@ impl DirectRunError {
         }
     }
 
+    fn remote_terminal(kind: DirectRunErrorKind, cancellation_confirmed: bool) -> Self {
+        Self {
+            kind,
+            disposition: DirectRunDisposition::RemoteTerminal {
+                cancellation_confirmed,
+            },
+        }
+    }
+
     #[cfg(test)]
     pub fn kind(self) -> DirectRunErrorKind {
         self.kind
@@ -94,8 +117,8 @@ impl DirectRunError {
         self.disposition
     }
 
-    /// True only when cancellation is terminal: no child was spawned, the
-    /// owned child group was reaped, or a remote request was never dispatched.
+    /// True only when no child was spawned, the owned child group was reaped,
+    /// a remote request was never dispatched, or Comfy reported Cancelled.
     pub fn cancellation_confirmed(self) -> bool {
         self.kind == DirectRunErrorKind::Cancelled
             && matches!(
@@ -104,6 +127,27 @@ impl DirectRunError {
                     ProcessFailureDisposition::NoChildSpawned
                         | ProcessFailureDisposition::ChildGroupReaped,
                 ) | DirectRunDisposition::Remote(DispatchDisposition::NoDispatch)
+                    | DirectRunDisposition::RemoteTerminal {
+                        cancellation_confirmed: true,
+                    }
+            )
+    }
+
+    pub fn is_remote(self) -> bool {
+        matches!(
+            self.disposition,
+            DirectRunDisposition::Remote(_) | DirectRunDisposition::RemoteTerminal { .. }
+        )
+    }
+
+    /// True when a client cancellation request was followed by a
+    /// confirmed terminal Comfy state. This does not say the backend honored
+    /// cancellation: `cancellation_confirmed` is true only for native Cancelled.
+    pub fn remote_terminal_confirmed(self) -> bool {
+        self.kind == DirectRunErrorKind::Cancelled
+            && matches!(
+                self.disposition,
+                DirectRunDisposition::RemoteTerminal { .. }
             )
     }
 
@@ -143,25 +187,27 @@ impl fmt::Display for DirectRunError {
 
 impl Error for DirectRunError {}
 
-/// Execute one already-built native request on a supported direct route.
-///
-/// The current catalog is refreshed before dispatch, then the accepted route
-/// is rechecked by the relevant adapter. CPU-local decisions and standard or
-/// voice-design speech use the bounded process runner; embeddings use the
-/// caller's existing language adapter and configured endpoint without managing
-/// llama-swap.
-/// Speech requires a caller-owned fresh output directory; other lanes reject
-/// one. Process cleanup is bounded by a fixed five-second recovery budget.
-/// Uncertain process ownership or remote completion blocks following work.
+/// Execute one already-built native request on an explicitly selected route.
+/// Comfy workflow IDs must be generated and persisted by the caller before this
+/// function; this runner never chooses a fallback, starts a runtime, or retries
+/// a dispatched request. Comfy cancellation uses one bounded scoped recovery
+/// cancel and terminal status is not GPU-release proof.
 pub fn run_native(
     catalog: &Catalog,
     request: &InferenceRequest,
     speech_output_directory: Option<&Path>,
-    language: Option<&LanguageAdapter>,
+    connection: Option<DirectConnection<'_>>,
     context: &OperationContext<'_>,
 ) -> Result<DirectRunResult, DirectRunError> {
     let is_decision = matches!(request, InferenceRequest::Decision { .. });
     let is_embeddings = matches!(request, InferenceRequest::Embeddings { .. });
+    let is_comfy_workflow = matches!(
+        request,
+        InferenceRequest::Media {
+            input: MediaInput::Workflow { .. },
+            ..
+        }
+    );
     let is_cpu_breeze_speech = matches!(
         request,
         InferenceRequest::Media {
@@ -169,52 +215,92 @@ pub fn run_native(
             ..
         } if matches!(input.mode, SpeechMode::Standard | SpeechMode::VoiceDesign)
     );
+    let (language, comfy) = match connection {
+        Some(DirectConnection::Language(adapter)) => (Some(adapter), None),
+        Some(DirectConnection::Comfy { adapter, native_id }) => (None, Some((adapter, native_id))),
+        None => (None, None),
+    };
     let valid_lane_arguments = match request {
         InferenceRequest::Decision { .. } => {
-            speech_output_directory.is_none() && language.is_none()
+            speech_output_directory.is_none() && language.is_none() && comfy.is_none()
         }
         InferenceRequest::Media { .. } if is_cpu_breeze_speech => {
-            speech_output_directory.is_some() && language.is_none()
+            speech_output_directory.is_some() && language.is_none() && comfy.is_none()
+        }
+        InferenceRequest::Media { .. } if is_comfy_workflow => {
+            speech_output_directory.is_some() && language.is_none() && comfy.is_some()
         }
         InferenceRequest::Embeddings { .. } => {
-            speech_output_directory.is_none() && language.is_some()
+            speech_output_directory.is_none() && language.is_some() && comfy.is_none()
         }
         _ => false,
     };
     if !valid_lane_arguments {
         return Err(unstarted_error(
             DirectRunErrorKind::InvalidRequest,
-            is_embeddings,
+            is_embeddings || is_comfy_workflow,
         ));
     }
     if context.check_active("direct native operation").is_err() {
-        return Err(if is_embeddings {
+        return Err(if is_embeddings || is_comfy_workflow {
             inactive_remote_error(context)
         } else {
             inactive_error(context)
         });
     }
 
-    let original_profile = catalog
-        .inspect(request.profile())
-        .ok_or_else(|| unstarted_error(DirectRunErrorKind::InvalidRequest, is_embeddings))?;
-    let catalog = catalog
-        .refresh()
-        .map_err(|_| unstarted_error(DirectRunErrorKind::CatalogUnavailable, is_embeddings))?;
+    let original_profile = catalog.inspect(request.profile()).ok_or_else(|| {
+        unstarted_error(
+            DirectRunErrorKind::InvalidRequest,
+            is_embeddings || is_comfy_workflow,
+        )
+    })?;
+    let catalog = catalog.refresh().map_err(|_| {
+        unstarted_error(
+            DirectRunErrorKind::CatalogUnavailable,
+            is_embeddings || is_comfy_workflow,
+        )
+    })?;
     if catalog.inspect(request.profile()) != Some(original_profile) {
         return Err(unstarted_error(
             DirectRunErrorKind::InvalidRequest,
-            is_embeddings,
+            is_embeddings || is_comfy_workflow,
         ));
     }
-    request
-        .validate(&catalog)
-        .map_err(|_| unstarted_error(DirectRunErrorKind::InvalidRequest, is_embeddings))?;
-    let route = resolve_profile_route(&catalog, request.profile())
-        .map_err(|_| unstarted_error(DirectRunErrorKind::InvalidRequest, is_embeddings))?;
+    request.validate(&catalog).map_err(|_| {
+        unstarted_error(
+            DirectRunErrorKind::InvalidRequest,
+            is_embeddings || is_comfy_workflow,
+        )
+    })?;
+    let route = resolve_profile_route(&catalog, request.profile()).map_err(|_| {
+        unstarted_error(
+            DirectRunErrorKind::InvalidRequest,
+            is_embeddings || is_comfy_workflow,
+        )
+    })?;
     let recovery = RecoveryPolicy::new(PROCESS_RECOVERY_TIMEOUT)
         .expect("fixed process recovery timeout is valid");
-    if is_decision {
+    if is_comfy_workflow {
+        if !is_comfy_workflow_route(request, &route) {
+            return Err(DirectRunError::remote(
+                DirectRunErrorKind::UnsupportedRoute,
+                DispatchDisposition::NoDispatch,
+            ));
+        }
+        let (adapter, native_id) = comfy.expect("validated Comfy connection");
+        let output_directory = speech_output_directory.expect("validated Comfy output directory");
+        execute_comfy_workflow(
+            &catalog,
+            request,
+            &route,
+            output_directory,
+            adapter,
+            native_id,
+            context,
+        )
+        .map(DirectRunResult::Comfy)
+    } else if is_decision {
         if !is_cpu_local_nagi_or_laya(request, &route) {
             return Err(DirectRunError::new(
                 DirectRunErrorKind::UnsupportedRoute,
@@ -268,6 +354,183 @@ pub fn run_native(
     } else {
         Err(unstarted_error(DirectRunErrorKind::InvalidRequest, false))
     }
+}
+
+fn is_comfy_workflow_route(request: &InferenceRequest, route: &ResolvedProfileRoute) -> bool {
+    let InferenceRequest::Media {
+        profile,
+        input: MediaInput::Workflow { task, graph },
+    } = request
+    else {
+        return false;
+    };
+    profile == &route.profile
+        && route.profile.lane == Lane::Media
+        && route.runtime.lane == Lane::Media
+        && route.runtime.as_str() == "ComfyUI"
+        && route.tasks.iter().any(|declared| declared == task)
+        && matches!(&route.native_route, NativeRoute::MediaScript { .. })
+        && graph.as_object().is_some_and(|object| !object.is_empty())
+}
+
+fn execute_comfy_workflow(
+    catalog: &Catalog,
+    request: &InferenceRequest,
+    route: &ResolvedProfileRoute,
+    output_directory: &Path,
+    adapter: &ComfyAdapter,
+    native_id: &str,
+    context: &OperationContext<'_>,
+) -> Result<NativeComfyResult, DirectRunError> {
+    let output_root = ComfyOutputRoot::open_fresh(output_directory).map_err(comfy_failure_error)?;
+    let mut job = adapter
+        .prepare_for_route(catalog, request, route, native_id)
+        .map_err(comfy_failure_error)?;
+    if let Err(error) = adapter.submit_for_route(&mut job, route, context) {
+        if job.submission_attempted() && context_inactive(context) {
+            return recover_comfy_cancellation(adapter, &job, context);
+        }
+        return Err(comfy_failure_error(error));
+    }
+
+    loop {
+        if context_inactive(context) {
+            return recover_comfy_cancellation(adapter, &job, context);
+        }
+        match adapter.status(&job, context) {
+            Ok(snapshot) => {
+                if let Some(result) = finish_comfy_snapshot(
+                    adapter,
+                    snapshot,
+                    &output_root,
+                    output_directory,
+                    native_id,
+                    context,
+                )? {
+                    return Ok(result);
+                }
+            }
+            Err(_) if context_inactive(context) => {
+                return recover_comfy_cancellation(adapter, &job, context)
+            }
+            Err(error) => return Err(comfy_failure_error(error)),
+        }
+        wait_for_poll(context);
+    }
+}
+
+fn recover_comfy_cancellation(
+    adapter: &ComfyAdapter,
+    job: &super::comfy::PreparedComfyJob,
+    caller_context: &OperationContext<'_>,
+) -> Result<NativeComfyResult, DirectRunError> {
+    let deadline = std::time::Instant::now()
+        .checked_add(PROCESS_RECOVERY_TIMEOUT)
+        .ok_or_else(remote_completion_uncertain)?;
+    let recovery = OperationContext::new(deadline, &NeverCancel);
+
+    // A successful cancel response is only an acknowledgement. The exact
+    // native ID is polled until terminal; this never proves engine/GPU release.
+    let _ = adapter.cancel(job, &recovery);
+    loop {
+        if recovery.remaining().is_zero() {
+            return Err(remote_completion_uncertain());
+        }
+        match adapter.status(job, &recovery) {
+            Ok(snapshot) => match snapshot.state {
+                ComfyJobState::Completed | ComfyJobState::Failed => {
+                    return Err(comfy_recovery_terminal_error(caller_context))
+                }
+                ComfyJobState::Cancelled => {
+                    return Err(DirectRunError::remote_terminal(
+                        DirectRunErrorKind::Cancelled,
+                        true,
+                    ))
+                }
+                ComfyJobState::Unknown | ComfyJobState::Pending | ComfyJobState::Running => {}
+            },
+            Err(_) => return Err(remote_completion_uncertain()),
+        }
+        wait_for_poll(&recovery);
+    }
+}
+
+fn comfy_recovery_terminal_error(context: &OperationContext<'_>) -> DirectRunError {
+    let kind = if context.is_cancelled() {
+        DirectRunErrorKind::Cancelled
+    } else {
+        DirectRunErrorKind::DeadlineExceeded
+    };
+    DirectRunError::remote_terminal(kind, false)
+}
+
+fn finish_comfy_snapshot(
+    adapter: &ComfyAdapter,
+    snapshot: super::comfy::ComfySnapshot,
+    output_root: &ComfyOutputRoot,
+    output_directory: &Path,
+    native_id: &str,
+    context: &OperationContext<'_>,
+) -> Result<Option<NativeComfyResult>, DirectRunError> {
+    match snapshot.state {
+        ComfyJobState::Completed => {
+            let artifacts = adapter
+                .collect_terminal_outputs(output_root, &snapshot, context)
+                .map_err(|error| {
+                    DirectRunError::remote_terminal(comfy_direct_error_kind(error.kind), false)
+                })?;
+            Ok(Some(NativeComfyResult {
+                native_id: native_id.to_owned(),
+                output_root: output_directory.to_path_buf(),
+                artifacts,
+            }))
+        }
+        ComfyJobState::Failed => Err(DirectRunError::remote_terminal(
+            DirectRunErrorKind::ExecutionFailed,
+            false,
+        )),
+        ComfyJobState::Cancelled => Err(DirectRunError::remote_terminal(
+            DirectRunErrorKind::Cancelled,
+            true,
+        )),
+        ComfyJobState::Unknown | ComfyJobState::Pending | ComfyJobState::Running => Ok(None),
+    }
+}
+
+fn wait_for_poll(context: &OperationContext<'_>) {
+    let remaining = context.remaining();
+    if !remaining.is_zero() {
+        std::thread::sleep(remaining.min(Duration::from_millis(25)));
+    }
+}
+
+fn context_inactive(context: &OperationContext<'_>) -> bool {
+    context.is_cancelled() || context.remaining().is_zero()
+}
+
+fn comfy_failure_error(error: ComfyFailure) -> DirectRunError {
+    DirectRunError::remote(comfy_direct_error_kind(error.kind), error.disposition)
+}
+
+fn comfy_direct_error_kind(kind: ComfyErrorKind) -> DirectRunErrorKind {
+    match kind {
+        ComfyErrorKind::Cancelled => DirectRunErrorKind::Cancelled,
+        ComfyErrorKind::Deadline => DirectRunErrorKind::DeadlineExceeded,
+        ComfyErrorKind::Configuration
+        | ComfyErrorKind::InvalidRequest
+        | ComfyErrorKind::InvalidOwnership => DirectRunErrorKind::InvalidRequest,
+        ComfyErrorKind::Protocol | ComfyErrorKind::TooLarge => DirectRunErrorKind::InvalidOutput,
+        ComfyErrorKind::AlreadyAttempted | ComfyErrorKind::Transport | ComfyErrorKind::Rejected => {
+            DirectRunErrorKind::ExecutionFailed
+        }
+    }
+}
+
+fn remote_completion_uncertain() -> DirectRunError {
+    DirectRunError::remote(
+        DirectRunErrorKind::RemoteCompletionUncertain,
+        DispatchDisposition::Uncertain,
+    )
 }
 
 fn is_cpu_local_nagi_or_laya(request: &InferenceRequest, route: &ResolvedProfileRoute) -> bool {
@@ -902,7 +1165,7 @@ printf 'RIFF\046\000\000\000WAVEfmt \020\000\000\000\001\000\001\000\300\135\000
             &catalog,
             &request,
             None,
-            Some(&adapter),
+            Some(DirectConnection::Language(&adapter)),
             &context(&NeverCancel),
         )
         .unwrap();
@@ -926,7 +1189,7 @@ printf 'RIFF\046\000\000\000WAVEfmt \020\000\000\000\001\000\001\000\300\135\000
             &catalog,
             &request,
             None,
-            Some(&adapter),
+            Some(DirectConnection::Language(&adapter)),
             &context(&AlwaysCancel),
         )
         .err()
@@ -962,9 +1225,15 @@ printf 'RIFF\046\000\000\000WAVEfmt \020\000\000\000\001\000\001\000\300\135\000
         let adapter = LanguageAdapter::new(&endpoint, None).unwrap();
         let cancellation = SharedCancel(cancelled);
         let context = OperationContext::new(Instant::now() + Duration::from_secs(3), &cancellation);
-        let error = run_native(&catalog, &request, None, Some(&adapter), &context)
-            .err()
-            .expect("dispatched cancellation remains uncertain");
+        let error = run_native(
+            &catalog,
+            &request,
+            None,
+            Some(DirectConnection::Language(&adapter)),
+            &context,
+        )
+        .err()
+        .expect("dispatched cancellation remains uncertain");
         assert_eq!(error.kind(), DirectRunErrorKind::RemoteCompletionUncertain);
         assert_eq!(
             error.disposition(),
@@ -1004,7 +1273,7 @@ printf 'RIFF\046\000\000\000WAVEfmt \020\000\000\000\001\000\001\000\300\135\000
             &catalog,
             &request,
             None,
-            Some(&adapter),
+            Some(DirectConnection::Language(&adapter)),
             &context(&NeverCancel),
         )
         .err()
@@ -1040,7 +1309,7 @@ printf 'RIFF\046\000\000\000WAVEfmt \020\000\000\000\001\000\001\000\300\135\000
             &catalog,
             &request,
             None,
-            Some(&adapter),
+            Some(DirectConnection::Language(&adapter)),
             &context(&NeverCancel),
         )
         .err()

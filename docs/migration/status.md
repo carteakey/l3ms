@@ -8,7 +8,38 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
-## Current CPU voice-design checkpoint — 2026-10-12
+## Current native Comfy checkpoint — 2026-10-12
+
+Declared Comfy workflow forms and image/video CLI tasks now share the existing
+adapter and foreground worker, without coordinator submission. A fresh native
+UUID is persisted in UI history (printed before CLI dispatch); submission is
+single-attempt and cancellation targets only that ID. Unknown state, a missing
+job or cancel acknowledgement never proves completion. Client cancellation
+racing native completion remains cancelled with terminal state known, without
+claiming that the backend itself cancelled or freed its GPU models.
+
+Completed output descriptors use the configured server's escaped `/view`
+request. Downloads stream into flat, exclusive 0600 files in an existing empty,
+owned 0700 directory, with 64-file/512-MiB bounds and suffix/header sanity checks.
+Only successful artifact references are returned; invalid or interrupted copies
+can leave private partial files but are not published as results. Graphs and
+credentials stay out of history. No new worker, service, registry or execution
+journal is added, and external services/clients are not stopped or fenced.
+
+Compile, strict all-target Clippy, formatting, CLI/form/privacy/Chat guards and
+injected filesystem download fixtures pass. Full root suite: **785 passed,
+121 transport failures, 1 ignored** under the existing socket restriction.
+Actual submit/poll/cancel/download and real-model Comfy acceptance remain open;
+there is no GPU switching or release acceptance. Original checkouts and live
+services remain unchanged. See README for explicit server-contract configuration.
+
+This slice adds **1,591 net root source lines**, including tests; cumulative
+delta against `702b4cd` is **+6,184**. No platform module was removed. The fewer-LOC
+target is not yet delivered: validate these replacements, finish the remaining
+native/GPU callers, then delete displaced coordinator machinery inward. Keep the
+wrapper direction; do not add another platform while deletion remains pending.
+
+## Previous CPU voice-design checkpoint — 2026-10-12
 
 Offline CPU voice design now reuses the existing Breeze recipe, foreground owner
 and validated WAV path. CLI uses strict `text`/`instruction`; the form exposes
