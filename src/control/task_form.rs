@@ -176,6 +176,25 @@ pub fn build_direct_native(
                 },
             }
         }
+        TaskFields::MediaScript { args } => {
+            let supported = catalog.inspect(&selected_profile).is_some_and(|profile| {
+                selected_profile.lane == Lane::Media
+                    && selected_profile.profile_id.as_str() == "heartmula-music"
+                    && declared_task.as_str() == "music"
+                    && profile.runtime.as_str() == "audio.cpp"
+                    && profile.device.as_ref() == Some(&super::catalog::Device::Cuda)
+            });
+            if !supported || !super::native_commands::is_supported_heartmula_args(&args) {
+                return Err(TaskFormError::InvalidNativeFields);
+            }
+            InferenceRequest::Media {
+                profile: selected_profile.clone(),
+                input: super::requests::MediaInput::Script {
+                    task: declared_task.clone(),
+                    args,
+                },
+            }
+        }
         TaskFields::Speech {
             text,
             mode,
@@ -225,7 +244,6 @@ pub fn build_direct_native(
             }
             request
         }
-        _ => return Err(TaskFormError::InvalidNativeFields),
     };
 
     let refreshed = catalog

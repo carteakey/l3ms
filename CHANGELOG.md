@@ -27,6 +27,11 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Run declared HeartMuLa music through the existing native recipe, foreground
+  CLI/UI owner and explicit idle-GPU window. Keep native argv/prompt/lyrics
+  ephemeral, pin both output controls to a private job directory, and validate
+  its final WAV with the existing audio checks. No service takeover, implicit
+  download, simulation, inference retry or live music-quality claim.
 - Route declared CUDA-local Nagi/Laya and Breeze tasks through the existing
   foreground native owner. Require explicit operator-managed idle GPU config,
   reuse advisory locks and bounded pre/post idle probes, and retain one recovery

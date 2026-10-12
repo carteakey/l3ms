@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Explicitly declare HeartMuLa's existing CUDA requirement in the media manifest
+  for root native routing. Original standalone script flags/defaults are unchanged;
+  shared execution requires an operator-managed idle GPU window.
+
 - Extend the explicit CPU Breeze profile to reference-audio cloning and chunked
   TTS output through the existing recipe and WAV validator. Cloning requires a
   reference transcript; chunks are returned after completion, not played live.

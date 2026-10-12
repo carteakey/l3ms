@@ -380,6 +380,7 @@ struct TaskFormEditor {
     profile_snapshot: CatalogProfile,
     direct_native_decision: bool,
     direct_breeze_speech: bool,
+    direct_native_music: bool,
     direct_comfy_workflow: bool,
     direct_language_embeddings: bool,
     declared_tasks: Vec<String>,
@@ -404,6 +405,7 @@ impl TaskFormEditor {
     ) -> Self {
         let direct_native_decision = is_direct_native_decision_profile(profile);
         let direct_breeze_speech = is_direct_breeze_speech_profile(profile);
+        let direct_native_music = is_direct_cuda_music_profile(profile);
         #[cfg(target_os = "linux")]
         let direct_comfy_workflow = is_direct_comfy_workflow_profile(profile);
         #[cfg(not(target_os = "linux"))]
@@ -422,6 +424,9 @@ impl TaskFormEditor {
         if direct_breeze_speech {
             declared_tasks.retain(|task| matches!(task.as_str(), "tts" | "clon" | "design"));
         }
+        if direct_native_music {
+            declared_tasks.retain(|task| task == "music");
+        }
         if profile.key.lane == Lane::Language
             && profile
                 .tasks
@@ -435,6 +440,7 @@ impl TaskFormEditor {
             profile_snapshot: profile.clone(),
             direct_native_decision,
             direct_breeze_speech,
+            direct_native_music,
             direct_comfy_workflow,
             direct_language_embeddings,
             declared_tasks,
@@ -448,6 +454,7 @@ impl TaskFormEditor {
         };
         if direct_native_decision
             || direct_breeze_speech
+            || direct_native_music
             || direct_comfy_workflow
             || direct_language_embeddings
         {
@@ -471,6 +478,13 @@ impl TaskFormEditor {
             editor.media_operation = Some(TaskFormMediaOperation::Speech);
             editor.speech_mode = Some(SpeechMode::Standard);
         }
+        if direct_native_music {
+            editor.selected_task = editor
+                .declared_tasks
+                .iter()
+                .position(|task| task == "music");
+            editor.media_operation = Some(TaskFormMediaOperation::Script);
+        }
         if direct_comfy_workflow {
             editor.media_operation = Some(TaskFormMediaOperation::Workflow);
         }
@@ -487,6 +501,7 @@ impl TaskFormEditor {
     fn is_direct_native(&self) -> bool {
         self.direct_native_decision
             || self.direct_breeze_speech
+            || self.direct_native_music
             || self.direct_comfy_workflow
             || self.direct_language_embeddings
     }
@@ -499,6 +514,7 @@ impl TaskFormEditor {
         fields.push(TaskFormField::Timeout);
         if !self.direct_native_decision
             && (!self.direct_breeze_speech || self.declared_tasks.len() > 1)
+            && !self.direct_native_music
             && !self.direct_language_embeddings
         {
             fields.push(TaskFormField::DeclaredTask);
@@ -538,6 +554,8 @@ impl TaskFormEditor {
                     }
                 } else if self.direct_comfy_workflow {
                     fields.push(TaskFormField::MediaWorkflowGraph);
+                } else if self.direct_native_music {
+                    fields.push(TaskFormField::MediaScriptArgv);
                 } else {
                     fields.push(TaskFormField::MediaOperation);
                     match self.media_operation {
@@ -4459,6 +4477,7 @@ impl App {
         #[cfg(target_os = "linux")]
         let direct_native_profile = is_direct_native_decision_profile(&profile)
             || is_direct_breeze_speech_profile(&profile)
+            || is_direct_cuda_music_profile(&profile)
             || is_direct_cuda_profile(&profile)
             || is_direct_comfy_workflow_profile(&profile)
             || direct_language_embeddings;
@@ -4517,7 +4536,9 @@ impl App {
                 direct_language_embeddings,
             ));
             self.input_mode = InputMode::TaskForm;
-            self.status = if is_direct_cuda_profile(&profile) {
+            self.status = if is_direct_cuda_music_profile(&profile) {
+                "Foreground CUDA HeartMuLa music form open · the selected GPU must be idle; prompt/lyrics stay in memory; no service is stopped automatically · run once with Ctrl+Enter".into()
+            } else if is_direct_cuda_profile(&profile) {
                 "Foreground CUDA native form open · the selected GPU must be idle; no service will be stopped automatically · run once with Ctrl+Enter".into()
             } else if is_direct_native_decision_profile(&profile) {
                 "Foreground native decision form open · request stays in memory; run once with Ctrl+Enter".into()
@@ -4829,6 +4850,7 @@ impl App {
         let cuda_native = catalog
             .inspect(request.profile())
             .is_some_and(is_direct_cuda_profile);
+        let music_request = is_direct_cuda_music_request(&catalog, &request);
         let task_label = if comfy_request {
             "Comfy workflow"
         } else if cuda_native {
@@ -4924,12 +4946,17 @@ impl App {
             return;
         }
 
-        let output_directory = if is_direct_breeze_speech_request(&request) || comfy_request {
+        let output_directory = if is_direct_breeze_speech_request(&request)
+            || music_request
+            || comfy_request
+        {
             match create_private_direct_output_directory(
                 &self.data_root,
                 job_id,
                 if comfy_request {
                     "comfy-job"
+                } else if music_request {
+                    "cuda-music-job"
                 } else if cuda_native {
                     "cuda-job"
                 } else {
@@ -5384,6 +5411,12 @@ impl App {
                     native.mode() == SpeechMode::VoiceDesign
                         && summary.lane == Lane::Media
                         && is_direct_breeze_profile_id(&summary.profile_id)
+                }
+                ("music", DirectRunResult::Music(native)) => {
+                    summary.lane == Lane::Media
+                        && summary.profile_id == "heartmula-music"
+                        && summary.cuda
+                        && !native.artifacts().is_empty()
                 }
                 ("embeddings", DirectRunResult::Embeddings(_)) => summary.lane == Lane::Language,
                 (_, DirectRunResult::Comfy(native)) => {
@@ -7359,7 +7392,7 @@ impl App {
         #[cfg(target_os = "linux")]
         let (action_text, action_title) = if show_direct_native {
             let text = self.direct_native_summary.as_ref().map_or_else(
-                || "Native decisions (CPU Nagi/Laya, hosted Jev, and explicitly selected CUDA Nagi/Laya), Breeze tts/clon/design (including completed streaming chunks), connected embeddings, and Comfy workflows run in one foreground job. CUDA requires the selected GPU to be idle; no service is stopped automatically. Comfy uses an existing server; operator manages GPU availability. No caller ID or coordinator for these tasks.\nf open task · c cancels an active run".to_owned(),
+                || "Native decisions (CPU Nagi/Laya, hosted Jev, and explicitly selected CUDA Nagi/Laya), CPU/CUDA Breeze tts/clon/design, HeartMuLa CUDA music, connected embeddings, and Comfy workflows run in one foreground job. CUDA requires the selected GPU to be idle; no service is stopped automatically. Comfy uses an existing server; operator manages GPU availability. No caller ID or coordinator for these tasks.\nf open task · c cancels an active run".to_owned(),
                 |summary| {
                     let operator_note = if summary.native_id.is_some() {
                         "\nExisting Comfy server · operator manages GPU availability"
@@ -7535,9 +7568,9 @@ impl App {
                 Constraint::Length(3),
             ])
             .split(area);
-        let form_hint = if editor.direct_breeze_speech
-            && is_direct_cuda_profile(&editor.profile_snapshot)
-        {
+        let form_hint = if editor.direct_native_music {
+            "HeartMuLa music · JSON argv only · prompt/lyrics stay in memory · GPU must be idle; no automatic service stop"
+        } else if editor.direct_breeze_speech && is_direct_cuda_profile(&editor.profile_snapshot) {
             "CUDA Breeze · GPU must be idle · no automatic service stop · tts/clon/design fields stay task-specific"
         } else if editor.direct_breeze_speech {
             "CPU Breeze · tts standard/streaming, clon reference, design instruction · no caller ID or coordinator"
@@ -8243,6 +8276,16 @@ fn is_direct_cuda_profile(_profile: &CatalogProfile) -> bool {
     false
 }
 
+#[cfg(target_os = "linux")]
+fn is_direct_cuda_music_profile(profile: &CatalogProfile) -> bool {
+    direct_run::is_supported_direct_music_profile(profile)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_direct_cuda_music_profile(_profile: &CatalogProfile) -> bool {
+    false
+}
+
 fn is_direct_cpu_speech_profile(profile: &CatalogProfile) -> bool {
     profile.key.lane == Lane::Media
         && profile.key.profile_id.as_str() == "breeze-tts-2-cpu"
@@ -8297,6 +8340,7 @@ fn is_direct_native_language_embeddings_profile(
 fn is_direct_native_profile(profile: &CatalogProfile, catalog: &Catalog) -> bool {
     is_direct_native_decision_profile(profile)
         || is_direct_breeze_speech_profile(profile)
+        || is_direct_cuda_music_profile(profile)
         || is_direct_cuda_profile(profile)
         || is_direct_comfy_workflow_profile(profile)
         || is_direct_native_language_embeddings_profile(profile, catalog)
@@ -8309,6 +8353,7 @@ fn direct_native_task_label(task: &str) -> &'static str {
         "tts" => "CPU speech",
         "clon" => "CPU voice clone",
         "design" => "CPU voice design",
+        "music" => "Music",
         "embeddings" => "Language embeddings",
         _ => "Foreground native task",
     }
@@ -8321,6 +8366,7 @@ fn direct_cuda_task_label(task: &str) -> &'static str {
         "tts" => "CUDA speech",
         "clon" => "CUDA voice clone",
         "design" => "CUDA voice design",
+        "music" => "CUDA music",
         _ => "CUDA native task",
     }
 }
@@ -8359,6 +8405,28 @@ fn is_direct_breeze_speech_request(request: &crate::control::requests::Inference
 }
 
 #[cfg(target_os = "linux")]
+fn is_direct_cuda_music_request(
+    catalog: &Catalog,
+    request: &crate::control::requests::InferenceRequest,
+) -> bool {
+    let crate::control::requests::InferenceRequest::Media {
+        profile,
+        input: crate::control::requests::MediaInput::Script { task, .. },
+    } = request
+    else {
+        return false;
+    };
+    task.as_str() == "music"
+        && request.task() == "music"
+        && profile.lane == Lane::Media
+        && profile.profile_id.as_str() == "heartmula-music"
+        && catalog
+            .inspect(profile)
+            .is_some_and(is_direct_cuda_music_profile)
+        && request.validate(catalog).is_ok()
+}
+
+#[cfg(target_os = "linux")]
 fn is_direct_comfy_workflow_request(
     catalog: &Catalog,
     request: &crate::control::requests::InferenceRequest,
@@ -8389,6 +8457,7 @@ fn direct_native_latency(result: &DirectRunResult) -> Option<Duration> {
     match result {
         DirectRunResult::Decision(result) => result.native_latency,
         DirectRunResult::Speech(_) => None,
+        DirectRunResult::Music(_) => None,
         DirectRunResult::Embeddings(_) => None,
         DirectRunResult::Comfy(_) => None,
     }
@@ -8397,7 +8466,7 @@ fn direct_native_latency(result: &DirectRunResult) -> Option<Duration> {
 #[cfg(target_os = "linux")]
 fn direct_native_artifact_refs(data_root: &Path, result: &DirectRunResult) -> Option<Vec<String>> {
     let (output_root, artifact_paths) = match result {
-        DirectRunResult::Speech(result) => (
+        DirectRunResult::Speech(result) | DirectRunResult::Music(result) => (
             result.output_root(),
             result
                 .artifacts()
@@ -8463,6 +8532,20 @@ fn direct_native_result_preview(result: &DirectRunResult) -> String {
                 format!(
                     "{:?}: {}",
                     artifact.kind(),
+                    result
+                        .output_root()
+                        .join(artifact.relative_path())
+                        .display()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        DirectRunResult::Music(result) => result
+            .artifacts()
+            .iter()
+            .map(|artifact| {
+                format!(
+                    "Music artifact: {}",
                     result
                         .output_root()
                         .join(artifact.relative_path())
@@ -9998,6 +10081,16 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    fn write_heartmula_music_media_manifest(fixture: &AppFixture) {
+        write_stack_fixture(fixture);
+        fs::write(
+            fixture.root.join("toolkits/l2m2/media-runtimes.json"),
+            r#"{"schema_version":1,"profiles":[{"id":"heartmula-music","name":"HeartMuLa music fixture","runtime":"audio.cpp","device":"cuda","tasks":["music"],"script":"media-models/generate-heartmula-music.sh"}]}"#,
+        )
+        .unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
     fn write_comfy_stack_fixture(fixture: &AppFixture) {
         write_stack_fixture(fixture);
         fs::write(
@@ -10258,6 +10351,73 @@ mod tests {
             .all(|line| !line.contains("private CUDA design instruction")));
         assert!(app.coordinator_workbench.is_none());
         assert!(app.direct_native_job.is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn heartmula_form_keeps_argv_ephemeral_and_uses_no_coordinator() {
+        let fixture = AppFixture::new();
+        write_heartmula_music_media_manifest(&fixture);
+        let mut app = fixture.app();
+
+        focus_stack_profile_by_id(&mut app, "heartmula-music");
+        let profile = app.selected_stack_profile().unwrap();
+        assert!(is_direct_cuda_music_profile(profile));
+        assert!(is_direct_cuda_profile(profile));
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+            .unwrap();
+
+        let editor = app.task_form_editor.as_mut().unwrap();
+        assert!(editor.direct_native_music);
+        assert!(editor.is_direct_native());
+        assert_eq!(editor.declared_tasks, ["music"]);
+        assert_eq!(editor.selected_task, Some(0));
+        assert!(!editor.fields.contains(&TaskFormField::RequestId));
+        assert!(!editor.fields.contains(&TaskFormField::DeclaredTask));
+        assert!(!editor.fields.contains(&TaskFormField::MediaOperation));
+        assert!(editor.fields.contains(&TaskFormField::MediaScriptArgv));
+        editor.values.script_argv =
+            r#"["--prompt","private music prompt","--lyrics","private lyrics"]"#.into();
+        let draft = editor.to_draft().unwrap();
+        assert!(!format!("{draft:?}").contains("private music prompt"));
+        assert!(!format!("{draft:?}").contains("private lyrics"));
+        let catalog = app.stack_catalog.as_ref().unwrap().clone();
+        let (request, _) = build_direct_native(&catalog, draft).unwrap();
+        let crate::control::requests::InferenceRequest::Media {
+            profile,
+            input: crate::control::requests::MediaInput::Script { task, args },
+        } = request
+        else {
+            panic!("HeartMuLa form builds a native media argv request")
+        };
+        assert_eq!(profile.profile_id.as_str(), "heartmula-music");
+        assert_eq!(task.as_str(), "music");
+        assert_eq!(
+            args,
+            [
+                "--prompt",
+                "private music prompt",
+                "--lyrics",
+                "private lyrics"
+            ]
+        );
+
+        assert!(app.status.contains("selected GPU must be idle"));
+        assert!(!app.status.contains("private music prompt"));
+        assert!(!app.status.contains("private lyrics"));
+        assert!(
+            app.log
+                .iter()
+                .all(|line| !line.contains("private music prompt")
+                    && !line.contains("private lyrics"))
+        );
+        assert!(app.job_history.records().is_empty());
+        assert!(app.direct_native_job.is_none());
+        assert!(app.coordinator_workbench.is_none());
+        let persisted =
+            fs::read_to_string(crate::state_store::jobs_path_in(&fixture.data)).unwrap_or_default();
+        assert!(!persisted.contains("private music prompt"));
+        assert!(!persisted.contains("private lyrics"));
     }
 
     #[cfg(target_os = "linux")]

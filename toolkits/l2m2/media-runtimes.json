@@ -50,6 +50,7 @@
       "id": "heartmula-music",
       "name": "HeartMuLa local music generation",
       "runtime": "audio.cpp",
+      "device": "cuda",
       "variant": "HeartMuLa-oss-3B Q8_0 GGUF, CUDA",
       "tasks": ["music"],
       "inputs": ["text", "lyrics"],

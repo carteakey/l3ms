@@ -300,6 +300,131 @@ pub fn prepare_breeze_speech_recipe_for_route(
     )
 }
 
+/// Prepare the declared HeartMuLa music script against the accepted CUDA route
+/// and append only the caller-owned output target. The script's native output
+/// aliases are not accepted from request arguments.
+pub(crate) fn prepare_heartmula_music_recipe_for_route(
+    catalog: &Catalog,
+    request: &InferenceRequest,
+    accepted_route: &ResolvedProfileRoute,
+    output_file: &std::path::Path,
+) -> Result<NativeCommandRecipe> {
+    ensure!(
+        is_supported_heartmula_request_route(request, accepted_route),
+        "request is not a supported HeartMuLa music route"
+    );
+    let mut recipe = prepare_native_command_for_route(catalog, request, accepted_route)?;
+    ensure!(
+        matches!(
+            &recipe.expectation,
+            NativeOutputExpectation::MediaScript { task } if task == "music"
+        ),
+        "HeartMuLa preparation did not resolve to the declared music script"
+    );
+    ensure!(
+        output_file.is_absolute(),
+        "music output target must be absolute"
+    );
+    ensure!(
+        output_file.file_name().and_then(|name| name.to_str()) == Some("result.wav"),
+        "music output target must use the fixed result filename"
+    );
+    recipe.argv.push(text_argument("--output")?);
+    recipe.argv.push(path_argument(output_file)?);
+    let output_directory = output_file
+        .parent()
+        .ok_or_else(|| anyhow!("music output target has no parent directory"))?;
+    recipe.argv.push(text_argument("--out-dir")?);
+    recipe.argv.push(path_argument(output_directory)?);
+    ensure_argv_budget(&recipe.executable, &recipe.argv)?;
+    Ok(recipe)
+}
+
+/// Shared shape-only admission for HeartMuLa wrapper arguments. Values remain
+/// opaque native input; this checks only the wrapper's supported option
+/// structure and mutually exclusive source fields.
+pub(crate) fn is_supported_heartmula_args(arguments: &[String]) -> bool {
+    // Prompt, tags, lyrics, duration, steps, seed, temperature, top-k,
+    // guidance, and instrumental. Aliases share their option slot.
+    let mut seen = [false; 10];
+    let mut has_prompt = false;
+    let mut has_lyrics = false;
+    let mut instrumental = false;
+    let mut index = 0;
+
+    while index < arguments.len() {
+        let (slot, takes_value) = match arguments[index].as_str() {
+            "--prompt" | "--text" | "--prompt-file" => (0, true),
+            "--tags" => (1, true),
+            "--lyrics" | "--lyrics-file" => (2, true),
+            "--duration" | "--duration-seconds" => (3, true),
+            "--steps" | "--num-inference-steps" => (4, true),
+            "--seed" => (5, true),
+            "--temperature" => (6, true),
+            "--top-k" => (7, true),
+            "--guidance-scale" => (8, true),
+            "--instrumental" => (9, false),
+            // In particular, output controls, help, backend overrides, the
+            // option delimiter, and all unknown flags are never caller-owned.
+            _ => return false,
+        };
+        if seen[slot] {
+            return false;
+        }
+        seen[slot] = true;
+        if takes_value {
+            let Some(value) = arguments.get(index + 1) else {
+                return false;
+            };
+            if value.is_empty() || value.contains('\0') || value.starts_with("--") {
+                return false;
+            }
+            match slot {
+                0 => has_prompt = true,
+                2 => has_lyrics = true,
+                _ => {}
+            }
+            index += 2;
+        } else {
+            instrumental = true;
+            index += 1;
+        }
+    }
+
+    has_prompt && !(instrumental && has_lyrics)
+}
+
+pub(crate) fn is_supported_heartmula_request_route(
+    request: &InferenceRequest,
+    route: &ResolvedProfileRoute,
+) -> bool {
+    let InferenceRequest::Media {
+        profile,
+        input: MediaInput::Script { task, args },
+    } = request
+    else {
+        return false;
+    };
+    let NativeRoute::MediaScript { path } = &route.native_route else {
+        return false;
+    };
+    profile == &route.profile
+        && profile.lane == Lane::Media
+        && profile.profile_id.as_str() == "heartmula-music"
+        && task.as_str() == "music"
+        && route.runtime.lane == Lane::Media
+        && route.runtime.as_str() == "audio.cpp"
+        && route.device.as_ref() == Some(&Device::Cuda)
+        && route
+            .tasks
+            .iter()
+            .any(|declared| declared.as_str() == "music")
+        && path.ends_with(std::path::Path::new(
+            "media-models/generate-heartmula-music.sh",
+        ))
+        && is_supported_heartmula_args(args)
+}
+
 fn breeze_recipe_with_output(
     mut recipe: NativeCommandRecipe,
     output_directory: &std::path::Path,
@@ -898,6 +1023,114 @@ mod tests {
             .iter()
             .map(|arg| arg.as_os_str().to_string_lossy().into_owned())
             .collect()
+    }
+
+    #[test]
+    fn heartmula_argument_admission_is_an_exact_wrapper_allowlist() {
+        for accepted in [
+            vec!["--prompt", "soft ambient music"],
+            vec!["--text", "soft ambient music", "--instrumental"],
+            vec!["--prompt-file", "lyrics/prompt.txt", "--tags", "ambient"],
+            vec!["--prompt", "song", "--lyrics-file", "lyrics.txt"],
+            vec![
+                "--prompt",
+                "song",
+                "--duration-seconds",
+                "30",
+                "--num-inference-steps",
+                "10",
+                "--seed",
+                "42",
+                "--temperature",
+                "1.0",
+                "--top-k",
+                "50",
+                "--guidance-scale",
+                "1.5",
+            ],
+        ] {
+            assert!(is_supported_heartmula_args(
+                &accepted.into_iter().map(str::to_owned).collect::<Vec<_>>()
+            ));
+        }
+
+        for rejected in [
+            vec![],
+            vec!["--prompt"],
+            vec!["--prompt", ""],
+            vec!["--prompt", "--instrumental"],
+            vec!["--prompt", "song", "--prompt-file", "prompt.txt"],
+            vec!["--prompt", "song", "--text", "another song"],
+            vec!["--prompt", "song", "--lyrics", "words", "--instrumental"],
+            vec!["--prompt", "song", "--lyrics"],
+            vec!["--prompt", "song", "--duration"],
+            vec!["--prompt", "song", "--output", "/tmp/arbitrary.wav"],
+            vec!["--prompt", "song", "--out", "/tmp/arbitrary.wav"],
+            vec!["--prompt", "song", "--out-dir", "/tmp/arbitrary"],
+            vec!["--prompt", "song", "--help"],
+            vec!["--prompt", "song", "--"],
+            vec!["--prompt", "song", "--backend", "cuda"],
+            vec!["--prompt", "song", "--other", "value"],
+        ] {
+            assert!(
+                !is_supported_heartmula_args(
+                    &rejected.into_iter().map(str::to_owned).collect::<Vec<_>>()
+                ),
+                "accepted unsupported HeartMuLa argument shape"
+            );
+        }
+    }
+
+    #[test]
+    fn heartmula_recipe_pins_both_script_output_controls_to_private_target() {
+        let fixture = Fixture::new(
+            "heartmula-music",
+            "media-models/generate-heartmula-music.sh",
+            &["music"],
+        );
+        fixture.write_media_script("media-models/generate-heartmula-music.sh");
+        let manifest_path = fixture.media_root.join("media-runtimes.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["profiles"][0]["device"] = Value::String("cuda".into());
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let catalog = fixture.catalog();
+        let request = InferenceRequest::Media {
+            profile: key(Lane::Media, "heartmula-music"),
+            input: MediaInput::Script {
+                task: super::super::catalog::Task::new("music").unwrap(),
+                args: vec!["--prompt".into(), "fixture song".into()],
+            },
+        };
+        let accepted = resolve_profile_route(&catalog, request.profile()).unwrap();
+        assert!(is_supported_heartmula_request_route(&request, &accepted));
+        let output = fixture._parent.path().join("private-job/result.wav");
+        let recipe =
+            prepare_heartmula_music_recipe_for_route(&catalog, &request, &accepted, &output)
+                .unwrap();
+        let argv = argv_strings(&recipe);
+        assert_eq!(
+            &argv[argv.len() - 4..],
+            [
+                "--output",
+                output.to_str().unwrap(),
+                "--out-dir",
+                output.parent().unwrap().to_str().unwrap(),
+            ]
+        );
+        let mut wrong_device = accepted;
+        wrong_device.device = Some(Device::Cpu);
+        assert!(!is_supported_heartmula_request_route(
+            &request,
+            &wrong_device
+        ));
+        assert!(prepare_heartmula_music_recipe_for_route(
+            &catalog,
+            &request,
+            &wrong_device,
+            &output,
+        )
+        .is_err());
     }
 
     fn speech_request(profile: &str, mode: SpeechMode, fixture: &Fixture) -> InferenceRequest {

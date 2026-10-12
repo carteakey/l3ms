@@ -8,6 +8,41 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
+## HeartMuLa native music integration — 2026-10-12
+
+Declared `media:heartmula-music` now routes through the existing native command
+recipe, process runner, foreground UI owner and explicit idle-GPU window. Its
+existing CUDA requirement is explicit in the manifest (snapshotted first).
+Standalone script flags/defaults are unchanged; no model or environment installed.
+
+Strict JSON `{"args":[...]}` retains native argv boundaries. Shared flag-shape
+validation refuses caller output/backend/help controls and conflicting/missing
+values; numeric interpretation remains native. Both native output file and
+directory are pinned to the existing private job root, including environment
+defaults. Existing WAV validation is reused. `Music` results have artifact paths,
+not a speech-mode or raw-log payload; prompt/lyrics/argv stay out of history/logs.
+No inference retry, fallback, service takeover, new module, worker or daemon.
+
+Five model-free HeartMuLa fixtures and the CLI input/launcher regression pass.
+The real CLI accepts the declared music route but, with GPU config unset, exits
+1 before native dispatch. Fixture: `/tmp/l3ms-heartmula-cli-ciXBqq`; no artifacts
+or service changes. The smoke caught and corrected a duplicated CLI task list;
+spec validation and launch now share the same lane selector.
+
+Root build/strict Clippy/fmt pass. Full suite **798 passed, 102 socket failures,
+1 ignored**; failure names match the preceding idle-GPU checkpoint's socket-only
+run. Existing GPU error-category fixture flake remains open, not fixed or hidden.
+Logs: `/tmp/l3ms-heartmula-{focused,cli-tests,tests-final,clippy,build}.log`.
+Standalone L2M2: six Rust, 17 media and 14 downloader tests plus lint/fmt pass.
+Site: 11 generator tests and DOM fixtures pass; source links regenerated without
+changing language ranking or publishing the branch.
+
+Source delta **+783 lines**, including fixtures; cumulative **+4,646** against
+`702b4cd`. Control source **61,291 lines** versus 60,729 baseline: the reduction
+target remains unmet. This adds one native leaf route, not a new engine framework.
+Real HeartMuLa/WAV/GPU and interactive acceptance remain unverified. Next: H3,
+LTX and scoped Blender contracts, live handoff/restoration, then broader deletion.
+
 ## Native idle-GPU path and CPU worker retirement — 2026-10-12
 
 CUDA-local Nagi/Laya and exact Breeze speech profiles now share CLI/TUI native

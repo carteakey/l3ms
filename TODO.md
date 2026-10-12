@@ -10,6 +10,13 @@ existing Linear migration issues rather than replacing their acceptance criteria
 
 ## Monorepo: next work
 
+HeartMuLa music now uses the shared native foreground/GPU-window path with
+native argv, controlled private WAV outputs and payload-free history. Model-free
+execution/form/CLI fixtures pass; real music generation is not accepted yet.
+Remaining native script ports: H3 multi-artifact video/audio, LTX and bounded
+Blender workflows. Reuse their actual contracts, not a generic engine framework.
+Live GPU/HTTP acceptance, handoff/restoration and broader deletion remain open.
+
 Latest: CUDA Nagi/Laya and Breeze forms now share the foreground runner through
 an explicit idle-GPU operator window. Existing locks/probes plus one recovery
 marker, no new daemon/service takeover. Guard/form fixtures pass; cached-weight

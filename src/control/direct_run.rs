@@ -23,8 +23,9 @@ use super::decision::{
 use super::gpu_probe::{GpuProbeConfig, NvidiaSmiGpuProbe};
 use super::language::{DispatchDisposition, LanguageAdapter, LanguageErrorKind, LanguageFailure};
 use super::media_execution::{
-    execute_breeze_speech_on_cpu, execute_breeze_speech_on_device, is_supported_cpu_breeze_route,
-    MediaExecutionErrorKind, MediaExecutionFailure, MediaExecutionResult,
+    execute_breeze_speech_on_cpu, execute_breeze_speech_on_device,
+    execute_heartmula_music_on_device, is_supported_cpu_breeze_route, MediaExecutionErrorKind,
+    MediaExecutionFailure, MediaExecutionResult,
 };
 use super::ownership::CoordinatorLock;
 use super::process::{ProcessFailureDisposition, ProcessFailureKind};
@@ -41,6 +42,7 @@ const PROCESS_RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 pub enum DirectRunResult {
     Decision(NativeDecisionResult),
     Speech(MediaExecutionResult),
+    Music(MediaExecutionResult),
     Embeddings(EmbeddingPayload),
     Comfy(NativeComfyResult),
 }
@@ -430,6 +432,7 @@ pub fn run_native(
                 | SpeechMode::Streaming
         )
     );
+    let is_music = matches!(request, InferenceRequest::Media { input: MediaInput::Script { task, .. }, .. } if task.as_str() == "music");
     let (language, comfy, cuda) = match connection {
         Some(DirectConnection::Language(adapter)) => (Some(adapter), None, None),
         Some(DirectConnection::Cuda(device)) => (None, None, Some(device)),
@@ -442,7 +445,7 @@ pub fn run_native(
         InferenceRequest::Decision { .. } => {
             speech_output_directory.is_none() && language.is_none() && comfy.is_none()
         }
-        InferenceRequest::Media { .. } if is_breeze_speech => {
+        InferenceRequest::Media { .. } if is_breeze_speech || is_music => {
             speech_output_directory.is_some() && language.is_none() && comfy.is_none()
         }
         InferenceRequest::Media { .. } if is_comfy_workflow => {
@@ -549,6 +552,27 @@ pub fn run_native(
                 .map(DirectRunResult::Decision)
                 .map_err(|error| execution_error(error, context))
         }
+    } else if is_music {
+        let profile = catalog
+            .inspect(request.profile())
+            .expect("validated refreshed profile");
+        if !is_supported_direct_music_profile(profile) || cuda.is_none() {
+            return Err(DirectRunError::new(
+                DirectRunErrorKind::UnsupportedRoute,
+                ProcessFailureDisposition::NoChildSpawned,
+            ));
+        }
+        execute_heartmula_music_on_device(
+            &catalog,
+            request,
+            &route,
+            cuda.expect("validated CUDA device"),
+            speech_output_directory.expect("validated music output directory"),
+            context,
+            recovery,
+        )
+        .map(DirectRunResult::Music)
+        .map_err(|error| media_execution_error(error, context))
     } else if is_breeze_speech {
         if is_supported_cpu_breeze_route(request, &route) {
             if cuda.is_some() {
@@ -871,7 +895,21 @@ pub(crate) fn is_supported_cuda_breeze_profile(profile: &CatalogProfile) -> bool
 /// Whether a profile has one of the direct CUDA implementations. The caller
 /// must still apply its operator-selected device and admission checks.
 pub(crate) fn is_supported_direct_cuda_profile(profile: &CatalogProfile) -> bool {
-    is_supported_cuda_direct_decision_profile(profile) || is_supported_cuda_breeze_profile(profile)
+    is_supported_cuda_direct_decision_profile(profile)
+        || is_supported_cuda_breeze_profile(profile)
+        || is_supported_direct_music_profile(profile)
+}
+
+pub(crate) fn is_supported_direct_music_profile(profile: &CatalogProfile) -> bool {
+    !profile.disabled
+        && profile.key.lane == Lane::Media
+        && profile.key.profile_id.as_str() == "heartmula-music"
+        && profile.runtime.lane == Lane::Media
+        && profile.runtime.as_str() == "audio.cpp"
+        && profile.device.as_ref() == Some(&Device::Cuda)
+        && profile.tasks.iter().any(|task| task.as_str() == "music")
+        && matches!(&profile.native_source, NativeProfileSource::Media { script }
+            if script == "media-models/generate-heartmula-music.sh")
 }
 
 fn is_supported_cuda_breeze_route(

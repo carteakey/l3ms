@@ -61,7 +61,7 @@ struct Cli {
     #[arg(long, value_name = "NAMESPACED_ID", requires_all = ["task", "input"])]
     run_profile: Option<String>,
 
-    /// Declared task name (decision, tts, clon, design, image, video, or embeddings) required by --run-profile.
+    /// Declared task name (decision, tts, clon, design, music, image, video, or embeddings) required by --run-profile.
     #[arg(long, value_name = "TASK", requires = "run_profile")]
     task: Option<String>,
 
@@ -69,7 +69,7 @@ struct Cli {
     #[arg(long, value_name = "PATH", requires = "run_profile")]
     input: Option<PathBuf>,
 
-    /// Existing private empty output directory required for speech and Comfy workflows.
+    /// Existing private empty output directory required for speech, music and Comfy workflows.
     #[arg(long, value_name = "PATH", requires = "run_profile")]
     output_dir: Option<PathBuf>,
 
@@ -215,6 +215,12 @@ struct DirectSpeechInput {
     mode: DirectSpeechMode,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectMusicInput {
+    args: Vec<String>,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum DirectSpeechMode {
@@ -351,20 +357,15 @@ fn direct_native_spec(cli: &Cli) -> Result<Option<DirectNativeSpec<'_>>> {
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("--run-profile requires --input"))?;
     let output_dir = cli.output_dir.as_deref();
-    match (task, output_dir) {
-        ("decision", None)
-        | ("embeddings", None)
-        | ("tts" | "clon" | "design" | "image" | "video", Some(_)) => {}
-        ("decision" | "embeddings", Some(_)) => {
-            bail!("--output-dir is only valid with speech or Comfy workflow tasks")
+    match (direct_native_task_lane(task)?, output_dir) {
+        (crate::control::catalog::Lane::Media, Some(_)) => {}
+        (crate::control::catalog::Lane::Media, None) => {
+            bail!("--output-dir is required with speech, music and Comfy workflow tasks")
         }
-        ("tts" | "clon" | "design" | "image" | "video", None) => {
-            bail!("--output-dir is required with speech and Comfy workflow tasks")
+        (_, Some(_)) => {
+            bail!("--output-dir is only valid with speech, music or Comfy workflow tasks")
         }
-        (_, Some(_)) => bail!("--output-dir is only valid with speech or Comfy workflow tasks"),
-        _ => bail!(
-            "--run-profile supports only --task decision, --task tts, --task clon, --task design, --task image, --task video, or --task embeddings"
-        ),
+        (_, None) => {}
     }
     let timeout_ms = cli
         .task_timeout_ms
@@ -379,6 +380,16 @@ fn direct_native_spec(cli: &Cli) -> Result<Option<DirectNativeSpec<'_>>> {
         output_dir,
         timeout_ms,
     }))
+}
+
+fn direct_native_task_lane(task: &str) -> Result<crate::control::catalog::Lane> {
+    use crate::control::catalog::Lane;
+    match task {
+        "decision" => Ok(Lane::Decisions),
+        "embeddings" => Ok(Lane::Language),
+        "tts" | "clon" | "design" | "music" | "image" | "video" => Ok(Lane::Media),
+        _ => bail!("unsupported native task; see --help"),
+    }
 }
 
 fn coordinator_options_present(cli: &Cli) -> bool {
@@ -1613,14 +1624,7 @@ fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
         .profile
         .parse::<crate::control::catalog::ProfileKey>()
         .map_err(|_| anyhow::anyhow!("--run-profile must be a valid namespaced profile ID"))?;
-    let expected_lane = match spec.task {
-        "decision" => crate::control::catalog::Lane::Decisions,
-        "tts" | "clon" | "design" | "image" | "video" => crate::control::catalog::Lane::Media,
-        "embeddings" => crate::control::catalog::Lane::Language,
-        _ => bail!(
-            "--run-profile supports only --task decision, --task tts, --task clon, --task design, --task image, --task video, or --task embeddings"
-        ),
-    };
+    let expected_lane = direct_native_task_lane(spec.task)?;
     if profile.lane != expected_lane {
         bail!("--run-profile profile lane does not match --task");
     }
@@ -1694,6 +1698,10 @@ fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
         DirectNativeInput::Embeddings(input) => (
             crate::control::task_form::TaskFields::LanguageEmbeddings { input: input.input },
             None,
+        ),
+        DirectNativeInput::Music(input) => (
+            crate::control::task_form::TaskFields::MediaScript { args: input.args },
+            spec.output_dir,
         ),
     };
     let draft = crate::control::task_form::TaskFormDraft::new(
@@ -1771,6 +1779,15 @@ fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
         crate::control::direct_run::DirectRunResult::Speech(result) => {
             direct_speech_output_json(&result)?
         }
+        crate::control::direct_run::DirectRunResult::Music(result) => {
+            let response = serde_json::json!({"artifacts": direct_wave_artifact_outputs(&result)});
+            let mut writer = BoundedJsonWriter::new(MAX_DIRECT_NATIVE_OUTPUT_BYTES);
+            serde_json::to_writer(&mut writer, &response).map_err(|_| {
+                anyhow::anyhow!("native music output could not be encoded within its bound")
+            })?;
+            String::from_utf8(writer.bytes)
+                .map_err(|_| anyhow::anyhow!("native music output could not be encoded"))?
+        }
         crate::control::direct_run::DirectRunResult::Embeddings(result) => {
             direct_embedding_output_json(&result)?
         }
@@ -1808,6 +1825,7 @@ enum DirectNativeInput {
     VoiceDesign(DirectVoiceDesignInput),
     ComfyWorkflow(serde_json::Value),
     Embeddings(DirectEmbeddingInput),
+    Music(DirectMusicInput),
 }
 
 #[cfg(target_os = "linux")]
@@ -1848,8 +1866,13 @@ fn read_direct_native_input(path: &Path, task: &str) -> Result<DirectNativeInput
         "embeddings" => parse_direct_embedding_input(&bytes)
             .map(DirectNativeInput::Embeddings)
             .map_err(|error| anyhow::anyhow!(error.to_string())),
+        "music" => {
+            if bytes.len() > MAX_DIRECT_NATIVE_INPUT_BYTES { bail!("native input exceeds the 1 MiB limit"); }
+            serde_json::from_slice(&bytes).map(DirectNativeInput::Music)
+                .map_err(|_| anyhow::anyhow!("native music input is invalid"))
+        }
         _ => bail!(
-            "--run-profile supports only --task decision, --task tts, --task clon, --task design, --task image, --task video, or --task embeddings"
+            "--run-profile supports only --task decision, --task tts, --task clon, --task design, --task music, --task image, --task video, or --task embeddings"
         ),
     }
 }
@@ -1904,7 +1927,13 @@ struct DirectSpeechArtifactOutput {
 fn direct_speech_output_json(
     result: &crate::control::media_execution::MediaExecutionResult,
 ) -> Result<String> {
-    let artifacts = result
+    direct_speech_output_parts_json(result.mode(), direct_wave_artifact_outputs(result))
+}
+
+fn direct_wave_artifact_outputs(
+    result: &crate::control::media_execution::MediaExecutionResult,
+) -> Vec<DirectSpeechArtifactOutput> {
+    result
         .artifacts()
         .iter()
         .map(|artifact| DirectSpeechArtifactOutput {
@@ -1916,8 +1945,7 @@ fn direct_speech_output_json(
                 }
             },
         })
-        .collect();
-    direct_speech_output_parts_json(result.mode(), artifacts)
+        .collect()
 }
 
 fn direct_speech_output_parts_json(
@@ -3827,4 +3855,59 @@ mod tests {
         assert_eq!(dispatch(cli).unwrap(), 0);
         server.join().unwrap();
     }
+}
+#[cfg(target_os = "linux")]
+#[test]
+fn direct_music_input_and_output_requirement_are_explicit() {
+    let valid: DirectMusicInput = serde_json::from_slice(
+        br#"{"args":["--prompt","ambient music","--instrumental","--seed","42"]}"#,
+    )
+    .unwrap();
+    assert_eq!(valid.args[1], "ambient music");
+    for invalid in [
+        br#"{"args":"--prompt x"}"#.as_slice(),
+        br#"{"args":[],"simulate":true}"#.as_slice(),
+        br#"{}"#.as_slice(),
+    ] {
+        assert!(serde_json::from_slice::<DirectMusicInput>(invalid).is_err());
+    }
+    let cli = Cli::try_parse_from([
+        "l3ms",
+        "--run-profile",
+        "media:heartmula-music",
+        "--task",
+        "music",
+        "--input",
+        "music.json",
+        "--output-dir",
+        "/private/new-job",
+    ])
+    .unwrap();
+    assert_eq!(direct_native_spec(&cli).unwrap().unwrap().task, "music");
+    let missing = Cli::try_parse_from([
+        "l3ms",
+        "--run-profile",
+        "media:heartmula-music",
+        "--task",
+        "music",
+        "--input",
+        "music.json",
+    ])
+    .unwrap();
+    assert!(direct_native_spec(&missing).is_err());
+    let fixture = tempfile::tempdir().unwrap();
+    let missing_input = fixture.path().join("missing.json");
+    let request = DirectNativeSpec {
+        profile: "media:heartmula-music",
+        task: "music",
+        input: &missing_input,
+        output_dir: Some(fixture.path()),
+        timeout_ms: 5000,
+    };
+    // Exercise the real launcher lane selection, not only clap/spec parsing;
+    // missing input must stop it before settings, GPU queries or execution.
+    assert_eq!(
+        run_direct_native(&request).unwrap_err().to_string(),
+        "native input file is unavailable"
+    );
 }

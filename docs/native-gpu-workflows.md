@@ -1,6 +1,6 @@
 # Explicit idle-GPU native work
 
-CUDA-local Nagi/Laya decisions and `media:breeze-tts-2` speech now use the same
+CUDA-local Nagi/Laya decisions, `media:breeze-tts-2` speech and HeartMuLa music use the same
 foreground runner as CPU work. This is an **operator-managed idle window**, not
 automatic switching of a live router. No service is adopted, stopped, installed
 or restored automatically. Original standalone commands remain available.
@@ -49,6 +49,32 @@ completed streaming chunks; see [CPU/native input shapes](cpu-native-workflows.m
 Completed chunks are not live playback. The selected runtime and weights must
 already be installed; there are no implicit downloads or simulated decisions.
 SemIf/OpenJev and unrelated media scripts are not admitted by this path.
+
+### HeartMuLa music
+
+```sh
+l3ms --run-profile media:heartmula-music --task music --input music.json --output-dir /absolute/private/fresh-output
+```
+
+`music.json` contains a native argv array, not a shell command:
+
+```json
+{"args":["--prompt","short ambient instrumental music","--instrumental","--duration","5","--seed","42"]}
+```
+
+The wrapper supports the script's prompt/text/file, tags, lyrics/file,
+instrumental, duration, steps, seed, temperature, top-k and guidance options.
+Incomplete/duplicate/conflicting options, unknown flags, help, backend and all
+output overrides are refused. Numeric interpretation remains native; original
+standalone commands retain their behavior. The shared runner supplies both
+output file and directory, so environment defaults cannot create an unrelated
+output directory. The final WAV is validated using the existing PCM/float audio
+checks, returned under `artifacts`, and shown by path in the UI. Music has no
+speech-mode field. Prompts, lyrics and argv stay out of status/log/history.
+
+This integration has model-free native-script fixtures, not real HeartMuLa
+generation or music-quality acceptance. GPU inference/release, installed native
+WAV compatibility and interactive acceptance still need a live test.
 
 ## What the wrapper checks
 

@@ -286,7 +286,7 @@ work has finished; query the same request ID for its terminal status. Service
 installation and general GPU/media dispatch remain gated by migration acceptance.
 CPU-local decisions use `--run-profile` or the Stack Catalog typed form (`f`)
 directly, without a daemon; see [native CPU workflows](docs/cpu-native-workflows.md).
-Declared CUDA Nagi/Laya and Breeze use the same runner with an
+Declared CUDA Nagi/Laya, Breeze and HeartMuLa music use the same runner with an
 [explicit operator-managed idle GPU window](docs/native-gpu-workflows.md),
 not automatic takeover of a live service.
 Stack observe/output (`o`) and cancel (`c`) remain available for retained jobs.
