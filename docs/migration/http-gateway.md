@@ -1,9 +1,15 @@
-# Explicit loopback HTTP gateway
+# Retired HTTP gateway — historical contract
 
-The Linux foreground action `l3ms --coordinator-http-gateway /absolute/gateway.json`
-forwards one authenticated HTTP request to an already running private coordinator.
-It does not install/start a daemon or engine, choose a model, download weights,
-or bypass coordinator admission. Standalone commands and normal startup are unchanged.
+`--coordinator-http-gateway` is no longer accepted. Its CLI launcher and custom
+HTTP transport modules were removed under the [simplification plan](simplification-plan.md).
+Native workflows use their configured engine endpoints; no replacement proxy is
+provided. Retained private coordinator actions, original standalone commands and
+live services are unchanged. Earlier implementation remains recoverable in Git.
+
+## Historical contract (not supported by the current branch)
+
+The following describes the retired pilot for historical evidence only. Do not
+use these configuration or request instructions with the current executable.
 
 The strict configuration must be a current-user-owned, single-link regular file
 with mode 0600, at most 16 KiB. Supply every field; unknown fields are refused:

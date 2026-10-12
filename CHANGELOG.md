@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Breaking changes
+- Retire branch-added `--coordinator-http-gateway`, its launcher and custom HTTP
+  transport. Direct workflows use native engine endpoints; retained private
+  coordinator actions and original standalone tools are unchanged. No proxy
+  replacement, service change or permanent cutover is introduced.
 - Retire branch-added generic `--request-submit` envelope-file submission and
   the Stack Catalog `s` action. Use typed forms (`f`) for remaining coordinator
   tasks or `--run-profile` for supported direct CPU tasks. Keep observe/cancel,

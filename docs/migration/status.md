@@ -8,7 +8,35 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
-## Current native Comfy checkpoint — 2026-10-12
+## Current gateway retirement checkpoint — 2026-10-12
+
+Removed the branch-added `--coordinator-http-gateway` action, launcher and custom
+HTTP transport (`http_launch.rs`, `http_gateway.rs`). Callsite tracing found only
+the gateway's CLI entry; native adapters, remaining private coordinator callers
+and original standalone tools do not depend on it. No replacement proxy or
+service mutation was introduced. Removed source is recoverable from Git.
+
+Compile/build, strict all-target Clippy, formatting and retired-flag regression
+pass; the built executable rejects the flag before opening its configuration.
+Full suite: **781 passed, 108 transport failures, 1 ignored**. The count decreased
+because the gateway and its tests were removed, not because sockets now work;
+failure-name comparison shows exactly the 13 retired gateway failures disappeared
+and all other failures are unchanged. Native transport/live acceptance stays open.
+
+This cut removes **1,762 net root source lines**, including tests, and two modules;
+cumulative delta against `702b4cd` is **+4,422**. Control scope is **61,898 lines**
+versus the 60,729 baseline: the larger half-size target remains unfinished.
+Remaining coordinator forms still cover native GPU/hosted tasks not yet moved;
+replace those callers and GPU lifecycle before retiring their dependency closure.
+
+Caller audit identifies CUDA Nagi/Laya/OpenJev and hosted Jev/SystemOne decisions,
+script-backed MiniMax H3/LTX/HeartMuLa/Blender, and CUDA Breeze cloning/streaming
+as remaining native replacement work. Existing native scripts remain available,
+but that alone is not integrated UI or GPU-switching acceptance. Active language
+chat already hands off to Chat; embeddings need an explicitly enabled endpoint
+profile (the stock embedding YAML entry remains commented out).
+
+## Previous native Comfy checkpoint — 2026-10-12
 
 Declared Comfy workflow forms and image/video CLI tasks now share the existing
 adapter and foreground worker, without coordinator submission. A fresh native
@@ -576,7 +604,7 @@ CAR-220 Phase 9, and CAR-221 Phase 10.
 | 4. Shared contracts | In development | Read-only catalog and offline `l3ms --list stack`, layered settings, existing-store job metadata, and typed lane request/result validation are on the branch. Adapter contracts and full compatibility/live release gates remain; release stays gated by Phase 3. |
 | 5. Runtime adapters | In development | Concrete bounded language execution, ComfyUI job handling, CPU-local decision supervision, Breeze speech execution/artifact validation, and inert generic media recipes pass fixtures. Private language/Comfy Unix HTTP transport also passes native fixtures. General lifecycle/admission, GPU release, real TTS/decision pilots, and user-facing switching remain pending. |
 | 6. Local coordinator | In development | Durable queue, ownership locks, v1 control/v2 native result pages, one-shot CLI Submit and opt-in foreground CPU-local decision dispatch pass offline fixtures. Current CUDA profiles remain gated. General managed-engine/media dispatch, installation, server-pushed streaming and real cross-client acceptance remain pending. |
-| 7. HTTP ingress | In development | Bounded authenticated loopback gateway forwards to the same coordinator; native framing, cancellation and lost-ack/no-retry fixtures pass. Installed/live multi-client acceptance remains pending. |
+| 7. HTTP ingress | Retired | Branch-added gateway and launcher removed on 2026-10-12 under the simplification plan; native endpoints remain. Historical pilot fixtures are not live acceptance. |
 | 8. Unified workbench | In development | Three-lane Stack Catalog shares settings and has opt-in strict-file submit/observe/cancel with retained IDs and private native output. Full task-form parity and live managed routing remain pending. |
 | 9. Public site | In development | Separate language, media/TTS and decision views derive from native manifests. Ten data/contrast tests, DOM fixtures and real Firefox desktop/mobile click/keyboard/focus/layout checks pass, including the Signal / 03 style. Comprehensive accessibility and publication/export gates remain pending. |
 | 10. Final acceptance | Pending | Live gates and old-path retirement review. |
@@ -907,7 +935,7 @@ tests, 14 decision safety Python tests, 14 imported downloader tests, six site
 data tests and shipped-JavaScript DOM fixtures. These do not load models or
 replace real browser visual/mobile/accessibility acceptance.
 
-### 2026-10-05 — authenticated loopback ingress checkpoint
+### 2026-10-05 — authenticated loopback ingress checkpoint (retired 2026-10-12)
 
 The explicit `--coordinator-http-gateway` action reads a strict private 0600
 configuration, binds only loopback, and forwards one native v1/v2 request per

@@ -10,6 +10,14 @@ existing Linear migration issues rather than replacing their acceptance criteria
 
 ## Monorepo: next work
 
+Latest simplification cut: remove the branch-added HTTP gateway CLI/launcher/
+transport, **1,762 net source lines and two modules**. Build/lint/fmt and actual
+retired-flag rejection pass. Full suite: **781 pass, 108 socket/transport failures,
+1 ignored**; the 13 fewer failures are removed gateway tests, not repaired
+transport. Cumulative source delta is **+4,422**, so substantial deletion remains.
+Native GPU/hosted form replacement and simple GPU lifecycle still gate broader
+coordinator retirement. See [current evidence](docs/migration/status.md).
+
 Native Comfy implementation now reuses the adapter and foreground worker for
 declared graphs, scoped cancellation and private flat-file downloads. No services
 or GPU lifecycle are managed. Build/strict Clippy/fmt and local fixtures pass;
@@ -48,6 +56,11 @@ Next gates:
 - [ ] Replace remaining native media/GPU form callers, then delete their
   coordinator dependency closure. Keep existing workflows until replacements pass;
   do not expand the managed daemon.
+  Remaining declared routes: CUDA Nagi/Laya/OpenJev and hosted Jev/SystemOne;
+  MiniMax H3, LTX, HeartMuLa, CUDA Breeze including cloning/streaming, and Blender.
+  Use their existing scripts/recipes with the same foreground owner, not another
+  engine framework. Explicit GPU service switching and real acceptance remain
+  prerequisites for claiming integrated GPU operation.
 
 Keep this a thin wrapper: Comfy uses the existing adapter and foreground worker,
 opaque native workflow JSON and ordinary private output files. No new service,
@@ -244,11 +257,9 @@ than treating unresolved records as implicitly safe to retry.
   explicit observations pass fixtures without resubmission or automatic polling.
   Connect them to managed dispatch, task-aware artifact access and visible runtime recovery/status;
   native envelope forwarding and JSON output panels alone are not full parity.
-- [ ] Add HTTP ingress to that coordinator only after local operation is proven;
-  verify authentication and cancellation/reconnect behavior across clients.
-  Explicit bounded loopback gateway and strict private foreground configuration
-  pass native v1/v2, authentication, framing, deadlines and lost-ack/no-retry
-  fixtures. Installed/live multi-client and managed-runtime acceptance remain.
+- Historical HTTP ingress pilot: retired on 2026-10-12 under the simplification
+  plan. Its gateway/launcher were removed rather than requiring another proxy;
+  native endpoints and retained private coordinator actions remain unchanged.
 
 ### Live acceptance and publication — CAR-216 / CAR-220 / CAR-221
 

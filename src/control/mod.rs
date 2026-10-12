@@ -34,10 +34,6 @@ pub mod engine_transport;
 pub(crate) mod foreground_shutdown;
 #[cfg(target_os = "linux")]
 pub mod gpu_probe;
-#[cfg(target_os = "linux")]
-pub mod http_gateway;
-#[cfg(target_os = "linux")]
-pub mod http_launch;
 pub mod inference;
 pub mod ipc;
 pub mod language;

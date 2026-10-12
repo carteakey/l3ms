@@ -221,8 +221,9 @@ durable mixed-runtime crash recovery remains a prerequisite for deployment.
 
 Breeze result pages and durable history carry relative `LocalJob` references
 prefixed by the private job-directory name, not private absolute paths.
-The HTTP gateway now forwards additive v3 read-only artifact envelopes through
-the same authenticated `/v1/coordinator` route. Managed Comfy/Breeze publication
+The HTTP gateway and `/v1/coordinator` route were retired on 2026-10-12; v3
+artifact envelopes remain available only through the retained private IPC path.
+Managed Comfy/Breeze publication
 moves pinned file handles to the main thread after release, and appends their
 references transactionally; a failed append drops the new handles. Reads require
 durable `Succeeded` status and retained result availability. Exact request/kind/
@@ -295,8 +296,8 @@ Exclusive coordinated ingress is valid only while engines and their children
 remain inside the owned private namespace and access is restricted to the captured
 coordinator. The running legacy service is not fenced by a coordinator lock;
 legacy direct clients cannot coexist with a claim of automatic exclusive GPU
-switching. The coordinator HTTP gateway forwards native coordinator envelopes,
-not arbitrary inference requests.
+switching. The coordinator HTTP gateway is retired; no replacement proxy or
+automatic ingress fencing is provided by the direct native workflows.
 
 ## Acceptance authority
 

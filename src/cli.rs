@@ -43,7 +43,7 @@ const MAX_COORDINATOR_ARTIFACT_CHUNK_JSON_BYTES: usize = 160 * 1024;
     about = "L3MS launcher (TUI + interactive model and bench CLI)",
     group(
         ArgGroup::new("action")
-            .args(["run", "run_profile", "bench", "list", "quickstart", "settings", "export_profile", "import_profile", "compare_results", "coordinator_status", "coordinator_cancel", "request_results", "request_output", "artifact_chunk", "coordinator_cpu_daemon", "coordinator_managed_session", "coordinator_http_gateway"])
+            .args(["run", "run_profile", "bench", "list", "quickstart", "settings", "export_profile", "import_profile", "compare_results", "coordinator_status", "coordinator_cancel", "request_results", "request_output", "artifact_chunk", "coordinator_cpu_daemon", "coordinator_managed_session"])
             .multiple(false)
     )
 )]
@@ -161,10 +161,6 @@ struct Cli {
     /// Run one explicitly configured foreground managed language session.
     #[arg(long, value_name = "CONFIG")]
     coordinator_managed_session: Option<PathBuf>,
-
-    /// Run an authenticated loopback HTTP gateway to an existing coordinator.
-    #[arg(long, value_name = "CONFIG")]
-    coordinator_http_gateway: Option<PathBuf>,
 
     /// Results cursor to read after; defaults to 0 and requires --request-results.
     #[arg(long, value_name = "CURSOR")]
@@ -369,7 +365,6 @@ fn coordinator_options_present(cli: &Cli) -> bool {
         || cli.request_lane.is_some()
         || cli.coordinator_cpu_daemon.is_some()
         || cli.coordinator_managed_session.is_some()
-        || cli.coordinator_http_gateway.is_some()
         || cli.after_cursor.is_some()
         || cli.result_page_bytes.is_some()
         || cli.coordinator_socket_dir.is_some()
@@ -461,9 +456,6 @@ fn isolated_engine_action(arguments: Vec<OsString>) -> Option<Result<u8>> {
 fn dispatch(cli: Cli) -> Result<u8> {
     if let Some(code) = direct_native_action(&cli)? {
         return Ok(code);
-    }
-    if let Some(config_path) = http_gateway_action(&cli)? {
-        return run_http_gateway_action(config_path);
     }
     if let Some(config_path) = coordinator_cpu_daemon_action(&cli)? {
         return run_cpu_coordinator_action(config_path);
@@ -580,56 +572,6 @@ fn dispatch(cli: Cli) -> Result<u8> {
     Ok(0)
 }
 
-fn http_gateway_action(cli: &Cli) -> Result<Option<&Path>> {
-    let Some(path) = cli.coordinator_http_gateway.as_deref() else {
-        return Ok(None);
-    };
-    if cli.request_lane.is_some()
-        || cli.coordinator_socket_dir.is_some()
-        || cli.after_cursor.is_some()
-        || cli.result_page_bytes.is_some()
-        || cli.artifact_chunk.is_some()
-        || cli.artifact_kind.is_some()
-        || cli.artifact_path.is_some()
-        || cli.artifact_offset.is_some()
-        || cli.artifact_byte_budget.is_some()
-        || cli.artifact_version.is_some()
-        || cli.extra.is_some()
-    {
-        bail!("HTTP gateway accepts only its explicit configuration file");
-    }
-    Ok(Some(path))
-}
-
-#[cfg(target_os = "linux")]
-fn run_http_gateway_action(path: &Path) -> Result<u8> {
-    let report = crate::control::http_launch::run(path).map_err(anyhow::Error::new)?;
-    let stopped = match report.stop {
-        crate::control::http_gateway::SessionStop::Cancelled => "cancelled",
-        crate::control::http_gateway::SessionStop::Deadline => "deadline",
-        crate::control::http_gateway::SessionStop::AttemptLimit => "attempt_limit",
-        crate::control::http_gateway::SessionStop::ListenerUnavailable => "listener_unavailable",
-    };
-    println!(
-        "{}",
-        serde_json::json!({
-            "accepted_attempts": report.accepted_attempts,
-            "completed_http_connections": report.completed_http_connections,
-            "denied_non_loopback_peers": report.denied_non_loopback_peers,
-            "denied_peer_limit": report.denied_peer_limit,
-            "stopped": stopped,
-        })
-    );
-    Ok(u8::from(
-        report.stop == crate::control::http_gateway::SessionStop::ListenerUnavailable,
-    ))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn run_http_gateway_action(_: &Path) -> Result<u8> {
-    bail!("HTTP gateway is supported only on Linux");
-}
-
 fn coordinator_cpu_daemon_action(cli: &Cli) -> Result<Option<&Path>> {
     let Some(config_path) = cli.coordinator_cpu_daemon.as_deref() else {
         return Ok(None);
@@ -732,7 +674,6 @@ fn coordinator_artifact_chunk_spec(cli: &Cli) -> Result<Option<ArtifactChunkSpec
         || cli.request_lane.is_some()
         || cli.coordinator_cpu_daemon.is_some()
         || cli.coordinator_managed_session.is_some()
-        || cli.coordinator_http_gateway.is_some()
         || cli.after_cursor.is_some()
         || cli.result_page_bytes.is_some()
         || cli.extra.is_some()
@@ -2579,35 +2520,10 @@ mod tests {
     }
 
     #[test]
-    fn http_gateway_is_exclusive_and_rejects_orphan_options_before_launch() {
-        let cli =
-            Cli::try_parse_from(["l3ms", "--coordinator-http-gateway", "private.json"]).unwrap();
-        assert_eq!(
-            http_gateway_action(&cli).unwrap(),
-            Some(Path::new("private.json"))
+    fn retired_http_gateway_option_is_not_exposed() {
+        assert!(
+            Cli::try_parse_from(["l3ms", "--coordinator-http-gateway", "private.json"]).is_err()
         );
-        assert!(Cli::try_parse_from([
-            "l3ms",
-            "--coordinator-http-gateway",
-            "private.json",
-            "--quickstart"
-        ])
-        .is_err());
-        for options in [
-            vec!["--extra", ""],
-            vec!["--coordinator-socket-dir", "/private"],
-            vec!["--request-lane", "decisions"],
-            vec!["--after-cursor", "0"],
-            vec!["--result-page-bytes", "4096"],
-        ] {
-            let mut arguments = vec!["l3ms", "--coordinator-http-gateway", "private.json"];
-            arguments.extend(options);
-            let cli = Cli::try_parse_from(arguments).unwrap();
-            assert_eq!(
-                http_gateway_action(&cli).unwrap_err().to_string(),
-                "HTTP gateway accepts only its explicit configuration file"
-            );
-        }
     }
 
     #[test]
