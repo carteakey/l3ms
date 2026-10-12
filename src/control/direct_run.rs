@@ -1,9 +1,9 @@
 //! Direct, bounded execution for explicitly supported CPU-local native work.
 //!
-//! This module currently accepts CPU-local Nagi/Laya decisions and standard
-//! Breeze speech. It does not start services, install runtimes, select a
-//! fallback, or retry an attempted inference. Native input and output stay out
-//! of its errors.
+//! This module accepts CPU-local Nagi/Laya decisions, standard Breeze speech,
+//! and embeddings through the existing language adapter. It does not start
+//! services, install runtimes, select a fallback, or retry an attempted
+//! inference. Native input and output stay out of its errors.
 
 use std::error::Error;
 use std::fmt;
@@ -14,13 +14,16 @@ use super::catalog::{Catalog, Device, Lane};
 use super::decision::{
     execute_accepted_cpu_decision, DecisionExecutionError, NativeDecisionResult,
 };
+use super::language::{DispatchDisposition, LanguageAdapter, LanguageErrorKind, LanguageFailure};
 use super::media_execution::{
     execute_breeze_speech_on_cpu, MediaExecutionErrorKind, MediaExecutionFailure,
     MediaExecutionResult,
 };
 use super::native_commands::CPU_BREEZE_PROFILE_ID;
 use super::process::{ProcessFailureDisposition, ProcessFailureKind};
-use super::requests::{InferenceRequest, MediaInput, SpeechMode};
+use super::requests::{
+    EmbeddingPayload, InferenceRequest, InferenceResult, MediaInput, SpeechMode,
+};
 use super::routes::{resolve_profile_route, NativeRoute, ResolvedProfileRoute};
 use super::runtime::{OperationContext, RecoveryPolicy};
 
@@ -31,6 +34,7 @@ const PROCESS_RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 pub enum DirectRunResult {
     Decision(NativeDecisionResult),
     Speech(MediaExecutionResult),
+    Embeddings(EmbeddingPayload),
 }
 
 /// Fixed failure categories with no request body, path, runner output, or OS
@@ -45,18 +49,40 @@ pub enum DirectRunErrorKind {
     ExecutionFailed,
     InvalidOutput,
     OwnershipUncertain,
+    RemoteCompletionUncertain,
 }
 
-/// A redacted direct-run failure plus the strongest child-cleanup conclusion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DirectRunDisposition {
+    Process(ProcessFailureDisposition),
+    Remote(DispatchDisposition),
+}
+
+/// A redacted failure plus whether local ownership or remote completion is uncertain.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DirectRunError {
     kind: DirectRunErrorKind,
-    disposition: ProcessFailureDisposition,
+    disposition: DirectRunDisposition,
 }
 
 impl DirectRunError {
     fn new(kind: DirectRunErrorKind, disposition: ProcessFailureDisposition) -> Self {
-        Self { kind, disposition }
+        Self {
+            kind,
+            disposition: DirectRunDisposition::Process(disposition),
+        }
+    }
+
+    fn remote(kind: DirectRunErrorKind, disposition: DispatchDisposition) -> Self {
+        let kind = if disposition == DispatchDisposition::Uncertain {
+            DirectRunErrorKind::RemoteCompletionUncertain
+        } else {
+            kind
+        };
+        Self {
+            kind,
+            disposition: DirectRunDisposition::Remote(disposition),
+        }
     }
 
     #[cfg(test)]
@@ -65,30 +91,39 @@ impl DirectRunError {
     }
 
     #[cfg(test)]
-    pub fn disposition(self) -> ProcessFailureDisposition {
+    fn disposition(self) -> DirectRunDisposition {
         self.disposition
     }
 
-    /// True only when the caller cancelled and either no child was spawned
-    /// or the owned child group was confirmed reaped.
+    /// True only when cancellation is terminal: no child was spawned, the
+    /// owned child group was reaped, or a remote request was never dispatched.
     pub fn cancellation_confirmed(self) -> bool {
         self.kind == DirectRunErrorKind::Cancelled
             && matches!(
                 self.disposition,
-                ProcessFailureDisposition::NoChildSpawned
-                    | ProcessFailureDisposition::ChildGroupReaped
+                DirectRunDisposition::Process(
+                    ProcessFailureDisposition::NoChildSpawned
+                        | ProcessFailureDisposition::ChildGroupReaped,
+                ) | DirectRunDisposition::Remote(DispatchDisposition::NoDispatch)
             )
     }
 
-    /// Callers must keep execution serialized and surface recovery when the
-    /// child group could not be confirmed absent.
+    /// Callers must keep execution serialized when a child group or remote
+    /// request may still be active.
     pub fn blocks_following_work(self) -> bool {
-        self.disposition == ProcessFailureDisposition::OwnershipUncertain
+        matches!(
+            self.disposition,
+            DirectRunDisposition::Process(ProcessFailureDisposition::OwnershipUncertain)
+                | DirectRunDisposition::Remote(DispatchDisposition::Uncertain)
+        )
     }
 }
 
 impl fmt::Display for DirectRunError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.disposition == DirectRunDisposition::Remote(DispatchDisposition::Uncertain) {
+            return formatter.write_str("remote completion is unconfirmed; stop before continuing");
+        }
         formatter.write_str(match self.kind {
             DirectRunErrorKind::InvalidRequest => "direct native request is invalid",
             DirectRunErrorKind::CatalogUnavailable => "native catalog is unavailable",
@@ -100,27 +135,33 @@ impl fmt::Display for DirectRunError {
             DirectRunErrorKind::OwnershipUncertain => {
                 "native process cleanup is uncertain; stop before continuing"
             }
+            DirectRunErrorKind::RemoteCompletionUncertain => {
+                "remote completion is unconfirmed; stop before continuing"
+            }
         })
     }
 }
 
 impl Error for DirectRunError {}
 
-/// Execute one already-built native request on a supported CPU-local route.
+/// Execute one already-built native request on a supported direct route.
 ///
 /// The current catalog is refreshed before dispatch, then the accepted route
-/// is rechecked by the native command adapter. Speech requires a caller-owned,
-/// fresh output directory; decisions reject one. Cancellation and the caller's
-/// deadline are honored by the bounded process runner; its separate cleanup
-/// budget is fixed at five seconds. If cleanup is uncertain, callers must not
-/// clear their busy state or start another operation.
-pub fn run_cpu_native(
+/// is rechecked by the relevant adapter. CPU-local decisions and standard
+/// speech use the bounded process runner; embeddings use the caller's existing
+/// language adapter and configured endpoint without managing llama-swap.
+/// Speech requires a caller-owned fresh output directory; other lanes reject
+/// one. Process cleanup is bounded by a fixed five-second recovery budget.
+/// Uncertain process ownership or remote completion blocks following work.
+pub fn run_native(
     catalog: &Catalog,
     request: &InferenceRequest,
     speech_output_directory: Option<&Path>,
+    language: Option<&LanguageAdapter>,
     context: &OperationContext<'_>,
 ) -> Result<DirectRunResult, DirectRunError> {
     let is_decision = matches!(request, InferenceRequest::Decision { .. });
+    let is_embeddings = matches!(request, InferenceRequest::Embeddings { .. });
     let is_standard_speech = matches!(
         request,
         InferenceRequest::Media {
@@ -128,48 +169,49 @@ pub fn run_cpu_native(
             ..
         } if input.mode == SpeechMode::Standard
     );
-    if !((is_decision && speech_output_directory.is_none())
-        || (is_standard_speech && speech_output_directory.is_some()))
-    {
-        return Err(DirectRunError::new(
+    let valid_lane_arguments = match request {
+        InferenceRequest::Decision { .. } => {
+            speech_output_directory.is_none() && language.is_none()
+        }
+        InferenceRequest::Media { .. } if is_standard_speech => {
+            speech_output_directory.is_some() && language.is_none()
+        }
+        InferenceRequest::Embeddings { .. } => {
+            speech_output_directory.is_none() && language.is_some()
+        }
+        _ => false,
+    };
+    if !valid_lane_arguments {
+        return Err(unstarted_error(
             DirectRunErrorKind::InvalidRequest,
-            ProcessFailureDisposition::NoChildSpawned,
+            is_embeddings,
         ));
     }
     if context.check_active("direct native operation").is_err() {
-        return Err(inactive_error(context));
+        return Err(if is_embeddings {
+            inactive_remote_error(context)
+        } else {
+            inactive_error(context)
+        });
     }
 
-    let original_profile = catalog.inspect(request.profile()).ok_or_else(|| {
-        DirectRunError::new(
-            DirectRunErrorKind::InvalidRequest,
-            ProcessFailureDisposition::NoChildSpawned,
-        )
-    })?;
-    let catalog = catalog.refresh().map_err(|_| {
-        DirectRunError::new(
-            DirectRunErrorKind::CatalogUnavailable,
-            ProcessFailureDisposition::NoChildSpawned,
-        )
-    })?;
+    let original_profile = catalog
+        .inspect(request.profile())
+        .ok_or_else(|| unstarted_error(DirectRunErrorKind::InvalidRequest, is_embeddings))?;
+    let catalog = catalog
+        .refresh()
+        .map_err(|_| unstarted_error(DirectRunErrorKind::CatalogUnavailable, is_embeddings))?;
     if catalog.inspect(request.profile()) != Some(original_profile) {
-        return Err(DirectRunError::new(
+        return Err(unstarted_error(
             DirectRunErrorKind::InvalidRequest,
-            ProcessFailureDisposition::NoChildSpawned,
+            is_embeddings,
         ));
     }
-    request.validate(&catalog).map_err(|_| {
-        DirectRunError::new(
-            DirectRunErrorKind::InvalidRequest,
-            ProcessFailureDisposition::NoChildSpawned,
-        )
-    })?;
-    let route = resolve_profile_route(&catalog, request.profile()).map_err(|_| {
-        DirectRunError::new(
-            DirectRunErrorKind::InvalidRequest,
-            ProcessFailureDisposition::NoChildSpawned,
-        )
-    })?;
+    request
+        .validate(&catalog)
+        .map_err(|_| unstarted_error(DirectRunErrorKind::InvalidRequest, is_embeddings))?;
+    let route = resolve_profile_route(&catalog, request.profile())
+        .map_err(|_| unstarted_error(DirectRunErrorKind::InvalidRequest, is_embeddings))?;
     let recovery = RecoveryPolicy::new(PROCESS_RECOVERY_TIMEOUT)
         .expect("fixed process recovery timeout is valid");
     if is_decision {
@@ -200,11 +242,31 @@ pub fn run_cpu_native(
         )
         .map(DirectRunResult::Speech)
         .map_err(|error| media_execution_error(error, context))
+    } else if is_embeddings {
+        if !is_language_embeddings_route(request, &route) {
+            return Err(DirectRunError::remote(
+                DirectRunErrorKind::UnsupportedRoute,
+                DispatchDisposition::NoDispatch,
+            ));
+        }
+        let adapter = language.expect("validated embeddings adapter");
+        let result = adapter
+            .execute_embeddings_for_route(&catalog, request, &route, context)
+            .map_err(remote_language_error)?;
+        match result {
+            InferenceResult::Embeddings { vectors, usage } => {
+                Ok(DirectRunResult::Embeddings(EmbeddingPayload {
+                    vectors,
+                    usage,
+                }))
+            }
+            _ => Err(DirectRunError::remote(
+                DirectRunErrorKind::InvalidOutput,
+                DispatchDisposition::Uncertain,
+            )),
+        }
     } else {
-        Err(DirectRunError::new(
-            DirectRunErrorKind::InvalidRequest,
-            ProcessFailureDisposition::NoChildSpawned,
-        ))
+        Err(unstarted_error(DirectRunErrorKind::InvalidRequest, false))
     }
 }
 
@@ -221,6 +283,20 @@ fn is_cpu_local_nagi_or_laya(request: &InferenceRequest, route: &ResolvedProfile
         && matches!(route.runtime.as_str(), "nagi" | "laya")
         && route.device.as_ref() == Some(&Device::Cpu)
         && profile_type == "local"
+}
+
+fn is_language_embeddings_route(request: &InferenceRequest, route: &ResolvedProfileRoute) -> bool {
+    let InferenceRequest::Embeddings { profile, .. } = request else {
+        return false;
+    };
+    let NativeRoute::LlamaSwapModel { model_id, .. } = &route.native_route else {
+        return false;
+    };
+    profile == &route.profile
+        && route.profile.lane == Lane::Language
+        && route.runtime.lane == Lane::Language
+        && model_id == &route.profile.profile_id
+        && route.tasks.iter().any(|task| task.as_str() == "embeddings")
 }
 
 fn is_cpu_breeze_standard_route(request: &InferenceRequest, route: &ResolvedProfileRoute) -> bool {
@@ -252,6 +328,40 @@ fn inactive_error(context: &OperationContext<'_>) -> DirectRunError {
         DirectRunErrorKind::DeadlineExceeded
     };
     DirectRunError::new(kind, ProcessFailureDisposition::NoChildSpawned)
+}
+
+fn inactive_remote_error(context: &OperationContext<'_>) -> DirectRunError {
+    let kind = if context.is_cancelled() {
+        DirectRunErrorKind::Cancelled
+    } else {
+        DirectRunErrorKind::DeadlineExceeded
+    };
+    DirectRunError::remote(kind, DispatchDisposition::NoDispatch)
+}
+
+fn unstarted_error(kind: DirectRunErrorKind, remote: bool) -> DirectRunError {
+    if remote {
+        DirectRunError::remote(kind, DispatchDisposition::NoDispatch)
+    } else {
+        DirectRunError::new(kind, ProcessFailureDisposition::NoChildSpawned)
+    }
+}
+
+fn remote_language_error(error: LanguageFailure) -> DirectRunError {
+    let kind = match error.kind {
+        LanguageErrorKind::Configuration | LanguageErrorKind::InvalidRequest => {
+            DirectRunErrorKind::InvalidRequest
+        }
+        LanguageErrorKind::Cancelled => DirectRunErrorKind::Cancelled,
+        LanguageErrorKind::Deadline => DirectRunErrorKind::DeadlineExceeded,
+        LanguageErrorKind::Protocol | LanguageErrorKind::TooLarge => {
+            DirectRunErrorKind::InvalidOutput
+        }
+        LanguageErrorKind::Transport
+        | LanguageErrorKind::Rejected
+        | LanguageErrorKind::ResultPublication => DirectRunErrorKind::ExecutionFailed,
+    };
+    DirectRunError::remote(kind, error.disposition)
 }
 
 fn execution_error(
@@ -340,7 +450,11 @@ mod tests {
     use super::*;
 
     use std::fs;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
     use std::time::Instant;
 
     use serde_json::{json, Map};
@@ -355,6 +469,14 @@ mod tests {
     impl super::super::runtime::Cancellation for AlwaysCancel {
         fn is_cancelled(&self) -> bool {
             true
+        }
+    }
+
+    struct SharedCancel(Arc<AtomicBool>);
+
+    impl super::super::runtime::Cancellation for SharedCancel {
+        fn is_cancelled(&self) -> bool {
+            self.0.load(Ordering::Acquire)
         }
     }
 
@@ -437,6 +559,88 @@ mod tests {
         OperationContext::new(Instant::now() + Duration::from_secs(5), cancellation)
     }
 
+    fn embedding_fixture() -> (TempDir, Catalog, InferenceRequest) {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("toolkits/l2m2")).unwrap();
+        fs::create_dir_all(root.path().join("toolkits/l3ds")).unwrap();
+        fs::write(
+            root.path().join("llama-swap.yaml"),
+            "models:\n  fixture-embeddings:\n    cmd: |\n      llama-server --embedding\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("toolkits/l2m2/media-runtimes.json"),
+            r#"{"schema_version":1,"profiles":[]}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("toolkits/l3ds/decision-runtimes.json"),
+            r#"{"version":"1.0","profiles":[]}"#,
+        )
+        .unwrap();
+        let catalog = Catalog::load(root.path()).unwrap();
+        let request = InferenceRequest::Embeddings {
+            profile: ProfileKey::new(Lane::Language, "fixture-embeddings").unwrap(),
+            input: vec!["alpha".into(), "beta".into()],
+        };
+        (root, catalog, request)
+    }
+
+    fn accept_bounded(listener: &TcpListener) -> TcpStream {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => return stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "embedding request not received");
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                Err(error) => panic!("fixture listener failed: {error}"),
+            }
+        }
+    }
+
+    fn read_embedding_request(stream: &mut TcpStream) -> serde_json::Value {
+        let mut header = Vec::new();
+        let mut byte = [0];
+        while !header.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            header.push(byte[0]);
+            assert!(header.len() < 16_384, "request headers are bounded");
+        }
+        let header = String::from_utf8(header).unwrap();
+        assert!(header.contains("POST /v1/embeddings HTTP/1.1"));
+        let length = header
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap())
+            })
+            .unwrap();
+        assert!(length <= 1024 * 1024 + 4096);
+        let mut body = vec![0; length];
+        stream.read_exact(&mut body).unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    fn write_http_response(stream: &mut TcpStream, status: &str, body: &str) {
+        write!(
+            stream,
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+    }
+
+    fn assert_no_connection(listener: &TcpListener) {
+        match listener.accept() {
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Ok(_) => panic!("direct embeddings unexpectedly dispatched HTTP"),
+            Err(error) => panic!("fixture listener failed: {error}"),
+        }
+    }
+
     fn native_response(engine: &str) -> String {
         serde_json::to_string(&json!({
             "engine": engine,
@@ -452,7 +656,7 @@ mod tests {
         let (_root, catalog, request, launch_marker) =
             fixture("nagi", "local", "cpu", &native_response("nagi-native"));
         let DirectRunResult::Decision(result) =
-            run_cpu_native(&catalog, &request, None, &context(&NeverCancel)).unwrap()
+            run_native(&catalog, &request, None, None, &context(&NeverCancel)).unwrap()
         else {
             panic!("direct decision returns native decision result")
         };
@@ -479,13 +683,13 @@ mod tests {
                 device,
                 &native_response("nagi-native"),
             );
-            let error = run_cpu_native(&catalog, &request, None, &context(&NeverCancel))
+            let error = run_native(&catalog, &request, None, None, &context(&NeverCancel))
                 .err()
                 .expect("unsupported route is rejected");
             assert_eq!(error.kind(), DirectRunErrorKind::UnsupportedRoute);
             assert_eq!(
                 error.disposition(),
-                ProcessFailureDisposition::NoChildSpawned
+                DirectRunDisposition::Process(ProcessFailureDisposition::NoChildSpawned)
             );
             assert!(!error.blocks_following_work());
             assert!(!launch_marker.exists());
@@ -502,33 +706,34 @@ mod tests {
         manifest["profiles"][0]["device"] = json!("cuda");
         fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
 
-        let error = run_cpu_native(&catalog, &request, None, &context(&NeverCancel))
+        let error = run_native(&catalog, &request, None, None, &context(&NeverCancel))
             .err()
             .expect("catalog drift is rejected before dispatch");
         assert_eq!(error.kind(), DirectRunErrorKind::InvalidRequest);
         assert_eq!(
             error.disposition(),
-            ProcessFailureDisposition::NoChildSpawned
+            DirectRunDisposition::Process(ProcessFailureDisposition::NoChildSpawned)
         );
         assert!(!launch_marker.exists());
     }
 
     #[test]
-    fn direct_runner_rejects_non_decision_request_without_launch() {
+    fn embedding_request_without_a_connection_does_not_launch_a_local_engine() {
         let (_root, catalog, _request, launch_marker) =
             fixture("nagi", "local", "cpu", &native_response("nagi-native"));
         let request = InferenceRequest::Embeddings {
             profile: ProfileKey::new(Lane::Language, "fixture-chat").unwrap(),
             input: vec!["private input".into()],
         };
-        let error = run_cpu_native(&catalog, &request, None, &context(&NeverCancel))
+        let error = run_native(&catalog, &request, None, None, &context(&NeverCancel))
             .err()
-            .expect("non-decision request is rejected");
+            .expect("embedding request without a connection is rejected");
         assert_eq!(error.kind(), DirectRunErrorKind::InvalidRequest);
         assert_eq!(
             error.disposition(),
-            ProcessFailureDisposition::NoChildSpawned
+            DirectRunDisposition::Remote(DispatchDisposition::NoDispatch)
         );
+        assert!(!error.blocks_following_work());
         assert!(!launch_marker.exists());
     }
 
@@ -536,17 +741,195 @@ mod tests {
     fn invalid_native_output_is_not_replayed() {
         let (_root, catalog, request, launch_marker) =
             fixture("nagi", "local", "cpu", "{\"engine\":\"wrong\"}");
-        let error = run_cpu_native(&catalog, &request, None, &context(&NeverCancel))
+        let error = run_native(&catalog, &request, None, None, &context(&NeverCancel))
             .err()
             .expect("invalid native output is rejected");
         assert_eq!(error.kind(), DirectRunErrorKind::InvalidOutput);
         assert_eq!(
             error.disposition(),
-            ProcessFailureDisposition::ChildGroupReaped
+            DirectRunDisposition::Process(ProcessFailureDisposition::ChildGroupReaped)
         );
         assert!(!error.blocks_following_work());
         assert_eq!(fs::read(launch_marker).unwrap(), b"x");
         assert!(!error.to_string().contains("wrong"));
+    }
+
+    #[test]
+    fn direct_runner_executes_typed_embeddings_through_existing_adapter() {
+        let (_root, catalog, request) = embedding_fixture();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let mut stream = accept_bounded(&listener);
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let payload = read_embedding_request(&mut stream);
+            assert_eq!(payload["model"], "fixture-embeddings");
+            assert_eq!(payload["input"], json!(["alpha", "beta"]));
+            assert_eq!(payload["encoding_format"], "float");
+            let body = r#"{"object":"list","model":"fixture-embeddings","data":[{"object":"embedding","index":0,"embedding":[0.1,0.2]},{"object":"embedding","index":1,"embedding":[0.3,0.4]}],"usage":{"prompt_tokens":2,"total_tokens":2}}"#;
+            write_http_response(&mut stream, "200 OK", body);
+        });
+        let adapter = LanguageAdapter::new(&endpoint, None).unwrap();
+        let result = run_native(
+            &catalog,
+            &request,
+            None,
+            Some(&adapter),
+            &context(&NeverCancel),
+        )
+        .unwrap();
+        let DirectRunResult::Embeddings(result) = result else {
+            panic!("language embeddings return their typed payload")
+        };
+        assert_eq!(result.vectors, [vec![0.1, 0.2], vec![0.3, 0.4]]);
+        assert_eq!(result.usage.prompt_tokens, 2);
+        assert_eq!(result.usage.total_tokens, 2);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn direct_runner_confirms_embedding_cancellation_only_before_dispatch() {
+        let (_root, catalog, request) = embedding_fixture();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let adapter = LanguageAdapter::new(&endpoint, None).unwrap();
+        let error = run_native(
+            &catalog,
+            &request,
+            None,
+            Some(&adapter),
+            &context(&AlwaysCancel),
+        )
+        .err()
+        .expect("cancelled embedding request is not dispatched");
+        assert_eq!(error.kind(), DirectRunErrorKind::Cancelled);
+        assert_eq!(
+            error.disposition(),
+            DirectRunDisposition::Remote(DispatchDisposition::NoDispatch)
+        );
+        assert!(error.cancellation_confirmed());
+        assert!(!error.blocks_following_work());
+        assert_no_connection(&listener);
+    }
+
+    #[test]
+    fn dispatched_embedding_cancellation_is_remote_uncertainty() {
+        let (_root, catalog, request) = embedding_fixture();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let server_cancelled = cancelled.clone();
+        let server = std::thread::spawn(move || {
+            let mut stream = accept_bounded(&listener);
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let payload = read_embedding_request(&mut stream);
+            assert_eq!(payload["input"], json!(["alpha", "beta"]));
+            server_cancelled.store(true, Ordering::Release);
+            std::thread::sleep(Duration::from_millis(100));
+        });
+        let adapter = LanguageAdapter::new(&endpoint, None).unwrap();
+        let cancellation = SharedCancel(cancelled);
+        let context = OperationContext::new(Instant::now() + Duration::from_secs(3), &cancellation);
+        let error = run_native(&catalog, &request, None, Some(&adapter), &context)
+            .err()
+            .expect("dispatched cancellation remains uncertain");
+        assert_eq!(error.kind(), DirectRunErrorKind::RemoteCompletionUncertain);
+        assert_eq!(
+            error.disposition(),
+            DirectRunDisposition::Remote(DispatchDisposition::Uncertain)
+        );
+        assert!(!error.cancellation_confirmed());
+        assert!(error.blocks_following_work());
+        assert_eq!(
+            error.to_string(),
+            "remote completion is unconfirmed; stop before continuing"
+        );
+        assert!(!error.to_string().contains("process cleanup"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn uncertain_embedding_response_is_not_retried() {
+        let (_root, catalog, request) = embedding_fixture();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let no_retry_probe = listener.try_clone().unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let mut stream = accept_bounded(&listener);
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let payload = read_embedding_request(&mut stream);
+            assert_eq!(payload["model"], "fixture-embeddings");
+            write_http_response(&mut stream, "503 Service Unavailable", "private body");
+        });
+        let adapter = LanguageAdapter::new(&endpoint, None).unwrap();
+        let error = run_native(
+            &catalog,
+            &request,
+            None,
+            Some(&adapter),
+            &context(&NeverCancel),
+        )
+        .err()
+        .expect("server rejection after dispatch is uncertain");
+        assert_eq!(error.kind(), DirectRunErrorKind::RemoteCompletionUncertain);
+        assert_eq!(
+            error.disposition(),
+            DirectRunDisposition::Remote(DispatchDisposition::Uncertain)
+        );
+        assert!(error.blocks_following_work());
+        assert!(!error.cancellation_confirmed());
+        assert_eq!(
+            error.to_string(),
+            "remote completion is unconfirmed; stop before continuing"
+        );
+        server.join().unwrap();
+        assert_no_connection(&no_retry_probe);
+    }
+
+    #[test]
+    fn direct_runner_rejects_embedding_catalog_drift_before_http_dispatch() {
+        let (root, catalog, request) = embedding_fixture();
+        fs::write(
+            root.path().join("llama-swap.yaml"),
+            "models:\n  fixture-embeddings:\n    cmd: llama-server --port 8080\n",
+        )
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let adapter = LanguageAdapter::new(&endpoint, None).unwrap();
+        let error = run_native(
+            &catalog,
+            &request,
+            None,
+            Some(&adapter),
+            &context(&NeverCancel),
+        )
+        .err()
+        .expect("catalog drift is rejected before HTTP dispatch");
+        assert_eq!(error.kind(), DirectRunErrorKind::InvalidRequest);
+        assert_eq!(
+            error.disposition(),
+            DirectRunDisposition::Remote(DispatchDisposition::NoDispatch)
+        );
+        assert!(!error.blocks_following_work());
+        assert_no_connection(&listener);
     }
 
     #[test]
@@ -572,7 +955,7 @@ mod tests {
         assert_eq!(cancelled.kind(), DirectRunErrorKind::Cancelled);
         assert_eq!(
             cancelled.disposition(),
-            ProcessFailureDisposition::NoChildSpawned
+            DirectRunDisposition::Process(ProcessFailureDisposition::NoChildSpawned)
         );
         assert!(cancelled.cancellation_confirmed());
 
@@ -581,7 +964,7 @@ mod tests {
         assert_eq!(expired.kind(), DirectRunErrorKind::DeadlineExceeded);
         assert_eq!(
             expired.disposition(),
-            ProcessFailureDisposition::NoChildSpawned
+            DirectRunDisposition::Process(ProcessFailureDisposition::NoChildSpawned)
         );
         assert!(!expired.cancellation_confirmed());
 
@@ -592,7 +975,7 @@ mod tests {
         assert_eq!(setup_failure.kind(), DirectRunErrorKind::ExecutionFailed);
         assert_eq!(
             setup_failure.disposition(),
-            ProcessFailureDisposition::NoChildSpawned
+            DirectRunDisposition::Process(ProcessFailureDisposition::NoChildSpawned)
         );
         assert!(!setup_failure.cancellation_confirmed());
     }

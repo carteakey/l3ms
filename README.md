@@ -120,7 +120,34 @@ a pending connection or active work are refused rather than choosing a default.
 This uses the current committed Chat connection, not an uncommitted endpoint
 draft, and needs no coordinator socket. Chat keeps its existing streaming,
 history and cancellation behavior. The duplicate raw-turn coordinator chat form
-is retired; embedding profiles still use their typed batch form.
+is retired; embedding profiles use the direct batch form below.
+
+### Direct embedding batches (Linux)
+
+For an installed embedding profile served by your configured endpoint:
+
+```bash
+LLAMA_SWAP_URL=http://localhost:8080 l3ms --run-profile language:your-embedding-profile --task embeddings --input /path/to/batch.json --task-timeout-ms 30000
+```
+
+Input is strictly `{"input":["first text","second text"]}` (up to 128 nonempty
+texts, a 1 MiB input file and the native field/aggregate limits). No output
+directory is accepted. Stdout contains `vectors` and native `usage`, with a
+4 MiB JSON cap. `LLAMA_SWAP_API_KEY` supplies optional CLI authentication.
+No runtime is installed or service managed; the existing endpoint may load or
+swap models normally in response to the explicit request.
+
+In Stack Catalog, select an embedding profile, press `f`, enter a text-batch
+JSON array and run with `Ctrl+Enter`. Connect Chat first: embeddings reuse its
+committed endpoint and captured credentials, require the exact enabled
+advertised model, and need no coordinator socket or caller ID. History stores
+metadata only; vectors/usage stay in the private in-memory result panel.
+
+Cancellation after HTTP dispatch does not prove the server stopped. Unconfirmed
+completion closes foreground admission and blocks overlapping Chat sends;
+inspect the endpoint before continuing. There is no automatic replay or GPU
+release claim. HTTP/IPC acceptance remains pending in the restricted session;
+see [migration status](docs/migration/status.md).
 
 ### Direct CPU decisions (Linux)
 

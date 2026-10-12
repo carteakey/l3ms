@@ -10,6 +10,32 @@ existing Linear migration issues rather than replacing their acceptance criteria
 
 ## Monorepo: next work
 
+Current embedding implementation is integrated: CLI strict `{"input":[...]}`
+and Stack batch forms share the native runner/language adapter, no coordinator socket/caller
+ID. UI uses the committed Chat endpoint and captured credentials; vectors stay
+out of history. Post-dispatch cancellation is remote completion uncertainty,
+not process/GPU release, and blocks overlapping Chat sends.
+
+Verification is **not fully green**: build/strict Clippy/fmt pass; 772 root tests
+pass, 121 fail at sandbox-restricted socket/transport operations, 1 is ignored.
+Builder/CLI validation and local cancellation guards pass. New loopback success,
+captured-auth and remote-cancel tests remain enabled but cannot execute here.
+No cached embedding weights were found; real-model acceptance is also pending.
+This slice adds **1,260 net root source lines** including tests; cumulative
+change against `702b4cd` is **+3,991**, not the target reduction.
+
+Next gates:
+
+- [ ] Run `cargo test --all-targets --locked` in a session allowing local TCP/Unix
+  sockets; verify the new native embedding HTTP/UI cases before claiming acceptance.
+- [ ] Run a bounded real embedding batch with an explicitly prepared profile,
+  installed weights and configured endpoint. Do not silently enable/download models.
+- [ ] Replace remaining native media/GPU form callers, then delete their
+  coordinator dependency closure. Keep existing workflows until replacements pass;
+  do not expand the managed daemon.
+
+## Previous Chat replacement checkpoint
+
 Current replacement: Stack chat-only language profiles now open the existing
 Chat tab on the exact enabled advertised model, using the committed connection.
 No connect, send, load or default-model fallback occurs; drafts/conversations
@@ -20,11 +46,8 @@ build pass. This slice adds **306 net root source lines** including tests;
 cumulative source change against `702b4cd` is **+2,731**. No platform module
 was removed here, and the larger LOC reduction is not complete.
 
-Next concrete slice: native embedding batches through the existing configured
-language adapter/connection, without another chat owner or coordinator protocol.
-Keep HTTP cancellation uncertainty distinct from locally owned process cleanup.
-Then replace native media form callers and remove the displaced coordinator
-dependency closure. Do not expand the managed daemon or remove unreplaced paths.
+The native embedding implementation is now integrated above; its transport and
+real-model acceptance gates remain open before broader dependency deletion.
 
 ## Previous deletion checkpoint
 

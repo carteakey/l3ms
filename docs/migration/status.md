@@ -8,7 +8,41 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
-## Current Chat replacement checkpoint — 2026-10-10
+## Current embedding implementation checkpoint — 2026-10-12
+
+CLI and Stack embedding batches now reuse the existing native language adapter
+and foreground job/result owner, without coordinator submission or caller IDs.
+Strict CLI input is `{"input":[...]}`; vectors and native usage have the existing
+4 MiB output cap. Decision/TTS output limits and CPU backend semantics remain
+unchanged. UI validates the exact enabled model on its committed Chat connection,
+including captured credentials, and stores metadata only in history.
+
+Remote HTTP dispatch uncertainty is separate from local process ownership.
+Cancellation after dispatch never claims server termination or GPU release;
+foreground admission closes and overlapping Chat sends are refused without
+losing the draft. No request replay, service management or model installation
+is added. Older coordinator UI integration tests now use retained CUDA-decision
+forms so their submit/observe/cancel/results coverage stays intact.
+
+**Acceptance pending:** the resumed environment prohibits local socket creation
+(`PermissionError: Operation not permitted`). Full suite: **772 passed, 121
+transport-related failures, 1 ignored**. Build, strict all-target Clippy, fmt and
+whitespace checks pass; all 13 task-form tests, 9 direct CLI tests and focused
+local cancellation/connection guards pass. New loopback runner/UI success,
+captured-auth and remote-cancel cases are enabled but not verified here. Tests
+were not weakened or skipped to report a green suite. The temporary full-CLI
+fixture drafted before interruption did not survive the session reset and was
+never reported as passed. Real-model embedding acceptance also remains pending:
+no cached embedding weights were found in the earlier read-only audit.
+
+Whole-`src/` net change for this slice is **+1,260 lines** including tests/comments/
+blanks; cumulative change against `702b4cd` is **+3,991**. Control scope is
+**62,361 lines**. No platform module was removed; remaining media/GPU callers
+still block broad deletion. Original checkouts/services/models remain unchanged.
+Next unrestricted socket acceptance, real embeddings, then native media callers
+and inward coordinator deletion. The full port is not complete.
+
+## Previous Chat replacement checkpoint — 2026-10-10
 
 Stack `f` on a chat-only language profile now selects the exact enabled model
 on the current committed Chat connection and opens the original Chat tab.

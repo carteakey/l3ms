@@ -143,6 +143,16 @@ impl ChatClient {
         &self.base_url
     }
 
+    /// Reuse this committed connection, including its captured credentials,
+    /// for explicit embedding requests. Construction performs no network I/O.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn embedding_adapter(
+        &self,
+    ) -> Result<crate::control::language::LanguageAdapter, crate::control::language::LanguageFailure>
+    {
+        crate::control::language::LanguageAdapter::new(&self.base_url, self.api_key.as_deref())
+    }
+
     pub fn list_models(&self) -> Result<Vec<SwapModel>> {
         let url = endpoint_url(&self.base_url, "/v1/models");
         let response = self

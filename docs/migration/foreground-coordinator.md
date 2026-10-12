@@ -114,7 +114,7 @@ model in the existing Chat tab; it does not create a coordinator request or send
 a prompt. Connect Chat explicitly first. The current committed Chat connection
 is authoritative, and draft endpoint edits are not applied by this handoff.
 For remaining tasks, `f` opens a native task form for the captured catalog
-profile: an embedding text-batch JSON array, media workflow JSON
+profile: media workflow JSON
 or an argv array, speech text/mode and
 optional cloning/design fields, or decision state/questions. Supply the caller
 ID and timeout explicitly; select the declared task and operation using the
@@ -137,3 +137,7 @@ managed-engine/GPU acceptance gates. A real offline CPU Nagi coordinator request
 passed with a private copied CPU profile, native output, durable terminal history
 and verified process cleanup; see [measured evidence](nagi-acceptance.md).
 Original checkouts and runtime rollback paths remain in place.
+
+Embedding profiles now use the direct batch form and existing Chat connection,
+not this coordinator submission path. Remote HTTP cancellation does not prove
+server termination; see [the current checkpoint](status.md).

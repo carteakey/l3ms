@@ -144,6 +144,16 @@ pub fn build_direct_native(
                 questions,
             }
         }
+        TaskFields::LanguageEmbeddings { input } => {
+            if selected_profile.lane != Lane::Language || declared_task.as_str() != "embeddings" {
+                return Err(TaskFormError::ProfileTaskMismatch);
+            }
+            preflight_direct_embedding_fields(&input)?;
+            InferenceRequest::Embeddings {
+                profile: selected_profile.clone(),
+                input,
+            }
+        }
         TaskFields::Speech {
             text,
             mode,
@@ -240,6 +250,21 @@ fn preflight_direct_decision_fields(
         || state_bytes.saturating_add(question_bytes) > MAX_TASK_FORM_TOTAL_BYTES
     {
         return Err(TaskFormError::FrameTooLarge);
+    }
+    Ok(())
+}
+
+fn preflight_direct_embedding_fields(input: &[String]) -> Result<(), TaskFormError> {
+    let mut total = 0usize;
+    for text in input {
+        let size = bounded_json_len(text)?;
+        if size > MAX_TASK_FORM_FIELD_BYTES {
+            return Err(TaskFormError::FrameTooLarge);
+        }
+        total = total.saturating_add(size);
+        if total > MAX_TASK_FORM_TOTAL_BYTES {
+            return Err(TaskFormError::FrameTooLarge);
+        }
     }
     Ok(())
 }
@@ -775,6 +800,112 @@ mod tests {
     }
 
     #[test]
+    fn direct_native_builder_accepts_bounded_language_embeddings() {
+        let (_temporary, catalog) = embedding_catalog();
+        let (request, timeout) = build_direct_native(
+            &catalog,
+            TaskFormDraft::new(
+                profile(super::super::catalog::Lane::Language, "fixture-embeddings"),
+                task("embeddings"),
+                "ignored legacy id".into(),
+                45_000,
+                language_embedding_fields(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(timeout, std::time::Duration::from_secs(45));
+        let super::super::requests::InferenceRequest::Embeddings {
+            profile: selected,
+            input,
+        } = request
+        else {
+            panic!("direct embedding fields build a typed embeddings request")
+        };
+        assert_eq!(
+            selected,
+            profile(super::super::catalog::Lane::Language, "fixture-embeddings")
+        );
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[0], "private system instruction");
+
+        for (profile_lane, task_name, input) in [
+            (
+                super::super::catalog::Lane::Decisions,
+                "embeddings",
+                vec!["alpha".into()],
+            ),
+            (
+                super::super::catalog::Lane::Language,
+                "chat",
+                vec!["alpha".into()],
+            ),
+            (
+                super::super::catalog::Lane::Language,
+                "embeddings",
+                Vec::new(),
+            ),
+            (
+                super::super::catalog::Lane::Language,
+                "embeddings",
+                vec!["\0".into()],
+            ),
+        ] {
+            let error = direct_error(build_direct_native(
+                &catalog,
+                TaskFormDraft::new(
+                    profile(profile_lane, "fixture-embeddings"),
+                    task(task_name),
+                    String::new(),
+                    30_000,
+                    TaskFields::LanguageEmbeddings { input },
+                ),
+            ));
+            assert_eq!(
+                error,
+                if profile_lane != super::super::catalog::Lane::Language
+                    || task_name != "embeddings"
+                {
+                    TaskFormError::ProfileTaskMismatch
+                } else {
+                    TaskFormError::InvalidNativeFields
+                }
+            );
+        }
+
+        let too_large = vec!["x".repeat(MAX_TASK_FORM_FIELD_BYTES + 1)];
+        assert_eq!(
+            direct_error(build_direct_native(
+                &catalog,
+                TaskFormDraft::new(
+                    profile(super::super::catalog::Lane::Language, "fixture-embeddings"),
+                    task("embeddings"),
+                    String::new(),
+                    30_000,
+                    TaskFields::LanguageEmbeddings { input: too_large },
+                ),
+            )),
+            TaskFormError::FrameTooLarge
+        );
+
+        let too_much_total = vec!["x".repeat(470_000), "y".repeat(470_000)];
+        assert_eq!(
+            direct_error(build_direct_native(
+                &catalog,
+                TaskFormDraft::new(
+                    profile(super::super::catalog::Lane::Language, "fixture-embeddings"),
+                    task("embeddings"),
+                    String::new(),
+                    30_000,
+                    TaskFields::LanguageEmbeddings {
+                        input: too_much_total,
+                    },
+                ),
+            )),
+            TaskFormError::FrameTooLarge
+        );
+    }
+
+    #[test]
     fn direct_native_builder_accepts_only_standard_cpu_breeze_speech() {
         let (_temporary, catalog) = cpu_breeze_catalog();
         let draft = TaskFormDraft::new(
@@ -898,7 +1029,7 @@ mod tests {
                     language_embedding_fields(),
                 ),
             )),
-            TaskFormError::InvalidNativeFields
+            TaskFormError::ProfileTaskMismatch
         );
         for timeout_ms in [0, MAX_DIRECT_TIMEOUT_MS + 1] {
             assert_eq!(
@@ -974,6 +1105,30 @@ mod tests {
                         state: json!({"ready": true}),
                         questions: Map::from_iter([("route".into(), json!({"type": "rank"}))]),
                     },
+                ),
+            )),
+            TaskFormError::ProfileTaskMismatch
+        );
+    }
+
+    #[test]
+    fn direct_native_embedding_builder_rejects_catalog_route_drift() {
+        let (root, catalog) = embedding_catalog();
+        fs::write(
+            root.path().join("llama-swap.yaml"),
+            "models:\n  fixture-embeddings:\n    cmd: llama-server --port 8080\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            direct_error(build_direct_native(
+                &catalog,
+                TaskFormDraft::new(
+                    profile(super::super::catalog::Lane::Language, "fixture-embeddings"),
+                    task("embeddings"),
+                    String::new(),
+                    30_000,
+                    language_embedding_fields(),
                 ),
             )),
             TaskFormError::ProfileTaskMismatch

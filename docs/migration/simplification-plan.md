@@ -234,3 +234,19 @@ catalog drift and active-work checks keep selection explicit and side-effect fre
 batches through the existing language adapter, then native media and inward
 coordinator deletion. Keep HTTP cancellation uncertainty separate from local
 child cleanup; do not add another Chat owner or expand managed infrastructure.
+
+### Native embedding implementation checkpoint — 2026-10-12
+
+Embedding batches now share the direct native owner and existing language
+adapter across CLI/UI. HTTP uncertainty is distinct from child cleanup; UI
+preserves the committed connection credentials and refuses overlapping Chat
+sends after unconfirmed completion. No coordinator envelope or result store
+was added for the replacement path.
+
+Verification remains gated: build/lint/fmt and focused non-transport tests pass,
+but the restricted session blocks local socket operations (772 full-suite passes,
+121 transport failures, 1 ignored). Native loopback and real-model acceptance
+must pass before claiming this slice accepted or pruning dependent working paths.
+Net source change is +1,260; cumulative change remains +3,991 against `702b4cd`.
+Next verify embeddings, replace remaining media/GPU callers, then delete the
+coordinator closure. Do not confuse temporary replacement overlap with LOC reduction.

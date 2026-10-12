@@ -27,6 +27,7 @@ use crate::control::result_consumer::NativeOutput;
 #[cfg(target_os = "linux")]
 use crate::control::{
     direct_run::{self, DirectRunError, DirectRunResult},
+    language::LanguageAdapter,
     runtime::{Cancellation, OperationContext},
     task_form::build_direct_native,
 };
@@ -377,6 +378,7 @@ struct TaskFormEditor {
     profile_snapshot: CatalogProfile,
     direct_cpu_decision: bool,
     direct_cpu_standard_tts: bool,
+    direct_language_embeddings: bool,
     declared_tasks: Vec<String>,
     selected_task: Option<usize>,
     media_operation: Option<TaskFormMediaOperation>,
@@ -388,9 +390,23 @@ struct TaskFormEditor {
 }
 
 impl TaskFormEditor {
+    #[cfg(test)]
     fn new(profile: &CatalogProfile) -> Self {
+        Self::new_with_direct_embeddings(profile, false)
+    }
+
+    fn new_with_direct_embeddings(
+        profile: &CatalogProfile,
+        direct_language_embeddings: bool,
+    ) -> Self {
         let direct_cpu_decision = is_direct_cpu_decision_profile(profile);
         let direct_cpu_standard_tts = is_direct_cpu_standard_tts_profile(profile);
+        let direct_language_embeddings = direct_language_embeddings
+            && profile.key.lane == Lane::Language
+            && profile
+                .tasks
+                .iter()
+                .any(|task| task.as_str() == "embeddings");
         let mut declared_tasks = profile
             .tasks
             .iter()
@@ -412,6 +428,7 @@ impl TaskFormEditor {
             profile_snapshot: profile.clone(),
             direct_cpu_decision,
             direct_cpu_standard_tts,
+            direct_language_embeddings,
             declared_tasks,
             selected_task: None,
             media_operation: None,
@@ -421,9 +438,9 @@ impl TaskFormEditor {
             cursor_byte: 0,
             values: TaskFormValues::default(),
         };
-        if direct_cpu_decision || direct_cpu_standard_tts {
-            // Foreground local work has no caller ID to retain. A useful
-            // bounded timeout keeps the CPU path keyboard-first.
+        if direct_cpu_decision || direct_cpu_standard_tts || direct_language_embeddings {
+            // Foreground native work has no caller ID to retain. A useful
+            // bounded timeout keeps the direct path keyboard-first.
             editor.values.timeout = "30000".into();
         }
         if direct_cpu_decision {
@@ -434,21 +451,27 @@ impl TaskFormEditor {
             editor.media_operation = Some(TaskFormMediaOperation::Speech);
             editor.speech_mode = Some(SpeechMode::Standard);
         }
+        if direct_language_embeddings {
+            editor.selected_task = editor
+                .declared_tasks
+                .iter()
+                .position(|task| task == "embeddings");
+        }
         editor.refresh_fields();
         editor
     }
 
-    fn is_direct_cpu_native(&self) -> bool {
-        self.direct_cpu_decision || self.direct_cpu_standard_tts
+    fn is_direct_native(&self) -> bool {
+        self.direct_cpu_decision || self.direct_cpu_standard_tts || self.direct_language_embeddings
     }
 
     fn refresh_fields(&mut self) {
         let mut fields = Vec::with_capacity(8);
-        if !self.is_direct_cpu_native() {
+        if !self.is_direct_native() {
             fields.push(TaskFormField::RequestId);
         }
         fields.push(TaskFormField::Timeout);
-        if !self.direct_cpu_standard_tts {
+        if !self.direct_cpu_standard_tts && !self.direct_language_embeddings {
             fields.push(TaskFormField::DeclaredTask);
         }
         match self.profile.lane {
@@ -725,7 +748,7 @@ impl TaskFormEditor {
     }
 
     fn to_draft(&self) -> Result<TaskFormDraft, TaskFormError> {
-        let request_id = if self.is_direct_cpu_native() {
+        let request_id = if self.is_direct_native() {
             String::new()
         } else {
             self.values.request_id.clone()
@@ -944,11 +967,11 @@ impl DirectNativeState {
     fn label(self) -> &'static str {
         match self {
             Self::Running => "running",
-            Self::CancelRequested => "cancellation requested · waiting for cleanup",
+            Self::CancelRequested => "cancellation requested · waiting for operation outcome",
             Self::Succeeded => "succeeded",
-            Self::Cancelled => "cancelled · owned process cleanup confirmed",
+            Self::Cancelled => "cancelled before dispatch or with local cleanup confirmed",
             Self::Failed => "failed",
-            Self::Interrupted => "interrupted · ownership/recovery required",
+            Self::Interrupted => "interrupted · completion unconfirmed",
         }
     }
 }
@@ -4348,24 +4371,33 @@ impl App {
         };
 
         #[cfg(target_os = "linux")]
-        if is_direct_cpu_native_profile(&profile) {
+        let direct_language_embeddings = self
+            .stack_catalog
+            .as_ref()
+            .is_some_and(|catalog| is_direct_native_language_embeddings_profile(&profile, catalog));
+        #[cfg(target_os = "linux")]
+        let direct_native_profile =
+            is_direct_cpu_native_profile(&profile) || direct_language_embeddings;
+
+        #[cfg(target_os = "linux")]
+        if direct_native_profile {
             if self.coordinator_action_pending
                 || (self.coordinator_request_id.is_some() && !self.coordinator_request_terminal)
             {
-                self.status = "A coordinator request is pending or nonterminal; observe or cancel it before starting a foreground CPU run".into();
+                self.status = "A coordinator request is pending or nonterminal; observe or cancel it before starting a foreground native run".into();
                 return;
             }
             if self.direct_native_admission_closed {
-                self.status = "Foreground CPU admission is closed after uncertain process cleanup; inspect Jobs and recover the runner before retrying".into();
+                self.status = "Foreground native admission is closed after an unconfirmed completion; inspect Jobs and recover the backend before retrying".into();
                 return;
             }
             if self.direct_native_job.is_some() {
-                self.status = "A foreground CPU task is still running; press c to cancel and wait for cleanup".into();
+                self.status = "A foreground native task is still running; press c to cancel and wait for its outcome".into();
                 return;
             }
         } else {
             if self.direct_native_job.is_some() || self.direct_native_admission_closed {
-                self.status = "A foreground CPU task is active or interrupted; finish cleanup or recovery before using the coordinator lane".into();
+                self.status = "A foreground native task is active or interrupted; finish or recover it before using the coordinator lane".into();
                 return;
             }
             if self.coordinator_action_pending
@@ -4386,9 +4418,7 @@ impl App {
         }
         #[cfg(target_os = "linux")]
         {
-            if !is_direct_cpu_native_profile(&profile)
-                && self.stack_coordinator_socket_dir.is_none()
-            {
+            if !direct_native_profile && self.stack_coordinator_socket_dir.is_none() {
                 self.status =
                     "No explicit private coordinator socket is configured in shared settings"
                         .into();
@@ -4398,11 +4428,16 @@ impl App {
                 self.status = "Selected profile declares no task forms".into();
                 return;
             }
-            self.task_form_editor = Some(TaskFormEditor::new(&profile));
+            self.task_form_editor = Some(TaskFormEditor::new_with_direct_embeddings(
+                &profile,
+                direct_language_embeddings,
+            ));
             self.input_mode = InputMode::TaskForm;
             self.status = if is_direct_cpu_native_profile(&profile) {
                 "Foreground CPU task form open · request stays in memory; run once with Ctrl+Enter"
                     .into()
+            } else if direct_language_embeddings {
+                "Foreground language embeddings form open · no caller ID or coordinator; run once with Ctrl+Enter".into()
             } else {
                 "Native task form open · choose the declared task explicitly".into()
             };
@@ -4527,13 +4562,13 @@ impl App {
             if self
                 .task_form_editor
                 .as_ref()
-                .is_some_and(TaskFormEditor::is_direct_cpu_native)
+                .is_some_and(TaskFormEditor::is_direct_native)
             {
-                self.submit_direct_cpu_native();
+                self.submit_direct_native();
                 return;
             }
             if self.direct_native_job.is_some() || self.direct_native_admission_closed {
-                self.status = "A foreground CPU task is active or interrupted; finish cleanup or recovery before using the coordinator lane".into();
+                self.status = "A foreground native task is active or interrupted; finish or recover it before using the coordinator lane".into();
                 return;
             }
             if self.coordinator_action_pending
@@ -4637,35 +4672,34 @@ impl App {
     }
 
     #[cfg(target_os = "linux")]
-    fn submit_direct_cpu_native(&mut self) {
+    fn submit_direct_native(&mut self) {
         if self.coordinator_action_pending
             || (self.coordinator_request_id.is_some() && !self.coordinator_request_terminal)
         {
-            self.status = "A coordinator request is pending or nonterminal; observe or cancel it before starting a foreground CPU run".into();
+            self.status = "A coordinator request is pending or nonterminal; observe or cancel it before starting a foreground native run".into();
             return;
         }
         if self.direct_native_admission_closed {
-            self.status = "Foreground CPU admission is closed after uncertain process cleanup; inspect Jobs and recover the runner before retrying".into();
+            self.status = "Foreground native admission is closed after an unconfirmed completion; inspect Jobs and recover the backend before retrying".into();
             return;
         }
         if self.direct_native_job.is_some() {
-            self.status =
-                "A foreground CPU task is still running; press c to cancel and wait for cleanup"
-                    .into();
+            self.status = "A foreground native task is still running; press c to cancel and wait for its outcome".into();
             return;
         }
         let Some(catalog) = self.stack_catalog.as_ref() else {
-            self.status = "Refresh the Stack Catalog before running a foreground CPU task".into();
+            self.status =
+                "Refresh the Stack Catalog before running a foreground native task".into();
             return;
         };
         let Some(editor) = self.task_form_editor.as_ref() else {
             self.status = "Native task form is not open".into();
             return;
         };
-        if !editor.is_direct_cpu_native()
+        if !editor.is_direct_native()
             || catalog.inspect(&editor.profile) != Some(&editor.profile_snapshot)
         {
-            self.status = "Selected CPU profile changed; refresh and reopen the form".into();
+            self.status = "Selected native profile changed; refresh and reopen the form".into();
             return;
         }
         let lane = editor.profile.lane;
@@ -4687,17 +4721,25 @@ impl App {
         };
         let task = request.task().to_owned();
         let task_label = direct_native_task_label(&task);
+        let language_adapter = if task == "embeddings" {
+            match self.prepare_direct_embedding_adapter(&catalog, &request) {
+                Ok(adapter) => Some(adapter),
+                Err(message) => {
+                    self.status = message.into();
+                    return;
+                }
+            }
+        } else {
+            None
+        };
 
-        // The cross-toolkit history contract has metadata only: no caller ID,
-        // command, argv, speech text, decision state, or native result is
-        // persisted. Artifact references are added only after validated TTS.
+        // History remains metadata-only: no caller ID, command, argv, text,
+        // embedding input, decision state, or native result is persisted.
+        // Artifact references are added only after validated TTS.
         let toolkit = match lane {
+            Lane::Language => "l3ms",
             Lane::Decisions => "l3ds",
             Lane::Media => "l2m2",
-            Lane::Language => {
-                self.status = "The foreground CPU runner does not accept language work".into();
-                return;
-            }
         };
         let job_id = match self.job_history.begin_cross_toolkit(CrossToolkitJobStart {
             toolkit: toolkit.into(),
@@ -4707,7 +4749,7 @@ impl App {
         }) {
             Ok(job_id) => job_id,
             Err(_) => {
-                self.status = "Could not create safe foreground CPU job history".into();
+                self.status = "Could not create safe foreground native job history".into();
                 return;
             }
         };
@@ -4724,7 +4766,7 @@ impl App {
             .is_err()
         {
             self.finish_direct_native_history(job_id, "failed", None);
-            self.status = "Could not mark foreground CPU task as running".into();
+            self.status = "Could not mark foreground native task as running".into();
             return;
         }
         if self.job_history.persist_in(&self.data_root).is_err() {
@@ -4736,7 +4778,7 @@ impl App {
                 },
             );
             self.status =
-                "Safe foreground CPU job history could not be saved; nothing was started".into();
+                "Safe foreground native job history could not be saved; nothing was started".into();
             return;
         }
 
@@ -4745,7 +4787,7 @@ impl App {
                 Ok(directory) => Some(directory),
                 Err(()) => {
                     self.finish_direct_native_history(job_id, "failed", None);
-                    self.status = "Could not allocate a fresh private CPU speech output directory; nothing was started".into();
+                    self.status = "Could not allocate a fresh private speech output directory; nothing was started".into();
                     return;
                 }
             }
@@ -4759,14 +4801,15 @@ impl App {
         let deadline = Instant::now() + timeout;
         let worker_task = task.clone();
         let worker = match thread::Builder::new()
-            .name(format!("l3ms-direct-{toolkit}-{job_id}"))
+            .name(format!("l3ms-native-{toolkit}-{job_id}"))
             .spawn(move || {
                 let cancellation = DirectNativeCancellation(worker_cancellation);
                 let context = OperationContext::new(deadline, &cancellation);
-                let outcome = direct_run::run_cpu_native(
+                let outcome = direct_run::run_native(
                     &catalog,
                     &request,
                     speech_output_directory.as_deref(),
+                    language_adapter.as_ref(),
                     &context,
                 );
                 let _ = sender.send(DirectNativeCompletion { job_id, outcome });
@@ -4782,7 +4825,7 @@ impl App {
                     state: DirectNativeState::Failed,
                     result: None,
                 });
-                self.status = "Could not start the foreground CPU task worker".into();
+                self.status = "Could not start the foreground native task worker".into();
                 return;
             }
         };
@@ -4807,8 +4850,55 @@ impl App {
         });
         self.task_form_editor = None;
         self.input_mode = InputMode::Normal;
-        self.status = format!("{task_label} #{job_id} running · press c to cancel");
+        self.status = if lane == Lane::Language {
+            format!("{task_label} #{job_id} running · press c to cancel; remote completion may be uncertain")
+        } else {
+            format!("{task_label} #{job_id} running · press c to cancel")
+        };
         self.push_log(format!("{task_label} #{job_id} started"));
+    }
+
+    #[cfg(target_os = "linux")]
+    fn prepare_direct_embedding_adapter(
+        &self,
+        catalog: &Catalog,
+        request: &crate::control::requests::InferenceRequest,
+    ) -> Result<LanguageAdapter, &'static str> {
+        if request.lane() != Lane::Language || request.task() != "embeddings" {
+            return Err("Direct language work is limited to the declared embeddings task");
+        }
+        if self.chat_connection_pending
+            || self.chat_pending
+            || self.chat_stream_cancellation.is_some()
+            || self.chat_session_pending
+        {
+            return Err("Wait for the current Chat connection, response, or session action before running embeddings");
+        }
+        let client = self
+            .chat_client
+            .as_ref()
+            .ok_or("Connect Chat before running native embeddings")?;
+        if self.chat_endpoint_committed.as_deref() != Some(client.base_url()) {
+            return Err("The current Chat endpoint is not a confirmed connection; reconnect before running embeddings");
+        }
+        let route = resolve_profile_route(catalog, request.profile())
+            .map_err(|_| "The selected embeddings route could not be revalidated")?;
+        let NativeRoute::LlamaSwapModel { model_id, .. } = route.native_route else {
+            return Err("The selected embeddings task has no native llama-swap model route");
+        };
+        let Some(model) = self
+            .chat_models
+            .iter()
+            .find(|model| model.id == model_id.as_str())
+        else {
+            return Err("The exact embeddings route model is not advertised by the connected Chat endpoint; refresh Chat models");
+        };
+        if model.disabled {
+            return Err("The exact embeddings route model is disabled in Chat");
+        }
+        client
+            .embedding_adapter()
+            .map_err(|_| "Could not configure the confirmed Chat endpoint for embeddings")
     }
 
     #[cfg(target_os = "linux")]
@@ -4828,11 +4918,11 @@ impl App {
             .direct_native_summary
             .as_ref()
             .filter(|summary| summary.job_id == job.job_id)
-            .map_or("foreground CPU task", |summary| {
+            .map_or("foreground native task", |summary| {
                 direct_native_task_label(&summary.task)
             });
         self.status = format!(
-            "{label} #{} cancellation requested · waiting for process cleanup",
+            "{label} #{} cancellation requested · waiting for operation outcome",
             job.job_id
         );
         true
@@ -4857,9 +4947,9 @@ impl App {
             )
             .is_ok();
         if updated {
-            self.persist_jobs("foreground CPU task finish");
+            self.persist_jobs("foreground native task finish");
         } else {
-            self.push_log("Foreground CPU job history update failed");
+            self.push_log("Foreground native job history update failed");
         }
     }
 
@@ -4890,10 +4980,10 @@ impl App {
             let label = self
                 .direct_native_summary
                 .as_ref()
-                .map_or("foreground CPU task", |summary| {
+                .map_or("foreground native task", |summary| {
                     direct_native_task_label(&summary.task)
                 });
-            self.status = format!("{label} #{expected_job_id} interrupted without a confirmed worker result; inspect Jobs and recover the runner before retrying");
+            self.status = format!("{label} #{expected_job_id} interrupted without a confirmed worker result; inspect Jobs and verify the backend before retrying");
             return;
         };
 
@@ -4913,7 +5003,7 @@ impl App {
                 let label = self
                     .direct_native_summary
                     .as_ref()
-                    .map_or("foreground CPU task", |summary| {
+                    .map_or("foreground native task", |summary| {
                         direct_native_task_label(&summary.task)
                     });
                 let latency = latency.map_or_else(String::new, |latency| {
@@ -4933,7 +5023,7 @@ impl App {
                     summary.result = None;
                 }
                 self.status = format!(
-                    "Foreground CPU job #{expected_job_id} returned an unexpected result lane"
+                    "Foreground native job #{expected_job_id} returned an unexpected result lane"
                 );
             }
             Err(error) if error.blocks_following_work() => {
@@ -4945,13 +5035,23 @@ impl App {
                 let label = self
                     .direct_native_summary
                     .as_ref()
-                    .map_or("foreground CPU task", |summary| {
+                    .map_or("foreground native task", |summary| {
                         direct_native_task_label(&summary.task)
                     });
-                self.status = format!("{label} #{expected_job_id} interrupted: {error}; inspect Jobs and recover the runner before retrying");
-                self.push_log(format!(
-                    "{label} #{expected_job_id} requires runner recovery"
-                ));
+                let remote = self
+                    .direct_native_summary
+                    .as_ref()
+                    .is_some_and(|summary| summary.lane == Lane::Language);
+                self.status = if remote {
+                    format!("{label} #{expected_job_id} interrupted: {error}; foreground admission is closed, verify the endpoint before retrying")
+                } else {
+                    format!("{label} #{expected_job_id} interrupted: {error}; inspect Jobs and recover the runner before retrying")
+                };
+                self.push_log(if remote {
+                    format!("{label} #{expected_job_id} remote completion unconfirmed")
+                } else {
+                    format!("{label} #{expected_job_id} requires runner recovery")
+                });
             }
             Err(error) if error.cancellation_confirmed() => {
                 self.finish_direct_native_history(expected_job_id, "cancelled", None);
@@ -4961,12 +5061,20 @@ impl App {
                 let label = self
                     .direct_native_summary
                     .as_ref()
-                    .map_or("foreground CPU task", |summary| {
+                    .map_or("foreground native task", |summary| {
                         direct_native_task_label(&summary.task)
                     });
-                self.status = format!(
-                    "{label} #{expected_job_id} cancelled · owned process cleanup confirmed"
-                );
+                let remote = self
+                    .direct_native_summary
+                    .as_ref()
+                    .is_some_and(|summary| summary.lane == Lane::Language);
+                self.status = if remote {
+                    format!("{label} #{expected_job_id} cancelled before remote dispatch")
+                } else {
+                    format!(
+                        "{label} #{expected_job_id} cancelled · owned process cleanup confirmed"
+                    )
+                };
                 self.push_log(format!("{label} #{expected_job_id} cancelled"));
             }
             Err(error) => {
@@ -4977,7 +5085,7 @@ impl App {
                 let label = self
                     .direct_native_summary
                     .as_ref()
-                    .map_or("foreground CPU task", |summary| {
+                    .map_or("foreground native task", |summary| {
                         direct_native_task_label(&summary.task)
                     });
                 self.status = format!("{label} #{expected_job_id} failed: {error}");
@@ -5001,6 +5109,7 @@ impl App {
                         && summary.lane == Lane::Media
                         && summary.profile_id == "breeze-tts-2-cpu"
                 }
+                ("embeddings", DirectRunResult::Embeddings(_)) => summary.lane == Lane::Language,
                 _ => false,
             })
     }
@@ -5321,6 +5430,15 @@ impl App {
     }
 
     fn send_chat_message(&mut self) {
+        #[cfg(target_os = "linux")]
+        if (self.direct_native_job.is_some() || self.direct_native_admission_closed)
+            && self.direct_native_summary.as_ref().is_some_and(|summary| {
+                summary.lane == Lane::Language && summary.task == "embeddings"
+            })
+        {
+            self.status = "An embedding request is active or unconfirmed; inspect its outcome before sending Chat".into();
+            return;
+        }
         self.input_mode = InputMode::Normal;
         let prompt = self.chat_input.trim().to_owned();
         if prompt.is_empty() || self.chat_pending {
@@ -6930,18 +7048,23 @@ impl App {
         let show_direct_native = self.direct_native_job.is_some()
             || self.direct_native_admission_closed
             || self.direct_native_summary.is_some()
-            || self
-                .selected_stack_profile()
-                .is_some_and(is_direct_cpu_native_profile);
+            || self.selected_stack_profile().is_some_and(|profile| {
+                self.stack_catalog
+                    .as_ref()
+                    .is_some_and(|catalog| is_direct_native_profile(profile, catalog))
+            });
         #[cfg(not(target_os = "linux"))]
         let show_direct_native = false;
         #[cfg(target_os = "linux")]
         let direct_result_visible = self.direct_native_summary.as_ref().is_some_and(|summary| {
             matches!(summary.state, DirectNativeState::Succeeded)
                 && self.selected_stack_profile().is_some_and(|profile| {
-                    is_direct_cpu_native_profile(profile)
-                        && profile.key.lane == summary.lane
+                    profile.key.lane == summary.lane
                         && profile.key.profile_id.as_str() == summary.profile_id
+                        && self
+                            .stack_catalog
+                            .as_ref()
+                            .is_some_and(|catalog| is_direct_native_profile(profile, catalog))
                 })
         });
         #[cfg(not(target_os = "linux"))]
@@ -6949,7 +7072,7 @@ impl App {
         #[cfg(target_os = "linux")]
         let (action_text, action_title) = if show_direct_native {
             let text = self.direct_native_summary.as_ref().map_or_else(
-                || "CPU-local Nagi/Laya decisions and standard Breeze speech run in the foreground. No caller ID, coordinator socket, or observe step.\nf open form · c cancels an active run".to_owned(),
+                || "Nagi/Laya CPU decisions, standard CPU Breeze speech, and connected llama-swap embeddings run in the foreground. No caller ID, coordinator socket, or observe step.\nf open task · c cancels an active run".to_owned(),
                 |summary| {
                     let latency = summary.result.as_ref().and_then(direct_native_latency).map_or_else(
                         String::new,
@@ -6963,17 +7086,21 @@ impl App {
                         summary.task,
                         summary.state.label(),
                         latency,
-                        if self.direct_native_admission_closed {
+                        if self.direct_native_admission_closed && summary.lane == Lane::Language {
+                            "admission closed · remote completion unconfirmed; verify endpoint before retrying"
+                        } else if self.direct_native_admission_closed {
                             "admission closed · inspect Jobs and recover runner before retrying"
+                        } else if self.direct_native_job.is_some() && summary.lane == Lane::Language {
+                            "c cancel · dispatched remote work may continue"
                         } else if self.direct_native_job.is_some() {
-                            "c cancel · waits for process-group cleanup"
+                            "c cancel · waits for local process cleanup"
                         } else {
                             "f run again · c only applies while active"
                         }
                     )
                 },
             );
-            (text, "Foreground CPU task")
+            (text, "Foreground native task")
         } else {
             let retained = self.coordinator_request_id.as_deref().unwrap_or("none");
             let lane = self.coordinator_request_lane.map_or("—", Lane::as_str);
@@ -7050,9 +7177,9 @@ impl App {
                     .as_ref()
                     .and_then(|summary| summary.result.as_ref())
                     .map(direct_native_result_preview)
-                    .unwrap_or_else(|| "Foreground CPU result is not available.".into())
+                    .unwrap_or_else(|| "Foreground native result is not available.".into())
             } else {
-                "Foreground CPU result is hidden until its completed profile is selected.".into()
+                "Foreground native result is hidden until its completed profile is selected.".into()
             }
         } else {
             self.coordinator_output.as_ref().map_or_else(
@@ -7076,7 +7203,7 @@ impl App {
                 .block(
                     theme::block()
                         .title(if show_direct_native {
-                            "Foreground CPU result"
+                            "Foreground native result"
                         } else {
                             "Private native result panel · explicit observation only"
                         })
@@ -7101,23 +7228,24 @@ impl App {
                 Constraint::Length(3),
             ])
             .split(area);
+        let form_hint = if editor.direct_cpu_standard_tts {
+            "standard CPU speech · no caller ID or coordinator"
+        } else if editor.direct_cpu_decision {
+            "CPU decision · no caller ID or coordinator"
+        } else if editor.direct_language_embeddings {
+            "language embedding batch · connected Chat endpoint · no caller ID or coordinator"
+        } else {
+            "choose the task explicitly from its declared list"
+        };
         frame.render_widget(
-            Paragraph::new(format!(
-                "Profile: {}{}",
-                editor.profile,
-                if editor.direct_cpu_standard_tts {
-                    " · standard CPU speech · no caller ID or coordinator"
-                } else {
-                    " · choose the task explicitly from its declared list"
-                }
-            ))
-            .style(theme::text())
-            .block(
-                theme::block()
-                    .title("Native task form · in memory only")
-                    .borders(Borders::ALL),
-            )
-            .wrap(Wrap { trim: false }),
+            Paragraph::new(format!("Profile: {} · {form_hint}", editor.profile))
+                .style(theme::text())
+                .block(
+                    theme::block()
+                        .title("Native task form · in memory only")
+                        .borders(Borders::ALL),
+                )
+                .wrap(Wrap { trim: false }),
             panes[0],
         );
 
@@ -7184,7 +7312,7 @@ impl App {
             panes[1],
         );
         frame.render_widget(
-            Paragraph::new(if editor.is_direct_cpu_native() {
+            Paragraph::new(if editor.is_direct_native() {
                 "Tab/Shift+Tab move fields · Enter inserts newline · Ctrl+Enter runs once · Esc clears draft · c cancels active run"
             } else {
                 "Tab/Shift+Tab move fields · ↑/↓ choose task/kind/mode · Enter inserts newline · Ctrl+Enter submits once · Esc clears draft"
@@ -7789,11 +7917,33 @@ fn is_direct_cpu_native_profile(profile: &CatalogProfile) -> bool {
 }
 
 #[cfg(target_os = "linux")]
+fn is_direct_native_language_embeddings_profile(
+    profile: &CatalogProfile,
+    catalog: &Catalog,
+) -> bool {
+    profile.key.lane == Lane::Language
+        && !profile.disabled
+        && profile
+            .tasks
+            .iter()
+            .any(|task| task.as_str() == "embeddings")
+        && resolve_profile_route(catalog, &profile.key)
+            .is_ok_and(|route| matches!(route.native_route, NativeRoute::LlamaSwapModel { .. }))
+}
+
+#[cfg(target_os = "linux")]
+fn is_direct_native_profile(profile: &CatalogProfile, catalog: &Catalog) -> bool {
+    is_direct_cpu_native_profile(profile)
+        || is_direct_native_language_embeddings_profile(profile, catalog)
+}
+
+#[cfg(target_os = "linux")]
 fn direct_native_task_label(task: &str) -> &'static str {
     match task {
         "decision" => "CPU decision",
         "tts" => "CPU speech",
-        _ => "Foreground CPU task",
+        "embeddings" => "Language embeddings",
+        _ => "Foreground native task",
     }
 }
 
@@ -7813,6 +7963,7 @@ fn direct_native_latency(result: &DirectRunResult) -> Option<Duration> {
     match result {
         DirectRunResult::Decision(result) => result.native_latency,
         DirectRunResult::Speech(_) => None,
+        DirectRunResult::Embeddings(_) => None,
     }
 }
 
@@ -7875,6 +8026,35 @@ fn direct_native_result_preview(result: &DirectRunResult) -> String {
             })
             .collect::<Vec<_>>()
             .join("\n"),
+        DirectRunResult::Embeddings(payload) => {
+            let dimensions = payload.vectors.first().map_or(0, Vec::len);
+            let mut samples = payload
+                .vectors
+                .iter()
+                .take(3)
+                .enumerate()
+                .map(|(index, vector)| {
+                    let values = vector
+                        .iter()
+                        .take(8)
+                        .map(|value| format!("{value:.4}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let suffix = if vector.len() > 8 { ", …" } else { "" };
+                    format!("vector[{index}] [{values}{suffix}]")
+                })
+                .collect::<Vec<_>>();
+            if payload.vectors.len() > 3 {
+                samples.push(format!("… {} more vector(s)", payload.vectors.len() - 3));
+            }
+            format!(
+                "Embedding batch · {} vector(s) × {dimensions} dimension(s)\nusage: prompt_tokens={} · total_tokens={}\n{}",
+                payload.vectors.len(),
+                payload.usage.prompt_tokens,
+                payload.usage.total_tokens,
+                samples.join("\n")
+            )
+        }
     };
     let rendered = rendered
         .chars()
@@ -9312,6 +9492,15 @@ mod tests {
         .unwrap();
     }
 
+    fn write_cuda_decision_stack_fixture(fixture: &AppFixture) {
+        write_stack_fixture(fixture);
+        fs::write(
+            fixture.root.join("toolkits/l3ds/decision-runtimes.json"),
+            r#"{"version":"1.0","profiles":[{"id":"nagi-cuda","name":"CUDA decision fixture","engine":"nagi","type":"local","model":"org/nagi","device":"cuda","entrypoint":"decision-models/runner.py"}]}"#,
+        )
+        .unwrap();
+    }
+
     fn focus_stack_profile_by_id(app: &mut App, profile_id: &str) {
         app.handle_key(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE))
             .unwrap();
@@ -9326,13 +9515,21 @@ mod tests {
         app.stack_catalog_state.select(Some(index));
     }
 
-    fn connect_test_chat(app: &mut App, models: Vec<SwapModel>) {
-        let endpoint = "http://connected.example";
+    fn connect_test_chat_at(
+        app: &mut App,
+        endpoint: &str,
+        api_key: Option<&str>,
+        models: Vec<SwapModel>,
+    ) {
         app.chat_endpoint_draft = endpoint.into();
         app.chat_endpoint_committed = Some(endpoint.into());
-        app.chat_client = Some(ChatClient::new(endpoint, None).unwrap());
+        app.chat_client = Some(ChatClient::new(endpoint, api_key).unwrap());
         app.chat_models = models;
         app.chat_model_state.select(Some(0));
+    }
+
+    fn connect_test_chat(app: &mut App, models: Vec<SwapModel>) {
+        connect_test_chat_at(app, "http://connected.example", None, models);
     }
 
     fn test_chat_model(id: &str, state: &str, disabled: bool) -> SwapModel {
@@ -9466,7 +9663,354 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    fn submit_coordinator_embedding_form(app: &mut App, request_id: &str, input: &str) {
+    fn open_direct_embedding_form(app: &mut App, input: &str) {
+        focus_stack_profile_by_id(app, "local-embeddings");
+        assert!(app.stack_coordinator_socket_dir.is_none());
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+            .unwrap();
+        let editor = app.task_form_editor.as_mut().unwrap();
+        assert!(editor.direct_language_embeddings);
+        assert!(editor.is_direct_native());
+        assert!(!editor.fields.contains(&TaskFormField::RequestId));
+        assert!(!editor.fields.contains(&TaskFormField::DeclaredTask));
+        assert!(editor.fields.contains(&TaskFormField::EmbeddingInputs));
+        assert_eq!(editor.selected_task, Some(0));
+        assert_eq!(editor.declared_tasks, ["embeddings"]);
+        assert_eq!(editor.values.timeout, "30000");
+        editor.values.embedding_inputs = input.into();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn start_direct_embedding_job(fixture: &AppFixture, endpoint: &str, input: &str) -> (App, u64) {
+        let mut app = fixture.app();
+        open_direct_embedding_form(&mut app, input);
+        connect_test_chat_at(
+            &mut app,
+            endpoint,
+            Some("fixture-key"),
+            vec![test_chat_model("local-embeddings", "unloaded", false)],
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL))
+            .unwrap();
+        let job_id = app.direct_native_job.as_ref().unwrap().job_id;
+        (app, job_id)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+        use std::io::Read;
+
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut bytes = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let read = stream.read(&mut chunk).unwrap();
+            assert!(read > 0, "HTTP client closed before completing its request");
+            bytes.extend_from_slice(&chunk[..read]);
+            let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&bytes[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            if bytes.len() >= header_end + 4 + content_length {
+                return String::from_utf8(bytes).unwrap();
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn serve_direct_embeddings(
+        listener: std::net::TcpListener,
+        expected_input: Vec<String>,
+        expected_authorization: Option<&'static str>,
+        release: Option<mpsc::Receiver<()>>,
+        request_received: Option<mpsc::Sender<()>>,
+    ) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            use std::io::Write;
+
+            listener.set_nonblocking(true).unwrap();
+            let accept_deadline = Instant::now() + Duration::from_secs(3);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && Instant::now() < accept_deadline =>
+                    {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("embedding endpoint did not receive request: {error}"),
+                }
+            };
+            stream
+                .set_write_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let request = read_http_request(&mut stream);
+            assert!(request.starts_with("POST /v1/embeddings "));
+            let (headers, body) = request.split_once("\r\n\r\n").unwrap();
+            if let Some(expected) = expected_authorization {
+                assert!(headers.lines().any(|line| {
+                    line.to_ascii_lowercase()
+                        .starts_with(&format!("authorization: bearer {expected}"))
+                }));
+            }
+            let request: serde_json::Value = serde_json::from_str(body).unwrap();
+            assert_eq!(request["model"], "local-embeddings");
+            assert_eq!(request["input"], serde_json::json!(expected_input.clone()));
+            assert_eq!(request["encoding_format"], "float");
+            if let Some(request_received) = request_received {
+                request_received.send(()).unwrap();
+            }
+            if let Some(release) = release {
+                release.recv_timeout(Duration::from_secs(3)).unwrap();
+            }
+            let data = expected_input
+                .iter()
+                .enumerate()
+                .map(|(index, _)| {
+                    serde_json::json!({
+                        "object": "embedding",
+                        "index": index,
+                        "embedding": [0.25 + index as f32, -0.5]
+                    })
+                })
+                .collect::<Vec<_>>();
+            let body = serde_json::json!({
+                "object": "list",
+                "model": "server-model-name",
+                "data": data,
+                "usage": {"prompt_tokens": 5, "total_tokens": 5}
+            })
+            .to_string();
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn connected_embedding_batch_reuses_committed_auth_and_keeps_results_ephemeral() {
+        let fixture = AppFixture::new();
+        write_embedding_stack_fixture(&fixture);
+        let input = vec![
+            "embedding-private-secret".to_owned(),
+            "unicode π".to_owned(),
+        ];
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server =
+            serve_direct_embeddings(listener, input.clone(), Some("fixture-key"), None, None);
+        let (mut app, _) = start_direct_embedding_job(
+            &fixture,
+            &endpoint,
+            r#"["embedding-private-secret","unicode π"]"#,
+        );
+        assert!(app.direct_native_job.is_some());
+        assert!(app.coordinator_workbench.is_none());
+        assert!(app.task_form_editor.is_none());
+        wait_for_direct_native(&mut app);
+        server.join().unwrap();
+
+        let summary = app.direct_native_summary.as_ref().unwrap();
+        assert!(matches!(summary.state, DirectNativeState::Succeeded));
+        let Some(DirectRunResult::Embeddings(payload)) = summary.result.as_ref() else {
+            panic!("direct language embeddings were not retained in memory")
+        };
+        assert_eq!(payload.vectors, vec![vec![0.25, -0.5], vec![1.25, -0.5]]);
+        assert_eq!(payload.usage.prompt_tokens, 5);
+        assert_eq!(payload.usage.total_tokens, 5);
+        assert!(app.status.contains("Language embeddings"));
+        assert!(!app.status.contains("embedding-private-secret"));
+        assert!(app.log.iter().all(|line| {
+            !line.contains("embedding-private-secret") && !line.contains("fixture-key")
+        }));
+
+        let job = &app.job_history.records()[0];
+        assert!(job.command.is_empty());
+        assert_eq!(job.metadata.toolkit.as_deref(), Some("l3ms"));
+        assert_eq!(job.metadata.task.as_deref(), Some("embeddings"));
+        assert!(job.metadata.request_id.is_none());
+        assert_eq!(job.metadata.result_state.as_deref(), Some("succeeded"));
+        let persisted =
+            fs::read_to_string(crate::state_store::jobs_path_in(&fixture.data)).unwrap();
+        assert!(!persisted.contains("embedding-private-secret"));
+        assert!(!persisted.contains("fixture-key"));
+        assert!(!persisted.contains("vectors"));
+
+        let mut terminal = Terminal::new(TestBackend::new(140, 45)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let rendered = terminal_text(&terminal);
+        assert!(rendered.contains("Embedding batch"));
+        assert!(rendered.contains("vector[0]"));
+        assert!(rendered.contains("prompt_tokens=5"));
+        assert!(!rendered.contains("embedding-private-secret"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cancelling_dispatched_embedding_keeps_admission_closed_on_uncertain_completion() {
+        let fixture = AppFixture::new();
+        write_embedding_stack_fixture(&fixture);
+        let input = vec!["cancel-private-secret".to_owned()];
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (request_received_tx, request_received_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let server = serve_direct_embeddings(
+            listener,
+            input,
+            Some("fixture-key"),
+            Some(release_rx),
+            Some(request_received_tx),
+        );
+        let (mut app, job_id) =
+            start_direct_embedding_job(&fixture, &endpoint, r#"["cancel-private-secret"]"#);
+        request_received_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("embedding request did not reach the connected endpoint");
+        assert_eq!(
+            app.job_history.records()[0]
+                .metadata
+                .result_state
+                .as_deref(),
+            Some("running")
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.direct_native_job.as_ref().unwrap().job_id, job_id);
+        assert!(app.status.contains("cancellation requested"));
+        assert_eq!(
+            app.job_history.records()[0]
+                .metadata
+                .result_state
+                .as_deref(),
+            Some("running")
+        );
+        wait_for_direct_native(&mut app);
+        release_tx.send(()).unwrap();
+        server.join().unwrap();
+
+        let summary = app.direct_native_summary.as_ref().unwrap();
+        assert!(matches!(summary.state, DirectNativeState::Interrupted));
+        assert!(summary.result.is_none());
+        assert!(app.direct_native_admission_closed);
+        assert!(app.status.contains("remote completion is unconfirmed"));
+        assert!(app.status.contains("verify the endpoint before retrying"));
+        assert_eq!(
+            app.job_history.records()[0]
+                .metadata
+                .result_state
+                .as_deref(),
+            Some("interrupted")
+        );
+        assert!(app.log.iter().all(|line| {
+            !line.contains("cancel-private-secret") && !line.contains("fixture-key")
+        }));
+        let persisted =
+            fs::read_to_string(crate::state_store::jobs_path_in(&fixture.data)).unwrap();
+        assert!(!persisted.contains("cancel-private-secret"));
+        assert!(!persisted.contains("fixture-key"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn direct_embedding_requires_the_exact_enabled_model_and_idle_confirmed_chat() {
+        let fixture = AppFixture::new();
+        write_embedding_stack_fixture(&fixture);
+        let mut app = fixture.app();
+        focus_stack_profile_by_id(&mut app, "local-embeddings");
+        let catalog = app.stack_catalog.as_ref().unwrap().clone();
+        let request = crate::control::requests::InferenceRequest::Embeddings {
+            profile: crate::control::catalog::ProfileKey::new(Lane::Language, "local-embeddings")
+                .unwrap(),
+            input: vec!["private batch input".into()],
+        };
+        connect_test_chat(
+            &mut app,
+            vec![
+                test_chat_model("another-model", "loaded", false),
+                test_chat_model("local-embeddings", "unloaded", false),
+            ],
+        );
+        assert!(app
+            .prepare_direct_embedding_adapter(&catalog, &request)
+            .is_ok());
+
+        for (case, expected) in [
+            ("missing-client", "Connect Chat"),
+            ("uncommitted-endpoint", "not a confirmed connection"),
+            ("connection-pending", "Wait for the current Chat connection"),
+            ("chat-pending", "Wait for the current Chat connection"),
+            ("session-pending", "Wait for the current Chat connection"),
+            (
+                "missing-route-model",
+                "exact embeddings route model is not advertised",
+            ),
+            (
+                "disabled-route-model",
+                "exact embeddings route model is disabled",
+            ),
+        ] {
+            let mut app = fixture.app();
+            connect_test_chat(
+                &mut app,
+                vec![
+                    test_chat_model("another-model", "loaded", false),
+                    test_chat_model("local-embeddings", "unloaded", false),
+                ],
+            );
+            match case {
+                "missing-client" => {
+                    app.chat_client = None;
+                    app.chat_endpoint_committed = None;
+                }
+                "uncommitted-endpoint" => {
+                    app.chat_endpoint_committed = Some("http://different.example".into());
+                }
+                "connection-pending" => app.chat_connection_pending = true,
+                "chat-pending" => app.chat_pending = true,
+                "session-pending" => app.chat_session_pending = true,
+                "missing-route-model" => {
+                    app.chat_models = vec![test_chat_model("another-model", "loaded", false)];
+                }
+                "disabled-route-model" => {
+                    app.chat_models = vec![test_chat_model("local-embeddings", "unloaded", true)];
+                }
+                _ => unreachable!(),
+            }
+            let error = match app.prepare_direct_embedding_adapter(&catalog, &request) {
+                Ok(_) => panic!("{case} must refuse a direct embedding run"),
+                Err(error) => error,
+            };
+            assert!(error.contains(expected), "{case}: {error}");
+            assert!(app.direct_native_job.is_none());
+            assert!(app.job_history.records().is_empty());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn submit_coordinator_decision_form(
+        app: &mut App,
+        request_id: &str,
+        state_json: &str,
+        questions_json: &str,
+    ) {
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
             .unwrap();
         for character in request_id.chars() {
@@ -9485,7 +10029,13 @@ mod tests {
             .unwrap();
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .unwrap();
-        for character in format!(r#"["{input}"]"#).chars() {
+        for character in state_json.chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        for character in questions_json.chars() {
             app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
                 .unwrap();
         }
@@ -9503,7 +10053,7 @@ mod tests {
         app.drain_background_events();
         assert!(
             app.direct_native_job.is_none(),
-            "direct CPU decision did not finish"
+            "direct native task did not finish"
         );
     }
 
@@ -9741,7 +10291,9 @@ mod tests {
         app.stack_catalog_state.select(Some(language_index));
         app.begin_task_form();
         assert!(app.task_form_editor.is_none());
-        assert!(app.status.contains("foreground CPU task is active"));
+        assert!(app
+            .status
+            .contains("foreground native task is active or interrupted"));
         app.begin_coordinator_observe();
         assert!(app
             .status
@@ -9855,67 +10407,28 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn task_form_requires_explicit_choices_and_handles_unicode_bounds_and_navigation() {
+    fn direct_embedding_form_needs_no_socket_or_caller_id_and_requires_connected_chat() {
         let fixture = AppFixture::new();
         write_embedding_stack_fixture(&fixture);
         let mut app = fixture.app();
-        app.handle_key(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE))
-            .unwrap();
-        let embeddings_index = app
-            .stack_catalog
-            .as_ref()
-            .unwrap()
-            .list()
-            .iter()
-            .position(|profile| profile.key.profile_id.as_str() == "local-embeddings")
-            .unwrap();
-        app.stack_catalog_state.select(Some(embeddings_index));
-        app.stack_coordinator_socket_dir = Some(fixture.data.path().to_path_buf());
-        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
-            .unwrap();
+        open_direct_embedding_form(&mut app, r#"["private text π"]"#);
         assert_eq!(app.input_mode, InputMode::TaskForm);
         let editor = app.task_form_editor.as_ref().unwrap();
-        assert_eq!(editor.active_field(), TaskFormField::RequestId);
-        assert!(editor.selected_task.is_none());
-        assert!(editor.values.request_id.is_empty());
-
-        app.handle_key(KeyEvent::new(KeyCode::Char('π'), KeyModifiers::NONE))
-            .unwrap();
-        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
-            .unwrap();
-        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
-            .unwrap();
-        assert_eq!(
-            app.task_form_editor.as_ref().unwrap().values.request_id,
-            "π"
-        );
-
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
-            .unwrap();
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
-            .unwrap();
-        assert_eq!(app.task_form_editor.as_ref().unwrap().values.timeout, "\n");
+        assert_eq!(editor.active_field(), TaskFormField::Timeout);
+        assert!(!editor.fields.contains(&TaskFormField::RequestId));
+        assert!(!editor.fields.contains(&TaskFormField::DeclaredTask));
+        assert_eq!(editor.values.embedding_inputs, r#"["private text π"]"#);
+        assert!(app.stack_coordinator_socket_dir.is_none());
         assert!(app.coordinator_workbench.is_none());
-
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL))
             .unwrap();
-        let selected_before = app.stack_catalog_state.selected();
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
-            .unwrap();
-        let editor = app.task_form_editor.as_ref().unwrap();
-        assert_eq!(
-            editor.field_display(TaskFormField::DeclaredTask),
-            "embeddings"
-        );
-        assert!(editor.fields.contains(&TaskFormField::EmbeddingInputs));
-        assert_eq!(app.stack_catalog_state.selected(), selected_before);
-        assert!(!app.status.contains('π'));
-        assert!(!app.log.iter().any(|line| line.contains('π')));
-
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
-            .unwrap();
-        assert_eq!(app.input_mode, InputMode::Normal);
-        assert!(app.task_form_editor.is_none());
+        assert!(app.status.contains("Connect Chat"));
+        assert!(app.task_form_editor.is_some());
+        assert!(app.direct_native_job.is_none());
+        assert!(app.coordinator_workbench.is_none());
+        assert!(app.job_history.records().is_empty());
+        assert!(!app.status.contains("private text π"));
+        assert!(!app.log.iter().any(|line| line.contains("private text π")));
     }
 
     #[cfg(target_os = "linux")]
@@ -9934,33 +10447,21 @@ mod tests {
             .iter()
             .find(|profile| profile.key.profile_id.as_str() == "vector-fixture")
             .unwrap();
-        let mut editor = TaskFormEditor::new(profile);
-        editor.values.request_id = "caller:vectors".into();
+        let mut editor = TaskFormEditor::new_with_direct_embeddings(profile, true);
         editor.values.timeout = "1000".into();
-        editor.active = 2;
-        assert!(editor.cycle_selector(1));
+        editor.selected_task = Some(0);
         assert_eq!(editor.declared_tasks, ["embeddings"]);
         assert!(editor.fields.contains(&TaskFormField::EmbeddingInputs));
+        assert!(!editor.fields.contains(&TaskFormField::RequestId));
         editor.values.embedding_inputs = r#"["first private text","second private text"]"#.into();
-        let envelope =
-            crate::control::task_form::build_submit(&catalog, editor.to_draft().unwrap()).unwrap();
-        let json = serde_json::to_value(&envelope).unwrap();
-        assert_eq!(json["message"]["request"]["lane"], "language");
-        assert_eq!(json["message"]["request"]["task"], "embeddings");
-        assert!(json["message"]["request"].get("turns").is_none());
-        let crate::control::ipc::ClientRequest::Submit { request, .. } =
-            envelope.into_client_request().unwrap()
-        else {
-            panic!("embedding form must be Submit")
-        };
+        let (request, timeout) = build_direct_native(&catalog, editor.to_draft().unwrap()).unwrap();
         let crate::control::requests::InferenceRequest::Embeddings { input, .. } = request else {
             panic!("embedding form must retain its native task")
         };
         assert_eq!(input, ["first private text", "second private text"]);
+        assert_eq!(timeout, Duration::from_secs(1));
         editor.values.embedding_inputs = "[]".into();
-        assert!(
-            crate::control::task_form::build_submit(&catalog, editor.to_draft().unwrap()).is_err()
-        );
+        assert!(build_direct_native(&catalog, editor.to_draft().unwrap()).is_err());
     }
 
     #[cfg(target_os = "linux")]
@@ -9975,8 +10476,9 @@ mod tests {
             .find(|profile| profile.key.profile_id.as_str() == "local-embeddings")
             .unwrap();
         let mut app = fixture.app();
-        let mut editor = TaskFormEditor::new(profile);
-        editor.values.request_id = "界e\u{301}".into();
+        let mut editor = TaskFormEditor::new_with_direct_embeddings(profile, true);
+        editor.values.embedding_inputs = r#"["界e\u{301}"]"#.into();
+        editor.active = 1;
         editor.sync_cursor();
         app.task_form_editor = Some(editor);
         app.input_mode = InputMode::TaskForm;
@@ -10016,12 +10518,12 @@ mod tests {
     #[test]
     fn task_form_bounds_each_field_and_aggregate_before_typing_more() {
         let fixture = AppFixture::new();
-        write_embedding_stack_fixture(&fixture);
+        write_cuda_decision_stack_fixture(&fixture);
         let catalog = Catalog::load(&fixture.root).unwrap();
         let profile = catalog
             .list()
             .iter()
-            .find(|profile| profile.key.profile_id.as_str() == "local-embeddings")
+            .find(|profile| profile.key.profile_id.as_str() == "nagi-cuda")
             .unwrap();
         let mut editor = TaskFormEditor::new(profile);
         editor.selected_task = Some(0);
@@ -10032,16 +10534,16 @@ mod tests {
 
         editor.values.request_id = "a".repeat(MAX_STACK_ID_INPUT_BYTES);
         editor.values.timeout = "3".repeat(32);
-        editor.values.embedding_inputs = "c".repeat(MAX_TASK_FORM_FIELD_BYTES - 1);
+        editor.values.decision_state = "c".repeat(MAX_TASK_FORM_FIELD_BYTES - 1);
         let remaining = MAX_TASK_FORM_TOTAL_BYTES
             - editor.values.request_id.len()
             - editor.values.timeout.len()
-            - editor.values.embedding_inputs.len();
-        editor.values.workflow_graph = "4".repeat(remaining);
+            - editor.values.decision_state.len();
+        editor.values.decision_questions = "4".repeat(remaining);
         editor.move_focus(1);
         editor.move_focus(1);
         editor.move_focus(1);
-        assert_eq!(editor.active_field(), TaskFormField::EmbeddingInputs);
+        assert_eq!(editor.active_field(), TaskFormField::DecisionState);
         assert!(!editor.insert_char('x'));
     }
 
@@ -10119,7 +10621,7 @@ mod tests {
     }
 
     #[test]
-    fn stack_catalog_typed_embedding_submit_observe_cancel_keeps_native_output_private() {
+    fn stack_catalog_typed_decision_submit_observe_cancel_keeps_native_output_private() {
         use std::os::unix::fs::PermissionsExt;
         use std::os::unix::net::UnixListener;
 
@@ -10133,12 +10635,14 @@ mod tests {
 
         const REQUEST_ID: &str = "caller:keyboard-workbench";
         const NEXT_REQUEST_ID: &str = "caller:keyboard-workbench-next";
-        const PRIVATE_INPUT: &str = "private embedding input";
-        const SECOND_PRIVATE_INPUT: &str = "second private embedding input";
-        const RESULT_PREVIEW: &str = "Embeddings: 1 vectors";
+        const PRIVATE_STATE: &str = "private decision state";
+        const SECOND_PRIVATE_STATE: &str = "second private decision state";
+        const QUESTIONS: &str =
+            r#"{"route":{"type":"choice","criteria":{"yes":"Proceed","no":"Stop"}}}"#;
+        const RESULT_PREVIEW: &str = "Answers:";
 
         let fixture = AppFixture::new();
-        write_embedding_stack_fixture(&fixture);
+        write_cuda_decision_stack_fixture(&fixture);
         let socket_directory = tempfile::tempdir().unwrap();
         fs::set_permissions(socket_directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let listener =
@@ -10164,12 +10668,15 @@ mod tests {
             };
             assert_eq!(request_id, REQUEST_ID);
             assert_eq!(timeout.as_millis(), 5_000);
-            assert_eq!(request.profile().profile_id.as_str(), "local-embeddings");
-            let crate::control::requests::InferenceRequest::Embeddings { input, .. } = request
+            assert_eq!(request.profile().profile_id.as_str(), "nagi-cuda");
+            let crate::control::requests::InferenceRequest::Decision {
+                state, questions, ..
+            } = request
             else {
-                panic!("typed form retains the language-native embeddings shape")
+                panic!("typed form retains the native decision shape")
             };
-            assert_eq!(input, [PRIVATE_INPUT]);
+            assert_eq!(state["private_state"], PRIVATE_STATE);
+            assert_eq!(questions["route"]["type"], "choice");
             drop(submitted); // Lost acknowledgment must not trigger a replay.
 
             let mut status_stream = listener.accept().unwrap().0;
@@ -10196,16 +10703,22 @@ mod tests {
             };
             assert_eq!(query.request_id, REQUEST_ID);
             let mut buffer = ResultBuffer::new();
-            buffer.begin(&query.request_id, Lane::Language).unwrap();
+            buffer.begin(&query.request_id, Lane::Decisions).unwrap();
             buffer
                 .append(
                     &query.request_id,
-                    ResultEvent::Embeddings {
-                        vectors: vec![vec![0.125, -0.25]],
-                        usage: crate::control::requests::EmbeddingUsage {
-                            prompt_tokens: 1,
-                            total_tokens: 1,
-                        },
+                    ResultEvent::DecisionResult {
+                        answers: serde_json::json!({"route":{"choice":"yes","confidence":0.9}})
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                        native_latency: Some(Duration::from_nanos(17)),
+                        native_usage: Some(
+                            serde_json::json!({"fixture_tokens": 1})
+                                .as_object()
+                                .unwrap()
+                                .clone(),
+                        ),
                     },
                 )
                 .unwrap();
@@ -10254,11 +10767,10 @@ mod tests {
                 panic!("a new typed Submit is allowed after observing terminal status")
             };
             assert_eq!(request_id, NEXT_REQUEST_ID);
-            let crate::control::requests::InferenceRequest::Embeddings { input, .. } = request
-            else {
-                panic!("second typed form retains the language-native embeddings shape")
+            let crate::control::requests::InferenceRequest::Decision { state, .. } = request else {
+                panic!("second typed form retains the native decision shape")
             };
-            assert_eq!(input, [SECOND_PRIVATE_INPUT]);
+            assert_eq!(state["private_state"], SECOND_PRIVATE_STATE);
             ipc::write_response(
                 &mut next_submit_stream,
                 &ResponseEnvelope::v1(ResponseMessage::Accepted {
@@ -10283,16 +10795,21 @@ mod tests {
             .unwrap()
             .list()
             .iter()
-            .position(|profile| profile.key.profile_id.as_str() == "local-embeddings")
+            .position(|profile| profile.key.profile_id.as_str() == "nagi-cuda")
             .unwrap();
         app.stack_catalog_state.select(Some(selected));
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
             .unwrap();
         assert_eq!(app.input_mode, InputMode::Normal);
         assert!(app.coordinator_workbench.is_none());
-        submit_coordinator_embedding_form(&mut app, REQUEST_ID, PRIVATE_INPUT);
+        submit_coordinator_decision_form(
+            &mut app,
+            REQUEST_ID,
+            &format!(r#"{{"private_state":"{PRIVATE_STATE}"}}"#),
+            QUESTIONS,
+        );
         assert_eq!(app.coordinator_request_id.as_deref(), Some(REQUEST_ID));
-        assert!(!app.status.contains(PRIVATE_INPUT));
+        assert!(!app.status.contains(PRIVATE_STATE));
 
         let deadline = Instant::now() + Duration::from_secs(3);
         while app.coordinator_action_pending && Instant::now() < deadline {
@@ -10320,8 +10837,8 @@ mod tests {
         assert!(!app.coordinator_action_pending);
         assert!(app.coordinator_results_available);
         assert!(app.coordinator_output_complete);
-        assert!(!app.status.contains(PRIVATE_INPUT));
-        assert!(!app.log.iter().any(|line| line.contains(PRIVATE_INPUT)));
+        assert!(!app.status.contains(PRIVATE_STATE));
+        assert!(!app.log.iter().any(|line| line.contains(PRIVATE_STATE)));
         assert!(app.job_history.records().is_empty());
 
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
@@ -10338,9 +10855,14 @@ mod tests {
         }
         assert!(!app.coordinator_action_pending);
         assert!(app.status.contains("Cancel acknowledged"));
-        assert!(!app.status.contains(PRIVATE_INPUT));
+        assert!(!app.status.contains(PRIVATE_STATE));
 
-        submit_coordinator_embedding_form(&mut app, NEXT_REQUEST_ID, SECOND_PRIVATE_INPUT);
+        submit_coordinator_decision_form(
+            &mut app,
+            NEXT_REQUEST_ID,
+            &format!(r#"{{"private_state":"{SECOND_PRIVATE_STATE}"}}"#),
+            QUESTIONS,
+        );
         assert_eq!(app.coordinator_request_id.as_deref(), Some(NEXT_REQUEST_ID));
         let deadline = Instant::now() + Duration::from_secs(3);
         while app.coordinator_action_pending && Instant::now() < deadline {
@@ -10364,10 +10886,12 @@ mod tests {
         };
 
         const REQUEST_ID: &str = "caller:form-ui";
-        const PRIVATE_INPUT: &str = "task form payload stays private";
+        const PRIVATE_STATE: &str = "task form state stays private";
+        const QUESTIONS: &str =
+            r#"{"route":{"type":"choice","criteria":{"yes":"Proceed","no":"Stop"}}}"#;
 
         let fixture = AppFixture::new();
-        write_embedding_stack_fixture(&fixture);
+        write_cuda_decision_stack_fixture(&fixture);
         let socket_directory = tempfile::tempdir().unwrap();
         fs::set_permissions(socket_directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let listener =
@@ -10395,13 +10919,16 @@ mod tests {
             };
             assert_eq!(request_id, REQUEST_ID);
             assert_eq!(timeout.as_millis(), 30_000);
-            assert_eq!(request.profile().lane, Lane::Language);
-            assert_eq!(request.profile().profile_id.as_str(), "local-embeddings");
-            let crate::control::requests::InferenceRequest::Embeddings { input, .. } = request
+            assert_eq!(request.profile().lane, Lane::Decisions);
+            assert_eq!(request.profile().profile_id.as_str(), "nagi-cuda");
+            let crate::control::requests::InferenceRequest::Decision {
+                state, questions, ..
+            } = request
             else {
-                panic!("form retains the language-native embeddings shape")
+                panic!("form retains the native decision shape")
             };
-            assert_eq!(input, [PRIVATE_INPUT]);
+            assert_eq!(state["private_state"], PRIVATE_STATE);
+            assert_eq!(questions["route"]["type"], "choice");
             received_sender.send(()).unwrap();
             release_receiver
                 .recv_timeout(Duration::from_secs(3))
@@ -10426,7 +10953,7 @@ mod tests {
             .unwrap()
             .list()
             .iter()
-            .position(|profile| profile.key.profile_id.as_str() == "local-embeddings")
+            .position(|profile| profile.key.profile_id.as_str() == "nagi-cuda")
             .unwrap();
         app.stack_catalog_state.select(Some(selected_language));
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
@@ -10447,7 +10974,13 @@ mod tests {
             .unwrap();
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .unwrap();
-        for character in format!(r#"["{PRIVATE_INPUT}"]"#).chars() {
+        for character in format!(r#"{{"private_state":"{PRIVATE_STATE}"}}"#).chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        for character in QUESTIONS.chars() {
             app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
                 .unwrap();
         }
@@ -10466,14 +10999,14 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL))
             .unwrap();
         assert_eq!(app.coordinator_request_id.as_deref(), Some(REQUEST_ID));
-        assert_eq!(app.coordinator_request_lane, Some(Lane::Language));
+        assert_eq!(app.coordinator_request_lane, Some(Lane::Decisions));
         assert_eq!(app.input_mode, InputMode::Normal);
         assert!(app.task_form_editor.is_none());
         received_receiver
             .recv_timeout(Duration::from_secs(3))
             .unwrap();
-        assert!(!app.status.contains(PRIVATE_INPUT));
-        assert!(!app.log.iter().any(|line| line.contains(PRIVATE_INPUT)));
+        assert!(!app.status.contains(PRIVATE_STATE));
+        assert!(!app.log.iter().any(|line| line.contains(PRIVATE_STATE)));
         release_sender.send(()).unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(3);
@@ -10484,13 +11017,13 @@ mod tests {
         assert!(!app.coordinator_action_pending);
         assert_eq!(app.coordinator_request_id.as_deref(), Some(REQUEST_ID));
         assert!(app.status.contains("Submit accepted"));
-        assert!(!app.status.contains(PRIVATE_INPUT));
-        assert!(!app.log.iter().any(|line| line.contains(PRIVATE_INPUT)));
+        assert!(!app.status.contains(PRIVATE_STATE));
+        assert!(!app.log.iter().any(|line| line.contains(PRIVATE_STATE)));
         server.join().unwrap();
 
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
-        assert!(!terminal_text(&terminal).contains(PRIVATE_INPUT));
+        assert!(!terminal_text(&terminal).contains(PRIVATE_STATE));
     }
 
     #[test]
@@ -11209,6 +11742,33 @@ mod tests {
             assert!(!app.chat_connection_pending || matches!(case, Refusal::ConnectionPending));
             assert!(!app.chat_pending || matches!(case, Refusal::ActiveRequest));
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unconfirmed_embedding_completion_blocks_chat_without_losing_the_draft() {
+        let fixture = AppFixture::new();
+        let mut app = fixture.app();
+        let previous_history = app.chat_history.clone();
+        app.chat_input = "unsent draft".into();
+        app.input_mode = InputMode::ChatMessage;
+        app.direct_native_admission_closed = true;
+        app.direct_native_summary = Some(DirectNativeSummary {
+            job_id: 1,
+            lane: Lane::Language,
+            profile_id: "fixture-embeddings".into(),
+            task: "embeddings".into(),
+            state: DirectNativeState::Interrupted,
+            result: None,
+        });
+        app.send_chat_message();
+        assert_eq!(app.chat_input, "unsent draft");
+        assert_eq!(app.input_mode, InputMode::ChatMessage);
+        assert!(!app.chat_pending);
+        assert_eq!(app.chat_history, previous_history);
+        assert!(app
+            .status
+            .contains("embedding request is active or unconfirmed"));
     }
 
     #[test]

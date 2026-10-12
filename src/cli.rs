@@ -60,7 +60,7 @@ struct Cli {
     #[arg(long, value_name = "NAMESPACED_ID", requires_all = ["task", "input"])]
     run_profile: Option<String>,
 
-    /// Declared task name (decision or tts) required by --run-profile.
+    /// Declared task name (decision, tts, or embeddings) required by --run-profile.
     #[arg(long, value_name = "TASK", requires = "run_profile")]
     task: Option<String>,
 
@@ -220,6 +220,12 @@ struct DirectSpeechInput {
     text: String,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectEmbeddingInput {
+    input: Vec<String>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DirectInputError {
     TooLarge,
@@ -245,6 +251,13 @@ fn parse_direct_decision_input(bytes: &[u8]) -> Result<DirectDecisionInput, Dire
 }
 
 fn parse_direct_speech_input(bytes: &[u8]) -> Result<DirectSpeechInput, DirectInputError> {
+    if bytes.len() > MAX_DIRECT_NATIVE_INPUT_BYTES {
+        return Err(DirectInputError::TooLarge);
+    }
+    serde_json::from_slice(bytes).map_err(|_| DirectInputError::Invalid)
+}
+
+fn parse_direct_embedding_input(bytes: &[u8]) -> Result<DirectEmbeddingInput, DirectInputError> {
     if bytes.len() > MAX_DIRECT_NATIVE_INPUT_BYTES {
         return Err(DirectInputError::TooLarge);
     }
@@ -278,11 +291,13 @@ fn direct_native_spec(cli: &Cli) -> Result<Option<DirectNativeSpec<'_>>> {
         .ok_or_else(|| anyhow::anyhow!("--run-profile requires --input"))?;
     let output_dir = cli.output_dir.as_deref();
     match (task, output_dir) {
-        ("decision", None) | ("tts", Some(_)) => {}
-        ("decision", Some(_)) => bail!("--output-dir is only valid with --task tts"),
+        ("decision", None) | ("embeddings", None) | ("tts", Some(_)) => {}
+        ("decision" | "embeddings", Some(_)) => {
+            bail!("--output-dir is only valid with --task tts")
+        }
         ("tts", None) => bail!("--output-dir is required with --task tts"),
         (_, Some(_)) => bail!("--output-dir is only valid with --task tts"),
-        _ => bail!("--run-profile supports only --task decision or --task tts"),
+        _ => bail!("--run-profile supports only --task decision, --task tts, or --task embeddings"),
     }
     let timeout_ms = cli
         .task_timeout_ms
@@ -1582,7 +1597,8 @@ fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
     let expected_lane = match spec.task {
         "decision" => crate::control::catalog::Lane::Decisions,
         "tts" => crate::control::catalog::Lane::Media,
-        _ => bail!("--run-profile supports only --task decision or --task tts"),
+        "embeddings" => crate::control::catalog::Lane::Language,
+        _ => bail!("--run-profile supports only --task decision, --task tts, or --task embeddings"),
     };
     if profile.lane != expected_lane {
         bail!("--run-profile profile lane does not match --task");
@@ -1622,6 +1638,10 @@ fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
             },
             spec.output_dir,
         ),
+        DirectNativeInput::Embeddings(input) => (
+            crate::control::task_form::TaskFields::LanguageEmbeddings { input: input.input },
+            None,
+        ),
     };
     let draft = crate::control::task_form::TaskFormDraft::new(
         profile,
@@ -1632,21 +1652,46 @@ fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
     );
     let (request, timeout) = crate::control::task_form::build_direct_native(&catalog, draft)
         .map_err(|_| anyhow::anyhow!("native request is invalid"))?;
+    let language = if spec.task == "embeddings" {
+        let endpoint = env::var("LLAMA_SWAP_URL")
+            .unwrap_or_else(|_| crate::llama_swap::DEFAULT_BASE_URL.to_owned());
+        let api_key = env::var("LLAMA_SWAP_API_KEY").ok();
+        Some(
+            crate::control::language::LanguageAdapter::new(&endpoint, api_key.as_deref())
+                .map_err(|_| anyhow::anyhow!("language adapter configuration is invalid"))?,
+        )
+    } else {
+        None
+    };
     let deadline = Instant::now()
         .checked_add(timeout)
         .ok_or_else(|| anyhow::anyhow!("native task timeout is invalid"))?;
     let signals = crate::control::foreground_shutdown::ShutdownSignals::install()
         .map_err(|_| anyhow::anyhow!("could not install native task cancellation handler"))?;
     let context = crate::control::runtime::OperationContext::new(deadline, &signals);
-    let result =
-        crate::control::direct_run::run_cpu_native(&catalog, &request, output_dir, &context)
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let result = crate::control::direct_run::run_native(
+        &catalog,
+        &request,
+        output_dir,
+        language.as_ref(),
+        &context,
+    )
+    .map_err(|error| {
+        if spec.task == "embeddings" && error.blocks_following_work() {
+            anyhow::anyhow!("remote completion is unconfirmed; do not retry automatically")
+        } else {
+            anyhow::anyhow!(error.to_string())
+        }
+    })?;
     let output = match result {
         crate::control::direct_run::DirectRunResult::Decision(result) => {
             direct_decision_output_json(&result)?
         }
         crate::control::direct_run::DirectRunResult::Speech(result) => {
             direct_speech_output_json(&result)?
+        }
+        crate::control::direct_run::DirectRunResult::Embeddings(result) => {
+            direct_embedding_output_json(&result)?
         }
     };
     println!("{output}");
@@ -1662,6 +1707,7 @@ fn run_direct_native(_: &DirectNativeSpec<'_>) -> Result<u8> {
 enum DirectNativeInput {
     Decision(DirectDecisionInput),
     Speech(DirectSpeechInput),
+    Embeddings(DirectEmbeddingInput),
 }
 
 #[cfg(target_os = "linux")]
@@ -1690,7 +1736,10 @@ fn read_direct_native_input(path: &Path, task: &str) -> Result<DirectNativeInput
         "tts" => parse_direct_speech_input(&bytes)
             .map(DirectNativeInput::Speech)
             .map_err(|error| anyhow::anyhow!(error.to_string())),
-        _ => bail!("--run-profile supports only --task decision or --task tts"),
+        "embeddings" => parse_direct_embedding_input(&bytes)
+            .map(DirectNativeInput::Embeddings)
+            .map_err(|error| anyhow::anyhow!(error.to_string())),
+        _ => bail!("--run-profile supports only --task decision, --task tts, or --task embeddings"),
     }
 }
 
@@ -1775,6 +1824,20 @@ fn direct_speech_output_json(
     }
     String::from_utf8(writer.bytes)
         .map_err(|_| anyhow::anyhow!("native speech output could not be encoded"))
+}
+
+fn direct_embedding_output_json(
+    result: &crate::control::requests::EmbeddingPayload,
+) -> Result<String> {
+    let mut writer = BoundedJsonWriter::new(crate::control::requests::MAX_EMBEDDING_JSON_BYTES);
+    if serde_json::to_writer(&mut writer, result).is_err() {
+        if writer.exceeded {
+            bail!("native embedding output exceeds the 4 MiB limit");
+        }
+        bail!("native embedding output could not be encoded");
+    }
+    String::from_utf8(writer.bytes)
+        .map_err(|_| anyhow::anyhow!("native embedding output could not be encoded"))
 }
 
 #[cfg(test)]
@@ -1897,6 +1960,39 @@ mod tests {
     }
 
     #[test]
+    fn direct_native_embeddings_require_language_profile_and_reject_output_directory() {
+        let cli = Cli::try_parse_from([
+            "l3ms",
+            "--run-profile",
+            "language:nomic-embed-text-v1.5",
+            "--task",
+            "embeddings",
+            "--input",
+            "input.json",
+        ])
+        .unwrap();
+        let Some(spec) = direct_native_spec(&cli).unwrap() else {
+            panic!("direct embeddings action is present");
+        };
+        assert_eq!(spec.task, "embeddings");
+        assert_eq!(spec.output_dir, None);
+
+        let with_output_dir = Cli::try_parse_from([
+            "l3ms",
+            "--run-profile",
+            "language:nomic-embed-text-v1.5",
+            "--task",
+            "embeddings",
+            "--input",
+            "input.json",
+            "--output-dir",
+            "/private/job-1",
+        ])
+        .unwrap();
+        assert!(direct_native_spec(&with_output_dir).is_err());
+    }
+
+    #[test]
     fn direct_native_action_rejects_other_actions_extra_and_coordinator_options() {
         assert!(Cli::try_parse_from([
             "l3ms",
@@ -1986,6 +2082,32 @@ mod tests {
     }
 
     #[test]
+    fn direct_embedding_input_is_strict_duplicate_safe_and_bounded() {
+        let parsed = parse_direct_embedding_input(br#"{"input":["first","second"]}"#).unwrap();
+        assert_eq!(
+            parsed.input,
+            vec![String::from("first"), String::from("second")]
+        );
+
+        for invalid in [
+            br#"{"input":["first"],"input":["second"]}"#.as_slice(),
+            br#"{"input":["first"],"unexpected":true}"#.as_slice(),
+            br#"{"input":"first"}"#.as_slice(),
+            br#"{}"#.as_slice(),
+            br#"[]"#.as_slice(),
+            br#"{"input":["first"]} trailing"#.as_slice(),
+        ] {
+            assert!(parse_direct_embedding_input(invalid).is_err());
+        }
+
+        let oversized = vec![b' '; MAX_DIRECT_NATIVE_INPUT_BYTES + 1];
+        assert_eq!(
+            parse_direct_embedding_input(&oversized).err(),
+            Some(DirectInputError::TooLarge)
+        );
+    }
+
+    #[test]
     fn direct_decision_output_preserves_native_latency_and_enforces_size_limit() {
         let mut answers = serde_json::Map::new();
         answers.insert("answer".into(), serde_json::json!("yes"));
@@ -2011,6 +2133,36 @@ mod tests {
             native_usage: None,
         };
         assert!(direct_decision_output_json(&oversized).is_err());
+    }
+
+    #[test]
+    fn direct_embedding_output_preserves_vectors_and_usage_with_four_mib_limit() {
+        let result = crate::control::requests::EmbeddingPayload {
+            vectors: vec![vec![0.125, -0.25]],
+            usage: crate::control::requests::EmbeddingUsage {
+                prompt_tokens: 3,
+                total_tokens: 3,
+            },
+        };
+        let output: serde_json::Value =
+            serde_json::from_str(&direct_embedding_output_json(&result).unwrap()).unwrap();
+        assert_eq!(output["vectors"][0], serde_json::json!([0.125, -0.25]));
+        assert_eq!(output["usage"]["prompt_tokens"], 3);
+        assert_eq!(output["usage"]["total_tokens"], 3);
+
+        let oversized = crate::control::requests::EmbeddingPayload {
+            vectors: vec![vec![1.0; 1_100_000]],
+            usage: crate::control::requests::EmbeddingUsage {
+                prompt_tokens: 1,
+                total_tokens: 1,
+            },
+        };
+        assert_eq!(
+            direct_embedding_output_json(&oversized)
+                .unwrap_err()
+                .to_string(),
+            "native embedding output exceeds the 4 MiB limit"
+        );
     }
 
     #[test]

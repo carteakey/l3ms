@@ -15,6 +15,13 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Run native embedding batches through the existing language adapter from CLI
+  and the shared foreground UI owner, without coordinator IPC/caller IDs.
+  Reuse committed Chat endpoint credentials, validate exact model selection,
+  return bounded vectors/native usage, and persist metadata only. Distinguish
+  remote completion uncertainty from local process cleanup; block overlapping
+  Chat sends while embedding completion is unconfirmed. Transport acceptance
+  remains pending because this session forbids local socket operations.
 - Open Stack language chat profiles in the existing Chat tab with exact model
   selection and the current committed connection. Preserve drafts/conversations;
   do not connect, send or load automatically. Retire the duplicate raw-turn chat
