@@ -17,6 +17,11 @@
       "experiment": "toolkits/l2m2/docs/experiments/breeze-tts-2-baseline.md",
       "modes": ["Standard TTS", "Voice design", "Voice cloning", "Streaming"]
     },
+    "breeze-tts-2-cpu": {
+      "guide": "docs/cpu-native-workflows.md",
+      "experiment": "docs/cpu-native-workflows.md",
+      "modes": ["Standard TTS (CPU)"]
+    },
     "blender-3d": {
       "guide": "toolkits/l2m2/docs/blender-mcp-setup.md",
       "experiment": null
@@ -32,6 +37,7 @@
   },
   "decisions": {
     "nagi-smol": {"guide": "toolkits/l3ds/README.md", "experiment": null},
+    "nagi-smol-cpu": {"guide": "docs/cpu-native-workflows.md", "experiment": "docs/cpu-native-workflows.md"},
     "nagi-big": {"guide": "toolkits/l3ds/README.md", "experiment": null},
     "laya-en": {"guide": "toolkits/l3ds/README.md", "experiment": null},
     "semif-openjev": {"guide": "toolkits/l3ds/README.md", "experiment": null},

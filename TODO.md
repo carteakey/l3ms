@@ -26,6 +26,12 @@ change against `702b4cd` is **+3,991**, not the target reduction.
 
 Next gates:
 
+- [x] Restore site metadata/generated payload for CPU Breeze/Nagi; preserve
+  language ranking and portable evidence labels. Python/DOM checks pass and
+  regeneration is deterministic. Publication and fresh browser acceptance remain gated.
+- [ ] Extend the explicit CPU Breeze path to offline voice design using the
+  existing instruction/WAV contract; verify native execution before claiming it.
+
 - [ ] Run `cargo test --all-targets --locked` in a session allowing local TCP/Unix
   sockets; verify the new native embedding HTTP/UI cases before claiming acceptance.
 - [ ] Run a bounded real embedding batch with an explicitly prepared profile,

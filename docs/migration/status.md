@@ -8,7 +8,29 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
-## Current embedding implementation checkpoint — 2026-10-12
+## Current site consistency checkpoint — 2026-10-12
+
+The dashboard audit found manifest/display metadata drift from the new CPU
+profiles. Added CPU Breeze/Nagi metadata and regenerated the payload: **8 media
+and 7 decision cards**, with the existing **10 served language profiles** intact.
+CPU Breeze shows standard-only mode; CPU Nagi's latency remains a manifest target,
+not a benchmark claim. Their portable setup/evidence summary omits host paths,
+endpoints and credentials, and distinguishes execution smoke tests from quality
+or deadline guarantees. README scope now reflects the actual partial port.
+
+Dashboard Python checks and JavaScript DOM fixtures pass. Two generator runs
+produced the same SHA-256 (`b37339830e1d4f8cdedbd80a42b00f0aafe28ffdcc36b82fd5a37919fcb2150f`).
+No root source LOC changed; cumulative source delta stays +3,991. No browser/live
+link check or publication was performed; the publication NO-GO remains.
+
+Parallel native-media audits found CPU voice design can reuse the existing
+offline WAV recipe without waiting for GPU switching. Comfy's pinned checkout
+supports scoped native UUID cancellation, but acknowledgement/404 is not terminal
+proof; external-service artifacts need normal scoped file retrieval rather than
+the old owned-engine release/pinned-FD registry. These are next implementation
+steps, not evidence of completed media execution or GPU release.
+
+## Previous embedding implementation checkpoint — 2026-10-12
 
 CLI and Stack embedding batches now reuse the existing native language adapter
 and foreground job/result owner, without coordinator submission or caller IDs.

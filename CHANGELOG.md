@@ -15,6 +15,10 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Restore dashboard manifest/display consistency for explicit CPU Breeze and
+  Nagi profiles. Label CPU speech as standard-only, preserve separate native
+  latency versus whole-CLI speech evidence, and link a portable setup/evidence
+  summary without host paths. Preserve language ranking; no publication is made.
 - Run native embedding batches through the existing language adapter from CLI
   and the shared foreground UI owner, without coordinator IPC/caller IDs.
   Reuse committed Chat endpoint credentials, validate exact model selection,

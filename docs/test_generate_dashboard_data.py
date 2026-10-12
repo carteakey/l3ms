@@ -119,13 +119,21 @@ class DashboardDataTest(unittest.TestCase):
             json.loads((ROOT / "toolkits" / "l3ds" / "decision-runtimes.json").read_text()),
             metadata["decisions"],
         )
-        self.assertEqual(len(media), 7)
-        self.assertEqual(len(decisions), 6)
+        self.assertEqual(len(media), 8)
+        self.assertEqual(len(decisions), 7)
         breeze = next(profile for profile in media if profile["id"] == "breeze-tts-2")
         self.assertEqual(
             breeze["modes"],
             ["Standard TTS", "Voice design", "Voice cloning", "Streaming"],
         )
+        cpu_breeze = next(profile for profile in media if profile["id"] == "breeze-tts-2-cpu")
+        self.assertEqual(cpu_breeze["modes"], ["Standard TTS (CPU)"])
+        self.assertEqual(cpu_breeze["status"], "experimental-local")
+        cpu_nagi = next(profile for profile in decisions if profile["id"] == "nagi-smol-cpu")
+        self.assertEqual(cpu_nagi["kind"], "local")
+        self.assertEqual(cpu_nagi["device"], "cpu")
+        self.assertEqual(cpu_nagi["declaredLatencyMs"], 1600)
+        self.assertTrue(cpu_nagi["experimentUrl"].endswith("docs/cpu-native-workflows.md"))
         h3 = next(profile for profile in media if profile["id"] == "minimax-h3")
         self.assertEqual(h3["status"], "experimental-local")
         hosted = next(profile for profile in decisions if profile["id"] == "systemone")
@@ -148,6 +156,16 @@ class DashboardDataTest(unittest.TestCase):
         unsafe["breeze-tts-2"]["guide"] = "../private-note.md"
         with self.assertRaises(SystemExit):
             dashboard.media_public_profiles(manifest, unsafe)
+
+    def test_cpu_evidence_summary_is_portable_and_not_a_quality_claim(self):
+        text = (ROOT / "docs" / "cpu-native-workflows.md").read_text()
+        for private_marker in ("/home/", "/tmp/", ".ts.net"):
+            self.assertNotIn(private_marker, text)
+        self.assertNotRegex(text, r"\bsk-[A-Za-z0-9]{20,}")
+        self.assertIn("not an accuracy, deadline", text)
+        self.assertIn("execution and artifact delivery only", text)
+        self.assertIn("voice-quality evaluation", text)
+        self.assertIn("standard text-only speech", text)
 
     def test_site_has_separate_lane_panels_and_explicit_evidence_labels(self):
         html = (ROOT / "docs" / "index.html").read_text()

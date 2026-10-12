@@ -17,7 +17,9 @@ Language (root L3MS) · Media (L2M2) · Decisions (L3DS)
 
 The root L3MS app continues to run its existing language-model workflows. The
 media and decision toolkits keep their native runtimes and configuration;
-shared routing across lanes is planned work.
+shared catalog and direct CPU decision/speech paths are available. Native
+embedding dispatch is implemented with transport acceptance still pending;
+remaining media/GPU routing and the full port are unfinished.
 
 Vision-capable LLMs, including Gemma vision, and embeddings remain in the
 language lane.
