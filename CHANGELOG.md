@@ -23,6 +23,11 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Correct native model controls for the pinned llama-swap contract: unload only
+  the selected model through its scoped route, rather than the unload-all route
+  with an ignored JSON body. Load through one routed native health request;
+  encode model identifiers, preserve endpoint prefixes and refuse redirects.
+  These actions do not prove GPU release or idle work and are not auto-retried.
 - Run hosted TypeSafe Jev/SystemOne decisions through the existing native recipe
   and foreground worker using an explicitly prepared hosted interpreter. Disable
   SDK retries for this path and preserve remote uncertainty after child cleanup;

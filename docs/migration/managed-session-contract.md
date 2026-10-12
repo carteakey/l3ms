@@ -166,8 +166,10 @@ For an explicitly declared llama-server-compatible backend, the branch's
 activation request is one side-effectful `/upstream/{encoded-id}/health` GET,
 which can start/swap that model before forwarding native health. It must not
 be used as a read-only probe. Other backend health contracts stay gated until
-declared and verified; the old standalone load client is not the managed
-activation implementation.
+declared and verified. The standalone load client now uses this routed health
+request too, without claiming the managed implementation's readiness/ownership
+checks. Its unload action uses `/api/models/unload/{encoded-id}`; the unsuffixed
+`/api/models/unload` route unloads all models and ignores a JSON model body.
 
 ## Concrete language-session entrypoint
 

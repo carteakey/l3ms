@@ -8,6 +8,29 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
+## Native model-control correction — 2026-10-12
+
+The existing `SwapClient` now targets `POST /api/models/unload/{encoded-id}`
+instead of posting a model body to the unload-all route. Load sends one routed
+`GET /upstream/{encoded-id}/health` for llama-server-compatible backends instead
+of forwarding unsupported `/load`. Endpoint prefixes are retained; empty/dot
+identifiers are refused and redirects disabled. No inference, service changes,
+automatic retry or GPU ownership/readiness claim is introduced.
+
+Source authority: [pinned native router routes](https://github.com/mostlygeek/llama-swap/blob/40027d62fdc0cf08131973c02db2d4a7de172df1/internal/server/server.go).
+Eight focused client tests, build, strict Clippy, formatting and diff checks pass.
+Full suite: **790 pass, 108 unchanged socket-restricted failures, 1 ignored**;
+failure names match the CPU-retirement checkpoint. Logs:
+`/tmp/l3ms-native-controls-{tests,clippy,build}.log`.
+URL construction tests are not live router acceptance, especially for unusual
+model identifiers or non-llama-server backends. Live scoped unload, activation
+and GPU release/restoration remain open.
+
+This slice adds **32 net source lines**, including regression tests, but adds no
+module or worker. Cumulative source delta is **+4,974** against `702b4cd`; the
+substantial simplification target remains unmet. Next implement only the small
+operator-window GPU path through these native controls and existing runners.
+
 ## CPU daemon retirement — 2026-10-12
 
 Removed branch-added `--coordinator-cpu-daemon`, its CPU-only configuration and

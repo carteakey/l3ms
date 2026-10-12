@@ -10,15 +10,22 @@ existing Linear migration issues rather than replacing their acceptance criteria
 
 ## Monorepo: next work
 
+Native load/unload client now matches pinned router routes: one routed health
+activation and scoped unload URL, encoded IDs and no redirects. Eight focused
+tests/build/strict lint/fmt pass; full suite **790 pass, 108 unchanged socket
+failures, 1 ignored**. No live service action. Next is the small operator-window
+GPU path and remaining native script callers—not new coordinator scaffolding.
+
 Latest simplification: retired the redundant branch-added CPU daemon launcher;
 CPU decisions use the existing direct CLI/UI runner. **300 net source lines
 removed**, no new module. Build/strict Clippy/fmt pass; root suite **788 pass,
 108 unchanged transport failures, 1 ignored**. Originals/services/history unchanged.
 Remaining GPU work must reuse native controls, not another daemon. Router loaded/
 ready state is not proof of request-idle; use an explicitly quiesced operator
-window, refuse unknown claimants, and verify native release/restoration. First
-reconcile the existing standalone load client with the pinned native health-based
-activation contract. See [current evidence](docs/migration/status.md).
+window, refuse unknown claimants, and verify native release/restoration. The
+standalone load/unload mismatch is now corrected above; live activation,
+release and restoration acceptance remain pending. See
+[current evidence](docs/migration/status.md).
 
 Hosted TypeSafe decisions now use the same native owner with explicit hosted
 Python, SDK retries/logging disabled and post-spawn remote uncertainty. Actual

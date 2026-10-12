@@ -1235,7 +1235,10 @@ fn interactive_run(filter: &str) -> Result<u8> {
     };
 
     let model = &models[index];
-    println!("POST {}/models/load  model={}", client.base_url(), model.id);
+    println!(
+        "Load selected model through its routed native health endpoint: {}",
+        model.id
+    );
     println!("{}", client.load_model(&model.id)?);
     Ok(0)
 }

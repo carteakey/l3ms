@@ -105,9 +105,16 @@ curl -s http://localhost:8080/v1/chat/completions \
 Manually load / unload:
 
 ```bash
-curl -X POST http://localhost:8080/models/load   -d '{"model":"qwen3-coder-next"}'
-curl -X POST http://localhost:8080/models/unload -d '{"model":"qwen3-coder-next"}'
+curl http://localhost:8080/upstream/qwen3-coder-next/health
+curl -X POST http://localhost:8080/api/models/unload/qwen3-coder-next
 ```
+
+These are side-effectful native controls for the pinned v247 router and a
+llama-server backend. The health request can start/swap the model; it is not a
+read-only idle probe. The unsuffixed `/api/models/unload` unloads **all** models,
+not a model named in a JSON body. Neither acknowledgment proves GPU release.
+Do not automatically repeat an action whose outcome is uncertain.
+See the [pinned routes](https://github.com/mostlygeek/llama-swap/blob/40027d62fdc0cf08131973c02db2d4a7de172df1/internal/server/server.go).
 
 ## Adding a new model
 

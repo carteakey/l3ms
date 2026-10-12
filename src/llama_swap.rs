@@ -12,7 +12,6 @@ use anyhow::{bail, Context, Result};
 use reqwest::blocking::{Client, RequestBuilder};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use reqwest::Url;
-use serde::Serialize;
 use serde_json::Value;
 /// Lifecycle state of a model as reported by llama-swap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -129,6 +128,7 @@ impl SwapClient {
         let client = Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .default_headers(headers)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .context("failed to build llama-swap HTTP client")?;
 
@@ -156,16 +156,14 @@ impl SwapClient {
 
     /// Ask llama-swap to load `model_id` and return a compact HTTP summary.
     ///
-    /// `GET /upstream/{model}/load` triggers the on-demand startup path and
-    /// holds the connection until the model passes its health check.
+    /// One routed native `/health` request triggers on-demand startup for a
+    /// llama-server-compatible backend. This is side-effectful, not an idle
+    /// probe; failure must not be retried automatically. An acknowledgment
+    /// does not establish request-idle or continued model readiness.
     pub fn load_model(&self, model_id: &str) -> Result<String> {
-        let model_id = model_id.trim();
-        if model_id.is_empty() {
-            bail!("model id cannot be empty");
-        }
-        let url = self.endpoint(&format!("/upstream/{model_id}/load"));
+        let url = model_endpoint(&self.base_url, "upstream", model_id, Some("health"))?;
         let response = self
-            .with_timeout(self.client.get(&url), LOAD_TIMEOUT)
+            .with_timeout(self.client.get(url.clone()), LOAD_TIMEOUT)
             .send()
             .with_context(|| format!("failed to GET {url}"))?;
         let status = response.status().as_u16();
@@ -177,7 +175,18 @@ impl SwapClient {
 
     /// Ask llama-swap to unload `model_id` and return a compact HTTP summary.
     pub fn unload_model(&self, model_id: &str) -> Result<String> {
-        self.model_action("/api/models/unload", model_id, REQUEST_TIMEOUT)
+        // The unsuffixed endpoint unloads ALL models and ignores a JSON model
+        // body. Always address the selected model in the native route instead.
+        let url = model_endpoint(&self.base_url, "api/models/unload", model_id, None)?;
+        let response = self
+            .with_timeout(self.client.post(url.clone()), REQUEST_TIMEOUT)
+            .send()
+            .with_context(|| format!("failed to POST {url}"))?;
+        let status = response.status().as_u16();
+        let body = response
+            .text()
+            .with_context(|| format!("failed to read response from {url}"))?;
+        action_result(status, &body)
     }
 
     /// Check whether the configured llama-swap endpoint is reachable and healthy.
@@ -198,34 +207,28 @@ impl SwapClient {
     fn with_timeout(&self, request: RequestBuilder, timeout: Duration) -> RequestBuilder {
         request.timeout(timeout)
     }
-
-    fn model_action(&self, path: &str, model_id: &str, timeout: Duration) -> Result<String> {
-        let model_id = model_id.trim();
-        if model_id.is_empty() {
-            bail!("model id cannot be empty");
-        }
-
-        let url = self.endpoint(path);
-        let response = self
-            .with_timeout(
-                self.client
-                    .post(&url)
-                    .json(&ModelAction { model: model_id }),
-                timeout,
-            )
-            .send()
-            .with_context(|| format!("failed to POST {url}"))?;
-        let status = response.status().as_u16();
-        let body = response
-            .text()
-            .with_context(|| format!("failed to read response from {url}"))?;
-        action_result(status, &body)
-    }
 }
 
-#[derive(Serialize)]
-struct ModelAction<'a> {
-    model: &'a str,
+fn model_endpoint(
+    base_url: &str,
+    route: &str,
+    model_id: &str,
+    suffix: Option<&str>,
+) -> Result<Url> {
+    let model_id = model_id.trim();
+    if model_id.is_empty() || matches!(model_id, "." | "..") {
+        bail!("model id is invalid");
+    }
+    let mut url = Url::parse(&endpoint_url(base_url, route))?;
+    let mut segments = url
+        .path_segments_mut()
+        .map_err(|_| anyhow::anyhow!("model endpoint is invalid"))?;
+    segments.push(model_id);
+    if let Some(suffix) = suffix {
+        segments.push(suffix);
+    }
+    drop(segments);
+    Ok(url)
 }
 
 pub(crate) fn normalize_base_url(raw: &str) -> Result<String> {
@@ -364,6 +367,32 @@ fn action_result(status: u16, body: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_model_routes_preserve_prefix_and_encode_selected_id() {
+        let base = "http://example.test:8080/router";
+        let model = " model/with?reserved%chars# ";
+        let load = model_endpoint(base, "upstream", model, Some("health")).unwrap();
+        assert_eq!(
+            load.as_str(),
+            "http://example.test:8080/router/upstream/model%2Fwith%3Freserved%25chars%23/health"
+        );
+        let unload = model_endpoint(base, "api/models/unload", model, None).unwrap();
+        assert_eq!(
+            unload.as_str(),
+            "http://example.test:8080/router/api/models/unload/model%2Fwith%3Freserved%25chars%23"
+        );
+        assert!(load.query().is_none() && load.fragment().is_none());
+        assert!(unload.query().is_none() && unload.fragment().is_none());
+    }
+
+    #[test]
+    fn model_actions_cannot_fall_back_to_all_models_or_dot_routes() {
+        for model in ["", " ", ".", "..", " .. "] {
+            assert!(model_endpoint(DEFAULT_BASE_URL, "api/models/unload", model, None).is_err());
+            assert!(model_endpoint(DEFAULT_BASE_URL, "upstream", model, Some("health")).is_err());
+        }
+    }
 
     #[test]
     fn normalizes_base_urls_and_builds_endpoints() {
