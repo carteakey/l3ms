@@ -191,11 +191,15 @@ Input is strictly `{"text":"Hello."}` (at most 1 MiB). The output directory must
 already exist, be private and owned by you, and contain no prior result files.
 The command returns JSON with `mode`, and validated `artifacts` containing
 absolute `path` and `native_kind`; it does not stream audio bytes.
-This explicit CPU profile supports standard text-only speech, not cloning,
-design or streaming. The original CUDA profile and script default are unchanged.
+For offline voice design, use `--task design` with strictly
+`{"text":"Hello.","instruction":"Speak gently with a calm low voice."}`.
+Instruction is required for design and not accepted by standard TTS. CPU cloning
+and streaming remain unsupported; CUDA profiles/script defaults are unchanged.
 
 In Stack Catalog (`F8`), select `breeze-tts-2-cpu`, press `f`, choose `tts`, enter
-text and press `Ctrl+Enter`. The same foreground owner handles execution,
+text, choose the declared `tts` or `design` task, and press `Ctrl+Enter`. Design
+shows an instruction field; returning to TTS keeps but does not send that draft.
+The same foreground owner handles execution,
 cancellation (`c`) and results; the TUI allocates a fresh private output directory
 under its data root. History stores metadata and relative artifact references,
 not text or audio bytes. See [real CPU speech evidence](docs/migration/direct-speech-acceptance.md).

@@ -115,7 +115,7 @@ impl std::error::Error for TaskFormError {}
 /// Build a typed request for the supported direct CPU execution slice.
 ///
 /// The legacy caller ID remains available to the IPC submit builder but is
-/// ignored here. Decision fields and standard speech stay typed in memory;
+/// ignored here. Decision fields and supported speech stay typed in memory;
 /// this function constructs no wire envelope or output-directory path.
 pub fn build_direct_native(
     catalog: &Catalog,
@@ -163,15 +163,33 @@ pub fn build_direct_native(
         } => {
             if selected_profile.lane != Lane::Media
                 || selected_profile.profile_id.as_str() != CPU_BREEZE_PROFILE_ID
-                || declared_task.as_str() != "tts"
             {
                 return Err(TaskFormError::ProfileTaskMismatch);
             }
-            if mode != SpeechMode::Standard
-                || instruction.is_some()
-                || voice_reference.is_some()
-                || reference_text.is_some()
-            {
+            let expected_task = match mode {
+                SpeechMode::Standard => "tts",
+                SpeechMode::VoiceDesign => "design",
+                SpeechMode::VoiceClone | SpeechMode::Streaming => {
+                    return Err(TaskFormError::InvalidNativeFields);
+                }
+            };
+            if declared_task.as_str() != expected_task {
+                return Err(TaskFormError::ProfileTaskMismatch);
+            }
+            let valid_mode_fields = match mode {
+                SpeechMode::Standard => {
+                    instruction.is_none() && voice_reference.is_none() && reference_text.is_none()
+                }
+                SpeechMode::VoiceDesign => {
+                    instruction
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty())
+                        && voice_reference.is_none()
+                        && reference_text.is_none()
+                }
+                SpeechMode::VoiceClone | SpeechMode::Streaming => false,
+            };
+            if !valid_mode_fields {
                 return Err(TaskFormError::InvalidNativeFields);
             }
             preflight_direct_speech_fields(&text, &instruction, &voice_reference, &reference_text)?;
@@ -514,7 +532,7 @@ mod tests {
                     "name": "CPU Breeze fixture",
                     "runtime": "audio.cpp",
                     "device": "cpu",
-                    "tasks": ["tts"],
+                    "tasks": ["tts", "design"],
                     "script": "media-models/generate-breeze-tts-2.sh"
                 }]
             })
@@ -906,68 +924,101 @@ mod tests {
     }
 
     #[test]
-    fn direct_native_builder_accepts_only_standard_cpu_breeze_speech() {
+    fn direct_native_builder_accepts_standard_and_voice_design_cpu_breeze_speech() {
         let (_temporary, catalog) = cpu_breeze_catalog();
-        let draft = TaskFormDraft::new(
-            profile(super::super::catalog::Lane::Media, CPU_BREEZE_PROFILE_ID),
-            task("tts"),
-            "ignored legacy id".into(),
-            120_000,
-            TaskFields::Speech {
-                text: "local speech input".into(),
-                mode: SpeechMode::Standard,
-                instruction: None,
-                voice_reference: None,
-                reference_text: None,
-            },
-        );
+        for (mode, declared_task, instruction) in [
+            (SpeechMode::Standard, "tts", None),
+            (
+                SpeechMode::VoiceDesign,
+                "design",
+                Some("calm clear delivery".to_owned()),
+            ),
+        ] {
+            let draft = TaskFormDraft::new(
+                profile(super::super::catalog::Lane::Media, CPU_BREEZE_PROFILE_ID),
+                task(declared_task),
+                "ignored legacy id".into(),
+                120_000,
+                TaskFields::Speech {
+                    text: "local speech input".into(),
+                    mode,
+                    instruction: instruction.clone(),
+                    voice_reference: None,
+                    reference_text: None,
+                },
+            );
 
-        let (request, timeout) = build_direct_native(&catalog, draft).unwrap();
-        assert_eq!(timeout, std::time::Duration::from_secs(120));
-        let super::super::requests::InferenceRequest::Media {
-            profile: selected,
-            input: super::super::requests::MediaInput::Speech(input),
-        } = request
-        else {
-            panic!("direct speech fields build a typed media request")
-        };
-        assert_eq!(selected.profile_id.as_str(), CPU_BREEZE_PROFILE_ID);
-        assert_eq!(input.mode, SpeechMode::Standard);
-        assert_eq!(input.text, "local speech input");
-        assert!(input.instruction.is_none());
+            let (request, timeout) = build_direct_native(&catalog, draft).unwrap();
+            assert_eq!(timeout, std::time::Duration::from_secs(120));
+            let super::super::requests::InferenceRequest::Media {
+                profile: selected,
+                input: super::super::requests::MediaInput::Speech(input),
+            } = request
+            else {
+                panic!("direct speech fields build a typed media request")
+            };
+            assert_eq!(selected.profile_id.as_str(), CPU_BREEZE_PROFILE_ID);
+            assert_eq!(input.mode, mode);
+            assert_eq!(input.text, "local speech input");
+            assert_eq!(input.instruction, instruction);
+        }
 
-        let mut instruction_draft = TaskFormDraft::new(
+        let instruction_draft = TaskFormDraft::new(
             profile(super::super::catalog::Lane::Media, CPU_BREEZE_PROFILE_ID),
             task("tts"),
             String::new(),
             30_000,
-            speech_fields(SpeechMode::Standard),
+            TaskFields::Speech {
+                text: "hello there".into(),
+                mode: SpeechMode::Standard,
+                instruction: Some("calm clear delivery".into()),
+                voice_reference: None,
+                reference_text: None,
+            },
         );
-        if let TaskFields::Speech { instruction, .. } = &mut instruction_draft.fields {
-            *instruction = Some("calm clear delivery".into());
-        }
         assert_eq!(
             direct_error(build_direct_native(&catalog, instruction_draft)),
             TaskFormError::InvalidNativeFields
         );
 
-        for mode in [
-            SpeechMode::VoiceDesign,
-            SpeechMode::VoiceClone,
-            SpeechMode::Streaming,
+        for (mode, declared_task, instruction) in [
+            (SpeechMode::VoiceDesign, "design", None),
+            (SpeechMode::VoiceDesign, "design", Some("   ".into())),
+            (SpeechMode::VoiceClone, "clon", None),
+            (SpeechMode::Streaming, "tts", None),
         ] {
             let result = build_direct_native(
+                &catalog,
+                TaskFormDraft::new(
+                    profile(super::super::catalog::Lane::Media, CPU_BREEZE_PROFILE_ID),
+                    task(declared_task),
+                    String::new(),
+                    30_000,
+                    TaskFields::Speech {
+                        text: "hello there".into(),
+                        mode,
+                        instruction,
+                        voice_reference: None,
+                        reference_text: None,
+                    },
+                ),
+            );
+            assert_eq!(direct_error(result), TaskFormError::InvalidNativeFields);
+        }
+
+        assert_eq!(
+            direct_error(build_direct_native(
                 &catalog,
                 TaskFormDraft::new(
                     profile(super::super::catalog::Lane::Media, CPU_BREEZE_PROFILE_ID),
                     task("tts"),
                     String::new(),
                     30_000,
-                    speech_fields(mode),
+                    speech_fields(SpeechMode::VoiceDesign),
                 ),
-            );
-            assert_eq!(direct_error(result), TaskFormError::InvalidNativeFields);
-        }
+            )),
+            TaskFormError::ProfileTaskMismatch
+        );
 
         assert_eq!(
             direct_error(build_direct_native(

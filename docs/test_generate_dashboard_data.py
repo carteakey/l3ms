@@ -127,7 +127,7 @@ class DashboardDataTest(unittest.TestCase):
             ["Standard TTS", "Voice design", "Voice cloning", "Streaming"],
         )
         cpu_breeze = next(profile for profile in media if profile["id"] == "breeze-tts-2-cpu")
-        self.assertEqual(cpu_breeze["modes"], ["Standard TTS (CPU)"])
+        self.assertEqual(cpu_breeze["modes"], ["Standard TTS (CPU)", "Offline voice design (CPU)"])
         self.assertEqual(cpu_breeze["status"], "experimental-local")
         cpu_nagi = next(profile for profile in decisions if profile["id"] == "nagi-smol-cpu")
         self.assertEqual(cpu_nagi["kind"], "local")

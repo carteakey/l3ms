@@ -414,10 +414,12 @@ window.L3MS_DASHBOARD = {
       "runtime": "audio.cpp",
       "status": "experimental-local",
       "tasks": [
-        "tts"
+        "tts",
+        "design"
       ],
       "modes": [
-        "Standard TTS (CPU)"
+        "Standard TTS (CPU)",
+        "Offline voice design (CPU)"
       ],
       "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L96",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/cpu-native-workflows.md",

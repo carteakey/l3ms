@@ -15,6 +15,10 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Extend the existing CPU Breeze CLI/form/runner to offline voice design with
+  strict text/instruction input, shared WAV output validation and CPU-only backend.
+  Reuse one route predicate, worker and artifact path; keep cloning/streaming gated.
+  Verify a real cached-weight CPU run and process release, without service changes.
 - Restore dashboard manifest/display consistency for explicit CPU Breeze and
   Nagi profiles. Label CPU speech as standard-only, preserve separate native
   latency versus whole-CLI speech evidence, and link a portable setup/evidence

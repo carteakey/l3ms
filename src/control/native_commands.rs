@@ -405,9 +405,8 @@ fn breeze_speech_recipe(
             route.runtime.lane == Lane::Media
                 && route.runtime.as_str() == "audio.cpp"
                 && route.device.as_ref() == Some(&Device::Cpu)
-                && input.mode == SpeechMode::Standard
-                && input.instruction.is_none(),
-            "the CPU Breeze profile supports only standard CPU speech"
+                && is_supported_cpu_breeze_speech(input),
+            "the CPU Breeze profile supports only standard and voice-design speech"
         );
     } else {
         ensure!(
@@ -494,6 +493,24 @@ fn breeze_speech_recipe(
             artifacts,
         },
     })
+}
+
+/// CPU Breeze admits only offline standard TTS or instructed voice design.
+/// Keep the exact field contract shared by recipe preparation, execution, and
+/// direct-route checks; clone and streaming remain unsupported on this route.
+pub(crate) fn is_supported_cpu_breeze_speech(input: &SpeechInput) -> bool {
+    let no_reference = input.voice_reference.is_none() && input.reference_text.is_none();
+    match input.mode {
+        SpeechMode::Standard => input.instruction.is_none() && no_reference,
+        SpeechMode::VoiceDesign => {
+            input
+                .instruction
+                .as_deref()
+                .is_some_and(|instruction| !instruction.trim().is_empty())
+                && no_reference
+        }
+        SpeechMode::VoiceClone | SpeechMode::Streaming => false,
+    }
 }
 
 fn decision_recipe(
@@ -1105,8 +1122,8 @@ mod tests {
     }
 
     #[test]
-    fn cpu_breeze_uses_explicit_backend_only_for_the_cpu_profile() {
-        let fixture = Fixture::new(CPU_BREEZE_PROFILE_ID, BREEZE_SCRIPT, &["tts"]);
+    fn cpu_breeze_supports_standard_and_design_with_explicit_backend_only_on_cpu_profile() {
+        let fixture = Fixture::new(CPU_BREEZE_PROFILE_ID, BREEZE_SCRIPT, &["tts", "design"]);
         fixture.write_media_script(BREEZE_SCRIPT);
         let manifest_path = fixture.media_root.join("media-runtimes.json");
         let mut manifest: serde_json::Value =
@@ -1114,17 +1131,66 @@ mod tests {
         manifest["profiles"][0]["device"] = serde_json::json!("cpu");
         fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         let catalog = fixture.catalog();
-        let request = speech_request(CPU_BREEZE_PROFILE_ID, SpeechMode::Standard, &fixture);
-        let accepted =
-            super::super::routes::resolve_profile_route(&catalog, request.profile()).unwrap();
-        let recipe = prepare_native_command_for_route(&catalog, &request, &accepted).unwrap();
-        let args = argv_strings(&recipe);
-        let backend = args.iter().position(|arg| arg == "--backend").unwrap();
-        assert_eq!(&args[backend..backend + 2], ["--backend", "cpu"]);
+        let accepted = super::super::routes::resolve_profile_route(
+            &catalog,
+            &key(Lane::Media, CPU_BREEZE_PROFILE_ID),
+        )
+        .unwrap();
+        for (mode, expected_wrapper_task, expected_cli_task, instruction) in [
+            (SpeechMode::Standard, "tts", "tts", None),
+            (
+                SpeechMode::VoiceDesign,
+                "design",
+                "tts",
+                Some("warm, clear voice"),
+            ),
+        ] {
+            let request = speech_request(CPU_BREEZE_PROFILE_ID, mode, &fixture);
+            let recipe = prepare_native_command_for_route(&catalog, &request, &accepted).unwrap();
+            let args = argv_strings(&recipe);
+            let backend = args.iter().position(|arg| arg == "--backend").unwrap();
+            assert_eq!(&args[backend..backend + 2], ["--backend", "cpu"]);
+            let task = args.iter().position(|arg| arg == "--task").unwrap();
+            assert_eq!(&args[task..task + 2], ["--task", expected_wrapper_task]);
+            assert_eq!(
+                args.iter()
+                    .position(|arg| arg == "--instruction")
+                    .map(|index| args[index + 1].as_str()),
+                instruction
+            );
+            assert!(matches!(
+                recipe.expectation,
+                NativeOutputExpectation::BreezeSpeech {
+                    wrapper_task,
+                    audio_cpp_task,
+                    mode: actual_mode,
+                    artifacts: BreezeArtifacts::FinalWaveAtWrapperDefault,
+                } if wrapper_task == expected_wrapper_task
+                    && audio_cpp_task == expected_cli_task
+                    && actual_mode == mode
+            ));
 
-        let mut cuda = accepted.clone();
-        cuda.device = Some(Device::Cuda);
-        assert!(prepare_native_command_for_route(&catalog, &request, &cuda).is_err());
+            let mut cuda_route = accepted.clone();
+            cuda_route.device = Some(Device::Cuda);
+            assert!(prepare_native_command_for_route(&catalog, &request, &cuda_route).is_err());
+        }
+
+        for mode in [SpeechMode::VoiceClone, SpeechMode::Streaming] {
+            let request = speech_request(CPU_BREEZE_PROFILE_ID, mode, &fixture);
+            assert!(prepare_native_command_for_route(&catalog, &request, &accepted).is_err());
+        }
+
+        let mut malformed_design =
+            speech_request(CPU_BREEZE_PROFILE_ID, SpeechMode::VoiceDesign, &fixture);
+        let InferenceRequest::Media {
+            input: MediaInput::Speech(input),
+            ..
+        } = &mut malformed_design
+        else {
+            unreachable!();
+        };
+        input.instruction = None;
+        assert!(prepare_native_command_for_route(&catalog, &malformed_design, &accepted).is_err());
 
         let cuda_fixture = Fixture::new(BREEZE_PROFILE_ID, BREEZE_SCRIPT, &["tts"]);
         cuda_fixture.write_media_script(BREEZE_SCRIPT);

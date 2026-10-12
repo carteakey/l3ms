@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add offline voice design to the explicit CPU Breeze profile. The shared L3MS
+  wrapper requires an instruction for `design`; standard TTS remains text-only.
+  Preserve original CUDA defaults and native output conventions.
+
 - Add an explicit CPU Breeze profile for standard offline speech and a validated
   `--backend cpu|cuda` native script option. Keep the CUDA default and existing
   profile unchanged; backend availability is not proof of inference acceptance.

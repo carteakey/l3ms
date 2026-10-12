@@ -1,7 +1,7 @@
 //! Direct, bounded execution for explicitly supported CPU-local native work.
 //!
-//! This module accepts CPU-local Nagi/Laya decisions, standard Breeze speech,
-//! and embeddings through the existing language adapter. It does not start
+//! This module accepts CPU-local Nagi/Laya decisions, standard and voice-design
+//! Breeze speech, and embeddings through the existing language adapter. It does not start
 //! services, install runtimes, select a fallback, or retry an attempted
 //! inference. Native input and output stay out of its errors.
 
@@ -16,10 +16,9 @@ use super::decision::{
 };
 use super::language::{DispatchDisposition, LanguageAdapter, LanguageErrorKind, LanguageFailure};
 use super::media_execution::{
-    execute_breeze_speech_on_cpu, MediaExecutionErrorKind, MediaExecutionFailure,
-    MediaExecutionResult,
+    execute_breeze_speech_on_cpu, is_supported_cpu_breeze_route, MediaExecutionErrorKind,
+    MediaExecutionFailure, MediaExecutionResult,
 };
-use super::native_commands::CPU_BREEZE_PROFILE_ID;
 use super::process::{ProcessFailureDisposition, ProcessFailureKind};
 use super::requests::{
     EmbeddingPayload, InferenceRequest, InferenceResult, MediaInput, SpeechMode,
@@ -147,9 +146,10 @@ impl Error for DirectRunError {}
 /// Execute one already-built native request on a supported direct route.
 ///
 /// The current catalog is refreshed before dispatch, then the accepted route
-/// is rechecked by the relevant adapter. CPU-local decisions and standard
-/// speech use the bounded process runner; embeddings use the caller's existing
-/// language adapter and configured endpoint without managing llama-swap.
+/// is rechecked by the relevant adapter. CPU-local decisions and standard or
+/// voice-design speech use the bounded process runner; embeddings use the
+/// caller's existing language adapter and configured endpoint without managing
+/// llama-swap.
 /// Speech requires a caller-owned fresh output directory; other lanes reject
 /// one. Process cleanup is bounded by a fixed five-second recovery budget.
 /// Uncertain process ownership or remote completion blocks following work.
@@ -162,18 +162,18 @@ pub fn run_native(
 ) -> Result<DirectRunResult, DirectRunError> {
     let is_decision = matches!(request, InferenceRequest::Decision { .. });
     let is_embeddings = matches!(request, InferenceRequest::Embeddings { .. });
-    let is_standard_speech = matches!(
+    let is_cpu_breeze_speech = matches!(
         request,
         InferenceRequest::Media {
             input: MediaInput::Speech(input),
             ..
-        } if input.mode == SpeechMode::Standard
+        } if matches!(input.mode, SpeechMode::Standard | SpeechMode::VoiceDesign)
     );
     let valid_lane_arguments = match request {
         InferenceRequest::Decision { .. } => {
             speech_output_directory.is_none() && language.is_none()
         }
-        InferenceRequest::Media { .. } if is_standard_speech => {
+        InferenceRequest::Media { .. } if is_cpu_breeze_speech => {
             speech_output_directory.is_some() && language.is_none()
         }
         InferenceRequest::Embeddings { .. } => {
@@ -224,8 +224,8 @@ pub fn run_native(
         execute_accepted_cpu_decision(&catalog, request, &route, context, recovery)
             .map(DirectRunResult::Decision)
             .map_err(|error| execution_error(error, context))
-    } else if is_standard_speech {
-        if !is_cpu_breeze_standard_route(request, &route) {
+    } else if is_cpu_breeze_speech {
+        if !is_supported_cpu_breeze_route(request, &route) {
             return Err(DirectRunError::new(
                 DirectRunErrorKind::UnsupportedRoute,
                 ProcessFailureDisposition::NoChildSpawned,
@@ -297,28 +297,6 @@ fn is_language_embeddings_route(request: &InferenceRequest, route: &ResolvedProf
         && route.runtime.lane == Lane::Language
         && model_id == &route.profile.profile_id
         && route.tasks.iter().any(|task| task.as_str() == "embeddings")
-}
-
-fn is_cpu_breeze_standard_route(request: &InferenceRequest, route: &ResolvedProfileRoute) -> bool {
-    let InferenceRequest::Media {
-        profile,
-        input: MediaInput::Speech(input),
-    } = request
-    else {
-        return false;
-    };
-    matches!(
-        &route.native_route,
-        NativeRoute::MediaScript { path }
-            if path.file_name().and_then(|name| name.to_str()) == Some("generate-breeze-tts-2.sh")
-    ) && profile == &route.profile
-        && profile.lane == Lane::Media
-        && profile.profile_id.as_str() == CPU_BREEZE_PROFILE_ID
-        && route.runtime.lane == Lane::Media
-        && route.runtime.as_str() == "audio.cpp"
-        && route.device.as_ref() == Some(&Device::Cpu)
-        && input.mode == SpeechMode::Standard
-        && input.instruction.is_none()
 }
 
 fn inactive_error(context: &OperationContext<'_>) -> DirectRunError {
@@ -461,6 +439,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::super::catalog::ProfileKey;
+    use super::super::native_commands::CPU_BREEZE_PROFILE_ID;
     use super::super::requests::InferenceResult;
     use super::super::runtime::NeverCancel;
 
@@ -559,6 +538,101 @@ mod tests {
         OperationContext::new(Instant::now() + Duration::from_secs(5), cancellation)
     }
 
+    fn cpu_breeze_fixture() -> (TempDir, Catalog) {
+        let root = tempfile::tempdir().unwrap();
+        let media = root.path().join("toolkits/l2m2");
+        let decisions = root.path().join("toolkits/l3ds");
+        fs::create_dir_all(media.join("media-models")).unwrap();
+        fs::create_dir_all(&decisions).unwrap();
+        fs::write(
+            root.path().join("llama-swap.yaml"),
+            "models:\n  fixture-chat:\n    cmd: server\n",
+        )
+        .unwrap();
+        fs::write(
+            media.join("media-runtimes.json"),
+            json!({
+                "schema_version": 1,
+                "profiles": [{
+                    "id": CPU_BREEZE_PROFILE_ID,
+                    "name": "CPU Breeze fixture",
+                    "runtime": "audio.cpp",
+                    "device": "cpu",
+                    "tasks": ["tts", "design"],
+                    "script": "media-models/generate-breeze-tts-2.sh"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            media.join("media-models/generate-breeze-tts-2.sh"),
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+output=""
+out_dir=""
+backend=""
+task=""
+instruction=""
+while (($#)); do
+  case "$1" in
+    --output) output="$2"; shift 2 ;;
+    --out-dir) out_dir="$2"; shift 2 ;;
+    --backend) backend="$2"; shift 2 ;;
+    --task) task="$2"; shift 2 ;;
+    --instruction) instruction="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[[ "${CUDA_VISIBLE_DEVICES-unset}" == "" ]]
+[[ "$backend" == "cpu" ]]
+[[ "$output" == "$out_dir/result.wav" ]]
+if [[ "$task" == "design" ]]; then
+  [[ "$instruction" == "fixture voice direction" ]]
+else
+  [[ "$task" == "tts" && -z "$instruction" ]]
+fi
+printf 'RIFF\046\000\000\000WAVEfmt \020\000\000\000\001\000\001\000\300\135\000\000\200\273\000\000\002\000\020\000data\002\000\000\000\000\000' > "$output"
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(
+            media.join("media-models/generate-breeze-tts-2.sh"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        fs::write(
+            decisions.join("decision-runtimes.json"),
+            r#"{"version":"1.0","profiles":[]}"#,
+        )
+        .unwrap();
+        let catalog = Catalog::load(root.path()).unwrap();
+        (root, catalog)
+    }
+
+    fn cpu_breeze_request(mode: SpeechMode) -> InferenceRequest {
+        InferenceRequest::Media {
+            profile: ProfileKey::new(Lane::Media, CPU_BREEZE_PROFILE_ID).unwrap(),
+            input: super::super::requests::MediaInput::Speech(
+                super::super::requests::SpeechInput {
+                    text: "fixture speech".into(),
+                    mode,
+                    instruction: (mode == SpeechMode::VoiceDesign)
+                        .then(|| "fixture voice direction".into()),
+                    voice_reference: None,
+                    reference_text: None,
+                },
+            ),
+        }
+    }
+
+    fn cpu_breeze_output(root: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let output = root.join(name);
+        fs::create_dir(&output).unwrap();
+        fs::set_permissions(&output, fs::Permissions::from_mode(0o700)).unwrap();
+        output
+    }
+
     fn embedding_fixture() -> (TempDir, Catalog, InferenceRequest) {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("toolkits/l2m2")).unwrap();
@@ -649,6 +723,54 @@ mod tests {
             "usage": {"fixture_count": 1}
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn direct_runner_accepts_only_standard_and_voice_design_cpu_breeze_speech() {
+        let (root, catalog) = cpu_breeze_fixture();
+        for (mode, name) in [
+            (SpeechMode::Standard, "cpu-standard"),
+            (SpeechMode::VoiceDesign, "cpu-design"),
+        ] {
+            let request = cpu_breeze_request(mode);
+            let output = cpu_breeze_output(root.path(), name);
+            let DirectRunResult::Speech(result) = run_native(
+                &catalog,
+                &request,
+                Some(&output),
+                None,
+                &context(&NeverCancel),
+            )
+            .unwrap() else {
+                panic!("CPU Breeze direct mode returns validated speech artifacts")
+            };
+            assert_eq!(result.mode(), mode);
+            assert_eq!(result.artifacts().len(), 1);
+            assert!(output.join("result.wav").is_file());
+        }
+
+        for (mode, name) in [
+            (SpeechMode::VoiceClone, "cpu-clone-unsupported"),
+            (SpeechMode::Streaming, "cpu-streaming-unsupported"),
+        ] {
+            let request = cpu_breeze_request(mode);
+            let output = cpu_breeze_output(root.path(), name);
+            let error = run_native(
+                &catalog,
+                &request,
+                Some(&output),
+                None,
+                &context(&NeverCancel),
+            )
+            .err()
+            .expect("clone and streaming remain outside CPU direct scope");
+            assert_eq!(error.kind(), DirectRunErrorKind::InvalidRequest);
+            assert_eq!(
+                error.disposition(),
+                DirectRunDisposition::Process(ProcessFailureDisposition::NoChildSpawned)
+            );
+            assert_eq!(fs::read_dir(output).unwrap().count(), 0);
+        }
     }
 
     #[test]

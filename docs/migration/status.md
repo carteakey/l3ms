@@ -8,7 +8,28 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
-## Current site consistency checkpoint — 2026-10-12
+## Current CPU voice-design checkpoint — 2026-10-12
+
+Offline CPU voice design now reuses the existing Breeze recipe, foreground owner
+and validated WAV path. CLI uses strict `text`/`instruction`; the form exposes
+declared tts/design tasks, omits hidden design instructions from standard TTS,
+and persists metadata only. A duplicate route predicate was removed rather than
+adding another execution layer. Original CUDA/standalone defaults are unchanged.
+
+Final native CPU acceptance passed in **6.09 seconds wall time**: 24 kHz mono
+PCM16, 15,360 frames, observed process identities released. No GPU service was
+stopped and no weights downloaded. See [speech evidence](direct-speech-acceptance.md).
+Voice quality, cloning/streaming, Comfy and GPU switching are not thereby accepted.
+
+Build/lint/fmt and CPU/design/CLI/builder fixtures pass. Full root suite remains
+**777 passed, 121 transport failures, 1 ignored** under the socket restriction.
+Standalone media checks also pass: 6 Rust tests, 14 downloader and 17 media
+Python tests, strict lint/format and shell syntax; 11 site checks/DOM fixtures pass.
+This slice adds **602 net root source lines**, including tests; cumulative delta
+against `702b4cd` is **+4,593**, control scope 62,659. No platform module removed.
+The larger simplification/LOC-reduction target is still unfinished.
+
+## Previous site consistency checkpoint — 2026-10-12
 
 The dashboard audit found manifest/display metadata drift from the new CPU
 profiles. Added CPU Breeze/Nagi metadata and regenerated the payload: **8 media

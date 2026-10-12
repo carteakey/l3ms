@@ -55,3 +55,27 @@ cancellation and preserving earlier artifacts when job identifiers repeat.
 Native fixtures cover backend visibility and output validation. Manual TUI
 acceptance, cloning/design/streaming, GPU orchestration and deletion of old
 platform callers remain separate work. No platform module was removed.
+
+## CPU voice design follow-up — 2026-10-12
+
+The shared CLI/form now also accepts `--task design` with strict text/instruction
+JSON. Final-binary acceptance used `input.json` containing
+`{"text":"Hello.","instruction":"Speak gently with a calm low voice."}` and:
+
+```sh
+target/debug/l3ms --run-profile media:breeze-tts-2-cpu --task design --input /tmp/l3ms-cpu-design-UdXVk0/input.json --output-dir /tmp/l3ms-cpu-design-UdXVk0/output-final --task-timeout-ms 120000
+```
+
+The private fixture retains `probe.py`, input, native wrapper/spec copies,
+`receipt.json` and WAVs. Two deliberately separate native verification runs
+passed (6.93 and final **6.09 seconds wall time**), seed 0, two CPU threads,
+cached Q8_0 weights, empty CUDA visibility and offline settings. The bounded
+harness confirmed process identities released. Final WAV: PCM16 mono 24 kHz,
+15,360 frames (0.64 seconds), peak 7,488. No service was stopped or model installed.
+This proves the instruction/CPU execution and artifact path, not voice quality.
+
+An initial harness attempt omitted HOME and used the wrong model-root variable;
+read-only `--check` reproduced a shell preflight error before native inference.
+That environment was corrected, not an ambiguous inference replay. The failed
+preflight receipt is retained. The final implementation shares the route predicate
+and existing runner/WAV contract; CPU clone/streaming and GPU switching remain open.

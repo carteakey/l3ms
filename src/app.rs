@@ -377,7 +377,7 @@ struct TaskFormEditor {
     profile: crate::control::catalog::ProfileKey,
     profile_snapshot: CatalogProfile,
     direct_cpu_decision: bool,
-    direct_cpu_standard_tts: bool,
+    direct_cpu_speech: bool,
     direct_language_embeddings: bool,
     declared_tasks: Vec<String>,
     selected_task: Option<usize>,
@@ -400,7 +400,7 @@ impl TaskFormEditor {
         direct_language_embeddings: bool,
     ) -> Self {
         let direct_cpu_decision = is_direct_cpu_decision_profile(profile);
-        let direct_cpu_standard_tts = is_direct_cpu_standard_tts_profile(profile);
+        let direct_cpu_speech = is_direct_cpu_speech_profile(profile);
         let direct_language_embeddings = direct_language_embeddings
             && profile.key.lane == Lane::Language
             && profile
@@ -412,8 +412,8 @@ impl TaskFormEditor {
             .iter()
             .map(|task| task.as_str().to_owned())
             .collect::<Vec<_>>();
-        if direct_cpu_standard_tts {
-            declared_tasks.retain(|task| task == "tts");
+        if direct_cpu_speech {
+            declared_tasks.retain(|task| matches!(task.as_str(), "tts" | "design"));
         }
         if profile.key.lane == Lane::Language
             && profile
@@ -427,7 +427,7 @@ impl TaskFormEditor {
             profile: profile.key.clone(),
             profile_snapshot: profile.clone(),
             direct_cpu_decision,
-            direct_cpu_standard_tts,
+            direct_cpu_speech,
             direct_language_embeddings,
             declared_tasks,
             selected_task: None,
@@ -438,7 +438,7 @@ impl TaskFormEditor {
             cursor_byte: 0,
             values: TaskFormValues::default(),
         };
-        if direct_cpu_decision || direct_cpu_standard_tts || direct_language_embeddings {
+        if direct_cpu_decision || direct_cpu_speech || direct_language_embeddings {
             // Foreground native work has no caller ID to retain. A useful
             // bounded timeout keeps the direct path keyboard-first.
             editor.values.timeout = "30000".into();
@@ -446,10 +446,9 @@ impl TaskFormEditor {
         if direct_cpu_decision {
             editor.values.decision_state = "{}".into();
         }
-        if direct_cpu_standard_tts {
-            editor.selected_task = Some(0);
+        if direct_cpu_speech {
+            editor.selected_task = editor.declared_tasks.iter().position(|task| task == "tts");
             editor.media_operation = Some(TaskFormMediaOperation::Speech);
-            editor.speech_mode = Some(SpeechMode::Standard);
         }
         if direct_language_embeddings {
             editor.selected_task = editor
@@ -462,7 +461,7 @@ impl TaskFormEditor {
     }
 
     fn is_direct_native(&self) -> bool {
-        self.direct_cpu_decision || self.direct_cpu_standard_tts || self.direct_language_embeddings
+        self.direct_cpu_decision || self.direct_cpu_speech || self.direct_language_embeddings
     }
 
     fn refresh_fields(&mut self) {
@@ -471,7 +470,9 @@ impl TaskFormEditor {
             fields.push(TaskFormField::RequestId);
         }
         fields.push(TaskFormField::Timeout);
-        if !self.direct_cpu_standard_tts && !self.direct_language_embeddings {
+        if (!self.direct_cpu_speech || self.declared_tasks.len() > 1)
+            && !self.direct_language_embeddings
+        {
             fields.push(TaskFormField::DeclaredTask);
         }
         match self.profile.lane {
@@ -489,8 +490,15 @@ impl TaskFormEditor {
                 TaskFormField::DecisionQuestions,
             ]),
             Lane::Media => {
-                if self.direct_cpu_standard_tts {
+                if self.direct_cpu_speech {
                     fields.push(TaskFormField::SpeechText);
+                    if self
+                        .selected_task
+                        .and_then(|index| self.declared_tasks.get(index))
+                        .is_some_and(|task| task == "design")
+                    {
+                        fields.push(TaskFormField::SpeechInstruction);
+                    }
                 } else {
                     fields.push(TaskFormField::MediaOperation);
                     match self.media_operation {
@@ -790,10 +798,30 @@ impl TaskFormEditor {
                 },
                 TaskFormMediaOperation::Speech => TaskFields::Speech {
                     text: self.values.speech_text.clone(),
-                    mode: self.speech_mode.ok_or(TaskFormError::InvalidNativeFields)?,
-                    instruction: nonempty_form_field(&self.values.speech_instruction),
-                    voice_reference: nonempty_form_field(&self.values.speech_voice_reference),
-                    reference_text: nonempty_form_field(&self.values.speech_reference_text),
+                    mode: if self.direct_cpu_speech {
+                        match selected_task.as_str() {
+                            "tts" => SpeechMode::Standard,
+                            "design" => SpeechMode::VoiceDesign,
+                            _ => return Err(TaskFormError::InvalidNativeFields),
+                        }
+                    } else {
+                        self.speech_mode.ok_or(TaskFormError::InvalidNativeFields)?
+                    },
+                    instruction: if self.direct_cpu_speech && selected_task != "design" {
+                        None
+                    } else {
+                        nonempty_form_field(&self.values.speech_instruction)
+                    },
+                    voice_reference: if self.direct_cpu_speech {
+                        None
+                    } else {
+                        nonempty_form_field(&self.values.speech_voice_reference)
+                    },
+                    reference_text: if self.direct_cpu_speech {
+                        None
+                    } else {
+                        nonempty_form_field(&self.values.speech_reference_text)
+                    },
                 },
             },
         };
@@ -4735,7 +4763,7 @@ impl App {
 
         // History remains metadata-only: no caller ID, command, argv, text,
         // embedding input, decision state, or native result is persisted.
-        // Artifact references are added only after validated TTS.
+        // Artifact references are added only after validated speech output.
         let toolkit = match lane {
             Lane::Language => "l3ms",
             Lane::Decisions => "l3ds",
@@ -4782,7 +4810,7 @@ impl App {
             return;
         }
 
-        let speech_output_directory = if is_direct_standard_speech_request(&request) {
+        let speech_output_directory = if is_direct_cpu_speech_request(&request) {
             match create_private_direct_speech_directory(&self.data_root, job_id) {
                 Ok(directory) => Some(directory),
                 Err(()) => {
@@ -5106,6 +5134,11 @@ impl App {
                 ),
                 ("tts", DirectRunResult::Speech(native)) => {
                     native.mode() == SpeechMode::Standard
+                        && summary.lane == Lane::Media
+                        && summary.profile_id == "breeze-tts-2-cpu"
+                }
+                ("design", DirectRunResult::Speech(native)) => {
+                    native.mode() == SpeechMode::VoiceDesign
                         && summary.lane == Lane::Media
                         && summary.profile_id == "breeze-tts-2-cpu"
                 }
@@ -7072,7 +7105,7 @@ impl App {
         #[cfg(target_os = "linux")]
         let (action_text, action_title) = if show_direct_native {
             let text = self.direct_native_summary.as_ref().map_or_else(
-                || "Nagi/Laya CPU decisions, standard CPU Breeze speech, and connected llama-swap embeddings run in the foreground. No caller ID, coordinator socket, or observe step.\nf open task · c cancels an active run".to_owned(),
+                || "Nagi/Laya CPU decisions, Breeze tts/design, and connected llama-swap embeddings run in the foreground. No caller ID, coordinator socket, or observe step.\nf open task · c cancels an active run".to_owned(),
                 |summary| {
                     let latency = summary.result.as_ref().and_then(direct_native_latency).map_or_else(
                         String::new,
@@ -7228,8 +7261,8 @@ impl App {
                 Constraint::Length(3),
             ])
             .split(area);
-        let form_hint = if editor.direct_cpu_standard_tts {
-            "standard CPU speech · no caller ID or coordinator"
+        let form_hint = if editor.direct_cpu_speech {
+            "CPU speech · select tts or design · no caller ID or coordinator"
         } else if editor.direct_cpu_decision {
             "CPU decision · no caller ID or coordinator"
         } else if editor.direct_language_embeddings {
@@ -7903,17 +7936,18 @@ fn is_direct_cpu_decision_profile(profile: &CatalogProfile) -> bool {
         && matches!(profile.runtime.as_str(), "nagi" | "laya")
 }
 
-fn is_direct_cpu_standard_tts_profile(profile: &CatalogProfile) -> bool {
+fn is_direct_cpu_speech_profile(profile: &CatalogProfile) -> bool {
     profile.key.lane == Lane::Media
         && profile.key.profile_id.as_str() == "breeze-tts-2-cpu"
         && profile.runtime.as_str() == "audio.cpp"
         && profile.device.as_ref() == Some(&Device::Cpu)
         && profile.tasks.iter().any(|task| task.as_str() == "tts")
+        && profile.tasks.iter().any(|task| task.as_str() == "design")
 }
 
 #[cfg(target_os = "linux")]
 fn is_direct_cpu_native_profile(profile: &CatalogProfile) -> bool {
-    is_direct_cpu_decision_profile(profile) || is_direct_cpu_standard_tts_profile(profile)
+    is_direct_cpu_decision_profile(profile) || is_direct_cpu_speech_profile(profile)
 }
 
 #[cfg(target_os = "linux")]
@@ -7942,19 +7976,24 @@ fn direct_native_task_label(task: &str) -> &'static str {
     match task {
         "decision" => "CPU decision",
         "tts" => "CPU speech",
+        "design" => "CPU voice design",
         "embeddings" => "Language embeddings",
         _ => "Foreground native task",
     }
 }
 
 #[cfg(target_os = "linux")]
-fn is_direct_standard_speech_request(request: &crate::control::requests::InferenceRequest) -> bool {
-    matches!(
-        request,
+fn is_direct_cpu_speech_request(request: &crate::control::requests::InferenceRequest) -> bool {
+    matches!(request,
         crate::control::requests::InferenceRequest::Media {
+            profile,
             input: crate::control::requests::MediaInput::Speech(input),
-            ..
-        } if input.mode == SpeechMode::Standard
+        } if profile.lane == Lane::Media
+            && profile.profile_id.as_str() == "breeze-tts-2-cpu"
+            && matches!(
+                (input.mode, request.task()),
+                (SpeechMode::Standard, "tts") | (SpeechMode::VoiceDesign, "design")
+            )
     )
 }
 
@@ -9591,7 +9630,7 @@ mod tests {
         fs::create_dir_all(media.join("media-models")).unwrap();
         fs::write(
             media.join("media-runtimes.json"),
-            r#"{"schema_version":1,"profiles":[{"id":"breeze-tts-2-cpu","name":"CPU Breeze fixture","runtime":"audio.cpp","device":"cpu","tasks":["tts"],"script":"media-models/generate-breeze-tts-2.sh"}]}"#,
+            r#"{"schema_version":1,"profiles":[{"id":"breeze-tts-2-cpu","name":"CPU Breeze fixture","runtime":"audio.cpp","device":"cpu","tasks":["tts","design"],"script":"media-models/generate-breeze-tts-2.sh"}]}"#,
         )
         .unwrap();
         let late_marker = marker.with_extension("late");
@@ -9610,7 +9649,7 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    fn open_direct_cpu_tts_form(app: &mut App, text: &str) {
+    fn open_direct_cpu_speech_form(app: &mut App, text: &str) {
         app.handle_key(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE))
             .unwrap();
         let index = app
@@ -9626,14 +9665,39 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
             .unwrap();
         let editor = app.task_form_editor.as_mut().unwrap();
-        assert!(editor.direct_cpu_standard_tts);
+        assert!(editor.direct_cpu_speech);
         assert!(!editor.fields.contains(&TaskFormField::RequestId));
         assert!(!editor.fields.contains(&TaskFormField::MediaOperation));
         assert!(!editor.fields.contains(&TaskFormField::SpeechMode));
         assert!(!editor.fields.contains(&TaskFormField::SpeechInstruction));
+        assert!(!editor.fields.contains(&TaskFormField::SpeechVoiceReference));
+        assert!(!editor.fields.contains(&TaskFormField::SpeechReferenceText));
         assert_eq!(editor.values.timeout, "30000");
-        assert_eq!(editor.declared_tasks, ["tts"]);
+        assert_eq!(editor.declared_tasks, ["tts", "design"]);
+        assert_eq!(editor.selected_task, Some(0));
+        assert!(editor.fields.contains(&TaskFormField::DeclaredTask));
         editor.values.speech_text = text.into();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn focus_task_form_field(app: &mut App, field: TaskFormField) {
+        let max_steps = app.task_form_editor.as_ref().unwrap().fields.len();
+        for _ in 0..max_steps {
+            if app.task_form_editor.as_ref().unwrap().active_field() == field {
+                return;
+            }
+            app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+                .unwrap();
+        }
+        panic!("task form field is not focusable: {field:?}");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn type_task_form_text(app: &mut App, text: &str) {
+        for character in text.chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+                .unwrap();
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -10121,7 +10185,7 @@ mod tests {
         let marker = fixture.root.join("tts-runner-started");
         write_direct_cpu_tts_runner(&fixture, &marker, false);
         let mut app = fixture.app();
-        open_direct_cpu_tts_form(&mut app, "tts-private-secret");
+        open_direct_cpu_speech_form(&mut app, "tts-private-secret");
         app.submit_task_form();
         assert!(app.direct_native_job.is_some());
         assert!(app.coordinator_workbench.is_none());
@@ -10179,13 +10243,116 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn cpu_voice_design_uses_declared_task_and_keeps_instruction_private() {
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        let marker = fixture.root.join("voice-design-runner-started");
+        write_direct_cpu_tts_runner(&fixture, &marker, false);
+        let mut app = fixture.app();
+        open_direct_cpu_speech_form(&mut app, "voice-design-private-text");
+
+        focus_task_form_field(&mut app, TaskFormField::DeclaredTask);
+        assert_eq!(
+            app.task_form_editor.as_ref().unwrap().selected_task,
+            Some(0)
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        let editor = app.task_form_editor.as_ref().unwrap();
+        assert_eq!(editor.active_field(), TaskFormField::DeclaredTask);
+        assert_eq!(
+            editor.declared_tasks[editor.selected_task.unwrap()],
+            "design"
+        );
+        assert!(editor.fields.contains(&TaskFormField::SpeechInstruction));
+        assert!(!editor.fields.contains(&TaskFormField::SpeechMode));
+        assert!(!editor.fields.contains(&TaskFormField::SpeechVoiceReference));
+        assert!(!editor.fields.contains(&TaskFormField::SpeechReferenceText));
+
+        focus_task_form_field(&mut app, TaskFormField::SpeechInstruction);
+        type_task_form_text(&mut app, "voice-design-private-instruction");
+        let catalog = app.stack_catalog.as_ref().unwrap().clone();
+        let draft = app.task_form_editor.as_ref().unwrap().to_draft().unwrap();
+        let (design_request, _) = build_direct_native(&catalog, draft).unwrap();
+        let crate::control::requests::InferenceRequest::Media {
+            input: crate::control::requests::MediaInput::Speech(input),
+            ..
+        } = design_request
+        else {
+            panic!("design task form must build a speech request");
+        };
+        assert_eq!(input.mode, SpeechMode::VoiceDesign);
+        assert_eq!(
+            input.instruction.as_deref(),
+            Some("voice-design-private-instruction")
+        );
+
+        focus_task_form_field(&mut app, TaskFormField::DeclaredTask);
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+            .unwrap();
+        let draft = app.task_form_editor.as_ref().unwrap().to_draft().unwrap();
+        let (standard_request, _) = build_direct_native(&catalog, draft).unwrap();
+        let crate::control::requests::InferenceRequest::Media {
+            input: crate::control::requests::MediaInput::Speech(input),
+            ..
+        } = standard_request
+        else {
+            panic!("standard task form must build a speech request");
+        };
+        assert_eq!(input.mode, SpeechMode::Standard);
+        assert!(input.instruction.is_none());
+        assert_eq!(
+            app.task_form_editor
+                .as_ref()
+                .unwrap()
+                .values
+                .speech_instruction,
+            "voice-design-private-instruction"
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL))
+            .unwrap();
+        assert!(app.direct_native_job.is_some());
+        assert!(app.coordinator_workbench.is_none());
+        wait_for_direct_native(&mut app);
+
+        let summary = app.direct_native_summary.as_ref().unwrap();
+        assert!(matches!(summary.state, DirectNativeState::Succeeded));
+        assert_eq!(summary.task, "design");
+        let Some(DirectRunResult::Speech(result)) = summary.result.as_ref() else {
+            panic!("direct CPU voice-design artifact was not retained");
+        };
+        assert_eq!(result.mode(), SpeechMode::VoiceDesign);
+        assert_eq!(result.artifacts().len(), 1);
+        assert!(result.output_root().join("result.wav").is_file());
+        assert!(app.status.contains("CPU voice design"));
+        assert!(!app.status.contains("voice-design-private"));
+        assert!(app
+            .log
+            .iter()
+            .all(|line| !line.contains("voice-design-private")));
+
+        let job = &app.job_history.records()[0];
+        assert!(job.command.is_empty());
+        assert_eq!(job.metadata.task.as_deref(), Some("design"));
+        assert!(job.metadata.request_id.is_none());
+        assert_eq!(job.metadata.result_state.as_deref(), Some("succeeded"));
+        let persisted =
+            fs::read_to_string(crate::state_store::jobs_path_in(&fixture.data)).unwrap();
+        assert!(!persisted.contains("voice-design-private"));
+        assert!(marker.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn cpu_standard_tts_cancel_keeps_single_foreground_owner_until_cleanup() {
         let fixture = AppFixture::new();
         write_stack_fixture(&fixture);
         let marker = fixture.root.join("tts-runner-started");
         write_direct_cpu_tts_runner(&fixture, &marker, true);
         let mut app = fixture.app();
-        open_direct_cpu_tts_form(&mut app, "tts-private-secret");
+        open_direct_cpu_speech_form(&mut app, "tts-private-secret");
         app.submit_task_form();
         let job_id = app.direct_native_job.as_ref().unwrap().job_id;
         let start_deadline = Instant::now() + Duration::from_secs(3);
