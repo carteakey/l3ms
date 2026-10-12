@@ -83,12 +83,12 @@
       "engine": "jev",
       "tier": "hosted",
       "type": "api",
-      "model": "typesafe/jev-latest",
+      "model": "jev-latest",
       "backbone": "Proprietary Hosted",
       "device": "remote",
       "vram_gb": 0.0,
       "expected_latency_ms": 350,
-      "description": "Commercial reference decision model hosted by TypeSafe AI / OpenRouter",
+      "description": "Hosted TypeSafe System One decision model; compatibility profile alias, not an OpenRouter adapter",
       "entrypoint": "decision-models/runner.py"
     },
     {
@@ -97,7 +97,7 @@
       "engine": "jev",
       "tier": "hosted",
       "type": "api",
-      "model": "typesafe/jev-latest",
+      "model": "jev-latest",
       "backbone": "TypeSafe System One (Jev)",
       "device": "remote",
       "vram_gb": 0.0,

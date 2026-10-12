@@ -98,6 +98,39 @@ and retain its P50/P95 and option-flip results:
 Neither the environment setup nor a successful CLI build/list substitutes for
 those live checks.
 
+### Prepare the hosted TypeSafe runtime
+
+Hosted profiles use the official TypeSafe System One API, not an OpenRouter
+protocol adapter. Both profile IDs are preserved (`jev-api`, `systemone`), with
+the provider's canonical `jev-latest` model alias. This alias can move; choose a
+versioned model in your manifest if your application needs a fixed model.
+
+The monorepo foreground path uses a separate `.venv-hosted/bin/python`; it never
+changes the Nagi `.venv`. With Python 3.12 and uv installed, create it only if
+neither a directory nor symlink already exists:
+
+```sh
+test ! -e .venv-hosted && test ! -L .venv-hosted &&
+  uv venv --python 3.12 .venv-hosted &&
+  uv pip sync --strict --python .venv-hosted/bin/python requirements/hosted.lock.txt
+```
+
+The lock records the observed SDK 0.7.1 runtime dependency closure; a fresh
+installation still needs verification. These commands may download packages,
+not models; nothing installs automatically. `L3MS_HOSTED_DECISIONS_PYTHON` can
+instead select an explicitly prepared absolute Python executable for the shared
+L3MS path. Provider credentials stay in `TYPESAFE_API_KEY`; `TYPESAFE_BASE_URL`
+optionally configures the endpoint. The legacy `OPENROUTER_API_KEY` fallback is
+not an OpenRouter adapter.
+
+Root L3MS sends `--single-attempt`: SDK retries are disabled and SDK payload
+logging is suppressed. Child cancellation or timeout cannot prove the remote
+request stopped; unresolved calls are never replayed. Standalone runner defaults
+remain unchanged; use `--single-attempt` explicitly for a one-shot hosted call.
+No paid provider acceptance has been run. Official contracts:
+[retry policy](https://docs.typesafe.ai/sdk/python/api/retries),
+[models](https://docs.typesafe.ai/models).
+
 ### Inspect Profiles
 ```bash
 ./target/release/l3ds --list

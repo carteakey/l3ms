@@ -1,21 +1,22 @@
 //! Direct, bounded execution for explicitly supported native work.
 //!
-//! This module accepts CPU-local Nagi/Laya decisions, standard and voice-design
-//! Breeze speech, embeddings and Comfy workflows through existing adapters. It does not start
-//! services, install runtimes, select a fallback, or retry an attempted
-//! inference. Native input and output stay out of its errors.
+//! This module accepts CPU-local Nagi/Laya and hosted Jev decisions, Breeze
+//! speech, embeddings and Comfy workflows through existing adapters. It does
+//! not start services, install runtimes, select a fallback, or retry an
+//! attempted inference. Native input and output stay out of its errors.
 
 use std::error::Error;
 use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
-use super::catalog::{Catalog, Device, Lane};
+use super::catalog::{Catalog, CatalogProfile, Device, Lane, NativeProfileSource};
 use super::comfy::{
     ComfyAdapter, ComfyErrorKind, ComfyFailure, ComfyJobState, ComfyOutputRoot, NativeComfyResult,
 };
 use super::decision::{
-    execute_accepted_cpu_decision, DecisionExecutionError, NativeDecisionResult,
+    execute_accepted_cpu_decision, execute_accepted_hosted_decision, DecisionExecutionError,
+    NativeDecisionResult,
 };
 use super::language::{DispatchDisposition, LanguageAdapter, LanguageErrorKind, LanguageFailure};
 use super::media_execution::{
@@ -208,6 +209,11 @@ pub fn run_native(
             ..
         }
     );
+    let is_hosted_jev_decision = is_decision
+        && catalog
+            .inspect(request.profile())
+            .is_some_and(is_jev_api_decision_profile);
+    let is_remote_operation = is_embeddings || is_comfy_workflow || is_hosted_jev_decision;
     let is_cpu_breeze_speech = matches!(
         request,
         InferenceRequest::Media {
@@ -244,47 +250,34 @@ pub fn run_native(
     if !valid_lane_arguments {
         return Err(unstarted_error(
             DirectRunErrorKind::InvalidRequest,
-            is_embeddings || is_comfy_workflow,
+            is_remote_operation,
         ));
     }
     if context.check_active("direct native operation").is_err() {
-        return Err(if is_embeddings || is_comfy_workflow {
+        return Err(if is_remote_operation {
             inactive_remote_error(context)
         } else {
             inactive_error(context)
         });
     }
 
-    let original_profile = catalog.inspect(request.profile()).ok_or_else(|| {
-        unstarted_error(
-            DirectRunErrorKind::InvalidRequest,
-            is_embeddings || is_comfy_workflow,
-        )
-    })?;
+    let original_profile = catalog
+        .inspect(request.profile())
+        .ok_or_else(|| unstarted_error(DirectRunErrorKind::InvalidRequest, is_remote_operation))?;
     let catalog = catalog.refresh().map_err(|_| {
-        unstarted_error(
-            DirectRunErrorKind::CatalogUnavailable,
-            is_embeddings || is_comfy_workflow,
-        )
+        unstarted_error(DirectRunErrorKind::CatalogUnavailable, is_remote_operation)
     })?;
     if catalog.inspect(request.profile()) != Some(original_profile) {
         return Err(unstarted_error(
             DirectRunErrorKind::InvalidRequest,
-            is_embeddings || is_comfy_workflow,
+            is_remote_operation,
         ));
     }
-    request.validate(&catalog).map_err(|_| {
-        unstarted_error(
-            DirectRunErrorKind::InvalidRequest,
-            is_embeddings || is_comfy_workflow,
-        )
-    })?;
-    let route = resolve_profile_route(&catalog, request.profile()).map_err(|_| {
-        unstarted_error(
-            DirectRunErrorKind::InvalidRequest,
-            is_embeddings || is_comfy_workflow,
-        )
-    })?;
+    request
+        .validate(&catalog)
+        .map_err(|_| unstarted_error(DirectRunErrorKind::InvalidRequest, is_remote_operation))?;
+    let route = resolve_profile_route(&catalog, request.profile())
+        .map_err(|_| unstarted_error(DirectRunErrorKind::InvalidRequest, is_remote_operation))?;
     let recovery = RecoveryPolicy::new(PROCESS_RECOVERY_TIMEOUT)
         .expect("fixed process recovery timeout is valid");
     if is_comfy_workflow {
@@ -307,15 +300,31 @@ pub fn run_native(
         )
         .map(DirectRunResult::Comfy)
     } else if is_decision {
-        if !is_cpu_local_nagi_or_laya(request, &route) {
-            return Err(DirectRunError::new(
-                DirectRunErrorKind::UnsupportedRoute,
-                ProcessFailureDisposition::NoChildSpawned,
-            ));
+        let profile = catalog
+            .inspect(request.profile())
+            .expect("validated request profile exists in refreshed catalog");
+        if !is_supported_direct_decision_profile(profile) {
+            return Err(if is_jev_api_decision_profile(profile) {
+                DirectRunError::remote(
+                    DirectRunErrorKind::UnsupportedRoute,
+                    DispatchDisposition::NoDispatch,
+                )
+            } else {
+                DirectRunError::new(
+                    DirectRunErrorKind::UnsupportedRoute,
+                    ProcessFailureDisposition::NoChildSpawned,
+                )
+            });
         }
-        execute_accepted_cpu_decision(&catalog, request, &route, context, recovery)
-            .map(DirectRunResult::Decision)
-            .map_err(|error| execution_error(error, context))
+        if is_jev_api_decision_profile(profile) {
+            execute_accepted_hosted_decision(&catalog, request, &route, context, recovery)
+                .map(DirectRunResult::Decision)
+                .map_err(|error| hosted_decision_error(error, context))
+        } else {
+            execute_accepted_cpu_decision(&catalog, request, &route, context, recovery)
+                .map(DirectRunResult::Decision)
+                .map_err(|error| execution_error(error, context))
+        }
     } else if is_cpu_breeze_speech {
         if !is_supported_cpu_breeze_route(request, &route) {
             return Err(DirectRunError::new(
@@ -539,19 +548,38 @@ fn remote_completion_uncertain() -> DirectRunError {
     )
 }
 
-fn is_cpu_local_nagi_or_laya(request: &InferenceRequest, route: &ResolvedProfileRoute) -> bool {
-    let InferenceRequest::Decision { profile, .. } = request else {
+/// Profile-level direct decision routes exposed to the UI. It is deliberately
+/// narrower than the manifest catalog: no CUDA switching, SemIf fallback, or
+/// hosted route without an explicit remote device is admitted here.
+pub(crate) fn is_supported_direct_decision_profile(profile: &CatalogProfile) -> bool {
+    if profile.disabled
+        || profile.key.lane != Lane::Decisions
+        || profile.runtime.lane != Lane::Decisions
+        || !profile.tasks.iter().any(|task| task.as_str() == "decision")
+    {
+        return false;
+    }
+    let NativeProfileSource::Decisions { profile_type, .. } = &profile.native_source else {
         return false;
     };
-    let NativeRoute::DecisionRunner { profile_type, .. } = &route.native_route else {
-        return false;
-    };
-    profile == &route.profile
-        && route.profile.lane == Lane::Decisions
-        && route.runtime.lane == Lane::Decisions
-        && matches!(route.runtime.as_str(), "nagi" | "laya")
-        && route.device.as_ref() == Some(&Device::Cpu)
-        && profile_type == "local"
+    matches!(
+        (
+            profile.runtime.as_str(),
+            profile.device.as_ref(),
+            profile_type.as_str(),
+        ),
+        ("nagi" | "laya", Some(Device::Cpu), "local") | ("jev", Some(Device::Remote), "api")
+    )
+}
+
+fn is_jev_api_decision_profile(profile: &CatalogProfile) -> bool {
+    profile.key.lane == Lane::Decisions
+        && profile.runtime.lane == Lane::Decisions
+        && profile.runtime.as_str() == "jev"
+        && matches!(
+            &profile.native_source,
+            NativeProfileSource::Decisions { profile_type, .. } if profile_type == "api"
+        )
 }
 
 fn is_language_embeddings_route(request: &InferenceRequest, route: &ResolvedProfileRoute) -> bool {
@@ -648,6 +676,27 @@ fn execution_error(
     }
 }
 
+fn hosted_decision_error(
+    error: DecisionExecutionError,
+    context: &OperationContext<'_>,
+) -> DirectRunError {
+    match error {
+        DecisionExecutionError::NotDispatched => {
+            if context.check_active("hosted direct decision").is_err() {
+                inactive_remote_error(context)
+            } else {
+                DirectRunError::remote(
+                    DirectRunErrorKind::ExecutionFailed,
+                    DispatchDisposition::NoDispatch,
+                )
+            }
+        }
+        DecisionExecutionError::InvalidResult(_) | DecisionExecutionError::Uncertain { .. } => {
+            remote_completion_uncertain()
+        }
+    }
+}
+
 fn media_execution_error(
     error: MediaExecutionFailure,
     context: &OperationContext<'_>,
@@ -740,6 +789,7 @@ mod tests {
         fs::create_dir_all(&media).unwrap();
         fs::create_dir_all(decisions.join("decision-models")).unwrap();
         fs::create_dir_all(decisions.join(".venv/bin")).unwrap();
+        fs::create_dir_all(decisions.join(".venv-hosted/bin")).unwrap();
         fs::write(
             root.path().join("llama-swap.yaml"),
             "models:\n  fixture-chat:\n    cmd: server\n",
@@ -769,9 +819,12 @@ mod tests {
         .unwrap();
 
         let interpreter = decisions.join(".venv/bin/python");
+        let hosted_interpreter = decisions.join(".venv-hosted/bin/python");
         let fixture_guard = super::super::process::executable_fixture_guard();
         fs::write(&interpreter, "#!/bin/sh\nexec /bin/sh \"$@\"\n").unwrap();
+        fs::write(&hosted_interpreter, "#!/bin/sh\nexec /bin/sh \"$@\"\n").unwrap();
         fs::set_permissions(&interpreter, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&hosted_interpreter, fs::Permissions::from_mode(0o700)).unwrap();
         fs::write(
             decisions.join("decision-models/runner.py"),
             format!(
@@ -1073,26 +1126,124 @@ fi
     }
 
     #[test]
-    fn direct_runner_rejects_cuda_and_hosted_routes_before_launch() {
-        for (engine, profile_type, device) in [("nagi", "local", "cuda"), ("jev", "api", "remote")]
-        {
-            let (_root, catalog, request, launch_marker) = fixture(
-                engine,
-                profile_type,
-                device,
-                &native_response("nagi-native"),
-            );
-            let error = run_native(&catalog, &request, None, None, &context(&NeverCancel))
-                .err()
-                .expect("unsupported route is rejected");
-            assert_eq!(error.kind(), DirectRunErrorKind::UnsupportedRoute);
-            assert_eq!(
-                error.disposition(),
-                DirectRunDisposition::Process(ProcessFailureDisposition::NoChildSpawned)
-            );
-            assert!(!error.blocks_following_work());
-            assert!(!launch_marker.exists());
+    fn direct_decision_profile_allowlist_is_exact() {
+        let (_root, hosted, request, _) = fixture(
+            "jev",
+            "api",
+            "remote",
+            &native_response("systemone-official-api"),
+        );
+        let profile = hosted.inspect(request.profile()).unwrap();
+        assert!(is_supported_direct_decision_profile(profile));
+
+        let (_root, cpu, request, _) =
+            fixture("nagi", "local", "cpu", &native_response("nagi-native"));
+        assert!(is_supported_direct_decision_profile(
+            cpu.inspect(request.profile()).unwrap()
+        ));
+
+        for (engine, profile_type, device) in [
+            ("jev", "api", "cuda"),
+            ("nagi", "local", "cuda"),
+            ("semif", "local", "cpu"),
+        ] {
+            let (_root, catalog, request, _) =
+                fixture(engine, profile_type, device, &native_response("unused"));
+            assert!(!is_supported_direct_decision_profile(
+                catalog.inspect(request.profile()).unwrap()
+            ));
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn direct_hosted_jev_requires_one_attempt_and_returns_a_valid_native_result() {
+        if std::env::var_os(super::super::native_commands::HOSTED_DECISION_PYTHON_ENV).is_some() {
+            return;
+        }
+        let response = native_response("systemone-official-api");
+        let (root, catalog, request, launch_marker) = fixture("jev", "api", "remote", &response);
+        let runner = root.path().join("toolkits/l3ds/decision-models/runner.py");
+        let script = format!(
+            "#!/bin/sh\nprintf x >> \"$0.calls\"\n[ \"$PYTHONDONTWRITEBYTECODE\" = 1 ] || exit 8\n[ -z \"${{TYPESAFE_LOG_LEVEL+x}}\" ] || exit 9\ncase \" $* \" in *\" --single-attempt \"*) ;; *) exit 10;; esac\ninput=$(/bin/cat)\ncase \"$input\" in *'\"state\"'*'\"questions\"'*) ;; *) exit 11;; esac\nprintf '%s\\n' '{}'\n",
+            response.replace('\'', "'\\''")
+        );
+        fs::write(runner, script).unwrap();
+        let DirectRunResult::Decision(result) =
+            run_native(&catalog, &request, None, None, &context(&NeverCancel)).unwrap()
+        else {
+            panic!("hosted Jev returns the native decision result")
+        };
+        let InferenceResult::Decision { answers } = result.result else {
+            panic!("hosted Jev returns decision answers")
+        };
+        assert_eq!(answers["route"]["choice"], "yes");
+        assert_eq!(fs::read(launch_marker).unwrap(), b"x");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn direct_hosted_cancellation_after_spawn_is_remote_uncertain() {
+        if std::env::var_os(super::super::native_commands::HOSTED_DECISION_PYTHON_ENV).is_some() {
+            return;
+        }
+        let (root, catalog, request, launch_marker) = fixture(
+            "jev",
+            "api",
+            "remote",
+            &native_response("systemone-official-api"),
+        );
+        let runner = root.path().join("toolkits/l3ds/decision-models/runner.py");
+        fs::write(
+            runner,
+            "#!/bin/sh\nprintf x >> \"$0.calls\"\n/bin/cat >/dev/null\nsleep 30\n",
+        )
+        .unwrap();
+
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let watcher_cancelled = Arc::clone(&cancelled);
+        let watcher_marker = launch_marker.clone();
+        let watcher = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !watcher_marker.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            watcher_cancelled.store(true, Ordering::Release);
+        });
+        let error = run_native(
+            &catalog,
+            &request,
+            None,
+            None,
+            &context(&SharedCancel(cancelled)),
+        )
+        .err()
+        .expect("hosted failure is not a successful result");
+        watcher.join().unwrap();
+        assert!(launch_marker.exists());
+        assert_eq!(error.kind(), DirectRunErrorKind::RemoteCompletionUncertain);
+        assert_eq!(
+            error.disposition(),
+            DirectRunDisposition::Remote(DispatchDisposition::Uncertain)
+        );
+        assert!(error.blocks_following_work());
+        assert!(!error.cancellation_confirmed());
+    }
+
+    #[test]
+    fn direct_runner_rejects_cuda_before_launch() {
+        let (_root, catalog, request, launch_marker) =
+            fixture("nagi", "local", "cuda", &native_response("nagi-native"));
+        let error = run_native(&catalog, &request, None, None, &context(&NeverCancel))
+            .err()
+            .expect("unsupported CUDA route is rejected");
+        assert_eq!(error.kind(), DirectRunErrorKind::UnsupportedRoute);
+        assert_eq!(
+            error.disposition(),
+            DirectRunDisposition::Process(ProcessFailureDisposition::NoChildSpawned)
+        );
+        assert!(!error.blocks_following_work());
+        assert!(!launch_marker.exists());
     }
 
     #[test]

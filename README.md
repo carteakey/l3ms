@@ -207,6 +207,31 @@ press `f`, choose `decision`, fill the native fields and press `Ctrl+Enter`.
 Press `c` to cancel; the job stays busy until cleanup is confirmed. History stores
 metadata only, while native answers stay in the in-memory result panel.
 
+### Hosted decisions (Linux, live acceptance pending)
+
+Prepare the [TypeSafe SDK runtime](toolkits/l3ds/README.md#prepare-the-hosted-typesafe-runtime)
+first. It is separate from the local Nagi environment; alternatively configure
+`L3MS_HOSTED_DECISIONS_PYTHON` with an absolute, prepared Python executable.
+Provide `TYPESAFE_API_KEY` through the environment, never argv or committed files.
+Both `decisions:systemone` and `decisions:jev-api` use TypeSafe's System One API
+with `jev-latest`, not an OpenRouter adapter.
+
+```sh
+l3ms --run-profile decisions:systemone --task decision --input /path/to/state-and-questions.json --task-timeout-ms 15000
+```
+
+Input/output use the same native `state`/`questions`, answers, latency and usage
+shape as local decisions; no output directory is accepted. Stack `f` uses the
+same foreground worker without a caller ID or coordinator. Submission is explicit:
+hosted inference sends those inputs to your configured provider and can incur costs.
+Only metadata enters history, not questions or answers.
+
+This path disables SDK retries and SDK payload logging. A stopped child does not
+prove that the provider cancelled; any post-spawn failure stays remotely unknown,
+closes foreground admission and is never replayed automatically. Chat is also
+blocked while foreground native work is active/unconfirmed. Actual SDK/CLI checks
+have used only offline mock transport, not a paid provider or live cancellation.
+
 ### Direct CPU speech (Linux)
 
 With an installed CPU-capable audio.cpp runtime and cached Breeze weights:

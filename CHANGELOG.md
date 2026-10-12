@@ -19,6 +19,11 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Run hosted TypeSafe Jev/SystemOne decisions through the existing native recipe
+  and foreground worker using an explicitly prepared hosted interpreter. Disable
+  SDK retries for this path and preserve remote uncertainty after child cleanup;
+  return native answers/usage without payload history. Correct the provider model
+  identifier to `jev-latest`; keep profile IDs and standalone retry defaults.
 - Extend direct CPU Breeze to cloning with required reference audio/transcript
   and optional chunked TTS mode. Reuse the recipe, worker, WAV/chunk validation
   and private result paths; keep hidden form inputs out of unrelated modes.

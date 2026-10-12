@@ -1,4 +1,5 @@
-//! Strict native decision result decoding. Never substitutes demo decisions.
+//! Strict local and hosted native decision execution and result decoding.
+//! Never substitutes demo decisions.
 //!
 //! This only validates captured runner stdout; it does not execute a model or
 //! establish live acceptance. The supervised executor must separately require
@@ -68,8 +69,6 @@ impl Error for DecisionExecutionError {}
 /// This blocking operation never creates an environment, retries a request, or
 /// accepts synthetic results. Engines run with Hugging Face/Transformers
 /// offline flags; model acquisition is separate explicit preparation work.
-/// Hosted execution remains gated until its native SDK retry/auth contract is
-/// verified; the standalone hosted CLI and result decoder are unaffected.
 pub fn execute_native_decision(
     catalog: &Catalog,
     request: &InferenceRequest,
@@ -139,6 +138,38 @@ pub(crate) fn execute_accepted_cpu_decision(
     )
 }
 
+/// Execute one accepted Jev API decision with the toolkit's hosted Python
+/// environment. The caller owns admission and must not replay an uncertain
+/// attempt; the process result establishes no provider-side cancellation or
+/// resource-release claim.
+pub(crate) fn execute_accepted_hosted_decision(
+    catalog: &Catalog,
+    request: &InferenceRequest,
+    accepted_route: &ResolvedProfileRoute,
+    context: &OperationContext<'_>,
+    recovery: RecoveryPolicy,
+) -> Result<NativeDecisionResult, DecisionExecutionError> {
+    if !accepted_hosted_decision_route(request, accepted_route) {
+        return Err(DecisionExecutionError::NotDispatched);
+    }
+    let recipe = prepare_native_command_for_route(catalog, request, accepted_route)
+        .map_err(|_| DecisionExecutionError::NotDispatched)?;
+    if !recipe_matches_route(&recipe, accepted_route) {
+        return Err(DecisionExecutionError::NotDispatched);
+    }
+    execute_prepared_recipe(
+        catalog,
+        request,
+        &recipe,
+        DecisionBinding {
+            route: Some(accepted_route),
+            device: DecisionDevice::Hosted,
+        },
+        context,
+        recovery,
+    )
+}
+
 /// Execute an explicitly CUDA-local accepted Nagi/Laya route on one configured
 /// physical device. This is native execution only: the caller must retain its
 /// owned service/cgroup and reservation, then separately prove GPU release.
@@ -173,6 +204,7 @@ enum DecisionDevice<'a> {
     Inherited,
     Cpu,
     Cuda(&'a CudaDevice),
+    Hosted,
 }
 
 struct DecisionBinding<'a> {
@@ -196,34 +228,45 @@ fn execute_prepared_recipe(
     else {
         return Err(DecisionExecutionError::NotDispatched);
     };
-    if !matches!(engine.as_str(), "nagi" | "laya") || profile_type != "local" {
+    let local_runner = matches!(engine.as_str(), "nagi" | "laya") && profile_type == "local";
+    let hosted_runner = engine == "jev" && profile_type == "api";
+    let binding_matches = match &binding.device {
+        DecisionDevice::Hosted => hosted_runner,
+        DecisionDevice::Inherited | DecisionDevice::Cpu | DecisionDevice::Cuda(_) => local_runner,
+    };
+    if !binding_matches {
         return Err(DecisionExecutionError::NotDispatched);
     }
     if let Some(route) = binding.route {
-        let expected_device = match binding.device {
-            DecisionDevice::Cpu => Device::Cpu,
-            DecisionDevice::Cuda(_) => Device::Cuda,
-            DecisionDevice::Inherited => return Err(DecisionExecutionError::NotDispatched),
+        let route_matches = match &binding.device {
+            DecisionDevice::Cpu => accepted_local_decision_route(request, route, Device::Cpu),
+            DecisionDevice::Cuda(_) => accepted_local_decision_route(request, route, Device::Cuda),
+            DecisionDevice::Hosted => accepted_hosted_decision_route(request, route),
+            DecisionDevice::Inherited => false,
         };
-        if !accepted_local_decision_route(request, route, expected_device)
-            || !recipe_matches_route(recipe, route)
-        {
+        if !route_matches || !recipe_matches_route(recipe, route) {
             return Err(DecisionExecutionError::NotDispatched);
         }
     }
     let mut command = std::process::Command::new(&recipe.executable);
     command.args(&recipe.argv).current_dir(&recipe.cwd);
-    command
-        .env("HF_HUB_OFFLINE", "1")
-        .env("TRANSFORMERS_OFFLINE", "1")
-        .env("HF_DATASETS_OFFLINE", "1");
-    match binding.device {
+    if hosted_runner {
+        command
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .env_remove("TYPESAFE_LOG_LEVEL");
+    } else {
+        command
+            .env("HF_HUB_OFFLINE", "1")
+            .env("TRANSFORMERS_OFFLINE", "1")
+            .env("HF_DATASETS_OFFLINE", "1");
+    }
+    match &binding.device {
         DecisionDevice::Cpu => {
             // Do not let a library that ignores --device discover CUDA.
             command.env("CUDA_VISIBLE_DEVICES", "");
         }
         DecisionDevice::Cuda(device) => device.apply_to(&mut command),
-        DecisionDevice::Inherited => {}
+        DecisionDevice::Inherited | DecisionDevice::Hosted => {}
     }
     let limits = ProcessLimits::new(1024 * 1024, 2 * 1024 * 1024)
         .map_err(|_| DecisionExecutionError::NotDispatched)?;
@@ -339,6 +382,24 @@ fn decode_decision_result_for_route(
 
 fn accepted_cpu_decision_route(request: &InferenceRequest, route: &ResolvedProfileRoute) -> bool {
     accepted_local_decision_route(request, route, Device::Cpu)
+}
+
+fn accepted_hosted_decision_route(
+    request: &InferenceRequest,
+    route: &ResolvedProfileRoute,
+) -> bool {
+    let InferenceRequest::Decision { profile, .. } = request else {
+        return false;
+    };
+    let NativeRoute::DecisionRunner { profile_type, .. } = &route.native_route else {
+        return false;
+    };
+    profile == &route.profile
+        && route.profile.lane == Lane::Decisions
+        && route.runtime.lane == Lane::Decisions
+        && route.runtime.as_str() == "jev"
+        && route.device.as_ref() == Some(&Device::Remote)
+        && profile_type == "api"
 }
 
 fn accepted_local_decision_route(

@@ -10,6 +10,7 @@ Supports:
 
 import argparse
 import json
+import logging
 import os
 import sys
 import time
@@ -64,20 +65,52 @@ def one_shot_inputs(args):
 
 
 class MockOrApiJevEngine(BaseDecisionEngine):
-    def __init__(self, model: str = "typesafe/jev-latest", api_key: str = None, base_url: str = None, allow_simulation: bool = False):
+    def __init__(
+        self,
+        model: str = "jev-latest",
+        api_key: str = None,
+        base_url: str = None,
+        allow_simulation: bool = False,
+        single_attempt: bool = False,
+    ):
         self.model = model
         self.allow_simulation = allow_simulation
+        self.single_attempt = single_attempt
+        self.single_attempt_consumed = False
         self.api_key = api_key or os.environ.get("TYPESAFE_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
         self.base_url = base_url or os.environ.get("TYPESAFE_BASE_URL")
         self.client = None
-        if self.api_key and not self.allow_simulation:
+        self.initialization_error = None
+        if self.single_attempt and self.allow_simulation:
+            self.initialization_error = "single-attempt hosted mode cannot use simulation"
+        elif not self.allow_simulation and not self.api_key:
+            self.initialization_error = "hosted decision API credentials are unavailable"
+        elif self.single_attempt:
+            # The SDK documents TYPESAFE_LOG_LEVEL=off; its DEBUG wire logger includes request and
+            # response bodies. Keep that logger disabled for this one-shot process before import.
+            os.environ["TYPESAFE_LOG_LEVEL"] = "off"
+            logging.getLogger("typesafe_sdk").disabled = True
+
+        if self.api_key and not self.allow_simulation and self.initialization_error is None:
             try:
-                from typesafe_sdk import TypeSafeClient
-                self.client = TypeSafeClient(api_key=self.api_key, base_url=self.base_url)
-            except Exception as e:
-                print(f"[systemone-api] Initialization notice: {e}", file=sys.stderr)
+                if self.single_attempt:
+                    from typesafe_sdk import RetryPolicy, TypeSafeClient
+
+                    self.client = TypeSafeClient(
+                        api_key=self.api_key,
+                        base_url=self.base_url,
+                        retry=RetryPolicy(max_retries=0),
+                    )
+                else:
+                    from typesafe_sdk import TypeSafeClient
+
+                    self.client = TypeSafeClient(api_key=self.api_key, base_url=self.base_url)
+            except Exception:
+                self.initialization_error = "hosted decision client is unavailable"
 
     def decide(self, state: Dict[str, Any], questions: Dict[str, Any]) -> Dict[str, Any]:
+        if self.single_attempt and self.single_attempt_consumed:
+            raise InferenceUnavailable("hosted decision request is already complete") from None
         if self.client:
             t0 = time.perf_counter()
             try:
@@ -100,11 +133,21 @@ class MockOrApiJevEngine(BaseDecisionEngine):
                     "latency_ms": elapsed_ms,
                     "engine": "systemone-official-api"
                 }
-            except Exception as api_err:
-                raise InferenceUnavailable("hosted decision request failed") from api_err
+            except Exception:
+                raise InferenceUnavailable("hosted decision request failed") from None
+            finally:
+                if self.single_attempt:
+                    self.single_attempt_consumed = True
+                    client, self.client = self.client, None
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
         else:
+            if self.initialization_error:
+                raise InferenceUnavailable(self.initialization_error) from None
             if not self.allow_simulation:
-                raise InferenceUnavailable("hosted decision API is unavailable; configure TYPESAFE_API_KEY or explicitly use --simulate")
+                raise InferenceUnavailable("hosted decision client is unavailable") from None
             # Emulate WAN network latency of hosted Jev API (P50 ~250ms, jitter up to 500ms)
             state_str = json.dumps(state) if isinstance(state, dict) else str(state)
             simulated_network_delay = 0.22 + (hash(state_str) % 100) / 1000.0
@@ -299,7 +342,7 @@ class SemIfEngine(BaseDecisionEngine):
         }
 
 
-def get_engine(engine_name: str, model: str, device: str, api_key: str = None, base_url: str = None, allow_simulation: bool = False) -> BaseDecisionEngine:
+def get_engine(engine_name: str, model: str, device: str, api_key: str = None, base_url: str = None, allow_simulation: bool = False, single_attempt: bool = False) -> BaseDecisionEngine:
     if engine_name == "nagi":
         return NagiEngine(model, device, allow_simulation)
     elif engine_name == "laya":
@@ -307,7 +350,7 @@ def get_engine(engine_name: str, model: str, device: str, api_key: str = None, b
     elif engine_name == "semif":
         return SemIfEngine(model, device, allow_simulation)
     elif engine_name == "jev":
-        return MockOrApiJevEngine(model, api_key=api_key, base_url=base_url, allow_simulation=allow_simulation)
+        return MockOrApiJevEngine(model, api_key=api_key, base_url=base_url, allow_simulation=allow_simulation, single_attempt=single_attempt)
     else:
         raise ValueError(f"Unknown engine: {engine_name}")
 
@@ -385,8 +428,11 @@ def main():
     parser.add_argument("--bench-suite", type=str, default=None)
     parser.add_argument("--iterations", type=int, default=10)
     parser.add_argument("--simulate", action="store_true", help="Explicit demo mode; results are synthetic and not benchmark evidence")
+    parser.add_argument("--single-attempt", action="store_true", help="Disable hosted SDK retries for one Jev API request")
 
     args = parser.parse_args()
+    if args.single_attempt and (args.engine != "jev" or args.simulate or args.bench_suite):
+        parser.error("--single-attempt requires one live Jev invocation without --simulate or --bench-suite")
     if args.input_stdin and (args.state is not None or args.question is not None or args.bench_suite is not None):
         parser.error("--input-stdin cannot be combined with --state, --question, or --bench-suite")
     if not args.bench_suite:
@@ -397,7 +443,7 @@ def main():
             return 2
 
     try:
-        engine = get_engine(args.engine, args.model, args.device, api_key=args.api_key, base_url=args.base_url, allow_simulation=args.simulate)
+        engine = get_engine(args.engine, args.model, args.device, api_key=args.api_key, base_url=args.base_url, allow_simulation=args.simulate, single_attempt=args.single_attempt)
         if args.bench_suite:
             run_benchmark(engine, args.bench_suite, args.iterations)
             return 0

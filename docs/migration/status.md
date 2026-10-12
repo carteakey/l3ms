@@ -8,7 +8,39 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
-## Current CPU cloning/chunked TTS checkpoint — 2026-10-12
+## Current hosted decision checkpoint — 2026-10-12
+
+Jev/SystemOne now reuse the native recipe/process/decoder and foreground UI owner.
+The explicit hosted Python or `.venv-hosted/bin/python` is separate from Nagi;
+no runtime is installed automatically. The existing toolkit runner's new
+`--single-attempt` disables SDK retries/payload logs, with no simulation fallback.
+Standalone retry defaults remain. Both profile IDs retain their identity and use
+TypeSafe's verified `jev-latest` alias, not an OpenRouter protocol adapter.
+Questions/answers remain private in memory; history contains metadata only.
+
+After any child spawn, failure/timeout/cancellation or invalid output remains
+remotely uncertain even if the child was reaped. Pre-dispatch failure stays
+NoDispatch; successful answers preserve native usage/latency. The app serializes
+Chat against all active/unconfirmed foreground native work; no global client
+fencing is claimed. No new module, worker, framework or persistent authority.
+
+Actual pinned SDK plus full CLI passed success and synthetic 503 cases through
+socket-denying mock transport: **one call each**, no retries and no paid provider.
+See [exact offline evidence](direct-hosted-acceptance.md). Fresh hosted installation,
+approved paid provider/live cancellation and GPU switching acceptance remain open.
+
+Build/strict Clippy/fmt, 21 toolkit runner tests and site data/DOM checks pass.
+Full root suite: **789 passed, 108 unchanged transport failures, 1 ignored**.
+Hosted UI fixture errors were corrected without changing privacy assertions.
+An intermittent existing GPU-probe assertion could not be reproduced in bounded
+stress/full-library loops; it remains documented, not fixed or suppressed.
+
+This slice adds **411 net root source lines**, cumulative **+5,242** against
+`702b4cd`; control scope 62,281. No platform module is removed. Next prioritize
+the small native GPU lifecycle and remaining script/CUDA callers, then delete
+their coordinator closure. The larger LOC target and full port remain unfinished.
+
+## Previous CPU cloning/chunked TTS checkpoint — 2026-10-12
 
 CPU Breeze now covers Standard, VoiceDesign, VoiceClone and Streaming through
 the same native recipe, foreground worker and WAV/chunk validator. Strict CLI

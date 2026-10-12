@@ -35,6 +35,8 @@ const BREEZE_PROFILE_ID: &str = "breeze-tts-2";
 pub(crate) const CPU_BREEZE_PROFILE_ID: &str = "breeze-tts-2-cpu";
 const BREEZE_SCRIPT: &str = "media-models/generate-breeze-tts-2.sh";
 const DECISION_PYTHON: &str = ".venv/bin/python";
+const HOSTED_DECISION_PYTHON: &str = ".venv-hosted/bin/python";
+pub(crate) const HOSTED_DECISION_PYTHON_ENV: &str = "L3MS_HOSTED_DECISIONS_PYTHON";
 const BASH_EXECUTABLE: &str = "/bin/bash";
 const MAX_NATIVE_ARGUMENT_BYTES: usize = 64 * 1024;
 const MAX_NATIVE_ARGV_BYTES: usize = 256 * 1024;
@@ -559,10 +561,18 @@ fn decision_recipe(
         "decision model identifier is invalid"
     );
 
-    let python = checked_executable(
-        verified.toolkit_root.join(DECISION_PYTHON),
-        &format!("child-owned decision interpreter at {DECISION_PYTHON}"),
-    )?;
+    let hosted = engine == "jev" && profile_type == "api";
+    let python = if hosted {
+        configured_hosted_decision_interpreter(
+            &verified.toolkit_root,
+            std::env::var_os(HOSTED_DECISION_PYTHON_ENV),
+        )?
+    } else {
+        checked_executable(
+            verified.toolkit_root.join(DECISION_PYTHON),
+            &format!("child-owned decision interpreter at {DECISION_PYTHON}"),
+        )?
+    };
 
     let stdin_payload = encode_decision_stdin_payload(state, questions)?;
     let mut argv = vec![
@@ -576,6 +586,9 @@ fn decision_recipe(
     argv.push(text_argument("--device")?);
     argv.push(text_argument(device)?);
     argv.push(text_argument("--input-stdin")?);
+    if hosted {
+        argv.push(text_argument("--single-attempt")?);
+    }
     ensure_argv_budget(&python, &argv)?;
 
     Ok(NativeCommandRecipe {
@@ -606,6 +619,31 @@ fn checked_executable(path: PathBuf, label: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+fn configured_hosted_decision_interpreter(
+    toolkit_root: &std::path::Path,
+    configured: Option<std::ffi::OsString>,
+) -> Result<PathBuf> {
+    let (path, label) = match configured {
+        Some(configured) => (
+            PathBuf::from(configured),
+            "configured hosted decision interpreter",
+        ),
+        None => (
+            toolkit_root.join(HOSTED_DECISION_PYTHON),
+            "hosted decision interpreter at .venv-hosted/bin/python",
+        ),
+    };
+    ensure!(
+        path.is_absolute(),
+        "hosted decision interpreter must be an absolute path"
+    );
+    ensure!(
+        !path.to_string_lossy().contains('\0'),
+        "hosted decision interpreter path is invalid"
+    );
+    checked_executable(path, label)
+}
+
 #[derive(Serialize)]
 struct DecisionStdinEnvelope<'a> {
     state: &'a Value,
@@ -632,8 +670,8 @@ fn decision_device<'a>(
 ) -> Result<&'a str> {
     if engine == "jev" && profile_type == "api" {
         ensure!(
-            device.is_none() || matches!(device, Some(Device::Remote)),
-            "hosted Jev decision route must use the remote device"
+            matches!(device, Some(Device::Remote)),
+            "hosted Jev decision route must explicitly declare remote device"
         );
         return Ok("remote");
     }
@@ -815,6 +853,16 @@ mod tests {
                     use std::os::unix::fs::PermissionsExt;
                     fs::set_permissions(&python, fs::Permissions::from_mode(0o755)).unwrap();
                 }
+            }
+        }
+
+        fn write_hosted_decision_python(&self) {
+            let python = self.decisions_root.join(HOSTED_DECISION_PYTHON);
+            write_nonempty(&python);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&python, fs::Permissions::from_mode(0o755)).unwrap();
             }
         }
     }
@@ -1462,6 +1510,7 @@ mod tests {
 
         let hosted = Fixture::new("media-profile", "media-models/unused.sh", &["tts"]);
         hosted.write_decision_files(true);
+        hosted.write_hosted_decision_python();
         fs::write(
             hosted.decisions_root.join("decision-runtimes.json"),
             serde_json::json!({
@@ -1472,6 +1521,7 @@ mod tests {
                     "engine": "jev",
                     "tier": "hosted",
                     "type": "api",
+                    "device": "remote",
                     "model": "typesafe/jev-latest",
                     "entrypoint": "decision-models/runner.py"
                 }]
@@ -1482,11 +1532,49 @@ mod tests {
         let hosted_catalog = hosted.catalog();
         let recipe = prepare_native_command(&hosted_catalog, &decision_request("jev-api")).unwrap();
         let args = argv_strings(&recipe);
+        let expected_python = std::env::var_os(HOSTED_DECISION_PYTHON_ENV)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| hosted.decisions_root.join(HOSTED_DECISION_PYTHON));
+        assert_eq!(recipe.executable, expected_python);
         assert_eq!(
             &args[1..5],
             ["--engine", "jev", "--model", "typesafe/jev-latest"]
         );
         assert_eq!(&args[5..7], ["--device", "remote"]);
+        assert_eq!(&args[7..9], ["--input-stdin", "--single-attempt"]);
+    }
+
+    #[test]
+    fn hosted_interpreter_override_must_be_absolute_and_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let default = root.path().join(HOSTED_DECISION_PYTHON);
+        fs::create_dir_all(default.parent().unwrap()).unwrap();
+        fs::write(&default, "fixture").unwrap();
+        fs::set_permissions(&default, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            configured_hosted_decision_interpreter(root.path(), None).unwrap(),
+            default
+        );
+
+        let explicit = root.path().join("custom/python");
+        fs::create_dir_all(explicit.parent().unwrap()).unwrap();
+        fs::write(&explicit, "fixture").unwrap();
+        fs::set_permissions(&explicit, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            configured_hosted_decision_interpreter(
+                root.path(),
+                Some(explicit.clone().into_os_string())
+            )
+            .unwrap(),
+            explicit
+        );
+        assert!(configured_hosted_decision_interpreter(
+            root.path(),
+            Some("relative/python".into())
+        )
+        .is_err());
     }
 
     #[test]

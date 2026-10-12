@@ -10,6 +10,19 @@ existing Linear migration issues rather than replacing their acceptance criteria
 
 ## Monorepo: next work
 
+Hosted TypeSafe decisions now use the same native owner with explicit hosted
+Python, SDK retries/logging disabled and post-spawn remote uncertainty. Actual
+SDK/CLI offline success+503 checks each made one mock call, no paid/network call.
+Root **789 pass, 108 unchanged transport failures, 1 ignored**; build/lint/fmt,
+21 runner tests and site checks pass. Source **+411 net**, cumulative **+5,242**.
+No new module/worker; broad coordinator deletion is still pending.
+
+Next priority: small native GPU lifecycle plus remaining script/CUDA callers,
+not more provider or coordinator infrastructure. Fresh hosted runtime and an
+approved/budgeted provider test remain needed for live acceptance. An existing
+GPU-probe fixture assertion flake is logged but un-reproduced/unfixed; keep its
+assertions and recheck before any GPU acceptance.
+
 CPU Breeze cloning and completed streaming chunks now share the existing direct
 path with standard/design. Real cached-weight CPU runs pass (14.20/11.52 seconds,
 validated WAV/chunks and child release), no services/downloads. Streaming is not
@@ -17,9 +30,9 @@ live playback. Build/lint/fmt, local UI/privacy, site and standalone media check
 pass; root suite **784 pass, 108 unchanged transport failures, 1 ignored**.
 Source adds **409 net lines**, cumulative **+4,831**; broad reduction is unfinished.
 
-Next hosted gate: pin the provider runtime, disable SDK retries explicitly, keep
-post-spawn uncertainty remote even after child cleanup. Jev/SystemOne currently
-use TypeSafe, not an OpenRouter adapter. No paid/network acceptance has run.
+Hosted implementation gates above now pin the provider runtime, disable retries
+and preserve post-spawn uncertainty; fresh installation and paid/network
+acceptance have not run. Jev/SystemOne use TypeSafe, not an OpenRouter adapter.
 GPU lifecycle and remaining native media/decision callers still gate broad
 coordinator deletion; use existing recipes rather than another platform.
 

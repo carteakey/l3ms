@@ -1,0 +1,15 @@
+# Python 3.12 runtime dependency closure observed in the installed TypeSafe SDK 0.7.1 metadata.
+# Required packages only; no SDK extras or model/runtime packages.
+typesafe-sdk==0.7.1
+httpx2==2.13.1
+httpcore2==2.13.1
+anyio==4.15.1
+idna==3.20
+truststore==0.10.4
+h11==0.16.0
+pydantic==2.13.5
+pydantic-core==2.46.5
+annotated-types==0.8.0
+typing-inspection==0.4.4
+typing-extensions==4.16.0
+tenacity==9.1.4
