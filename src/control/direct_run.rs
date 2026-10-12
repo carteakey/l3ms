@@ -1,28 +1,32 @@
 //! Direct, bounded execution for explicitly supported native work.
 //!
-//! This module accepts CPU-local Nagi/Laya and hosted Jev decisions, Breeze
-//! speech, embeddings and Comfy workflows through existing adapters. It does
-//! not start services, install runtimes, select a fallback, or retry an
+//! This module accepts explicitly selected CPU/CUDA-local Nagi/Laya and hosted
+//! Jev decisions, Breeze speech, embeddings and Comfy workflows through
+//! existing adapters. CUDA admission and release remain the caller's duty. It
+//! does not start services, install runtimes, select a fallback, or retry an
 //! attempted inference. Native input and output stay out of its errors.
 
 use std::error::Error;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::catalog::{Catalog, CatalogProfile, Device, Lane, NativeProfileSource};
 use super::comfy::{
     ComfyAdapter, ComfyErrorKind, ComfyFailure, ComfyJobState, ComfyOutputRoot, NativeComfyResult,
 };
+use super::cuda_device::CudaDevice;
 use super::decision::{
-    execute_accepted_cpu_decision, execute_accepted_hosted_decision, DecisionExecutionError,
-    NativeDecisionResult,
+    execute_accepted_cpu_decision, execute_accepted_cuda_decision,
+    execute_accepted_hosted_decision, DecisionExecutionError, NativeDecisionResult,
 };
+use super::gpu_probe::{GpuProbeConfig, NvidiaSmiGpuProbe};
 use super::language::{DispatchDisposition, LanguageAdapter, LanguageErrorKind, LanguageFailure};
 use super::media_execution::{
-    execute_breeze_speech_on_cpu, is_supported_cpu_breeze_route, MediaExecutionErrorKind,
-    MediaExecutionFailure, MediaExecutionResult,
+    execute_breeze_speech_on_cpu, execute_breeze_speech_on_device, is_supported_cpu_breeze_route,
+    MediaExecutionErrorKind, MediaExecutionFailure, MediaExecutionResult,
 };
+use super::ownership::CoordinatorLock;
 use super::process::{ProcessFailureDisposition, ProcessFailureKind};
 use super::requests::{
     EmbeddingPayload, InferenceRequest, InferenceResult, MediaInput, SpeechMode,
@@ -44,6 +48,9 @@ pub enum DirectRunResult {
 /// Explicit endpoint connection for one direct lane-native request.
 pub enum DirectConnection<'a> {
     Language(&'a LanguageAdapter),
+    /// Exact child device selection only. The caller must establish exclusive
+    /// GPU admission before dispatch and separately prove release afterward.
+    Cuda(&'a CudaDevice),
     Comfy {
         adapter: &'a ComfyAdapter,
         native_id: &'a str,
@@ -63,6 +70,10 @@ pub enum DirectRunErrorKind {
     InvalidOutput,
     OwnershipUncertain,
     RemoteCompletionUncertain,
+    GpuConfiguration,
+    GpuUnavailable,
+    GpuReleaseUncertain,
+    GpuRecoveryRequired,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -182,17 +193,209 @@ impl fmt::Display for DirectRunError {
             DirectRunErrorKind::RemoteCompletionUncertain => {
                 "remote completion is unconfirmed; stop before continuing"
             }
+            DirectRunErrorKind::GpuConfiguration => "CUDA work requires explicit L3MS_NATIVE_GPU configuration and quiesced clients",
+            DirectRunErrorKind::GpuUnavailable => "configured GPU is not idle or the shared native lock is unavailable; no job started",
+            DirectRunErrorKind::GpuReleaseUncertain => "GPU release is unconfirmed; stop before continuing",
+            DirectRunErrorKind::GpuRecoveryRequired => "native-gpu-recovery-required marker exists; verify interrupted work and GPU release before manual recovery",
         })
     }
 }
 
 impl Error for DirectRunError {}
 
+/// One operator-managed idle GPU window. No services are adopted, stopped or
+/// restored here. All L3MS processes must use the same private lock directory;
+/// its advisory locks do not fence unrelated clients. The operator explicitly
+/// keeps those clients quiesced for the whole operation.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeGpuWindow {
+    uuid: String,
+    index: u32,
+    idle_mib: u64,
+    lock_dir: PathBuf,
+    clients_quiesced: bool,
+}
+
+impl NativeGpuWindow {
+    fn parse(raw: &str) -> Result<Self, DirectRunError> {
+        let invalid = || {
+            DirectRunError::new(
+                DirectRunErrorKind::GpuConfiguration,
+                ProcessFailureDisposition::NoChildSpawned,
+            )
+        };
+        if raw.len() > 4096 {
+            return Err(invalid());
+        }
+        let window: Self = serde_json::from_str(raw).map_err(|_| invalid())?;
+        if !window.clients_quiesced
+            || window.index > 1023
+            || !window.lock_dir.is_absolute()
+            || CudaDevice::new(&window.uuid).is_err()
+        {
+            return Err(invalid());
+        }
+        Ok(window)
+    }
+}
+
+/// Shared CLI/UI entry: declared CUDA-native work requires explicit device
+/// configuration, one advisory L3MS lock and idle observations before/after
+/// the existing native process runner. CPU/hosted/HTTP behavior is unchanged.
+/// A resident router must be paused by the operator first; this is deliberately
+/// not automatic live-service takeover or external-client fencing.
+pub(crate) fn run_native_in_operator_window(
+    catalog: &Catalog,
+    request: &InferenceRequest,
+    output_directory: Option<&Path>,
+    connection: Option<DirectConnection<'_>>,
+    context: &OperationContext<'_>,
+) -> Result<DirectRunResult, DirectRunError> {
+    if !catalog
+        .inspect(request.profile())
+        .is_some_and(is_supported_direct_cuda_profile)
+    {
+        return run_native(catalog, request, output_directory, connection, context);
+    }
+    if connection.is_some() {
+        return Err(DirectRunError::new(
+            DirectRunErrorKind::InvalidRequest,
+            ProcessFailureDisposition::NoChildSpawned,
+        ));
+    }
+    let raw = std::env::var("L3MS_NATIVE_GPU").map_err(|_| {
+        DirectRunError::new(
+            DirectRunErrorKind::GpuConfiguration,
+            ProcessFailureDisposition::NoChildSpawned,
+        )
+    })?;
+    let window = NativeGpuWindow::parse(&raw)?;
+    let config =
+        GpuProbeConfig::new(window.uuid.clone(), window.index, window.idle_mib).map_err(|_| {
+            DirectRunError::new(
+                DirectRunErrorKind::GpuConfiguration,
+                ProcessFailureDisposition::NoChildSpawned,
+            )
+        })?;
+    let probe = NvidiaSmiGpuProbe::new(config);
+    let recovery = RecoveryPolicy::new(PROCESS_RECOVERY_TIMEOUT).expect("fixed recovery timeout");
+    with_idle_gpu(
+        &window,
+        context,
+        |context| {
+            probe
+                .observe_idle(context, recovery)
+                .map(|_| ())
+                .map_err(|_| ())
+        },
+        |device| {
+            run_native(
+                catalog,
+                request,
+                output_directory,
+                Some(DirectConnection::Cuda(device)),
+                context,
+            )
+        },
+    )
+}
+
+fn with_idle_gpu<T>(
+    window: &NativeGpuWindow,
+    context: &OperationContext<'_>,
+    mut observe: impl FnMut(&OperationContext<'_>) -> Result<(), ()>,
+    execute: impl FnOnce(&CudaDevice) -> Result<T, DirectRunError>,
+) -> Result<T, DirectRunError> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let unavailable = || {
+        DirectRunError::new(
+            DirectRunErrorKind::GpuUnavailable,
+            ProcessFailureDisposition::NoChildSpawned,
+        )
+    };
+    if context.check_active("native GPU window").is_err() {
+        return Err(inactive_error(context));
+    }
+    let metadata = std::fs::metadata(&window.lock_dir).map_err(|_| unavailable())?;
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        return Err(unavailable());
+    }
+    let _lock =
+        CoordinatorLock::acquire(&window.lock_dir, [window.index]).map_err(|_| unavailable())?;
+    let marker_path = window.lock_dir.join("native-gpu-recovery-required");
+    match std::fs::symlink_metadata(&marker_path) {
+        Ok(_) => {
+            return Err(DirectRunError::new(
+                DirectRunErrorKind::GpuRecoveryRequired,
+                ProcessFailureDisposition::OwnershipUncertain,
+            ))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(unavailable()),
+    }
+    let device = CudaDevice::new(&window.uuid).map_err(|_| unavailable())?;
+    if observe(context).is_err() {
+        return Err(if context.check_active("native GPU window").is_err() {
+            inactive_error(context)
+        } else {
+            unavailable()
+        });
+    }
+    if context.check_active("native GPU dispatch").is_err() {
+        return Err(inactive_error(context));
+    }
+    // A single payload-free marker blocks later cooperating invocations after
+    // interruption/uncertain release. It is never replayed or auto-recovered.
+    let marker = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&marker_path)
+        .map_err(|_| unavailable())?;
+    let marker_identity = marker.metadata().map_err(|_| unavailable())?;
+    let result = execute(&device);
+    if result
+        .as_ref()
+        .is_err_and(|error| error.blocks_following_work())
+    {
+        return result;
+    }
+    // Cancellation/deadline cannot skip release observation. No inference is
+    // retried, and native outputs remain unpublished if release is uncertain.
+    let recovery_context = OperationContext::new(
+        std::time::Instant::now() + PROCESS_RECOVERY_TIMEOUT,
+        &NeverCancel,
+    );
+    if observe(&recovery_context).is_err() {
+        return Err(DirectRunError::new(
+            DirectRunErrorKind::GpuReleaseUncertain,
+            ProcessFailureDisposition::OwnershipUncertain,
+        ));
+    }
+    let retained = std::fs::symlink_metadata(&marker_path);
+    if !retained.is_ok_and(|metadata| {
+        metadata.is_file()
+            && metadata.nlink() == 1
+            && (metadata.dev(), metadata.ino()) == (marker_identity.dev(), marker_identity.ino())
+    }) || std::fs::remove_file(&marker_path).is_err()
+    {
+        return Err(DirectRunError::new(
+            DirectRunErrorKind::GpuReleaseUncertain,
+            ProcessFailureDisposition::OwnershipUncertain,
+        ));
+    }
+    result
+}
+
 /// Execute one already-built native request on an explicitly selected route.
 /// Comfy workflow IDs must be generated and persisted by the caller before this
 /// function; this runner never chooses a fallback, starts a runtime, or retries
 /// a dispatched request. Comfy cancellation uses one bounded scoped recovery
-/// cancel and terminal status is not GPU-release proof.
+/// cancel and terminal status is not GPU-release proof. A `Cuda` connection
+/// restricts the child to one GPU; it does not provide reservation or release
+/// proof. The caller must hold exclusive GPU admission across dispatch and its
+/// cleanup/release checks.
 pub fn run_native(
     catalog: &Catalog,
     request: &InferenceRequest,
@@ -214,7 +417,7 @@ pub fn run_native(
             .inspect(request.profile())
             .is_some_and(is_jev_api_decision_profile);
     let is_remote_operation = is_embeddings || is_comfy_workflow || is_hosted_jev_decision;
-    let is_cpu_breeze_speech = matches!(
+    let is_breeze_speech = matches!(
         request,
         InferenceRequest::Media {
             input: MediaInput::Speech(input),
@@ -227,23 +430,32 @@ pub fn run_native(
                 | SpeechMode::Streaming
         )
     );
-    let (language, comfy) = match connection {
-        Some(DirectConnection::Language(adapter)) => (Some(adapter), None),
-        Some(DirectConnection::Comfy { adapter, native_id }) => (None, Some((adapter, native_id))),
-        None => (None, None),
+    let (language, comfy, cuda) = match connection {
+        Some(DirectConnection::Language(adapter)) => (Some(adapter), None, None),
+        Some(DirectConnection::Cuda(device)) => (None, None, Some(device)),
+        Some(DirectConnection::Comfy { adapter, native_id }) => {
+            (None, Some((adapter, native_id)), None)
+        }
+        None => (None, None, None),
     };
     let valid_lane_arguments = match request {
         InferenceRequest::Decision { .. } => {
             speech_output_directory.is_none() && language.is_none() && comfy.is_none()
         }
-        InferenceRequest::Media { .. } if is_cpu_breeze_speech => {
+        InferenceRequest::Media { .. } if is_breeze_speech => {
             speech_output_directory.is_some() && language.is_none() && comfy.is_none()
         }
         InferenceRequest::Media { .. } if is_comfy_workflow => {
-            speech_output_directory.is_some() && language.is_none() && comfy.is_some()
+            speech_output_directory.is_some()
+                && language.is_none()
+                && comfy.is_some()
+                && cuda.is_none()
         }
         InferenceRequest::Embeddings { .. } => {
-            speech_output_directory.is_none() && language.is_some() && comfy.is_none()
+            speech_output_directory.is_none()
+                && language.is_some()
+                && comfy.is_none()
+                && cuda.is_none()
         }
         _ => false,
     };
@@ -303,7 +515,19 @@ pub fn run_native(
         let profile = catalog
             .inspect(request.profile())
             .expect("validated request profile exists in refreshed catalog");
-        if !is_supported_direct_decision_profile(profile) {
+        if is_supported_cuda_direct_decision_profile(profile) {
+            let Some(device) = cuda else {
+                return Err(DirectRunError::new(
+                    DirectRunErrorKind::UnsupportedRoute,
+                    ProcessFailureDisposition::NoChildSpawned,
+                ));
+            };
+            return execute_accepted_cuda_decision(
+                &catalog, request, &route, device, context, recovery,
+            )
+            .map(DirectRunResult::Decision)
+            .map_err(|error| execution_error(error, context));
+        } else if !is_supported_direct_decision_profile(profile) || cuda.is_some() {
             return Err(if is_jev_api_decision_profile(profile) {
                 DirectRunError::remote(
                     DirectRunErrorKind::UnsupportedRoute,
@@ -325,24 +549,52 @@ pub fn run_native(
                 .map(DirectRunResult::Decision)
                 .map_err(|error| execution_error(error, context))
         }
-    } else if is_cpu_breeze_speech {
-        if !is_supported_cpu_breeze_route(request, &route) {
-            return Err(DirectRunError::new(
+    } else if is_breeze_speech {
+        if is_supported_cpu_breeze_route(request, &route) {
+            if cuda.is_some() {
+                return Err(DirectRunError::new(
+                    DirectRunErrorKind::UnsupportedRoute,
+                    ProcessFailureDisposition::NoChildSpawned,
+                ));
+            }
+            let output_directory =
+                speech_output_directory.expect("validated speech output directory");
+            execute_breeze_speech_on_cpu(
+                &catalog,
+                request,
+                &route,
+                output_directory,
+                context,
+                recovery,
+            )
+            .map(DirectRunResult::Speech)
+            .map_err(|error| media_execution_error(error, context))
+        } else if is_supported_cuda_breeze_route(request, &route) {
+            let Some(device) = cuda else {
+                return Err(DirectRunError::new(
+                    DirectRunErrorKind::UnsupportedRoute,
+                    ProcessFailureDisposition::NoChildSpawned,
+                ));
+            };
+            let output_directory =
+                speech_output_directory.expect("validated speech output directory");
+            execute_breeze_speech_on_device(
+                &catalog,
+                request,
+                &route,
+                device,
+                output_directory,
+                context,
+                recovery,
+            )
+            .map(DirectRunResult::Speech)
+            .map_err(|error| media_execution_error(error, context))
+        } else {
+            Err(DirectRunError::new(
                 DirectRunErrorKind::UnsupportedRoute,
                 ProcessFailureDisposition::NoChildSpawned,
-            ));
+            ))
         }
-        let output_directory = speech_output_directory.expect("validated speech output directory");
-        execute_breeze_speech_on_cpu(
-            &catalog,
-            request,
-            &route,
-            output_directory,
-            context,
-            recovery,
-        )
-        .map(DirectRunResult::Speech)
-        .map_err(|error| media_execution_error(error, context))
     } else if is_embeddings {
         if !is_language_embeddings_route(request, &route) {
             return Err(DirectRunError::remote(
@@ -548,9 +800,8 @@ fn remote_completion_uncertain() -> DirectRunError {
     )
 }
 
-/// Profile-level direct decision routes exposed to the UI. It is deliberately
-/// narrower than the manifest catalog: no CUDA switching, SemIf fallback, or
-/// hosted route without an explicit remote device is admitted here.
+/// Profile-level CPU and hosted decision routes exposed to the UI. CUDA stays
+/// a separate explicit selection and is not advertised by this predicate.
 pub(crate) fn is_supported_direct_decision_profile(profile: &CatalogProfile) -> bool {
     if profile.disabled
         || profile.key.lane != Lane::Decisions
@@ -570,6 +821,85 @@ pub(crate) fn is_supported_direct_decision_profile(profile: &CatalogProfile) -> 
         ),
         ("nagi" | "laya", Some(Device::Cpu), "local") | ("jev", Some(Device::Remote), "api")
     )
+}
+
+/// Profile-level CUDA-local Nagi/Laya decision routes. Callers still need an
+/// explicit `CudaDevice`; this predicate does not establish GPU ownership.
+pub(crate) fn is_supported_cuda_direct_decision_profile(profile: &CatalogProfile) -> bool {
+    if profile.disabled
+        || profile.key.lane != Lane::Decisions
+        || profile.runtime.lane != Lane::Decisions
+        || !profile.tasks.iter().any(|task| task.as_str() == "decision")
+    {
+        return false;
+    }
+    let NativeProfileSource::Decisions { profile_type, .. } = &profile.native_source else {
+        return false;
+    };
+    matches!(
+        (
+            profile.runtime.as_str(),
+            profile.device.as_ref(),
+            profile_type.as_str(),
+        ),
+        ("nagi" | "laya", Some(Device::Cuda), "local")
+    )
+}
+
+/// Profile-level CUDA Breeze route selectable by direct media forms. The
+/// route-level check below additionally binds the request and refreshed task.
+pub(crate) fn is_supported_cuda_breeze_profile(profile: &CatalogProfile) -> bool {
+    const BREEZE_PROFILE_ID: &str = "breeze-tts-2";
+    const BREEZE_SCRIPT: &str = "media-models/generate-breeze-tts-2.sh";
+
+    !profile.disabled
+        && profile.key.lane == Lane::Media
+        && profile.key.profile_id.as_str() == BREEZE_PROFILE_ID
+        && profile.runtime.lane == Lane::Media
+        && profile.runtime.as_str() == "audio.cpp"
+        && profile.device.as_ref() == Some(&Device::Cuda)
+        && profile
+            .tasks
+            .iter()
+            .any(|task| matches!(task.as_str(), "tts" | "design" | "clon"))
+        && matches!(
+            &profile.native_source,
+            NativeProfileSource::Media { script } if script == BREEZE_SCRIPT
+        )
+}
+
+/// Whether a profile has one of the direct CUDA implementations. The caller
+/// must still apply its operator-selected device and admission checks.
+pub(crate) fn is_supported_direct_cuda_profile(profile: &CatalogProfile) -> bool {
+    is_supported_cuda_direct_decision_profile(profile) || is_supported_cuda_breeze_profile(profile)
+}
+
+fn is_supported_cuda_breeze_route(
+    request: &InferenceRequest,
+    route: &ResolvedProfileRoute,
+) -> bool {
+    let InferenceRequest::Media {
+        profile,
+        input: MediaInput::Speech(_),
+    } = request
+    else {
+        return false;
+    };
+    profile == &route.profile
+        && route.profile.lane == Lane::Media
+        && route.profile.profile_id.as_str() == "breeze-tts-2"
+        && route.runtime.lane == Lane::Media
+        && route.runtime.as_str() == "audio.cpp"
+        && route.device == Some(Device::Cuda)
+        && route
+            .tasks
+            .iter()
+            .any(|task| task.as_str() == request.task())
+        && matches!(
+            &route.native_route,
+            NativeRoute::MediaScript { path }
+                if path.file_name().and_then(|name| name.to_str()) == Some("generate-breeze-tts-2.sh")
+        )
 }
 
 fn is_jev_api_decision_profile(profile: &CatalogProfile) -> bool {
@@ -777,6 +1107,149 @@ mod tests {
         }
     }
 
+    fn gpu_window(directory: &Path) -> NativeGpuWindow {
+        NativeGpuWindow::parse(
+            &json!({
+                "uuid": "GPU-12345678-1234-1234-1234-123456789abc",
+                "index": 0, "idle_mib": 512, "lock_dir": directory,
+                "clients_quiesced": true
+            })
+            .to_string(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn operator_gpu_configuration_is_explicit_and_redacted() {
+        let valid = json!({"uuid":"GPU-12345678-1234-1234-1234-123456789abc",
+            "index":0,"idle_mib":512,"lock_dir":"/private/native-locks","clients_quiesced":true});
+        for (field, value) in [
+            ("uuid", json!("0")),
+            ("index", json!(1024)),
+            ("lock_dir", json!("relative")),
+            ("clients_quiesced", json!(false)),
+            ("extra", json!(true)),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            let error = NativeGpuWindow::parse(&invalid.to_string()).err().unwrap();
+            assert_eq!(error.kind(), DirectRunErrorKind::GpuConfiguration);
+            assert!(!error.to_string().contains("/private"));
+        }
+        assert!(NativeGpuWindow::parse(&"x".repeat(4097)).is_err());
+    }
+
+    #[test]
+    fn idle_gpu_window_serializes_and_checks_release_without_retrying() {
+        use std::cell::Cell;
+        for failing_observation in [0, 1, 2] {
+            let directory = tempfile::tempdir().unwrap();
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let window = gpu_window(directory.path());
+            let calls = Cell::new(0);
+            let executions = Cell::new(0);
+            let context =
+                OperationContext::new(Instant::now() + Duration::from_secs(2), &NeverCancel);
+            let result = with_idle_gpu(
+                &window,
+                &context,
+                |_| {
+                    calls.set(calls.get() + 1);
+                    if calls.get() == failing_observation {
+                        Err(())
+                    } else {
+                        Ok(())
+                    }
+                },
+                |device| {
+                    executions.set(executions.get() + 1);
+                    assert_eq!(device.gpu_uuid(), window.uuid);
+                    assert!(CoordinatorLock::acquire(directory.path(), [0]).is_err());
+                    Ok(42)
+                },
+            );
+            assert_eq!(executions.get(), usize::from(failing_observation != 1));
+            assert_eq!(calls.get(), if failing_observation == 1 { 1 } else { 2 });
+            match failing_observation {
+                0 => assert_eq!(result.unwrap(), 42),
+                1 => assert!(!result.unwrap_err().blocks_following_work()),
+                2 => assert!(result.unwrap_err().blocks_following_work()),
+                _ => unreachable!(),
+            }
+            // Empty lock inodes remain; release never authorizes skipping the
+            // next invocation's idle probe or bypassing external quiescence.
+            assert!(CoordinatorLock::acquire(directory.path(), [0]).is_ok());
+            if failing_observation == 2 {
+                assert!(directory
+                    .path()
+                    .join("native-gpu-recovery-required")
+                    .is_file());
+                let retry: Result<(), _> = with_idle_gpu(
+                    &window,
+                    &context,
+                    |_| Ok(()),
+                    |_| panic!("uncertain work must not be restarted"),
+                );
+                assert_eq!(
+                    retry.unwrap_err().kind(),
+                    DirectRunErrorKind::GpuRecoveryRequired
+                );
+            } else {
+                assert!(!directory
+                    .path()
+                    .join("native-gpu-recovery-required")
+                    .exists());
+            }
+        }
+    }
+
+    #[test]
+    fn cancelled_gpu_job_uses_fresh_release_context_and_preserves_uncertainty() {
+        use std::cell::Cell;
+        for uncertain_child in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let window = gpu_window(directory.path());
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let cancellation = SharedCancel(cancelled.clone());
+            let context =
+                OperationContext::new(Instant::now() + Duration::from_secs(2), &cancellation);
+            let calls = Cell::new(0);
+            let result: Result<(), _> = with_idle_gpu(
+                &window,
+                &context,
+                |observation_context| {
+                    calls.set(calls.get() + 1);
+                    assert!(!observation_context.is_cancelled());
+                    assert!(!observation_context.remaining().is_zero());
+                    Ok(())
+                },
+                |_| {
+                    cancelled.store(true, Ordering::Release);
+                    Err(DirectRunError::new(
+                        DirectRunErrorKind::Cancelled,
+                        if uncertain_child {
+                            ProcessFailureDisposition::OwnershipUncertain
+                        } else {
+                            ProcessFailureDisposition::ChildGroupReaped
+                        },
+                    ))
+                },
+            );
+            let error = result.unwrap_err();
+            assert_eq!(calls.get(), if uncertain_child { 1 } else { 2 });
+            assert_eq!(error.blocks_following_work(), uncertain_child);
+            assert_eq!(error.cancellation_confirmed(), !uncertain_child);
+            assert_eq!(
+                directory
+                    .path()
+                    .join("native-gpu-recovery-required")
+                    .exists(),
+                uncertain_child
+            );
+        }
+    }
+
     fn fixture(
         engine: &str,
         profile_type: &str,
@@ -860,7 +1333,7 @@ mod tests {
         OperationContext::new(Instant::now() + Duration::from_secs(5), cancellation)
     }
 
-    fn cpu_breeze_fixture() -> (TempDir, Catalog) {
+    fn breeze_fixture(profile_id: &str, device: &str) -> (TempDir, Catalog) {
         let root = tempfile::tempdir().unwrap();
         let media = root.path().join("toolkits/l2m2");
         let decisions = root.path().join("toolkits/l3ds");
@@ -876,10 +1349,10 @@ mod tests {
             json!({
                 "schema_version": 1,
                 "profiles": [{
-                    "id": CPU_BREEZE_PROFILE_ID,
-                    "name": "CPU Breeze fixture",
+                    "id": profile_id,
+                    "name": "Breeze fixture",
                     "runtime": "audio.cpp",
-                    "device": "cpu",
+                    "device": device,
                     "tasks": ["tts", "clon", "design"],
                     "script": "media-models/generate-breeze-tts-2.sh"
                 }]
@@ -942,6 +1415,10 @@ fi
         .unwrap();
         let catalog = Catalog::load(root.path()).unwrap();
         (root, catalog)
+    }
+
+    fn cpu_breeze_fixture() -> (TempDir, Catalog) {
+        breeze_fixture(CPU_BREEZE_PROFILE_ID, "cpu")
     }
 
     fn cpu_breeze_request(mode: SpeechMode, root: &std::path::Path) -> InferenceRequest {
@@ -1149,9 +1626,12 @@ fi
         ] {
             let (_root, catalog, request, _) =
                 fixture(engine, profile_type, device, &native_response("unused"));
-            assert!(!is_supported_direct_decision_profile(
-                catalog.inspect(request.profile()).unwrap()
-            ));
+            let profile = catalog.inspect(request.profile()).unwrap();
+            assert!(!is_supported_direct_decision_profile(profile));
+            assert_eq!(
+                is_supported_cuda_direct_decision_profile(profile),
+                engine == "nagi" && profile_type == "local" && device == "cuda"
+            );
         }
     }
 
@@ -1236,7 +1716,7 @@ fi
             fixture("nagi", "local", "cuda", &native_response("nagi-native"));
         let error = run_native(&catalog, &request, None, None, &context(&NeverCancel))
             .err()
-            .expect("unsupported CUDA route is rejected");
+            .expect("CUDA route without an explicit device is rejected");
         assert_eq!(error.kind(), DirectRunErrorKind::UnsupportedRoute);
         assert_eq!(
             error.disposition(),
@@ -1244,6 +1724,115 @@ fi
         );
         assert!(!error.blocks_following_work());
         assert!(!launch_marker.exists());
+    }
+
+    #[test]
+    fn direct_runner_rejects_cuda_connection_for_cpu_and_hosted_decisions() {
+        let device = CudaDevice::new("GPU-01234567-89ab-cdef-0123-456789abcdef").unwrap();
+
+        let (_root, catalog, request, launch_marker) =
+            fixture("nagi", "local", "cpu", &native_response("nagi-native"));
+        let error = run_native(
+            &catalog,
+            &request,
+            None,
+            Some(DirectConnection::Cuda(&device)),
+            &context(&NeverCancel),
+        )
+        .err()
+        .expect("a CPU route must reject an explicit CUDA device");
+        assert_eq!(error.kind(), DirectRunErrorKind::UnsupportedRoute);
+        assert_eq!(
+            error.disposition(),
+            DirectRunDisposition::Process(ProcessFailureDisposition::NoChildSpawned)
+        );
+        assert!(!launch_marker.exists());
+
+        let (_root, catalog, request, launch_marker) = fixture(
+            "jev",
+            "api",
+            "remote",
+            &native_response("systemone-official-api"),
+        );
+        let error = run_native(
+            &catalog,
+            &request,
+            None,
+            Some(DirectConnection::Cuda(&device)),
+            &context(&NeverCancel),
+        )
+        .err()
+        .expect("a hosted route must reject a local CUDA device");
+        assert_eq!(error.kind(), DirectRunErrorKind::UnsupportedRoute);
+        assert_eq!(
+            error.disposition(),
+            DirectRunDisposition::Remote(DispatchDisposition::NoDispatch)
+        );
+        assert!(!launch_marker.exists());
+    }
+
+    #[test]
+    fn direct_breeze_cuda_route_requires_explicit_device() {
+        let (root, catalog) = breeze_fixture("breeze-tts-2", "cuda");
+        let request = InferenceRequest::Media {
+            profile: ProfileKey::new(Lane::Media, "breeze-tts-2").unwrap(),
+            input: MediaInput::Speech(super::super::requests::SpeechInput {
+                text: "fixture speech".into(),
+                mode: SpeechMode::Standard,
+                instruction: None,
+                voice_reference: None,
+                reference_text: None,
+            }),
+        };
+        assert!(is_supported_cuda_breeze_profile(
+            catalog.inspect(request.profile()).unwrap()
+        ));
+        let route = resolve_profile_route(&catalog, request.profile()).unwrap();
+        assert!(is_supported_cuda_breeze_route(&request, &route));
+
+        let output = cpu_breeze_output(root.path(), "cuda-missing-device");
+        let error = run_native(
+            &catalog,
+            &request,
+            Some(&output),
+            None,
+            &context(&NeverCancel),
+        )
+        .err()
+        .expect("CUDA Breeze route without an explicit device is rejected");
+        assert_eq!(error.kind(), DirectRunErrorKind::UnsupportedRoute);
+
+        let device = CudaDevice::new("GPU-01234567-89ab-cdef-0123-456789abcdef").unwrap();
+        let missing_output = root.path().join("missing-output");
+        let error = run_native(
+            &catalog,
+            &request,
+            Some(&missing_output),
+            Some(DirectConnection::Cuda(&device)),
+            &context(&NeverCancel),
+        )
+        .err()
+        .expect("an admitted route proceeds to output validation before dispatch");
+        assert_eq!(error.kind(), DirectRunErrorKind::InvalidRequest);
+        assert!(!root
+            .path()
+            .join("toolkits/l2m2/media-models/generate-breeze-tts-2.sh.calls")
+            .exists());
+
+        let (cpu_root, cpu_catalog) = cpu_breeze_fixture();
+        let cpu_request = cpu_breeze_request(SpeechMode::Standard, cpu_root.path());
+        let cpu_output = cpu_breeze_output(cpu_root.path(), "cpu-with-cuda-device");
+        let error = run_native(
+            &cpu_catalog,
+            &cpu_request,
+            Some(&cpu_output),
+            Some(DirectConnection::Cuda(&device)),
+            &context(&NeverCancel),
+        )
+        .err()
+        .expect("a CPU Breeze route must reject an explicit CUDA device");
+        assert_eq!(error.kind(), DirectRunErrorKind::UnsupportedRoute);
+        assert!(!cpu_output.join("result.wav").exists());
     }
 
     #[test]

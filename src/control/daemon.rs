@@ -1,10 +1,10 @@
-//! Linux control-loop owner with explicit opt-in CPU-local dispatch.
+//! Linux control-loop owner for control-only and explicit managed sessions.
 //!
 //! Binding acquires listener/host/device ownership before history is loaded or
-//! reconciled. The default loop keeps admission closed; only `run_cpu_decisions`
-//! dispatches restricted CPU-local work. General managed-engine reconciliation
-//! remains gated, and neither loop exposes its core for mutation. Each invocation consumes the owner
-//! and releases its endpoint and locks on every return path.
+//! reconciled. Control-only and managed loops keep admission closed except for
+//! their explicit startup paths, and neither loop exposes its core for mutation.
+//! Each invocation consumes the owner and releases its endpoint and locks on
+//! every return path.
 //!
 //! One authenticated peer is served at a time, one exchange per connection.
 //! Peer time and accepted/denied connection attempts are bounded. Same-user
@@ -19,10 +19,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::catalog::{Catalog, RuntimeIdentity};
-use super::decision_worker::{
-    CpuDecisionWorker, DecisionDispatchRefusalKind, DecisionWork, DecisionWorkerCompletion,
-    DecisionWorkerFailureKind, DecisionWorkerOutcome, DecisionWorkerReceiveError,
-};
 use super::inference::{Completion, CoordinatorCore, DispatchBeginError};
 use super::ipc::{
     AcceptedOperation, ArtifactQuery, ArtifactVersion, ClientRequest, IncomingRequest,
@@ -31,16 +27,13 @@ use super::ipc::{
 use super::local_ipc::{private_directory, LocalIpcError, LocalListener};
 #[cfg(target_os = "linux")]
 use super::managed_session::{ManagedJobKey, ManagedWorkerCommand};
-use super::process::ProcessFailureDisposition;
 use super::result_buffer::{
     Availability, ResultBuffer, ResultBufferError, ResultEvent, ResultFailureCode, ResultTerminal,
 };
-#[cfg(target_os = "linux")]
-use super::runtime::Cancellation;
-use super::runtime::{OperationContext, RecoveryPolicy, ResourceClaim};
+use super::runtime::{Cancellation, OperationContext, ResourceClaim};
 
-const CPU_ACCEPT_POLL: Duration = Duration::from_millis(25);
-const CPU_JOIN_POLL: Duration = Duration::from_millis(5);
+const ACCEPT_POLL: Duration = Duration::from_millis(25);
+const JOIN_POLL: Duration = Duration::from_millis(5);
 
 /// Explicit paths: no directory creation, default live store, or stale reclaim.
 pub struct DaemonConfig {
@@ -61,8 +54,6 @@ pub enum DaemonError {
     Transport(LocalIpcError),
     HistoryUnavailable,
     HistoryConflict,
-    CpuDecisionsUnavailable,
-    DecisionWorkerUnavailable,
     ManagedSessionUnavailable,
     ResultBufferInvariant,
 }
@@ -605,11 +596,11 @@ impl ControlDaemon {
                 }
 
                 if stopping {
-                    thread::sleep(CPU_JOIN_POLL);
+                    thread::sleep(JOIN_POLL);
                     continue;
                 }
 
-                let accept_deadline = (Instant::now() + CPU_ACCEPT_POLL).min(context.deadline());
+                let accept_deadline = (Instant::now() + ACCEPT_POLL).min(context.deadline());
                 let accept_cancel = ForwardCancellation(context);
                 let accept_context = OperationContext::new(accept_deadline, &accept_cancel);
                 let mut peer = match listener.accept(&accept_context) {
@@ -663,237 +654,6 @@ impl ControlDaemon {
         })
     }
 
-    /// Opt-in, bounded execution for declared CPU-local Nagi/Laya decision
-    /// routes only. The default [`Self::run`] remains control-only. Startup
-    /// refuses GPU/hosted bindings and retained work needing reconciliation.
-    /// Every accepted submit reserves its full result allowance before the
-    /// acceptance response can be written; execution is serial and never
-    /// replayed. Shutdown stops intake, cancels accepted work, and waits under
-    /// an independent recovery bound while this daemon still owns its listener
-    /// and host guard. Missing completion or uncertain child cleanup leaves an
-    /// interrupted durable row and retained core reservation.
-    pub fn run_cpu_decisions(
-        mut self,
-        context: &OperationContext<'_>,
-        recovery: RecoveryPolicy,
-    ) -> Result<RunReport, DaemonError> {
-        let mut report = RunReport {
-            completed_exchanges: 0,
-            failed_connections: 0,
-            stopped: StopReason::ConnectionLimit,
-        };
-        if let Some(reason) = stop_reason(context) {
-            report.stopped = reason;
-            return Ok(report);
-        }
-        self.core
-            .confirm_cpu_decisions_ready()
-            .map_err(|_| DaemonError::CpuDecisionsUnavailable)?;
-        let mut worker =
-            CpuDecisionWorker::start().map_err(|_| DaemonError::DecisionWorkerUnavailable)?;
-
-        let mut accepted_result_ids = BTreeSet::new();
-        let mut active_ticket: Option<CpuDecisionSlot> = None;
-        let mut handled_connections = 0usize;
-        let mut fatal_error = None;
-
-        while handled_connections < self.max_connections {
-            if let Some(reason) = stop_reason(context) {
-                report.stopped = reason;
-                break;
-            }
-
-            match worker.try_receive() {
-                Ok(Some(completion)) => match self.consume_cpu_completion(
-                    completion,
-                    &mut active_ticket,
-                    &mut accepted_result_ids,
-                ) {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        report.stopped = StopReason::WorkerUncertain;
-                        break;
-                    }
-                    Err(error) => {
-                        fatal_error = Some(error);
-                        report.stopped = StopReason::WorkerUncertain;
-                        break;
-                    }
-                },
-                Ok(None) => {}
-                Err(DecisionWorkerReceiveError::Closed) => {
-                    if let Some(slot) = active_ticket.take() {
-                        self.mark_cpu_slot_uncertain(&slot, &mut accepted_result_ids);
-                    } else {
-                        self.core.quarantine();
-                    }
-                    report.stopped = StopReason::WorkerUncertain;
-                    break;
-                }
-            }
-
-            if let Err(error) = self.settle_terminal_result_slots(&mut accepted_result_ids) {
-                fatal_error = Some(error);
-                report.stopped = StopReason::WorkerUncertain;
-                break;
-            }
-
-            if active_ticket.is_none() && !worker.is_in_flight() {
-                match self.core.reserve_next(Instant::now()) {
-                    Ok(Some(ticket)) => {
-                        let job_id = ticket.job_id;
-                        let request_id = ticket.request_id.clone();
-                        match self.core.begin_dispatch(&ticket, Instant::now()) {
-                            Ok(()) => {
-                                let slot = CpuDecisionSlot { job_id, request_id };
-                                let work = DecisionWork::new(
-                                    ticket,
-                                    self.core.catalog().clone(),
-                                    recovery,
-                                );
-                                match worker.try_dispatch(work) {
-                                    Ok(()) => active_ticket = Some(slot),
-                                    Err(refusal) => {
-                                        let kind = refusal.kind();
-                                        let ticket = refusal.into_work().into_ticket();
-                                        let refused_slot = CpuDecisionSlot {
-                                            job_id: ticket.job_id,
-                                            request_id: ticket.request_id,
-                                        };
-                                        let code = if kind == DecisionDispatchRefusalKind::Busy {
-                                            ResultFailureCode::Internal
-                                        } else {
-                                            ResultFailureCode::Unavailable
-                                        };
-                                        if self
-                                            .complete_cpu_without_child(
-                                                &refused_slot,
-                                                Completion::Failed,
-                                                ResultTerminal::Failed(code),
-                                                &mut accepted_result_ids,
-                                            )
-                                            .is_err()
-                                        {
-                                            fatal_error = Some(DaemonError::HistoryUnavailable);
-                                            report.stopped = StopReason::WorkerUncertain;
-                                            break;
-                                        }
-                                        self.core.quarantine();
-                                        report.stopped = StopReason::WorkerUncertain;
-                                        break;
-                                    }
-                                }
-                            }
-                            Err(error) => {
-                                let (outcome, terminal) = dispatch_error_result(error);
-                                if self
-                                    .complete_cpu_without_child(
-                                        &CpuDecisionSlot { job_id, request_id },
-                                        outcome,
-                                        terminal,
-                                        &mut accepted_result_ids,
-                                    )
-                                    .is_err()
-                                {
-                                    fatal_error = Some(DaemonError::HistoryUnavailable);
-                                    report.stopped = StopReason::WorkerUncertain;
-                                    break;
-                                }
-                                if self.core.admission() != super::inference::AdmissionState::Ready
-                                {
-                                    report.stopped = StopReason::WorkerUncertain;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(_) => {
-                        self.core.quarantine();
-                        fatal_error = Some(DaemonError::HistoryUnavailable);
-                        report.stopped = StopReason::WorkerUncertain;
-                        break;
-                    }
-                }
-            }
-
-            if let Err(error) = self.settle_terminal_result_slots(&mut accepted_result_ids) {
-                fatal_error = Some(error);
-                report.stopped = StopReason::WorkerUncertain;
-                break;
-            }
-
-            let accept_deadline = (Instant::now() + CPU_ACCEPT_POLL).min(context.deadline());
-            let accept_cancel = ForwardCancellation(context);
-            let accept_context = OperationContext::new(accept_deadline, &accept_cancel);
-            let mut peer = match self.listener.accept(&accept_context) {
-                Ok(peer) => {
-                    handled_connections += 1;
-                    peer
-                }
-                Err(LocalIpcError::PeerDenied) => {
-                    handled_connections += 1;
-                    report.failed_connections += 1;
-                    continue;
-                }
-                Err(LocalIpcError::Deadline) => {
-                    if let Some(reason) = stop_reason(context) {
-                        report.stopped = reason;
-                        break;
-                    }
-                    // A 25 ms idle poll is not a connection attempt.
-                    continue;
-                }
-                Err(LocalIpcError::Cancelled) => {
-                    report.stopped = stop_reason(context).unwrap_or(StopReason::Cancelled);
-                    break;
-                }
-                Err(error) => {
-                    fatal_error = Some(DaemonError::Transport(error));
-                    break;
-                }
-            };
-
-            let peer_deadline = (Instant::now() + self.peer_timeout).min(context.deadline());
-            let peer_cancel = ForwardCancellation(context);
-            let peer_context = OperationContext::new(peer_deadline, &peer_cancel);
-            if self
-                .serve_cpu_connection(&mut peer, &peer_context, &mut accepted_result_ids)
-                .is_ok()
-            {
-                report.completed_exchanges += 1;
-            } else {
-                report.failed_connections += 1;
-            }
-            if stop_reason(context).is_some() {
-                report.stopped = stop_reason(context).expect("checked stop reason");
-                break;
-            }
-        }
-
-        // On every session end, stop accepting new work and persist queued
-        // cancellations before asking the worker to clean up its active child.
-        let cancellation_uncertain = self.cancel_accepted_cpu_requests(&mut accepted_result_ids);
-        let worker_uncertain = self.shutdown_cpu_worker(
-            &mut worker,
-            &mut active_ticket,
-            &mut accepted_result_ids,
-            recovery,
-        );
-        if worker_uncertain || cancellation_uncertain {
-            report.stopped = StopReason::WorkerUncertain;
-        }
-        if fatal_error.is_none() {
-            if let Err(error) = self.settle_terminal_result_slots(&mut accepted_result_ids) {
-                fatal_error = Some(error);
-            }
-        }
-        if let Some(error) = fatal_error {
-            return Err(error);
-        }
-        Ok(report)
-    }
-
     fn serve_connection(
         &mut self,
         connection: &mut super::local_ipc::LocalConnection,
@@ -920,388 +680,6 @@ impl ControlDaemon {
             ),
         };
         connection.write_response(&response, context)
-    }
-
-    fn serve_cpu_connection(
-        &mut self,
-        connection: &mut super::local_ipc::LocalConnection,
-        context: &OperationContext<'_>,
-        accepted_result_ids: &mut BTreeSet<String>,
-    ) -> Result<(), LocalIpcError> {
-        let request = connection.read_incoming_request(context)?;
-        if context.is_cancelled() {
-            return Err(LocalIpcError::Cancelled);
-        }
-        if context.remaining().is_zero() {
-            return Err(LocalIpcError::Deadline);
-        }
-
-        if let IncomingRequest::Control(ClientRequest::Submit { request_id, .. }) = &request {
-            if let Err(error) = self.results.can_begin_reserved(request_id) {
-                let code = match error {
-                    ResultBufferError::InvalidRequestId => ResponseErrorCode::InvalidRequest,
-                    ResultBufferError::DuplicateRequest => ResponseErrorCode::DuplicateRequest,
-                    ResultBufferError::CapacityExceeded => ResponseErrorCode::QueueFull,
-                    _ => ResponseErrorCode::Internal,
-                };
-                return connection.write_response(
-                    &ResponseEnvelope::v1(ResponseMessage::Error {
-                        request_id: Some(request_id.clone()),
-                        code,
-                    }),
-                    context,
-                );
-            }
-        }
-
-        let response = match request {
-            IncomingRequest::Control(request) => {
-                self.core.handle_client_request(request, Instant::now())
-            }
-            IncomingRequest::Results(query) => self.handle_results_query(query),
-            IncomingRequest::Artifact(query) => managed_artifact_query(
-                &self.core,
-                &self.results,
-                &mut self.artifacts,
-                query,
-                context,
-            ),
-        };
-        if let ResponseMessage::Accepted {
-            request_id,
-            operation: AcceptedOperation::Submit,
-            state: RequestStatus::Queued,
-        } = &response.message
-        {
-            if self
-                .results
-                .begin_reserved(request_id, super::catalog::Lane::Decisions)
-                .is_err()
-            {
-                // The single daemon thread has no intervening buffer mutation
-                // between preflight and this commit. Treat any disagreement as
-                // an internal invariant failure, quarantine, and cancel queued
-                // work before it can be dispatched.
-                self.core.quarantine();
-                let _ = self.core.cancel_request(request_id);
-                return connection.write_response(
-                    &ResponseEnvelope::v1(ResponseMessage::Error {
-                        request_id: Some(request_id.clone()),
-                        code: ResponseErrorCode::Internal,
-                    }),
-                    context,
-                );
-            }
-            accepted_result_ids.insert(request_id.clone());
-        }
-        connection.write_response(&response, context)
-    }
-
-    fn settle_terminal_result_slots(
-        &mut self,
-        accepted_result_ids: &mut BTreeSet<String>,
-    ) -> Result<(), DaemonError> {
-        let mut terminal = Vec::new();
-        for request_id in accepted_result_ids.iter() {
-            let state = self.core.authoritative_request_status(request_id);
-            let result = match state {
-                Some(RequestStatus::Queued | RequestStatus::Running) => continue,
-                Some(RequestStatus::Succeeded) => ResultTerminal::Succeeded,
-                Some(RequestStatus::Failed) => ResultTerminal::Failed(ResultFailureCode::TimedOut),
-                Some(RequestStatus::Cancelled) => ResultTerminal::Cancelled,
-                Some(RequestStatus::Interrupted) | Some(RequestStatus::NotFound) | None => {
-                    self.core.quarantine();
-                    ResultTerminal::Interrupted
-                }
-            };
-            terminal.push((request_id.clone(), result));
-        }
-        for (request_id, result) in terminal {
-            self.results
-                .terminal(&request_id, result)
-                .map_err(|_| DaemonError::ResultBufferInvariant)?;
-            accepted_result_ids.remove(&request_id);
-        }
-        Ok(())
-    }
-
-    fn complete_cpu_without_child(
-        &mut self,
-        slot: &CpuDecisionSlot,
-        completion: Completion,
-        result: ResultTerminal,
-        accepted_result_ids: &mut BTreeSet<String>,
-    ) -> Result<(), DaemonError> {
-        self.complete_cpu_after_cleanup(slot, completion, result, accepted_result_ids)
-    }
-
-    fn complete_cpu_after_cleanup(
-        &mut self,
-        slot: &CpuDecisionSlot,
-        completion: Completion,
-        result: ResultTerminal,
-        accepted_result_ids: &mut BTreeSet<String>,
-    ) -> Result<(), DaemonError> {
-        match self
-            .core
-            .complete(slot.job_id, completion, Vec::new(), Instant::now())
-        {
-            Ok(_) => {
-                self.results
-                    .terminal(&slot.request_id, result)
-                    .map_err(|_| DaemonError::ResultBufferInvariant)?;
-                accepted_result_ids.remove(&slot.request_id);
-                Ok(())
-            }
-            Err(_) => {
-                self.core.quarantine();
-                // A failed durable terminal update is never converted into
-                // success. Attempt to persist interruption while retaining the
-                // reservation; if this succeeds, cleanup has already been
-                // independently proved above and may be acknowledged.
-                if self
-                    .core
-                    .complete(
-                        slot.job_id,
-                        Completion::Uncertain,
-                        Vec::new(),
-                        Instant::now(),
-                    )
-                    .is_ok()
-                {
-                    let _ = self.core.acknowledge_reconciled_cleanup(slot.job_id);
-                }
-                self.results
-                    .terminal(&slot.request_id, ResultTerminal::Interrupted)
-                    .map_err(|_| DaemonError::ResultBufferInvariant)?;
-                accepted_result_ids.remove(&slot.request_id);
-                Err(DaemonError::HistoryUnavailable)
-            }
-        }
-    }
-
-    fn mark_cpu_slot_uncertain(
-        &mut self,
-        slot: &CpuDecisionSlot,
-        accepted_result_ids: &mut BTreeSet<String>,
-    ) {
-        self.core.quarantine();
-        let _ = self.core.complete(
-            slot.job_id,
-            Completion::Uncertain,
-            Vec::new(),
-            Instant::now(),
-        );
-        let _ = self
-            .results
-            .terminal(&slot.request_id, ResultTerminal::Interrupted);
-        accepted_result_ids.remove(&slot.request_id);
-    }
-
-    fn consume_cpu_completion(
-        &mut self,
-        completion: DecisionWorkerCompletion,
-        active_ticket: &mut Option<CpuDecisionSlot>,
-        accepted_result_ids: &mut BTreeSet<String>,
-    ) -> Result<bool, DaemonError> {
-        let Some(slot) = active_ticket.take() else {
-            self.core.quarantine();
-            return Ok(false);
-        };
-        let (job_id, request_id, outcome) = completion.into_parts();
-        if job_id != slot.job_id || request_id != slot.request_id {
-            self.mark_cpu_slot_uncertain(&slot, accepted_result_ids);
-            return Ok(false);
-        }
-
-        let cleanup = outcome.cleanup();
-        if cleanup == ProcessFailureDisposition::OwnershipUncertain {
-            self.mark_cpu_slot_uncertain(&slot, accepted_result_ids);
-            return Ok(false);
-        }
-        match outcome {
-            DecisionWorkerOutcome::Succeeded(native) => {
-                if cleanup != ProcessFailureDisposition::ChildGroupReaped {
-                    self.mark_cpu_slot_uncertain(&slot, accepted_result_ids);
-                    return Ok(false);
-                }
-                let super::requests::InferenceResult::Decision { answers } = native.result else {
-                    return self
-                        .complete_cpu_after_cleanup(
-                            &slot,
-                            Completion::Failed,
-                            ResultTerminal::Failed(ResultFailureCode::InvalidOutput),
-                            accepted_result_ids,
-                        )
-                        .map(|()| true);
-                };
-                if self
-                    .results
-                    .append(
-                        &slot.request_id,
-                        ResultEvent::DecisionResult {
-                            answers,
-                            native_latency: native.native_latency,
-                            native_usage: native.native_usage,
-                        },
-                    )
-                    .is_err()
-                {
-                    return self
-                        .complete_cpu_after_cleanup(
-                            &slot,
-                            Completion::Failed,
-                            ResultTerminal::Failed(ResultFailureCode::Internal),
-                            accepted_result_ids,
-                        )
-                        .map(|()| true);
-                }
-                self.complete_cpu_after_cleanup(
-                    &slot,
-                    Completion::Succeeded,
-                    ResultTerminal::Succeeded,
-                    accepted_result_ids,
-                )?;
-                Ok(true)
-            }
-            DecisionWorkerOutcome::Failed(failure) => {
-                if !matches!(
-                    cleanup,
-                    ProcessFailureDisposition::NoChildSpawned
-                        | ProcessFailureDisposition::ChildGroupReaped
-                ) {
-                    self.mark_cpu_slot_uncertain(&slot, accepted_result_ids);
-                    return Ok(false);
-                }
-                let (completion, result) = worker_failure_result(failure.kind());
-                self.complete_cpu_after_cleanup(&slot, completion, result, accepted_result_ids)?;
-                Ok(true)
-            }
-        }
-    }
-
-    fn cancel_accepted_cpu_requests(&mut self, accepted_result_ids: &mut BTreeSet<String>) -> bool {
-        let mut uncertain = false;
-        let mut interrupt = Vec::new();
-        for request_id in accepted_result_ids.iter() {
-            match self.core.authoritative_request_status(request_id) {
-                Some(RequestStatus::Queued | RequestStatus::Running) => {
-                    if self.core.cancel_request(request_id).is_err() {
-                        self.core.quarantine();
-                        uncertain = true;
-                        interrupt.push(request_id.clone());
-                    }
-                }
-                Some(
-                    RequestStatus::Succeeded
-                    | RequestStatus::Failed
-                    | RequestStatus::Cancelled
-                    | RequestStatus::Interrupted,
-                ) => {}
-                Some(RequestStatus::NotFound) | None => {
-                    self.core.quarantine();
-                    interrupt.push(request_id.clone());
-                    uncertain = true;
-                }
-            }
-        }
-        for request_id in interrupt {
-            if self
-                .results
-                .terminal(&request_id, ResultTerminal::Interrupted)
-                .is_err()
-            {
-                uncertain = true;
-            }
-            accepted_result_ids.remove(&request_id);
-        }
-        if self
-            .settle_terminal_result_slots(accepted_result_ids)
-            .is_err()
-        {
-            uncertain = true;
-        }
-        uncertain
-    }
-
-    fn shutdown_cpu_worker(
-        &mut self,
-        worker: &mut CpuDecisionWorker,
-        active_ticket: &mut Option<CpuDecisionSlot>,
-        accepted_result_ids: &mut BTreeSet<String>,
-        recovery: RecoveryPolicy,
-    ) -> bool {
-        worker.shutdown();
-        let grace = recovery.timeout().saturating_add(CPU_JOIN_POLL);
-        let deadline = Instant::now()
-            .checked_add(grace)
-            .unwrap_or_else(Instant::now);
-        let mut completion = None;
-        let mut channel_closed = false;
-        let mut joined = false;
-
-        loop {
-            if completion.is_none() && worker.is_in_flight() {
-                let poll_deadline = (Instant::now() + CPU_JOIN_POLL).min(deadline);
-                match worker.receive_until(poll_deadline) {
-                    Ok(Some(received)) => completion = Some(received),
-                    Ok(None) => {}
-                    Err(DecisionWorkerReceiveError::Closed) => channel_closed = true,
-                }
-            }
-
-            match worker.try_join_finished() {
-                Ok(true) => {
-                    joined = true;
-                    break;
-                }
-                Ok(false) => {}
-                Err(_) => {
-                    if let Some(slot) = active_ticket.take() {
-                        self.mark_cpu_slot_uncertain(&slot, accepted_result_ids);
-                    } else {
-                        self.core.quarantine();
-                    }
-                    return true;
-                }
-            }
-            if channel_closed || Instant::now() >= deadline {
-                break;
-            }
-            std::thread::sleep(CPU_JOIN_POLL);
-        }
-
-        if !joined {
-            joined = matches!(worker.try_join_finished(), Ok(true));
-        }
-        if !joined {
-            if let Some(slot) = active_ticket.take() {
-                self.mark_cpu_slot_uncertain(&slot, accepted_result_ids);
-            } else {
-                self.core.quarantine();
-            }
-            return true;
-        }
-
-        if completion.is_none() && worker.is_in_flight() {
-            match worker.try_receive() {
-                Ok(Some(received)) => completion = Some(received),
-                Ok(None) | Err(DecisionWorkerReceiveError::Closed) => {}
-            }
-        }
-        if let Some(completion) = completion {
-            return match self.consume_cpu_completion(completion, active_ticket, accepted_result_ids)
-            {
-                Ok(cleanup_verified) => !cleanup_verified,
-                Err(_) => true,
-            };
-        }
-        if let Some(slot) = active_ticket.take() {
-            self.mark_cpu_slot_uncertain(&slot, accepted_result_ids);
-            true
-        } else {
-            false
-        }
     }
 
     fn handle_results_query(&self, query: ResultsQuery) -> ResponseEnvelope {
@@ -1704,11 +1082,6 @@ fn consume_managed_completion(
     Ok(())
 }
 
-struct CpuDecisionSlot {
-    job_id: u64,
-    request_id: String,
-}
-
 fn dispatch_error_result(error: DispatchBeginError) -> (Completion, ResultTerminal) {
     match error {
         DispatchBeginError::Cancelled => (Completion::Cancelled, ResultTerminal::Cancelled),
@@ -1717,32 +1090,6 @@ fn dispatch_error_result(error: DispatchBeginError) -> (Completion, ResultTermin
             ResultTerminal::Failed(ResultFailureCode::TimedOut),
         ),
         _ => (
-            Completion::Failed,
-            ResultTerminal::Failed(ResultFailureCode::Internal),
-        ),
-    }
-}
-
-fn worker_failure_result(kind: DecisionWorkerFailureKind) -> (Completion, ResultTerminal) {
-    match kind {
-        DecisionWorkerFailureKind::Cancelled => (Completion::Cancelled, ResultTerminal::Cancelled),
-        DecisionWorkerFailureKind::DeadlineExceeded => (
-            Completion::Failed,
-            ResultTerminal::Failed(ResultFailureCode::TimedOut),
-        ),
-        DecisionWorkerFailureKind::Unavailable => (
-            Completion::Failed,
-            ResultTerminal::Failed(ResultFailureCode::Unavailable),
-        ),
-        DecisionWorkerFailureKind::ProcessFailed => (
-            Completion::Failed,
-            ResultTerminal::Failed(ResultFailureCode::ResourceFailure),
-        ),
-        DecisionWorkerFailureKind::InvalidOutput(_) => (
-            Completion::Failed,
-            ResultTerminal::Failed(ResultFailureCode::InvalidOutput),
-        ),
-        DecisionWorkerFailureKind::UnsupportedRoute | DecisionWorkerFailureKind::Internal => (
             Completion::Failed,
             ResultTerminal::Failed(ResultFailureCode::Internal),
         ),
@@ -1831,14 +1178,13 @@ mod tests {
     use crate::control::local_ipc::LocalConnection;
     use crate::control::ownership::CoordinatorLock;
     use crate::control::result_buffer::{
-        Availability, PageEvent, ResultEvent, ResultTerminal, MIN_PAGE_BYTES,
+        Availability, ResultEvent, ResultTerminal, MIN_PAGE_BYTES,
     };
     use crate::control::runtime::{Cancellation, NeverCancel};
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixStream;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
     use tempfile::TempDir;
 
     #[test]
@@ -1894,12 +1240,36 @@ mod tests {
         }
     }
 
-    struct CpuFixture {
+    struct ManagedCompletionFixture {
         root: TempDir,
-        socket: TempDir,
-        locks: TempDir,
         data: TempDir,
-        standalone: TempDir,
+    }
+
+    impl ManagedCompletionFixture {
+        fn new() -> Self {
+            let root = TempDir::new().unwrap();
+            let data = TempDir::new().unwrap();
+            let media = root.path().join("toolkits/l2m2");
+            let decisions = root.path().join("toolkits/l3ds");
+            std::fs::create_dir_all(&media).unwrap();
+            std::fs::create_dir_all(&decisions).unwrap();
+            std::fs::write(
+                root.path().join("llama-swap.yaml"),
+                "models:\n  fixture:\n    cmd: fixture\n",
+            )
+            .unwrap();
+            std::fs::write(
+                media.join("media-runtimes.json"),
+                r#"{"schema_version":1,"profiles":[]}"#,
+            )
+            .unwrap();
+            std::fs::write(
+                decisions.join("decision-runtimes.json"),
+                r#"{"version":"1.0","profiles":[]}"#,
+            )
+            .unwrap();
+            Self { root, data }
+        }
     }
 
     #[test]
@@ -1909,7 +1279,7 @@ mod tests {
         use crate::control::requests::{ChatRole, ChatTurn, InferenceRequest};
 
         for cleanup_proven in [false, true] {
-            let fixture = CpuFixture::new("# not executed\n");
+            let fixture = ManagedCompletionFixture::new();
             let catalog = Catalog::load(fixture.root.path()).unwrap();
             let runtime = RuntimeIdentity::new(Lane::Language, "llama-swap").unwrap();
             let mut core = CoordinatorCore::load(
@@ -1977,523 +1347,6 @@ mod tests {
                 crate::control::inference::AdmissionState::Ready
             );
         }
-    }
-
-    impl CpuFixture {
-        fn new(runner: &str) -> Self {
-            let fixture = Self {
-                root: TempDir::new().unwrap(),
-                socket: TempDir::new().unwrap(),
-                locks: TempDir::new().unwrap(),
-                data: TempDir::new().unwrap(),
-                standalone: TempDir::new().unwrap(),
-            };
-            for path in [
-                fixture.socket.path(),
-                fixture.locks.path(),
-                fixture.data.path(),
-            ] {
-                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
-            }
-            let media = fixture.root.path().join("toolkits/l2m2");
-            let decisions = fixture.root.path().join("toolkits/l3ds");
-            std::fs::create_dir_all(&media).unwrap();
-            std::fs::create_dir_all(decisions.join("decision-models")).unwrap();
-            std::fs::create_dir_all(decisions.join(".venv/bin")).unwrap();
-            std::fs::write(
-                fixture.root.path().join("llama-swap.yaml"),
-                "models:\n  fixture:\n    cmd: fixture\n",
-            )
-            .unwrap();
-            std::fs::write(
-                media.join("media-runtimes.json"),
-                r#"{"schema_version":1,"profiles":[]}"#,
-            )
-            .unwrap();
-            std::fs::write(
-                decisions.join("decision-runtimes.json"),
-                r#"{"version":"1.0","profiles":[
-                    {"id":"fixture-cpu","name":"Fixture CPU","engine":"nagi","type":"local","device":"cpu","model":"fixture-model","entrypoint":"decision-models/runner.py"},
-                    {"id":"fixture-gpu","name":"Fixture GPU","engine":"nagi","type":"local","device":"cuda","model":"fixture-model","entrypoint":"decision-models/runner.py"}
-                ]}"#,
-            )
-            .unwrap();
-            let _guard = super::super::process::executable_fixture_guard();
-            let interpreter = decisions.join(".venv/bin/python");
-            std::fs::write(&interpreter, "#!/bin/sh\nexec /bin/sh \"$@\"\n").unwrap();
-            std::fs::set_permissions(&interpreter, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let runner_path = decisions.join("decision-models/runner.py");
-            std::fs::write(&runner_path, runner).unwrap();
-            std::fs::set_permissions(&runner_path, std::fs::Permissions::from_mode(0o700)).unwrap();
-            drop(_guard);
-            fixture
-        }
-
-        fn config(&self, max_connections: usize) -> DaemonConfig {
-            DaemonConfig {
-                socket_directory: self.socket.path().into(),
-                lock_directory: self.locks.path().into(),
-                data_directory: self.data.path().into(),
-                standalone_data_directory: self.standalone.path().into(),
-                gpus: Vec::new(),
-                queue_capacity: 8,
-                peer_timeout: Duration::from_millis(100),
-                max_connections,
-            }
-        }
-
-        fn bind(&self, max_connections: usize) -> ControlDaemon {
-            let catalog = Catalog::load(self.root.path()).unwrap();
-            let runtime =
-                RuntimeIdentity::new(crate::control::catalog::Lane::Decisions, "nagi").unwrap();
-            ControlDaemon::bind(
-                self.config(max_connections),
-                catalog,
-                BTreeMap::from([(runtime, ResourceClaim::None)]),
-                self.root.path(),
-            )
-            .unwrap()
-        }
-
-        fn released(&self) {
-            assert!(!self.socket.path().join("coordinator.sock").exists());
-            assert!(CoordinatorLock::acquire(self.locks.path(), []).is_ok());
-        }
-    }
-
-    fn cpu_submit(request_id: &str, profile_id: &str, timeout_ms: u64) -> WireRequestMessage {
-        WireRequestMessage::Submit {
-            request_id: request_id.to_owned(),
-            timeout_ms,
-            request: WireInferenceRequest::Decisions {
-                profile_id: profile_id.to_owned(),
-                state: serde_json::json!({"case":"fixture"}),
-                questions: serde_json::json!({
-                    "route": {
-                        "type":"choice",
-                        "criteria":{"secret-answer":"Proceed","no":"Stop"}
-                    }
-                })
-                .as_object()
-                .unwrap()
-                .clone(),
-            },
-        }
-    }
-
-    fn successful_cpu_runner(marker: &Path) -> String {
-        format!(
-            "#!/bin/sh\nprintf x >> {}\ncat >/dev/null\nprintf '%s\\n' '{{\"engine\":\"nagi-native\",\"answers\":{{\"route\":{{\"choice\":\"secret-answer\"}}}},\"latency_ms\":12.5}}'\n",
-            shell_quote(marker)
-        )
-    }
-
-    fn sleeping_cpu_runner(marker: &Path) -> String {
-        format!(
-            "#!/bin/sh\ntouch {}\nexec /bin/sleep 30\n",
-            shell_quote(marker)
-        )
-    }
-
-    fn shell_quote(path: &Path) -> String {
-        format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
-    }
-
-    fn shared_cancellation() -> Arc<Flag> {
-        Arc::new(Flag(AtomicBool::new(false)))
-    }
-
-    fn spawn_cpu_daemon(
-        daemon: ControlDaemon,
-        cancellation: Arc<Flag>,
-    ) -> std::thread::JoinHandle<Result<RunReport, DaemonError>> {
-        std::thread::spawn(move || {
-            let context = OperationContext::new(
-                Instant::now() + Duration::from_secs(15),
-                cancellation.as_ref(),
-            );
-            daemon.run_cpu_decisions(
-                &context,
-                RecoveryPolicy::new(Duration::from_secs(2)).unwrap(),
-            )
-        })
-    }
-
-    fn wait_for_request_state(directory: &Path, request_id: &str, terminal: bool) -> RequestStatus {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            let response = exchange(
-                directory,
-                WireRequestMessage::Status {
-                    request_id: request_id.to_owned(),
-                },
-            );
-            if let ResponseMessage::Status { state, .. } = response {
-                if !terminal
-                    || matches!(
-                        state,
-                        RequestStatus::Succeeded
-                            | RequestStatus::Failed
-                            | RequestStatus::Cancelled
-                            | RequestStatus::Interrupted
-                    )
-                {
-                    return state;
-                }
-            }
-            assert!(
-                Instant::now() < deadline,
-                "request did not reach expected state"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    fn wait_for_path(path: &Path) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !path.exists() {
-            assert!(Instant::now() < deadline, "fixture runner did not start");
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    }
-
-    fn cancel_outer_and_join(
-        cancellation: &Flag,
-        daemon: std::thread::JoinHandle<Result<RunReport, DaemonError>>,
-    ) -> RunReport {
-        cancellation.0.store(true, Ordering::Release);
-        daemon.join().unwrap().unwrap()
-    }
-
-    fn result_page(directory: &Path, request_id: &str) -> super::super::result_buffer::ResultPage {
-        match exchange_envelope(
-            directory,
-            RequestEnvelope::v2_results(request_id, 0, MIN_PAGE_BYTES as u32),
-        )
-        .message
-        {
-            ResponseMessage::Results { page, .. } => page,
-            other => panic!("unexpected results response: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn cpu_decision_submit_lost_ack_result_pages_and_restart_never_replays() {
-        let marker_dir = TempDir::new().unwrap();
-        let marker = marker_dir.path().join("runs");
-        let fixture = CpuFixture::new(&successful_cpu_runner(&marker));
-        let daemon = fixture.bind(128);
-        let directory = fixture.socket.path().to_owned();
-        let cancellation = shared_cancellation();
-        let worker = spawn_cpu_daemon(daemon, Arc::clone(&cancellation));
-
-        let context = OperationContext::new(Instant::now() + Duration::from_secs(3), &NeverCancel);
-        let mut lost_ack = LocalConnection::connect(&directory, &context).unwrap();
-        lost_ack
-            .write_request(
-                &RequestEnvelope::v1(cpu_submit("cpu-once", "fixture-cpu", 5_000)),
-                &context,
-            )
-            .unwrap();
-        drop(lost_ack);
-
-        assert_eq!(
-            wait_for_request_state(&directory, "cpu-once", true),
-            RequestStatus::Succeeded
-        );
-        let page = result_page(&directory, "cpu-once");
-        assert_eq!(page.terminal, Some(ResultTerminal::Succeeded));
-        assert_eq!(page.events.len(), 2);
-        let PageEvent::DecisionJsonPart { json, .. } = &page.events[0].event else {
-            panic!("expected native decision result page");
-        };
-        let native: serde_json::Value = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            native,
-            serde_json::json!({"route":{"choice":"secret-answer"}})
-        );
-        let PageEvent::DecisionMetadataJsonPart { json, .. } = &page.events[1].event else {
-            panic!("expected native decision metadata page");
-        };
-        let metadata: serde_json::Value = serde_json::from_str(json).unwrap();
-        assert_eq!(metadata["native_latency_ns"], 12_500_000);
-        assert_eq!(std::fs::read(&marker).unwrap(), b"x");
-
-        let first_report = cancel_outer_and_join(cancellation.as_ref(), worker);
-        assert_eq!(first_report.stopped, StopReason::Cancelled);
-        fixture.released();
-
-        let restarted = fixture.bind(2);
-        let restarted_worker = spawn_cpu_daemon(restarted, shared_cancellation());
-        let status = exchange(
-            &directory,
-            WireRequestMessage::Status {
-                request_id: "cpu-once".into(),
-            },
-        );
-        assert_eq!(
-            status,
-            ResponseMessage::Status {
-                request_id: "cpu-once".into(),
-                state: RequestStatus::Succeeded,
-            }
-        );
-        let restarted_page = result_page(&directory, "cpu-once");
-        assert_eq!(restarted_page.availability, Availability::Unknown);
-        assert_eq!(restarted_page.terminal, None);
-        let restarted_report = restarted_worker.join().unwrap().unwrap();
-        assert_eq!(restarted_report.stopped, StopReason::ConnectionLimit);
-        assert_eq!(std::fs::read(&marker).unwrap(), b"x");
-        fixture.released();
-    }
-
-    #[test]
-    fn cpu_decision_running_cancel_waits_for_cleanup_and_terminalizes_page() {
-        let marker_dir = TempDir::new().unwrap();
-        let started = marker_dir.path().join("started");
-        let fixture = CpuFixture::new(&sleeping_cpu_runner(&started));
-        let daemon = fixture.bind(64);
-        let directory = fixture.socket.path().to_owned();
-        let cancellation = shared_cancellation();
-        let worker = spawn_cpu_daemon(daemon, Arc::clone(&cancellation));
-
-        assert!(matches!(
-            exchange(&directory, cpu_submit("cpu-cancel", "fixture-cpu", 5_000)),
-            ResponseMessage::Accepted {
-                operation: AcceptedOperation::Submit,
-                state: RequestStatus::Queued,
-                ..
-            }
-        ));
-        wait_for_path(&started);
-        assert_eq!(
-            exchange(
-                &directory,
-                WireRequestMessage::Status {
-                    request_id: "cpu-cancel".into(),
-                }
-            ),
-            ResponseMessage::Status {
-                request_id: "cpu-cancel".into(),
-                state: RequestStatus::Running,
-            }
-        );
-        assert!(matches!(
-            exchange(
-                &directory,
-                WireRequestMessage::Cancel {
-                    request_id: "cpu-cancel".into(),
-                }
-            ),
-            ResponseMessage::Accepted {
-                operation: AcceptedOperation::Cancel,
-                state: RequestStatus::Running,
-                ..
-            }
-        ));
-        assert_eq!(
-            wait_for_request_state(&directory, "cpu-cancel", true),
-            RequestStatus::Cancelled
-        );
-        let page = result_page(&directory, "cpu-cancel");
-        assert_eq!(page.terminal, Some(ResultTerminal::Cancelled));
-        assert!(page.events.is_empty());
-
-        let report = cancel_outer_and_join(cancellation.as_ref(), worker);
-        assert_eq!(report.stopped, StopReason::Cancelled);
-        fixture.released();
-    }
-
-    #[test]
-    fn cpu_decision_timeout_cleans_child_before_failed_terminal_is_reported() {
-        let marker_dir = TempDir::new().unwrap();
-        let started = marker_dir.path().join("started");
-        let fixture = CpuFixture::new(&sleeping_cpu_runner(&started));
-        let daemon = fixture.bind(64);
-        let directory = fixture.socket.path().to_owned();
-        let cancellation = shared_cancellation();
-        let worker = spawn_cpu_daemon(daemon, Arc::clone(&cancellation));
-
-        assert!(matches!(
-            exchange(&directory, cpu_submit("cpu-timeout", "fixture-cpu", 250)),
-            ResponseMessage::Accepted {
-                operation: AcceptedOperation::Submit,
-                state: RequestStatus::Queued,
-                ..
-            }
-        ));
-        wait_for_path(&started);
-        assert_eq!(
-            wait_for_request_state(&directory, "cpu-timeout", true),
-            RequestStatus::Failed
-        );
-        let page = result_page(&directory, "cpu-timeout");
-        assert_eq!(
-            page.terminal,
-            Some(ResultTerminal::Failed(ResultFailureCode::TimedOut))
-        );
-        assert!(page.events.is_empty());
-
-        let report = cancel_outer_and_join(cancellation.as_ref(), worker);
-        assert_eq!(report.stopped, StopReason::Cancelled);
-        fixture.released();
-    }
-
-    #[test]
-    fn cpu_decision_wrong_gpu_profile_is_rejected_before_acceptance() {
-        let marker_dir = TempDir::new().unwrap();
-        let marker = marker_dir.path().join("runs");
-        let fixture = CpuFixture::new(&successful_cpu_runner(&marker));
-        let daemon = fixture.bind(2);
-        let directory = fixture.socket.path().to_owned();
-        let client = std::thread::spawn(move || {
-            let submit = exchange(&directory, cpu_submit("gpu-refused", "fixture-gpu", 5_000));
-            let status = exchange(
-                &directory,
-                WireRequestMessage::Status {
-                    request_id: "gpu-refused".into(),
-                },
-            );
-            (submit, status)
-        });
-        let context = OperationContext::new(Instant::now() + Duration::from_secs(3), &NeverCancel);
-        let report = daemon.run_cpu_decisions(
-            &context,
-            RecoveryPolicy::new(Duration::from_secs(2)).unwrap(),
-        );
-        let (submit, status) = client.join().unwrap();
-        assert!(matches!(
-            submit,
-            ResponseMessage::Error {
-                request_id: Some(ref id),
-                code: ResponseErrorCode::Unavailable,
-            } if id == "gpu-refused"
-        ));
-        assert_eq!(
-            status,
-            ResponseMessage::Status {
-                request_id: "gpu-refused".into(),
-                state: RequestStatus::NotFound,
-            }
-        );
-        assert_eq!(report.unwrap().stopped, StopReason::ConnectionLimit);
-        assert!(!marker.exists());
-        fixture.released();
-    }
-
-    #[test]
-    fn cpu_decision_capacity_is_reserved_before_request_is_accepted() {
-        let fixture = CpuFixture::new("#!/bin/sh\nexit 99\n");
-        let mut daemon = fixture.bind(2);
-        let mut filled = 0;
-        loop {
-            match daemon.results.begin_reserved(
-                &format!("held-{filled}"),
-                crate::control::catalog::Lane::Decisions,
-            ) {
-                Ok(()) => filled += 1,
-                Err(ResultBufferError::CapacityExceeded) => break,
-                Err(error) => panic!("unexpected fixture buffer error: {error:?}"),
-            }
-        }
-        assert!(filled > 0);
-
-        let directory = fixture.socket.path().to_owned();
-        let client = std::thread::spawn(move || {
-            let submit = exchange(
-                &directory,
-                cpu_submit("no-result-capacity", "fixture-cpu", 5_000),
-            );
-            let status = exchange(
-                &directory,
-                WireRequestMessage::Status {
-                    request_id: "no-result-capacity".into(),
-                },
-            );
-            (submit, status)
-        });
-        let context = OperationContext::new(Instant::now() + Duration::from_secs(3), &NeverCancel);
-        let report = daemon.run_cpu_decisions(
-            &context,
-            RecoveryPolicy::new(Duration::from_secs(2)).unwrap(),
-        );
-        let (submit, status) = client.join().unwrap();
-        assert!(matches!(
-            submit,
-            ResponseMessage::Error {
-                code: ResponseErrorCode::QueueFull,
-                ..
-            }
-        ));
-        assert!(matches!(
-            status,
-            ResponseMessage::Status {
-                state: RequestStatus::NotFound,
-                ..
-            }
-        ));
-        assert_eq!(report.unwrap().stopped, StopReason::ConnectionLimit);
-        fixture.released();
-    }
-
-    #[test]
-    fn cpu_decision_active_shutdown_cancels_and_waits_for_worker_cleanup() {
-        let marker_dir = TempDir::new().unwrap();
-        let started = marker_dir.path().join("started");
-        let fixture = CpuFixture::new(&sleeping_cpu_runner(&started));
-        let daemon = fixture.bind(2);
-        let directory = fixture.socket.path().to_owned();
-        let cancellation = shared_cancellation();
-        let worker = spawn_cpu_daemon(daemon, Arc::clone(&cancellation));
-        assert!(matches!(
-            exchange(
-                &directory,
-                cpu_submit("cpu-shutdown", "fixture-cpu", 10_000)
-            ),
-            ResponseMessage::Accepted {
-                operation: AcceptedOperation::Submit,
-                state: RequestStatus::Queued,
-                ..
-            }
-        ));
-        wait_for_path(&started);
-        assert_eq!(
-            exchange(
-                &directory,
-                WireRequestMessage::Status {
-                    request_id: "cpu-shutdown".into(),
-                }
-            ),
-            ResponseMessage::Status {
-                request_id: "cpu-shutdown".into(),
-                state: RequestStatus::Running,
-            }
-        );
-        let report = worker.join().unwrap().unwrap();
-        assert_eq!(report.stopped, StopReason::ConnectionLimit);
-        fixture.released();
-
-        let restarted = fixture.bind(1);
-        let directory = fixture.socket.path().to_owned();
-        let client = std::thread::spawn(move || {
-            exchange(
-                &directory,
-                WireRequestMessage::Status {
-                    request_id: "cpu-shutdown".into(),
-                },
-            )
-        });
-        let context = OperationContext::new(Instant::now() + Duration::from_secs(3), &NeverCancel);
-        let restart_report = restarted.run(&context).unwrap();
-        assert_eq!(restart_report.completed_exchanges, 1);
-        assert_eq!(
-            client.join().unwrap(),
-            ResponseMessage::Status {
-                request_id: "cpu-shutdown".into(),
-                state: RequestStatus::Cancelled,
-            }
-        );
-        fixture.released();
     }
 
     fn exchange(directory: &Path, message: WireRequestMessage) -> ResponseMessage {

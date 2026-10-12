@@ -10,6 +10,19 @@ existing Linear migration issues rather than replacing their acceptance criteria
 
 ## Monorepo: next work
 
+Latest: CUDA Nagi/Laya and Breeze forms now share the foreground runner through
+an explicit idle-GPU operator window. Existing locks/probes plus one recovery
+marker, no new daemon/service takeover. Guard/form fixtures pass; cached-weight
+CPU Nagi still runs offline (1.757 s native latency, execution evidence only).
+Removed the unused CPU daemon dispatch/worker closure: **1,111 net source lines
+removed** for the whole slice. Build/strict lint/fmt pass; first root run **792 pass,
+102 socket failures, 1 ignored**; final repeat **791 pass, 103 failures, 1 ignored**
+also resurfaced the previously recorded GPU-probe error-category fixture flake.
+No assertion weakened or speculative fix. Six fewer transport failures are retired
+CPU daemon tests, not transport fixes. Remaining priority: native media scripts, live CUDA tests,
+explicit language→media/TTS→language handoff/restoration, then further platform
+deletion. See [operator GPU workflow](docs/native-gpu-workflows.md).
+
 Native load/unload client now matches pinned router routes: one routed health
 activation and scoped unload URL, encoded IDs and no redirects. Eight focused
 tests/build/strict lint/fmt pass; full suite **790 pass, 108 unchanged socket

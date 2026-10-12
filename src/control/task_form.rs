@@ -183,9 +183,20 @@ pub fn build_direct_native(
             voice_reference,
             reference_text,
         } => {
-            if selected_profile.lane != Lane::Media
-                || selected_profile.profile_id.as_str() != CPU_BREEZE_PROFILE_ID
-            {
+            let supported_speech_profile =
+                catalog.inspect(&selected_profile).is_some_and(|profile| {
+                    selected_profile.lane == Lane::Media
+                        && profile.runtime.as_str() == "audio.cpp"
+                        && matches!(
+                            (
+                                selected_profile.profile_id.as_str(),
+                                profile.device.as_ref()
+                            ),
+                            (CPU_BREEZE_PROFILE_ID, Some(super::catalog::Device::Cpu))
+                                | ("breeze-tts-2", Some(super::catalog::Device::Cuda))
+                        )
+                });
+            if !supported_speech_profile {
                 return Err(TaskFormError::ProfileTaskMismatch);
             }
             preflight_direct_speech_fields(&text, &instruction, &voice_reference, &reference_text)?;
@@ -550,6 +561,13 @@ mod tests {
                     "name": "CPU Breeze fixture",
                     "runtime": "audio.cpp",
                     "device": "cpu",
+                    "tasks": ["tts", "clon", "design"],
+                    "script": "media-models/generate-breeze-tts-2.sh"
+                }, {
+                    "id": "breeze-tts-2",
+                    "name": "CUDA Breeze fixture",
+                    "runtime": "audio.cpp",
+                    "device": "cuda",
                     "tasks": ["tts", "clon", "design"],
                     "script": "media-models/generate-breeze-tts-2.sh"
                 }]
@@ -1046,19 +1064,27 @@ mod tests {
             TaskFormError::ProfileTaskMismatch
         );
 
-        assert_eq!(
-            direct_error(build_direct_native(
+        for (mode, declared_task) in [
+            (SpeechMode::Standard, "tts"),
+            (SpeechMode::VoiceDesign, "design"),
+            (SpeechMode::VoiceClone, "clon"),
+            (SpeechMode::Streaming, "tts"),
+        ] {
+            // Building a declared CUDA request does not grant GPU admission.
+            // The shared runner still requires an explicit idle operator window.
+            let (request, _) = build_direct_native(
                 &catalog,
                 TaskFormDraft::new(
                     profile(super::super::catalog::Lane::Media, "breeze-tts-2"),
-                    task("tts"),
+                    task(declared_task),
                     String::new(),
                     30_000,
-                    speech_fields(SpeechMode::Standard),
+                    speech_fields(mode),
                 ),
-            )),
-            TaskFormError::ProfileTaskMismatch
-        );
+            )
+            .unwrap();
+            assert_eq!(request.task(), declared_task);
+        }
     }
 
     #[test]

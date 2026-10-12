@@ -1750,7 +1750,7 @@ fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
         (None, None, None) => None,
         _ => bail!("native connection configuration is invalid"),
     };
-    let result = crate::control::direct_run::run_native(
+    let result = crate::control::direct_run::run_native_in_operator_window(
         &catalog, &request, output_dir, connection, &context,
     )
     .map_err(|error| {

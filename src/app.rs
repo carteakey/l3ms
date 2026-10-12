@@ -311,7 +311,7 @@ impl TaskFormMediaOperation {
 }
 
 impl SpeechMode {
-    const CPU_BREEZE_TTS_FORM_MODES: [Self; 2] = [Self::Standard, Self::Streaming];
+    const BREEZE_TTS_FORM_MODES: [Self; 2] = [Self::Standard, Self::Streaming];
     const TASK_FORM_MODES: [Self; 4] = [
         Self::Standard,
         Self::VoiceDesign,
@@ -379,7 +379,7 @@ struct TaskFormEditor {
     profile: crate::control::catalog::ProfileKey,
     profile_snapshot: CatalogProfile,
     direct_native_decision: bool,
-    direct_cpu_speech: bool,
+    direct_breeze_speech: bool,
     direct_comfy_workflow: bool,
     direct_language_embeddings: bool,
     declared_tasks: Vec<String>,
@@ -403,7 +403,7 @@ impl TaskFormEditor {
         direct_language_embeddings: bool,
     ) -> Self {
         let direct_native_decision = is_direct_native_decision_profile(profile);
-        let direct_cpu_speech = is_direct_cpu_speech_profile(profile);
+        let direct_breeze_speech = is_direct_breeze_speech_profile(profile);
         #[cfg(target_os = "linux")]
         let direct_comfy_workflow = is_direct_comfy_workflow_profile(profile);
         #[cfg(not(target_os = "linux"))]
@@ -419,7 +419,7 @@ impl TaskFormEditor {
             .iter()
             .map(|task| task.as_str().to_owned())
             .collect::<Vec<_>>();
-        if direct_cpu_speech {
+        if direct_breeze_speech {
             declared_tasks.retain(|task| matches!(task.as_str(), "tts" | "clon" | "design"));
         }
         if profile.key.lane == Lane::Language
@@ -434,7 +434,7 @@ impl TaskFormEditor {
             profile: profile.key.clone(),
             profile_snapshot: profile.clone(),
             direct_native_decision,
-            direct_cpu_speech,
+            direct_breeze_speech,
             direct_comfy_workflow,
             direct_language_embeddings,
             declared_tasks,
@@ -447,7 +447,7 @@ impl TaskFormEditor {
             values: TaskFormValues::default(),
         };
         if direct_native_decision
-            || direct_cpu_speech
+            || direct_breeze_speech
             || direct_comfy_workflow
             || direct_language_embeddings
         {
@@ -462,8 +462,12 @@ impl TaskFormEditor {
                 .iter()
                 .position(|task| task == "decision");
         }
-        if direct_cpu_speech {
-            editor.selected_task = editor.declared_tasks.iter().position(|task| task == "tts");
+        if direct_breeze_speech {
+            editor.selected_task = editor
+                .declared_tasks
+                .iter()
+                .position(|task| task == "tts")
+                .or_else(|| (!editor.declared_tasks.is_empty()).then_some(0));
             editor.media_operation = Some(TaskFormMediaOperation::Speech);
             editor.speech_mode = Some(SpeechMode::Standard);
         }
@@ -482,7 +486,7 @@ impl TaskFormEditor {
 
     fn is_direct_native(&self) -> bool {
         self.direct_native_decision
-            || self.direct_cpu_speech
+            || self.direct_breeze_speech
             || self.direct_comfy_workflow
             || self.direct_language_embeddings
     }
@@ -494,7 +498,7 @@ impl TaskFormEditor {
         }
         fields.push(TaskFormField::Timeout);
         if !self.direct_native_decision
-            && (!self.direct_cpu_speech || self.declared_tasks.len() > 1)
+            && (!self.direct_breeze_speech || self.declared_tasks.len() > 1)
             && !self.direct_language_embeddings
         {
             fields.push(TaskFormField::DeclaredTask);
@@ -514,7 +518,7 @@ impl TaskFormEditor {
                 TaskFormField::DecisionQuestions,
             ]),
             Lane::Media => {
-                if self.direct_cpu_speech {
+                if self.direct_breeze_speech {
                     match self
                         .selected_task
                         .and_then(|index| self.declared_tasks.get(index))
@@ -693,8 +697,8 @@ impl TaskFormEditor {
                 true
             }
             TaskFormField::SpeechMode => {
-                let modes: &[SpeechMode] = if self.direct_cpu_speech {
-                    &SpeechMode::CPU_BREEZE_TTS_FORM_MODES
+                let modes: &[SpeechMode] = if self.direct_breeze_speech {
+                    &SpeechMode::BREEZE_TTS_FORM_MODES
                 } else {
                     &SpeechMode::TASK_FORM_MODES
                 };
@@ -835,7 +839,7 @@ impl TaskFormEditor {
                 },
                 TaskFormMediaOperation::Speech => TaskFields::Speech {
                     text: self.values.speech_text.clone(),
-                    mode: if self.direct_cpu_speech {
+                    mode: if self.direct_breeze_speech {
                         match selected_task.as_str() {
                             "tts" => match self.speech_mode {
                                 Some(mode @ (SpeechMode::Standard | SpeechMode::Streaming)) => mode,
@@ -848,17 +852,17 @@ impl TaskFormEditor {
                     } else {
                         self.speech_mode.ok_or(TaskFormError::InvalidNativeFields)?
                     },
-                    instruction: if !self.direct_cpu_speech || selected_task == "design" {
+                    instruction: if !self.direct_breeze_speech || selected_task == "design" {
                         nonempty_form_field(&self.values.speech_instruction)
                     } else {
                         None
                     },
-                    voice_reference: if !self.direct_cpu_speech || selected_task == "clon" {
+                    voice_reference: if !self.direct_breeze_speech || selected_task == "clon" {
                         nonempty_form_field(&self.values.speech_voice_reference)
                     } else {
                         None
                     },
-                    reference_text: if !self.direct_cpu_speech || selected_task == "clon" {
+                    reference_text: if !self.direct_breeze_speech || selected_task == "clon" {
                         nonempty_form_field(&self.values.speech_reference_text)
                     } else {
                         None
@@ -1051,6 +1055,7 @@ struct DirectNativeSummary {
     lane: Lane,
     profile_id: String,
     task: String,
+    cuda: bool,
     native_id: Option<String>,
     state: DirectNativeState,
     result: Option<DirectRunResult>,
@@ -4328,6 +4333,12 @@ impl App {
     }
 
     fn begin_model_action(&mut self, model_id: String, load: bool) {
+        #[cfg(target_os = "linux")]
+        if self.direct_native_job.is_some() || self.direct_native_admission_closed {
+            self.status =
+                "Finish or recover foreground native work before changing loaded models".into();
+            return;
+        }
         if self.model_action_pending {
             self.status = "A llama-swap action is already in progress".into();
             return;
@@ -4447,7 +4458,8 @@ impl App {
             .is_some_and(|catalog| is_direct_native_language_embeddings_profile(&profile, catalog));
         #[cfg(target_os = "linux")]
         let direct_native_profile = is_direct_native_decision_profile(&profile)
-            || is_direct_cpu_speech_profile(&profile)
+            || is_direct_breeze_speech_profile(&profile)
+            || is_direct_cuda_profile(&profile)
             || is_direct_comfy_workflow_profile(&profile)
             || direct_language_embeddings;
 
@@ -4505,9 +4517,11 @@ impl App {
                 direct_language_embeddings,
             ));
             self.input_mode = InputMode::TaskForm;
-            self.status = if is_direct_native_decision_profile(&profile) {
+            self.status = if is_direct_cuda_profile(&profile) {
+                "Foreground CUDA native form open · the selected GPU must be idle; no service will be stopped automatically · run once with Ctrl+Enter".into()
+            } else if is_direct_native_decision_profile(&profile) {
                 "Foreground native decision form open · request stays in memory; run once with Ctrl+Enter".into()
-            } else if is_direct_cpu_speech_profile(&profile) {
+            } else if is_direct_breeze_speech_profile(&profile) {
                 "Foreground CPU task form open · request stays in memory; run once with Ctrl+Enter"
                     .into()
             } else if is_direct_comfy_workflow_profile(&profile) {
@@ -4749,6 +4763,17 @@ impl App {
 
     #[cfg(target_os = "linux")]
     fn submit_direct_native(&mut self) {
+        if self.chat_connection_pending
+            || self.chat_pending
+            || self.chat_stream_cancellation.is_some()
+            || self.chat_session_pending
+            || self.model_action_pending
+        {
+            self.status =
+                "Wait for active Chat or model operations before starting foreground native work"
+                    .into();
+            return;
+        }
         if self.coordinator_action_pending
             || (self.coordinator_request_id.is_some() && !self.coordinator_request_terminal)
         {
@@ -4801,8 +4826,13 @@ impl App {
             && catalog
                 .inspect(request.profile())
                 .is_some_and(is_hosted_direct_decision_profile);
+        let cuda_native = catalog
+            .inspect(request.profile())
+            .is_some_and(is_direct_cuda_profile);
         let task_label = if comfy_request {
             "Comfy workflow"
+        } else if cuda_native {
+            direct_cuda_task_label(&task)
         } else {
             direct_native_task_label(&task)
         };
@@ -4894,12 +4924,14 @@ impl App {
             return;
         }
 
-        let output_directory = if is_direct_cpu_speech_request(&request) || comfy_request {
+        let output_directory = if is_direct_breeze_speech_request(&request) || comfy_request {
             match create_private_direct_output_directory(
                 &self.data_root,
                 job_id,
                 if comfy_request {
                     "comfy-job"
+                } else if cuda_native {
+                    "cuda-job"
                 } else {
                     "cpu-job"
                 },
@@ -4939,7 +4971,7 @@ impl App {
                     }
                     _ => None,
                 };
-                let outcome = direct_run::run_native(
+                let outcome = direct_run::run_native_in_operator_window(
                     &catalog,
                     &request,
                     output_directory.as_deref(),
@@ -4956,6 +4988,7 @@ impl App {
                     lane,
                     profile_id,
                     task,
+                    cuda: cuda_native,
                     native_id,
                     state: DirectNativeState::Failed,
                     result: None,
@@ -4974,6 +5007,7 @@ impl App {
             lane,
             profile_id: profile_id.clone(),
             task: worker_task.clone(),
+            cuda: cuda_native,
             native_id: native_id.clone(),
             state: DirectNativeState::Running,
             result: None,
@@ -4988,6 +5022,10 @@ impl App {
         self.input_mode = InputMode::Normal;
         self.status = if native_id.is_some() {
             format!("{task_label} #{job_id} · Comfy ID {} saved before dispatch · press c to cancel and wait for terminal state", native_id.as_deref().unwrap_or_default())
+        } else if cuda_native {
+            format!(
+                "{task_label} #{job_id} running · GPU remains operator-managed; press c to cancel"
+            )
         } else if lane == Lane::Language || hosted_jev_decision {
             format!("{task_label} #{job_id} running · press c to cancel; remote completion may be uncertain")
         } else if lane == Lane::Decisions {
@@ -5163,7 +5201,15 @@ impl App {
                 .direct_native_summary
                 .as_ref()
                 .map_or("foreground native task", direct_native_summary_label);
-            self.status = format!("{label} #{expected_job_id} interrupted without a confirmed worker result; inspect Jobs and verify the backend before retrying");
+            let cuda = self
+                .direct_native_summary
+                .as_ref()
+                .is_some_and(|summary| summary.cuda);
+            self.status = if cuda {
+                format!("{label} #{expected_job_id} interrupted without a confirmed worker result; GPU idle is unconfirmed, keep other clients quiesced and verify the device before retrying")
+            } else {
+                format!("{label} #{expected_job_id} interrupted without a confirmed worker result; inspect Jobs and verify the backend before retrying")
+            };
             return;
         };
 
@@ -5215,8 +5261,14 @@ impl App {
                     .as_ref()
                     .map_or("foreground native task", direct_native_summary_label);
                 let remote = error.is_remote();
+                let cuda = self
+                    .direct_native_summary
+                    .as_ref()
+                    .is_some_and(|summary| summary.cuda);
                 self.status = if remote {
                     format!("{label} #{expected_job_id} interrupted: {error}; foreground admission is closed, inspect the backend before retrying")
+                } else if cuda {
+                    format!("{label} #{expected_job_id} interrupted: {error}; foreground admission is closed, keep other clients quiesced and verify the GPU is idle before retrying")
                 } else {
                     format!("{label} #{expected_job_id} interrupted: {error}; inspect Jobs and recover the runner before retrying")
                 };
@@ -5277,6 +5329,12 @@ impl App {
                         "remote"
                     };
                     format!("{label} #{expected_job_id} cancelled before {backend} dispatch")
+                } else if self
+                    .direct_native_summary
+                    .as_ref()
+                    .is_some_and(|summary| summary.cuda)
+                {
+                    format!("{label} #{expected_job_id} cancelled · runner cleanup and GPU idle verification confirmed")
                 } else {
                     format!(
                         "{label} #{expected_job_id} cancelled · owned process cleanup confirmed"
@@ -5315,17 +5373,17 @@ impl App {
                 ("tts", DirectRunResult::Speech(native)) => {
                     matches!(native.mode(), SpeechMode::Standard | SpeechMode::Streaming)
                         && summary.lane == Lane::Media
-                        && summary.profile_id == "breeze-tts-2-cpu"
+                        && is_direct_breeze_profile_id(&summary.profile_id)
                 }
                 ("clon", DirectRunResult::Speech(native)) => {
                     native.mode() == SpeechMode::VoiceClone
                         && summary.lane == Lane::Media
-                        && summary.profile_id == "breeze-tts-2-cpu"
+                        && is_direct_breeze_profile_id(&summary.profile_id)
                 }
                 ("design", DirectRunResult::Speech(native)) => {
                     native.mode() == SpeechMode::VoiceDesign
                         && summary.lane == Lane::Media
-                        && summary.profile_id == "breeze-tts-2-cpu"
+                        && is_direct_breeze_profile_id(&summary.profile_id)
                 }
                 ("embeddings", DirectRunResult::Embeddings(_)) => summary.lane == Lane::Language,
                 (_, DirectRunResult::Comfy(native)) => {
@@ -7301,10 +7359,12 @@ impl App {
         #[cfg(target_os = "linux")]
         let (action_text, action_title) = if show_direct_native {
             let text = self.direct_native_summary.as_ref().map_or_else(
-                || "Native decisions (CPU Nagi/Laya and hosted Jev), Breeze tts/clon/design (including completed streaming chunks), connected embeddings, and Comfy workflows run in one foreground job. Comfy uses an existing server; operator manages GPU availability. No caller ID or coordinator for these tasks.\nf open task · c cancels an active run".to_owned(),
+                || "Native decisions (CPU Nagi/Laya, hosted Jev, and explicitly selected CUDA Nagi/Laya), Breeze tts/clon/design (including completed streaming chunks), connected embeddings, and Comfy workflows run in one foreground job. CUDA requires the selected GPU to be idle; no service is stopped automatically. Comfy uses an existing server; operator manages GPU availability. No caller ID or coordinator for these tasks.\nf open task · c cancels an active run".to_owned(),
                 |summary| {
                     let operator_note = if summary.native_id.is_some() {
                         "\nExisting Comfy server · operator manages GPU availability"
+                    } else if summary.cuda {
+                        "\nCUDA · selected GPU must remain idle; services are not changed automatically"
                     } else {
                         ""
                     };
@@ -7322,6 +7382,8 @@ impl App {
                         latency,
                         if self.direct_native_admission_closed && summary.native_id.is_some() {
                             "admission closed · Comfy completion unconfirmed; inspect endpoint before retrying"
+                        } else if self.direct_native_admission_closed && summary.cuda {
+                            "admission closed · GPU idle is unconfirmed; keep other clients quiesced and verify the device before retrying"
                         } else if self.direct_native_admission_closed && summary.lane == Lane::Language {
                             "admission closed · remote completion unconfirmed; verify endpoint before retrying"
                         } else if self.direct_native_admission_closed && summary.lane == Lane::Decisions {
@@ -7330,6 +7392,8 @@ impl App {
                             "admission closed · inspect Jobs and recover runner before retrying"
                         } else if self.direct_native_job.is_some() && summary.native_id.is_some() {
                             "c cancel · waits for Comfy terminal state; server remains externally managed"
+                        } else if self.direct_native_job.is_some() && summary.cuda {
+                            "c cancel · waits for runner cleanup and GPU idle verification; no service is stopped automatically"
                         } else if self.direct_native_job.is_some() && summary.lane == Lane::Language {
                             "c cancel · dispatched remote work may continue"
                         } else if self.direct_native_job.is_some() && summary.lane == Lane::Decisions {
@@ -7471,10 +7535,18 @@ impl App {
                 Constraint::Length(3),
             ])
             .split(area);
-        let form_hint = if editor.direct_cpu_speech {
+        let form_hint = if editor.direct_breeze_speech
+            && is_direct_cuda_profile(&editor.profile_snapshot)
+        {
+            "CUDA Breeze · GPU must be idle · no automatic service stop · tts/clon/design fields stay task-specific"
+        } else if editor.direct_breeze_speech {
             "CPU Breeze · tts standard/streaming, clon reference, design instruction · no caller ID or coordinator"
         } else if editor.direct_native_decision {
-            "Native decision · local CPU or hosted route · no caller ID or coordinator"
+            if is_direct_cuda_profile(&editor.profile_snapshot) {
+                "CUDA decision · GPU must be idle · no automatic service stop · no caller ID or coordinator"
+            } else {
+                "Native decision · local CPU or hosted route · no caller ID or coordinator"
+            }
         } else if editor.direct_comfy_workflow {
             "Comfy workflow · existing server only · operator manages GPU availability"
         } else if editor.direct_language_embeddings {
@@ -8146,6 +8218,8 @@ fn is_direct_native_decision_profile(profile: &CatalogProfile) -> bool {
     #[cfg(target_os = "linux")]
     {
         direct_run::is_supported_direct_decision_profile(profile)
+            || (profile.key.lane == Lane::Decisions
+                && direct_run::is_supported_direct_cuda_profile(profile))
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -8159,6 +8233,16 @@ fn is_hosted_direct_decision_profile(profile: &CatalogProfile) -> bool {
     profile.runtime.as_str() == "jev" && direct_run::is_supported_direct_decision_profile(profile)
 }
 
+#[cfg(target_os = "linux")]
+fn is_direct_cuda_profile(profile: &CatalogProfile) -> bool {
+    direct_run::is_supported_direct_cuda_profile(profile)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_direct_cuda_profile(_profile: &CatalogProfile) -> bool {
+    false
+}
+
 fn is_direct_cpu_speech_profile(profile: &CatalogProfile) -> bool {
     profile.key.lane == Lane::Media
         && profile.key.profile_id.as_str() == "breeze-tts-2-cpu"
@@ -8167,6 +8251,22 @@ fn is_direct_cpu_speech_profile(profile: &CatalogProfile) -> bool {
         && profile.tasks.iter().any(|task| task.as_str() == "tts")
         && profile.tasks.iter().any(|task| task.as_str() == "clon")
         && profile.tasks.iter().any(|task| task.as_str() == "design")
+}
+
+fn is_direct_breeze_speech_profile(profile: &CatalogProfile) -> bool {
+    if is_direct_cpu_speech_profile(profile) {
+        return true;
+    }
+    is_direct_cuda_profile(profile)
+        && profile.key.lane == Lane::Media
+        && profile.key.profile_id.as_str() == "breeze-tts-2"
+        && profile.runtime.as_str() == "audio.cpp"
+        && ["tts", "clon", "design"].iter().any(|task| {
+            profile
+                .tasks
+                .iter()
+                .any(|declared| declared.as_str() == *task)
+        })
 }
 
 #[cfg(target_os = "linux")]
@@ -8196,7 +8296,8 @@ fn is_direct_native_language_embeddings_profile(
 #[cfg(target_os = "linux")]
 fn is_direct_native_profile(profile: &CatalogProfile, catalog: &Catalog) -> bool {
     is_direct_native_decision_profile(profile)
-        || is_direct_cpu_speech_profile(profile)
+        || is_direct_breeze_speech_profile(profile)
+        || is_direct_cuda_profile(profile)
         || is_direct_comfy_workflow_profile(profile)
         || is_direct_native_language_embeddings_profile(profile, catalog)
 }
@@ -8214,22 +8315,40 @@ fn direct_native_task_label(task: &str) -> &'static str {
 }
 
 #[cfg(target_os = "linux")]
+fn direct_cuda_task_label(task: &str) -> &'static str {
+    match task {
+        "decision" => "CUDA decision",
+        "tts" => "CUDA speech",
+        "clon" => "CUDA voice clone",
+        "design" => "CUDA voice design",
+        _ => "CUDA native task",
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn direct_native_summary_label(summary: &DirectNativeSummary) -> &'static str {
     if summary.native_id.is_some() {
         "Comfy workflow"
+    } else if summary.cuda {
+        direct_cuda_task_label(&summary.task)
     } else {
         direct_native_task_label(&summary.task)
     }
 }
 
 #[cfg(target_os = "linux")]
-fn is_direct_cpu_speech_request(request: &crate::control::requests::InferenceRequest) -> bool {
+fn is_direct_breeze_profile_id(profile_id: &str) -> bool {
+    matches!(profile_id, "breeze-tts-2-cpu" | "breeze-tts-2")
+}
+
+#[cfg(target_os = "linux")]
+fn is_direct_breeze_speech_request(request: &crate::control::requests::InferenceRequest) -> bool {
     matches!(request,
         crate::control::requests::InferenceRequest::Media {
             profile,
             input: crate::control::requests::MediaInput::Speech(input),
         } if profile.lane == Lane::Media
-            && profile.profile_id.as_str() == "breeze-tts-2-cpu"
+            && matches!(profile.profile_id.as_str(), "breeze-tts-2-cpu" | "breeze-tts-2")
             && matches!(
                 (input.mode, request.task()),
                 (SpeechMode::Standard | SpeechMode::Streaming, "tts")
@@ -9860,6 +9979,24 @@ mod tests {
         .unwrap();
     }
 
+    fn write_coordinator_decision_stack_fixture(fixture: &AppFixture) {
+        write_stack_fixture(fixture);
+        fs::write(
+            fixture.root.join("toolkits/l3ds/decision-runtimes.json"),
+            r#"{"version":"1.0","profiles":[{"id":"semif-fixture","name":"Coordinator decision fixture","engine":"semif","type":"local","model":"org/semif","device":"cpu","entrypoint":"decision-models/runner.py"}]}"#,
+        )
+        .unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn write_cuda_breeze_media_manifest(fixture: &AppFixture) {
+        fs::write(
+            fixture.root.join("toolkits/l2m2/media-runtimes.json"),
+            r#"{"schema_version":1,"profiles":[{"id":"breeze-tts-2","name":"CUDA Breeze fixture","runtime":"audio.cpp","device":"cuda","tasks":["tts","clon","design"],"script":"media-models/generate-breeze-tts-2.sh"}]}"#,
+        )
+        .unwrap();
+    }
+
     #[cfg(target_os = "linux")]
     fn write_comfy_stack_fixture(fixture: &AppFixture) {
         write_stack_fixture(fixture);
@@ -9996,7 +10133,7 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
             .unwrap();
         let editor = app.task_form_editor.as_mut().unwrap();
-        assert!(editor.direct_cpu_speech);
+        assert!(editor.direct_breeze_speech);
         assert!(!editor.fields.contains(&TaskFormField::RequestId));
         assert!(!editor.fields.contains(&TaskFormField::MediaOperation));
         assert!(editor.fields.contains(&TaskFormField::SpeechMode));
@@ -10008,6 +10145,119 @@ mod tests {
         assert_eq!(editor.selected_task, Some(0));
         assert!(editor.fields.contains(&TaskFormField::DeclaredTask));
         editor.values.speech_text = text.into();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cuda_decision_and_breeze_forms_share_the_foreground_native_owner() {
+        let fixture = AppFixture::new();
+        write_cuda_decision_stack_fixture(&fixture);
+        write_cuda_breeze_media_manifest(&fixture);
+        let mut app = fixture.app();
+
+        focus_stack_profile_by_id(&mut app, "nagi-cuda");
+        let profile = app.selected_stack_profile().unwrap();
+        assert!(is_direct_cuda_profile(profile));
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.status.contains("selected GPU must be idle"));
+        let editor = app.task_form_editor.as_mut().unwrap();
+        assert!(editor.direct_native_decision);
+        assert!(!editor.fields.contains(&TaskFormField::RequestId));
+        assert!(!editor.fields.contains(&TaskFormField::DeclaredTask));
+        editor.values.decision_questions =
+            r#"{"route":{"type":"choice","criteria":{"yes":"Proceed","no":"Stop"}}}"#.into();
+        let catalog = app.stack_catalog.as_ref().unwrap().clone();
+        let decision = build_direct_native(&catalog, editor.to_draft().unwrap())
+            .unwrap()
+            .0;
+        assert!(matches!(
+            decision,
+            crate::control::requests::InferenceRequest::Decision { .. }
+        ));
+        assert!(app.coordinator_workbench.is_none());
+        assert!(app.direct_native_job.is_none());
+        assert!(app.job_history.records().is_empty());
+
+        app.chat_pending = true;
+        app.submit_direct_native();
+        assert!(app.status.contains("Wait for active Chat"));
+        assert!(app.direct_native_job.is_none());
+        assert!(app.job_history.records().is_empty());
+        app.chat_pending = false;
+        app.direct_native_admission_closed = true;
+        app.begin_model_action("fixture-chat".into(), true);
+        assert!(!app.model_action_pending);
+        assert!(app.status.contains("Finish or recover foreground"));
+        app.direct_native_admission_closed = false;
+
+        app.task_form_editor = None;
+        app.input_mode = InputMode::Normal;
+        focus_stack_profile_by_id(&mut app, "breeze-tts-2");
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+            .unwrap();
+        let editor = app.task_form_editor.as_mut().unwrap();
+        assert!(editor.direct_breeze_speech);
+        assert_eq!(editor.declared_tasks, ["tts", "clon", "design"]);
+        assert_eq!(editor.selected_task, Some(0));
+        assert!(!editor.fields.contains(&TaskFormField::RequestId));
+        assert!(!editor.fields.contains(&TaskFormField::MediaOperation));
+        assert!(editor.fields.contains(&TaskFormField::SpeechMode));
+        assert_eq!(editor.speech_mode, Some(SpeechMode::Standard));
+        editor.values.speech_text = "cuda speech text".into();
+        editor.active = editor
+            .fields
+            .iter()
+            .position(|field| *field == TaskFormField::SpeechMode)
+            .unwrap();
+        assert!(editor.cycle_selector(1));
+        assert_eq!(editor.speech_mode, Some(SpeechMode::Streaming));
+        let catalog = app.stack_catalog.as_ref().unwrap().clone();
+        let streaming = build_direct_native(&catalog, editor.to_draft().unwrap())
+            .unwrap()
+            .0;
+        assert!(matches!(
+            streaming,
+            crate::control::requests::InferenceRequest::Media {
+                input: crate::control::requests::MediaInput::Speech(
+                    crate::control::requests::SpeechInput {
+                        mode: SpeechMode::Streaming,
+                        ..
+                    }
+                ),
+                ..
+            }
+        ));
+
+        editor.selected_task = Some(2);
+        editor.refresh_fields();
+        editor.values.speech_instruction = "private CUDA design instruction".into();
+        editor.values.speech_voice_reference = "hidden-clone-reference.wav".into();
+        assert!(editor.fields.contains(&TaskFormField::SpeechInstruction));
+        assert!(!editor.fields.contains(&TaskFormField::SpeechVoiceReference));
+        let design = build_direct_native(&catalog, editor.to_draft().unwrap())
+            .unwrap()
+            .0;
+        let crate::control::requests::InferenceRequest::Media {
+            input: crate::control::requests::MediaInput::Speech(input),
+            ..
+        } = design
+        else {
+            panic!("CUDA Breeze design selection builds a native speech request")
+        };
+        assert_eq!(input.mode, SpeechMode::VoiceDesign);
+        assert_eq!(
+            input.instruction.as_deref(),
+            Some("private CUDA design instruction")
+        );
+        assert!(input.voice_reference.is_none());
+        assert!(!app.status.contains("private CUDA design instruction"));
+        assert!(app
+            .log
+            .iter()
+            .all(|line| !line.contains("private CUDA design instruction")));
+        assert!(app.coordinator_workbench.is_none());
+        assert!(app.direct_native_job.is_none());
     }
 
     #[cfg(target_os = "linux")]
@@ -10633,7 +10883,7 @@ mod tests {
         assert!(app.coordinator_workbench.is_none());
         assert!(app.direct_native_job.is_none());
         assert!(app.job_history.records().is_empty());
-        let editor = app.task_form_editor.as_ref().unwrap();
+        let editor = app.task_form_editor.as_mut().unwrap();
         assert!(editor.direct_native_decision);
         assert!(editor.is_direct_native());
         assert!(!editor.fields.contains(&TaskFormField::RequestId));
@@ -11328,12 +11578,12 @@ mod tests {
     #[test]
     fn task_form_bounds_each_field_and_aggregate_before_typing_more() {
         let fixture = AppFixture::new();
-        write_cuda_decision_stack_fixture(&fixture);
+        write_coordinator_decision_stack_fixture(&fixture);
         let catalog = Catalog::load(&fixture.root).unwrap();
         let profile = catalog
             .list()
             .iter()
-            .find(|profile| profile.key.profile_id.as_str() == "nagi-cuda")
+            .find(|profile| profile.key.profile_id.as_str() == "semif-fixture")
             .unwrap();
         let mut editor = TaskFormEditor::new(profile);
         editor.selected_task = Some(0);
@@ -11452,7 +11702,7 @@ mod tests {
         const RESULT_PREVIEW: &str = "Answers:";
 
         let fixture = AppFixture::new();
-        write_cuda_decision_stack_fixture(&fixture);
+        write_coordinator_decision_stack_fixture(&fixture);
         let socket_directory = tempfile::tempdir().unwrap();
         fs::set_permissions(socket_directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let listener =
@@ -11478,7 +11728,7 @@ mod tests {
             };
             assert_eq!(request_id, REQUEST_ID);
             assert_eq!(timeout.as_millis(), 5_000);
-            assert_eq!(request.profile().profile_id.as_str(), "nagi-cuda");
+            assert_eq!(request.profile().profile_id.as_str(), "semif-fixture");
             let crate::control::requests::InferenceRequest::Decision {
                 state, questions, ..
             } = request
@@ -11605,7 +11855,7 @@ mod tests {
             .unwrap()
             .list()
             .iter()
-            .position(|profile| profile.key.profile_id.as_str() == "nagi-cuda")
+            .position(|profile| profile.key.profile_id.as_str() == "semif-fixture")
             .unwrap();
         app.stack_catalog_state.select(Some(selected));
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
@@ -11701,7 +11951,7 @@ mod tests {
             r#"{"route":{"type":"choice","criteria":{"yes":"Proceed","no":"Stop"}}}"#;
 
         let fixture = AppFixture::new();
-        write_cuda_decision_stack_fixture(&fixture);
+        write_coordinator_decision_stack_fixture(&fixture);
         let socket_directory = tempfile::tempdir().unwrap();
         fs::set_permissions(socket_directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let listener =
@@ -11730,7 +11980,7 @@ mod tests {
             assert_eq!(request_id, REQUEST_ID);
             assert_eq!(timeout.as_millis(), 30_000);
             assert_eq!(request.profile().lane, Lane::Decisions);
-            assert_eq!(request.profile().profile_id.as_str(), "nagi-cuda");
+            assert_eq!(request.profile().profile_id.as_str(), "semif-fixture");
             let crate::control::requests::InferenceRequest::Decision {
                 state, questions, ..
             } = request
@@ -11763,7 +12013,7 @@ mod tests {
             .unwrap()
             .list()
             .iter()
-            .position(|profile| profile.key.profile_id.as_str() == "nagi-cuda")
+            .position(|profile| profile.key.profile_id.as_str() == "semif-fixture")
             .unwrap();
         app.stack_catalog_state.select(Some(selected_language));
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
@@ -12568,6 +12818,7 @@ mod tests {
             lane: Lane::Decisions,
             profile_id: "jev-api".into(),
             task: "decision".into(),
+            cuda: false,
             native_id: None,
             state: DirectNativeState::Interrupted,
             result: None,
@@ -12587,6 +12838,7 @@ mod tests {
             lane: Lane::Decisions,
             profile_id: "nagi".into(),
             task: "decision".into(),
+            cuda: false,
             native_id: None,
             state: DirectNativeState::Running,
             result: None,

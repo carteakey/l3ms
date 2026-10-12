@@ -1,6 +1,6 @@
-//! Shared control-plane discovery and gated execution primitives.
-//! Opt-in CPU-local execution is connected to explicit CLI/UI actions; general
-//! managed-engine and GPU/media admission remain gated.
+//! Shared native discovery and explicit CLI/UI execution primitives.
+//! CUDA-native execution requires an operator-managed idle window; automatic
+//! live-engine switching and general managed admission remain gated.
 
 #[cfg(target_os = "linux")]
 pub(crate) mod artifact_store;
@@ -20,8 +20,6 @@ pub mod cuda_device;
 #[cfg(target_os = "linux")]
 pub mod daemon;
 pub mod decision;
-#[cfg(target_os = "linux")]
-pub mod decision_worker;
 #[cfg(target_os = "linux")]
 pub(crate) mod direct_run;
 #[cfg(target_os = "linux")]

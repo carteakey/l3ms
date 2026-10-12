@@ -8,6 +8,53 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
+## Native idle-GPU path and CPU worker retirement — 2026-10-12
+
+CUDA-local Nagi/Laya and exact Breeze speech profiles now share CLI/TUI native
+dispatch and the existing foreground owner. A strict `L3MS_NATIVE_GPU` operator
+configuration supplies physical UUID/index/idle allowance and the shared private
+lock directory, with explicit client quiescence. Existing advisory locks and
+bounded NVIDIA idle observations surround native execution. No model/device
+fallback, new worker, daemon, service adoption or automatic stop/start.
+
+One payload-free `native-gpu-recovery-required` marker remains after interruption,
+uncertain child cleanup or failed release observation. Subsequent cooperating
+CUDA work refuses it; only verified release clears its unchanged inode. Recovery
+is operator-led, not a replay journal or external-client fence. Outputs are not
+returned on unconfirmed release. Cancellation uses a fresh bounded release context.
+UI blocks active Chat/model operations against native work in both directions.
+See [exact operator contract](../native-gpu-workflows.md).
+
+Deleted the retired CPU daemon loop/helper closure and `decision_worker.rs`.
+Retained managed late-ready/uncertain-completion lifecycle tests pass with a small
+fixture independent of the removed CPU path. Original commands/history/services
+and remaining managed-session workflows are preserved.
+
+Build/strict Clippy/fmt/diff checks pass. First root suite: **792 passed, 102 failed,
+1 ignored**. That failure-name comparison has only the six removed CPU-daemon
+transport tests; remaining failures still hit restricted sockets. Final repeat:
+**791 passed, 103 failed, 1 ignored**, additionally resurfacing the previously
+recorded `malformed_n_a_and_missing_or_extra_rows_fail_closed` GPU fixture error-
+category flake (`QueryFailed` vs `MalformedOutput`). `gpu_probe.rs` is unchanged;
+no assertions are weakened or speculative fix claimed. These are not transport
+fixes. New guard/config/form/cancellation/recovery fixtures pass. Logs:
+`/tmp/l3ms-idle-gpu-{tests,tests-final,clippy,build}.log`.
+
+Actual CLI `decisions:nagi-smol` with GPU config unset exits 1 before model launch.
+Actual `decisions:nagi-smol-cpu` still succeeds offline with cached weights,
+CUDA hidden and two CPU threads: **1,756,774,111 ns native latency**, empty stderr.
+Synthetic choice output is execution evidence, not accuracy, GPU acceptance or a
+latency guarantee. Fixture: `/tmp/l3ms-idle-gpu-cli-hFdCl0` (private input/result).
+This regression did not repeat the earlier process-birth-identity acceptance audit.
+No live service was stopped, no CUDA inference/provider/network request made,
+and no model installed/downloaded.
+
+Whole-slice source delta: **−1,111 lines**, cumulative **+3,863** against `702b4cd`.
+Control source: **60,751 lines**, versus 60,729 baseline. The substantial reduction
+target remains unmet, but this deletes an entire worker rather than relocating it.
+Remaining media scripts, live CUDA/HTTP acceptance, automatic scoped handoff and
+verified restoration, broader coordinator deletion and final UI/site gates remain.
+
 ## Native model-control correction — 2026-10-12
 
 The existing `SwapClient` now targets `POST /api/models/unload/{encoded-id}`

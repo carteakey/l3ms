@@ -7,6 +7,12 @@ real-model acceptance. Linear remains the committed-work tracking authority.
 
 ## Product stays; implementation gets smaller
 
+Current CUDA slice: direct Nagi/Laya and Breeze use the same foreground owner,
+existing advisory locks/device probe, and one interruption marker. This is an
+explicit idle operator window, not live-service takeover. The displaced CPU
+daemon loop/worker is deleted; remaining managed code must likewise be retired
+as its actual callers move. See [operator workflow](../native-gpu-workflows.md).
+
 Implementation rule: prefer a deletion or an existing native command over a new
 abstraction. Each new slice must identify the caller it replaces and the code
 that can then be retired. Do not add a second worker, proxy, scheduler or daemon

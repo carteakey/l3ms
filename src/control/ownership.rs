@@ -1,6 +1,6 @@
-//! Advisory lifetime locks for the future host-local coordinator.
+//! Advisory lifetime locks shared by cooperating host-local L3MS invocations.
 //!
-//! All managed entry points must agree on one pre-existing, caller-owned,
+//! All cooperating entry points must agree on one pre-existing, caller-owned,
 //! private lock directory on a local filesystem, independently of checkout or
 //! job-store location. These locks do not fence legacy direct engine clients,
 //! prove GPU release, or replace startup reconciliation. Never unlink a lock

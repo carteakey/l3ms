@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Breaking changes
+- Remove the retired CPU coordinator's dispatch loop, worker module and their
+  private helpers. Direct CPU execution remains; retain managed-session lifecycle
+  coverage and original tools. This removes code rather than disabling tests for
+  a still-supported workflow.
 - Retire branch-added `--coordinator-cpu-daemon` and its CPU-only configuration/
   launcher. CPU-local decisions already share the direct CLI/UI native runner;
   no listener or daemon is needed. Retain managed-session workflows and original
@@ -23,6 +27,11 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Route declared CUDA-local Nagi/Laya and Breeze tasks through the existing
+  foreground native owner. Require explicit operator-managed idle GPU config,
+  reuse advisory locks and bounded pre/post idle probes, and retain one recovery
+  marker after interruption/uncertain release. No automatic service takeover,
+  inference retry, device fallback or live GPU acceptance claim.
 - Correct native model controls for the pinned llama-swap contract: unload only
   the selected model through its scoped route, rather than the unload-all route
   with an ignored JSON body. Load through one routed native health request;
