@@ -8,7 +8,34 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
-## Current hosted decision checkpoint — 2026-10-12
+## CPU daemon retirement — 2026-10-12
+
+Removed branch-added `--coordinator-cpu-daemon`, its CPU-only configuration and
+launcher. CPU decisions already use the accepted direct CLI/UI runner, so there
+is no replacement listener or daemon. Retained managed-session setup keeps its
+private-file security checks and parser tests; existing tools, services and
+history are untouched. The old CPU guide is clearly historical, not setup advice.
+
+Build/strict Clippy/fmt and four retained launch tests pass. Full root suite:
+**788 passed, 108 failed, 1 ignored**; failure names exactly match the preceding
+hosted checkpoint's socket-restricted failures. Actual binary rejects the retired
+flag with exit 2 before reading its nonexistent config. Logs:
+`/tmp/l3ms-retire-cpu-{tests,clippy,build}.log`.
+
+**300 net source lines removed**; cumulative root source delta is **+4,942**
+against `702b4cd`. Control source is **62,114 lines**, still above the 60,729-line
+baseline: the substantial reduction target is not met. This slice deletes code,
+not moves it or suppresses tests for retained behavior.
+
+GPU audit: native router ready/loaded states do not prove request-idle. Do not
+adopt the existing deployed unit as an owned generation or treat an advisory lock
+as external-client fencing. The next small path must reuse native unload,
+bounded idle checks, single native execution and verified restoration during an
+explicitly quiesced operator window. Reconcile the existing load client with the
+pinned health-based activation contract before relying on restoration. No live
+switching or new platform implementation occurred in this slice.
+
+## Hosted decision checkpoint — 2026-10-12
 
 Jev/SystemOne now reuse the native recipe/process/decoder and foreground UI owner.
 The explicit hosted Python or `.venv-hosted/bin/python` is separate from Nagi;

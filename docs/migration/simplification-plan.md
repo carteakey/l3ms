@@ -7,6 +7,11 @@ real-model acceptance. Linear remains the committed-work tracking authority.
 
 ## Product stays; implementation gets smaller
 
+Implementation rule: prefer a deletion or an existing native command over a new
+abstraction. Each new slice must identify the caller it replaces and the code
+that can then be retired. Do not add a second worker, proxy, scheduler or daemon
+to bridge the old coordinator into the direct path.
+
 One monorepo and keyboard-first workbench for language, media (including TTS)
 and decisions. Shared discovery, settings, jobs, logs and sensible GPU switching.
 Keep the existing engines, scripts, model directories and standalone commands.

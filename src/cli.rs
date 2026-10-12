@@ -43,7 +43,7 @@ const MAX_COORDINATOR_ARTIFACT_CHUNK_JSON_BYTES: usize = 160 * 1024;
     about = "L3MS launcher (TUI + interactive model and bench CLI)",
     group(
         ArgGroup::new("action")
-            .args(["run", "run_profile", "bench", "list", "quickstart", "settings", "export_profile", "import_profile", "compare_results", "coordinator_status", "coordinator_cancel", "request_results", "request_output", "artifact_chunk", "coordinator_cpu_daemon", "coordinator_managed_session"])
+            .args(["run", "run_profile", "bench", "list", "quickstart", "settings", "export_profile", "import_profile", "compare_results", "coordinator_status", "coordinator_cancel", "request_results", "request_output", "artifact_chunk", "coordinator_managed_session"])
             .multiple(false)
     )
 )]
@@ -153,10 +153,6 @@ struct Cli {
     /// Native output lane required by --request-output.
     #[arg(long, value_enum, value_name = "LANE")]
     request_lane: Option<RequestOutputLane>,
-
-    /// Run an explicitly configured foreground CPU-local coordinator session.
-    #[arg(long, value_name = "CONFIG")]
-    coordinator_cpu_daemon: Option<PathBuf>,
 
     /// Run one explicitly configured foreground managed language session.
     #[arg(long, value_name = "CONFIG")]
@@ -397,7 +393,6 @@ fn coordinator_options_present(cli: &Cli) -> bool {
         || cli.artifact_byte_budget.is_some()
         || cli.artifact_version.is_some()
         || cli.request_lane.is_some()
-        || cli.coordinator_cpu_daemon.is_some()
         || cli.coordinator_managed_session.is_some()
         || cli.after_cursor.is_some()
         || cli.result_page_bytes.is_some()
@@ -490,9 +485,6 @@ fn isolated_engine_action(arguments: Vec<OsString>) -> Option<Result<u8>> {
 fn dispatch(cli: Cli) -> Result<u8> {
     if let Some(code) = direct_native_action(&cli)? {
         return Ok(code);
-    }
-    if let Some(config_path) = coordinator_cpu_daemon_action(&cli)? {
-        return run_cpu_coordinator_action(config_path);
     }
     if let Some(config_path) = coordinator_managed_session_action(&cli)? {
         return run_managed_session_action(config_path);
@@ -606,31 +598,6 @@ fn dispatch(cli: Cli) -> Result<u8> {
     Ok(0)
 }
 
-fn coordinator_cpu_daemon_action(cli: &Cli) -> Result<Option<&Path>> {
-    let Some(config_path) = cli.coordinator_cpu_daemon.as_deref() else {
-        return Ok(None);
-    };
-    if cli.coordinator_socket_dir.is_some()
-        || cli.coordinator_status.is_some()
-        || cli.coordinator_cancel.is_some()
-        || cli.request_results.is_some()
-        || cli.request_output.is_some()
-        || cli.artifact_chunk.is_some()
-        || cli.artifact_kind.is_some()
-        || cli.artifact_path.is_some()
-        || cli.artifact_offset.is_some()
-        || cli.artifact_byte_budget.is_some()
-        || cli.artifact_version.is_some()
-        || cli.request_lane.is_some()
-        || cli.after_cursor.is_some()
-        || cli.result_page_bytes.is_some()
-        || cli.extra.is_some()
-    {
-        bail!("--coordinator-cpu-daemon cannot be combined with other coordinator options");
-    }
-    Ok(Some(config_path))
-}
-
 fn coordinator_managed_session_action(cli: &Cli) -> Result<Option<&Path>> {
     let Some(config_path) = cli.coordinator_managed_session.as_deref() else {
         return Ok(None);
@@ -706,7 +673,6 @@ fn coordinator_artifact_chunk_spec(cli: &Cli) -> Result<Option<ArtifactChunkSpec
         || cli.request_results.is_some()
         || cli.request_output.is_some()
         || cli.request_lane.is_some()
-        || cli.coordinator_cpu_daemon.is_some()
         || cli.coordinator_managed_session.is_some()
         || cli.after_cursor.is_some()
         || cli.result_page_bytes.is_some()
@@ -760,29 +726,9 @@ fn is_artifact_version_token(token: &str) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn run_cpu_coordinator_action(config_path: &Path) -> Result<u8> {
-    let report = run_cpu_coordinator(config_path)?;
-    println!("{}", cpu_coordinator_report_json(report));
-    Ok(u8::from(
-        report.stopped == crate::control::daemon::StopReason::WorkerUncertain,
-    ))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn run_cpu_coordinator_action(_: &Path) -> Result<u8> {
-    bail!("CPU coordinator is supported only on Linux");
-}
-
-#[cfg(target_os = "linux")]
-fn run_cpu_coordinator(config_path: &Path) -> Result<crate::control::daemon::RunReport> {
-    crate::control::coordinator_launch::run(config_path)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))
-}
-
-#[cfg(target_os = "linux")]
 fn run_managed_session_action(config_path: &Path) -> Result<u8> {
     let report = run_managed_session(config_path)?;
-    println!("{}", cpu_coordinator_report_json(report));
+    println!("{}", managed_session_report_json(report));
     Ok(u8::from(
         report.stopped == crate::control::daemon::StopReason::WorkerUncertain,
     ))
@@ -800,7 +746,7 @@ fn run_managed_session(config_path: &Path) -> Result<crate::control::daemon::Run
 }
 
 #[cfg(target_os = "linux")]
-fn cpu_coordinator_report_json(report: crate::control::daemon::RunReport) -> String {
+fn managed_session_report_json(report: crate::control::daemon::RunReport) -> String {
     let stopped = match report.stopped {
         crate::control::daemon::StopReason::Cancelled => "cancelled",
         crate::control::daemon::StopReason::Deadline => "deadline",
@@ -2638,6 +2584,11 @@ mod tests {
     }
 
     #[test]
+    fn retired_cpu_daemon_option_is_not_exposed() {
+        assert!(Cli::try_parse_from(["l3ms", "--coordinator-cpu-daemon", "daemon.json"]).is_err());
+    }
+
+    #[test]
     fn direct_voice_design_output_uses_existing_speech_json_shape_and_limit() {
         let artifact = DirectSpeechArtifactOutput {
             path: PathBuf::from("/private/job-1/final.wav"),
@@ -2759,35 +2710,6 @@ mod tests {
         .is_err());
 
         assert!(Cli::try_parse_from(["l3ms", "--request-submit", "request.json"]).is_err());
-        let cli = Cli::try_parse_from(["l3ms", "--coordinator-cpu-daemon", "daemon.json"]).unwrap();
-        assert_eq!(
-            cli.coordinator_cpu_daemon.as_deref(),
-            Some(Path::new("daemon.json"))
-        );
-        assert!(Cli::try_parse_from([
-            "l3ms",
-            "--coordinator-cpu-daemon",
-            "daemon.json",
-            "--coordinator-status",
-            "request-1",
-        ])
-        .is_err());
-        assert!(Cli::try_parse_from([
-            "l3ms",
-            "--coordinator-cpu-daemon",
-            "daemon.json",
-            "--request-results",
-            "request-1",
-        ])
-        .is_err());
-        assert!(Cli::try_parse_from([
-            "l3ms",
-            "--coordinator-cpu-daemon",
-            "daemon.json",
-            "--list",
-            "stack",
-        ])
-        .is_err());
         let cli = Cli::try_parse_from([
             "l3ms",
             "--request-results",
@@ -3122,69 +3044,14 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn cpu_coordinator_launcher_rejects_modifiers_and_maps_fixed_errors() {
-        let normal = Cli::try_parse_from(["l3ms"]).unwrap();
-        assert!(coordinator_cpu_daemon_action(&normal).unwrap().is_none());
-
-        let config = Path::new("/private/daemon-secret.json");
-        let cli =
-            Cli::try_parse_from(["l3ms", "--coordinator-cpu-daemon", config.to_str().unwrap()])
-                .unwrap();
-        assert_eq!(coordinator_cpu_daemon_action(&cli).unwrap(), Some(config));
-
-        for args in [
-            vec![
-                "l3ms",
-                "--coordinator-cpu-daemon",
-                "/private/daemon.json",
-                "--coordinator-socket-dir",
-                "/private/socket",
-            ],
-            vec![
-                "l3ms",
-                "--coordinator-cpu-daemon",
-                "/private/daemon.json",
-                "--after-cursor",
-                "1",
-            ],
-            vec![
-                "l3ms",
-                "--coordinator-cpu-daemon",
-                "/private/daemon.json",
-                "--result-page-bytes",
-                "2048",
-            ],
-            vec![
-                "l3ms",
-                "--coordinator-cpu-daemon",
-                "/private/daemon.json",
-                "--extra",
-                "",
-            ],
-        ] {
-            let cli = Cli::try_parse_from(args).unwrap();
-            assert!(coordinator_cpu_daemon_action(&cli).is_err());
-        }
-
-        let directory = tempfile::tempdir().unwrap();
-        let missing = directory.path().join("secret-config.json");
-        let error = run_cpu_coordinator(&missing).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("CPU coordinator configuration is unavailable"));
-        assert!(!error.to_string().contains(missing.to_str().unwrap()));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn cpu_coordinator_report_contains_only_compact_counts_and_stop_reason() {
+    fn managed_session_report_contains_only_compact_counts_and_stop_reason() {
         let report = crate::control::daemon::RunReport {
             completed_exchanges: 7,
             failed_connections: 2,
             stopped: crate::control::daemon::StopReason::Deadline,
         };
         assert_eq!(
-            cpu_coordinator_report_json(report),
+            managed_session_report_json(report),
             r#"{"completed_exchanges":7,"failed_connections":2,"stopped":"deadline"}"#
         );
     }

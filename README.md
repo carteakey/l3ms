@@ -284,12 +284,12 @@ form (`f`) with a caller-owned ID. A lost reply means query that ID, not resubmi
 coordinator fails explicitly. Cancellation acceptance is not proof that active
 work has finished; query the same request ID for its terminal status. Service
 installation and general GPU/media dispatch remain gated by migration acceptance.
-An opt-in foreground CPU coordinator and Stack Catalog keyboard actions (`f`
-typed form, `o` observe/output, `c` cancel) are described in the
-[foreground coordinator guide](docs/migration/foreground-coordinator.md).
+CPU-local decisions use `--run-profile` or the Stack Catalog typed form (`f`)
+directly, without a daemon; see [native CPU workflows](docs/cpu-native-workflows.md).
+Stack observe/output (`o`) and cancel (`c`) remain available for retained jobs.
 Native output is sensitive and should not enter shared logs.
-The branch-added HTTP gateway has been retired; use the configured native engine
-endpoints for direct workflows. No replacement proxy is installed.
+The branch-added HTTP gateway and CPU daemon launcher have been retired; use
+native engine endpoints and direct workflows. No replacement proxy is installed.
 
 Show quick-start instructions without opening TUI:
 

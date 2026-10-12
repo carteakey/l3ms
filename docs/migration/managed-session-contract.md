@@ -171,8 +171,8 @@ activation implementation.
 
 ## Concrete language-session entrypoint
 
-`l3ms --coordinator-managed-session /absolute/path/private-session.json` uses a
-separate schema from `--coordinator-cpu-daemon`. It does not adopt the running
+`l3ms --coordinator-managed-session /absolute/path/private-session.json` uses its
+own schema (the separate CPU daemon launcher is retired). It does not adopt the running
 legacy service or enable ComfyUI or arbitrary native engines. Existing configs
 remain language-only; local TTS/decisions require the explicit opt-in below.
 Do not run it against an occupied GPU as a substitute for a maintenance plan.

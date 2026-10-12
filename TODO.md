@@ -10,6 +10,16 @@ existing Linear migration issues rather than replacing their acceptance criteria
 
 ## Monorepo: next work
 
+Latest simplification: retired the redundant branch-added CPU daemon launcher;
+CPU decisions use the existing direct CLI/UI runner. **300 net source lines
+removed**, no new module. Build/strict Clippy/fmt pass; root suite **788 pass,
+108 unchanged transport failures, 1 ignored**. Originals/services/history unchanged.
+Remaining GPU work must reuse native controls, not another daemon. Router loaded/
+ready state is not proof of request-idle; use an explicitly quiesced operator
+window, refuse unknown claimants, and verify native release/restoration. First
+reconcile the existing standalone load client with the pinned native health-based
+activation contract. See [current evidence](docs/migration/status.md).
+
 Hosted TypeSafe decisions now use the same native owner with explicit hosted
 Python, SDK retries/logging disabled and post-spawn remote uncertainty. Actual
 SDK/CLI offline success+503 checks each made one mock call, no paid/network call.

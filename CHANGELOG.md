@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Breaking changes
+- Retire branch-added `--coordinator-cpu-daemon` and its CPU-only configuration/
+  launcher. CPU-local decisions already share the direct CLI/UI native runner;
+  no listener or daemon is needed. Retain managed-session workflows and original
+  standalone tools; no running service or stored history is changed.
 - Retire branch-added `--coordinator-http-gateway`, its launcher and custom HTTP
   transport. Direct workflows use native engine endpoints; retained private
   coordinator actions and original standalone tools are unchanged. No proxy

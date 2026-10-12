@@ -1,5 +1,10 @@
 # Explicit foreground CPU coordinator
 
+**Historical, retired.** `--coordinator-cpu-daemon` is no longer accepted.
+Use [native CPU workflows](../cpu-native-workflows.md) through `--run-profile`
+or the Stack typed form instead. The material below records the old branch
+contract, not current setup instructions. Existing history is left untouched.
+
 This is an opt-in branch workflow, not a service installation or full GPU/media
 cutover. Normal `l3ms`, standalone toolkit commands, and existing services keep
 their behavior. The current production decision profiles declare CUDA; this

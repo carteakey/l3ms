@@ -3,19 +3,15 @@
 These are branch-local implementation contracts, not a deployed coordinator or
 live acceptance record. See [status.md](status.md) for phase gates and evidence.
 
-## Explicit foreground CPU operation
+## Direct CPU operation
 
-`--coordinator-cpu-daemon CONFIG` is the opt-in public path to the serial CPU
-decision loop, not a service installer or general engine switch. Its strict
-0600 single-link local JSON configuration supplies all private directories,
-standalone history exclusion, CPU runtime names and session/recovery bounds.
-The native catalog must explicitly declare an enabled CPU-local Nagi/Laya route;
-a CUDA profile's CPU fallback is not admitted as CPU. No directories,
-dependencies or models are created automatically, and stale endpoints are not
-adopted. Fresh socket/history files are part of the explicit daemon operation. SIGINT/SIGTERM
-request cooperative cleanup while the listener/host owner remains held through
-the bounded attempt. Unknown cleanup records interruption and closes admission.
-See [foreground-coordinator.md](foreground-coordinator.md) for operator setup.
+CPU-local decisions and Breeze speech use `--run-profile` or the Stack typed form
+with the shared native runner and foreground owner. No listener, daemon,
+installation or download is required. A CUDA profile is never silently converted
+to CPU. Cancellation/timeout perform bounded owned-child cleanup; uncertainty
+closes foreground admission. See [native CPU workflows](../cpu-native-workflows.md).
+The branch-added CPU daemon launcher is retired; its
+[historical contract](foreground-coordinator.md) is retained only as evidence.
 
 Generic envelope-file submission and its shared parser have been retired.
 Remaining Stack task forms build typed native requests, validate the refreshed
