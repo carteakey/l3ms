@@ -19,6 +19,10 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Extend direct CPU Breeze to cloning with required reference audio/transcript
+  and optional chunked TTS mode. Reuse the recipe, worker, WAV/chunk validation
+  and private result paths; keep hidden form inputs out of unrelated modes.
+  Chunk retrieval after completion is not live UI audio playback.
 - Route declared Comfy workflow forms and CLI tasks through the existing native
   adapter and foreground worker, without coordinator submission. Record a fresh
   job ID before one submission, cancel only that job, and privately download

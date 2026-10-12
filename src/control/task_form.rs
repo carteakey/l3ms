@@ -17,7 +17,7 @@ use super::ipc::{
     self, ClientRequest, RequestEnvelope, WireInferenceRequest, WireMediaInput, WireRequestMessage,
     WireSpeechMode, MAX_FRAME_BYTES,
 };
-use super::native_commands::CPU_BREEZE_PROFILE_ID;
+use super::native_commands::{is_supported_cpu_breeze_speech, CPU_BREEZE_PROFILE_ID};
 use super::requests::{InferenceRequest, SpeechInput, SpeechMode};
 
 const ENVELOPE_OVERHEAD_BUDGET: usize = 2048;
@@ -188,34 +188,8 @@ pub fn build_direct_native(
             {
                 return Err(TaskFormError::ProfileTaskMismatch);
             }
-            let expected_task = match mode {
-                SpeechMode::Standard => "tts",
-                SpeechMode::VoiceDesign => "design",
-                SpeechMode::VoiceClone | SpeechMode::Streaming => {
-                    return Err(TaskFormError::InvalidNativeFields);
-                }
-            };
-            if declared_task.as_str() != expected_task {
-                return Err(TaskFormError::ProfileTaskMismatch);
-            }
-            let valid_mode_fields = match mode {
-                SpeechMode::Standard => {
-                    instruction.is_none() && voice_reference.is_none() && reference_text.is_none()
-                }
-                SpeechMode::VoiceDesign => {
-                    instruction
-                        .as_deref()
-                        .is_some_and(|value| !value.trim().is_empty())
-                        && voice_reference.is_none()
-                        && reference_text.is_none()
-                }
-                SpeechMode::VoiceClone | SpeechMode::Streaming => false,
-            };
-            if !valid_mode_fields {
-                return Err(TaskFormError::InvalidNativeFields);
-            }
             preflight_direct_speech_fields(&text, &instruction, &voice_reference, &reference_text)?;
-            InferenceRequest::Media {
+            let request = InferenceRequest::Media {
                 profile: selected_profile.clone(),
                 input: super::requests::MediaInput::Speech(SpeechInput {
                     text,
@@ -224,7 +198,21 @@ pub fn build_direct_native(
                     voice_reference: voice_reference.map(PathBuf::from),
                     reference_text,
                 }),
+            };
+            if request.task() != declared_task.as_str() {
+                return Err(TaskFormError::ProfileTaskMismatch);
             }
+            let InferenceRequest::Media {
+                input: super::requests::MediaInput::Speech(input),
+                ..
+            } = &request
+            else {
+                unreachable!("speech fields construct a speech request")
+            };
+            if !is_supported_cpu_breeze_speech(input) {
+                return Err(TaskFormError::InvalidNativeFields);
+            }
+            request
         }
         _ => return Err(TaskFormError::InvalidNativeFields),
     };
@@ -562,7 +550,7 @@ mod tests {
                     "name": "CPU Breeze fixture",
                     "runtime": "audio.cpp",
                     "device": "cpu",
-                    "tasks": ["tts", "design"],
+                    "tasks": ["tts", "clon", "design"],
                     "script": "media-models/generate-breeze-tts-2.sh"
                 }]
             })
@@ -954,28 +942,20 @@ mod tests {
     }
 
     #[test]
-    fn direct_native_builder_accepts_standard_and_voice_design_cpu_breeze_speech() {
+    fn direct_native_builder_accepts_cpu_breeze_modes_and_rejects_field_conflicts() {
         let (_temporary, catalog) = cpu_breeze_catalog();
-        for (mode, declared_task, instruction) in [
-            (SpeechMode::Standard, "tts", None),
-            (
-                SpeechMode::VoiceDesign,
-                "design",
-                Some("calm clear delivery".to_owned()),
-            ),
+        for (mode, declared_task) in [
+            (SpeechMode::Standard, "tts"),
+            (SpeechMode::VoiceDesign, "design"),
+            (SpeechMode::VoiceClone, "clon"),
+            (SpeechMode::Streaming, "tts"),
         ] {
             let draft = TaskFormDraft::new(
                 profile(super::super::catalog::Lane::Media, CPU_BREEZE_PROFILE_ID),
                 task(declared_task),
                 "ignored legacy id".into(),
                 120_000,
-                TaskFields::Speech {
-                    text: "local speech input".into(),
-                    mode,
-                    instruction: instruction.clone(),
-                    voice_reference: None,
-                    reference_text: None,
-                },
+                speech_fields(mode),
             );
 
             let (request, timeout) = build_direct_native(&catalog, draft).unwrap();
@@ -989,33 +969,49 @@ mod tests {
             };
             assert_eq!(selected.profile_id.as_str(), CPU_BREEZE_PROFILE_ID);
             assert_eq!(input.mode, mode);
-            assert_eq!(input.text, "local speech input");
-            assert_eq!(input.instruction, instruction);
+            assert_eq!(input.text, "hello there");
+            assert_eq!(
+                input.instruction.as_deref(),
+                (mode == SpeechMode::VoiceDesign).then_some("warm alto voice")
+            );
+            if mode == SpeechMode::VoiceClone {
+                assert!(input.voice_reference.is_some());
+                assert_eq!(input.reference_text.as_deref(), Some("spoken words"));
+            }
         }
 
-        let instruction_draft = TaskFormDraft::new(
-            profile(super::super::catalog::Lane::Media, CPU_BREEZE_PROFILE_ID),
-            task("tts"),
-            String::new(),
-            30_000,
-            TaskFields::Speech {
-                text: "hello there".into(),
-                mode: SpeechMode::Standard,
-                instruction: Some("calm clear delivery".into()),
-                voice_reference: None,
-                reference_text: None,
-            },
-        );
-        assert_eq!(
-            direct_error(build_direct_native(&catalog, instruction_draft)),
-            TaskFormError::InvalidNativeFields
-        );
-
-        for (mode, declared_task, instruction) in [
-            (SpeechMode::VoiceDesign, "design", None),
-            (SpeechMode::VoiceDesign, "design", Some("   ".into())),
-            (SpeechMode::VoiceClone, "clon", None),
-            (SpeechMode::Streaming, "tts", None),
+        for (mode, declared_task, instruction, voice_reference, reference_text) in [
+            (SpeechMode::Standard, "tts", Some("extra"), None, None),
+            (SpeechMode::VoiceDesign, "design", None, None, None),
+            (SpeechMode::VoiceDesign, "design", Some("   "), None, None),
+            (
+                SpeechMode::VoiceClone,
+                "clon",
+                None,
+                None,
+                Some("spoken words"),
+            ),
+            (
+                SpeechMode::VoiceClone,
+                "clon",
+                None,
+                Some("/private/reference.wav"),
+                None,
+            ),
+            (
+                SpeechMode::VoiceClone,
+                "clon",
+                Some("not allowed"),
+                Some("/private/reference.wav"),
+                Some("spoken words"),
+            ),
+            (
+                SpeechMode::Streaming,
+                "tts",
+                None,
+                None,
+                Some("unexpected reference"),
+            ),
         ] {
             let result = build_direct_native(
                 &catalog,
@@ -1027,9 +1023,9 @@ mod tests {
                     TaskFields::Speech {
                         text: "hello there".into(),
                         mode,
-                        instruction,
-                        voice_reference: None,
-                        reference_text: None,
+                        instruction: instruction.map(str::to_owned),
+                        voice_reference: voice_reference.map(str::to_owned),
+                        reference_text: reference_text.map(str::to_owned),
                     },
                 ),
             );

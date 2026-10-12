@@ -20,7 +20,7 @@
     "breeze-tts-2-cpu": {
       "guide": "docs/cpu-native-workflows.md",
       "experiment": "docs/cpu-native-workflows.md",
-      "modes": ["Standard TTS (CPU)", "Offline voice design (CPU)"]
+      "modes": ["Standard TTS (CPU)", "Offline voice design (CPU)", "Voice cloning (CPU)", "TTS chunks after completion (CPU)"]
     },
     "blender-3d": {
       "guide": "toolkits/l2m2/docs/blender-mcp-setup.md",

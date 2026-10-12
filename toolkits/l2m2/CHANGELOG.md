@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Extend the explicit CPU Breeze profile to reference-audio cloning and chunked
+  TTS output through the existing recipe and WAV validator. Cloning requires a
+  reference transcript; chunks are returned after completion, not played live.
+  Preserve separate CUDA defaults and standalone modes.
+
 - Add offline voice design to the explicit CPU Breeze profile. The shared L3MS
   wrapper requires an instruction for `design`; standard TTS remains text-only.
   Preserve original CUDA defaults and native output conventions.

@@ -216,18 +216,24 @@ mkdir -m 700 /absolute/path/to/new-speech-output
 l3ms --run-profile media:breeze-tts-2-cpu --task tts --input /path/to/speech.json --output-dir /absolute/path/to/new-speech-output --task-timeout-ms 120000
 ```
 
-Input is strictly `{"text":"Hello."}` (at most 1 MiB). The output directory must
+Standard input is `{"text":"Hello."}` (at most 1 MiB). The output directory must
 already exist, be private and owned by you, and contain no prior result files.
 The command returns JSON with `mode`, and validated `artifacts` containing
 absolute `path` and `native_kind`; it does not stream audio bytes.
 For offline voice design, use `--task design` with strictly
 `{"text":"Hello.","instruction":"Speak gently with a calm low voice."}`.
-Instruction is required for design and not accepted by standard TTS. CPU cloning
-and streaming remain unsupported; CUDA profiles/script defaults are unchanged.
+Instruction is required for design and not accepted by standard TTS.
+For cloning, use `--task clon` with
+`{"text":"Hello.","voice_reference":"/absolute/reference.wav","reference_text":"The reference transcript."}`.
+Reference audio and a nonempty transcript are required. For completed streaming
+chunks, use `--task tts` with `{"text":"Hello.","mode":"streaming"}`; `offline`
+is the default. The final WAV and chunk paths arrive after completion, not as
+live playback. CUDA profiles/script defaults are unchanged.
 
 In Stack Catalog (`F8`), select `breeze-tts-2-cpu`, press `f`, choose `tts`, enter
-text, choose the declared `tts` or `design` task, and press `Ctrl+Enter`. Design
-shows an instruction field; returning to TTS keeps but does not send that draft.
+text, choose `tts`, `design` or `clon`, and press `Ctrl+Enter`. TTS selects offline
+or streaming; design shows instruction; cloning shows reference audio/transcript.
+Hidden retained fields are not sent when switching tasks.
 The same foreground owner handles execution,
 cancellation (`c`) and results; the TUI allocates a fresh private output directory
 under its data root. History stores metadata and relative artifact references,

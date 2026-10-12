@@ -98,18 +98,18 @@
       "runtime": "audio.cpp",
       "device": "cpu",
       "variant": "Breeze-TTS-2 Q8_0 GGUF, explicitly selected CPU backend",
-      "tasks": ["tts", "design"],
-      "inputs": ["text"],
+      "tasks": ["tts", "clon", "design"],
+      "inputs": ["text", "audio"],
       "status": "experimental-local",
       "script": "media-models/generate-breeze-tts-2.sh",
-      "description": "Explicit CPU standard or instructed voice-design offline speech for the direct L3MS runner. No CUDA fallback; CPU performance and quality require local acceptance.",
+      "description": "Explicit CPU standard, instructed voice-design and reference-audio cloning speech, with offline or chunked TTS output. No CUDA fallback; performance and quality require local acceptance.",
       "requirements": [
         "audio.cpp audiocpp_cli with CPU backend and breeze_tts loader",
         "Breeze-TTS-2 Q8_0 GGUF package and model spec available locally"
       ],
       "notes": [
         "The standalone CPU profile passes --backend cpu; direct script calls must select it explicitly because the script default remains CUDA.",
-        "The direct wrapper accepts offline standard TTS or voice design with a nonempty instruction. CPU cloning and streaming remain unsupported by this wrapper."
+        "The direct wrapper requires a nonempty reference transcript for cloning. Standard TTS optionally writes streaming chunks, returned after completion rather than played live."
       ]
     },
     {

@@ -78,4 +78,32 @@ An initial harness attempt omitted HOME and used the wrong model-root variable;
 read-only `--check` reproduced a shell preflight error before native inference.
 That environment was corrected, not an ambiguous inference replay. The failed
 preflight receipt is retained. The final implementation shares the route predicate
-and existing runner/WAV contract; CPU clone/streaming and GPU switching remain open.
+and existing runner/WAV contract; the subsequent CPU modes are recorded below.
+GPU switching remains open.
+
+## CPU cloning and completed streaming chunks — 2026-10-12
+
+Reusable runner: `toolkits/l2m2/maintenance/probe-breeze-cpu-modes.py`; it uses the
+existing bounded `run_cli` process-identity probe, refuses a reused case directory
+and never retries. Fixture: `/tmp/l3ms-cpu-modes-PBc4zg` (current UID, 0700).
+Before execution, MemAvailable was 48,452,824 KiB and no audiocpp_cli was running.
+The same installed audio.cpp binary, 5,079,668,352-byte Q8_0 model and local spec
+were reused. No download, environment installation, service or GPU change.
+
+Exact invocations, seed 0, two CPU threads, CPU backend, empty CUDA visibility,
+offline environment, native script/spec/probe copies, inputs, logs, receipts and
+WAVs are retained in the fixture:
+
+```sh
+python3 toolkits/l2m2/maintenance/probe-breeze-cpu-modes.py --mode clon --fixture /tmp/l3ms-cpu-modes-PBc4zg --audio-cpp-root /home/kchauhan/repos/audio.cpp --media-root /home/kchauhan/models/media --voice-reference /tmp/l3ms-cpu-design-UdXVk0/output-final/result.wav --reference-text 'Hello.' > /tmp/l3ms-cpu-modes-PBc4zg/clone.log 2>&1
+python3 toolkits/l2m2/maintenance/probe-breeze-cpu-modes.py --mode streaming --fixture /tmp/l3ms-cpu-modes-PBc4zg --audio-cpp-root /home/kchauhan/repos/audio.cpp --media-root /home/kchauhan/models/media > /tmp/l3ms-cpu-modes-PBc4zg/streaming.log 2>&1
+```
+
+Both used public synthetic text, `Hello from the local model stack.` Cloning
+used only the earlier synthetic design WAV, not a person's voice. Whole-CLI
+wall time: **14.197 seconds** clone, **11.515 seconds** streaming. All artifacts
+were nonempty 24 kHz mono PCM16; owned process identities were confirmed released.
+Clone final: 61,440 frames, peak 16,987. Streaming final: 46,080 frames, peak 17,890;
+two native chunks: 7,680 and 38,400 frames. Copies are returned only after native
+completion. This proves execution, bounded artifact delivery and process cleanup,
+not speaker similarity, voice quality, live playback or GPU lifecycle acceptance.

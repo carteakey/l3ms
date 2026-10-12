@@ -213,7 +213,13 @@ pub fn run_native(
         InferenceRequest::Media {
             input: MediaInput::Speech(input),
             ..
-        } if matches!(input.mode, SpeechMode::Standard | SpeechMode::VoiceDesign)
+        } if matches!(
+            input.mode,
+            SpeechMode::Standard
+                | SpeechMode::VoiceDesign
+                | SpeechMode::VoiceClone
+                | SpeechMode::Streaming
+        )
     );
     let (language, comfy) = match connection {
         Some(DirectConnection::Language(adapter)) => (Some(adapter), None),
@@ -821,7 +827,7 @@ mod tests {
                     "name": "CPU Breeze fixture",
                     "runtime": "audio.cpp",
                     "device": "cpu",
-                    "tasks": ["tts", "design"],
+                    "tasks": ["tts", "clon", "design"],
                     "script": "media-models/generate-breeze-tts-2.sh"
                 }]
             })
@@ -837,6 +843,9 @@ out_dir=""
 backend=""
 task=""
 instruction=""
+mode="offline"
+voice_ref=""
+reference_text=""
 while (($#)); do
   case "$1" in
     --output) output="$2"; shift 2 ;;
@@ -844,6 +853,9 @@ while (($#)); do
     --backend) backend="$2"; shift 2 ;;
     --task) task="$2"; shift 2 ;;
     --instruction) instruction="$2"; shift 2 ;;
+    --mode) mode="$2"; shift 2 ;;
+    --voice-ref) voice_ref="$2"; shift 2 ;;
+    --reference-text) reference_text="$2"; shift 2 ;;
     *) shift ;;
   esac
 done
@@ -852,10 +864,16 @@ done
 [[ "$output" == "$out_dir/result.wav" ]]
 if [[ "$task" == "design" ]]; then
   [[ "$instruction" == "fixture voice direction" ]]
+elif [[ "$task" == "clon" ]]; then
+  [[ -n "$voice_ref" && -f "$voice_ref" && "$reference_text" == "fixture transcript" ]]
 else
   [[ "$task" == "tts" && -z "$instruction" ]]
 fi
 printf 'RIFF\046\000\000\000WAVEfmt \020\000\000\000\001\000\001\000\300\135\000\000\200\273\000\000\002\000\020\000data\002\000\000\000\000\000' > "$output"
+if [[ "$mode" == "streaming" ]]; then
+  mkdir "$output.chunks"
+  cp "$output" "$output.chunks/chunk_0001.wav"
+fi
 "#,
         )
         .unwrap();
@@ -873,7 +891,14 @@ printf 'RIFF\046\000\000\000WAVEfmt \020\000\000\000\001\000\001\000\300\135\000
         (root, catalog)
     }
 
-    fn cpu_breeze_request(mode: SpeechMode) -> InferenceRequest {
+    fn cpu_breeze_request(mode: SpeechMode, root: &std::path::Path) -> InferenceRequest {
+        let voice_reference = if mode == SpeechMode::VoiceClone {
+            let path = root.join("speaker.wav");
+            fs::write(&path, b"fixture reference").unwrap();
+            Some(path)
+        } else {
+            None
+        };
         InferenceRequest::Media {
             profile: ProfileKey::new(Lane::Media, CPU_BREEZE_PROFILE_ID).unwrap(),
             input: super::super::requests::MediaInput::Speech(
@@ -882,8 +907,9 @@ printf 'RIFF\046\000\000\000WAVEfmt \020\000\000\000\001\000\001\000\300\135\000
                     mode,
                     instruction: (mode == SpeechMode::VoiceDesign)
                         .then(|| "fixture voice direction".into()),
-                    voice_reference: None,
-                    reference_text: None,
+                    voice_reference,
+                    reference_text: (mode == SpeechMode::VoiceClone)
+                        .then(|| "fixture transcript".into()),
                 },
             ),
         }
@@ -989,13 +1015,15 @@ printf 'RIFF\046\000\000\000WAVEfmt \020\000\000\000\001\000\001\000\300\135\000
     }
 
     #[test]
-    fn direct_runner_accepts_only_standard_and_voice_design_cpu_breeze_speech() {
+    fn direct_runner_accepts_supported_cpu_breeze_modes() {
         let (root, catalog) = cpu_breeze_fixture();
         for (mode, name) in [
             (SpeechMode::Standard, "cpu-standard"),
             (SpeechMode::VoiceDesign, "cpu-design"),
+            (SpeechMode::VoiceClone, "cpu-clone"),
+            (SpeechMode::Streaming, "cpu-streaming"),
         ] {
-            let request = cpu_breeze_request(mode);
+            let request = cpu_breeze_request(mode, root.path());
             let output = cpu_breeze_output(root.path(), name);
             let DirectRunResult::Speech(result) = run_native(
                 &catalog,
@@ -1008,31 +1036,17 @@ printf 'RIFF\046\000\000\000WAVEfmt \020\000\000\000\001\000\001\000\300\135\000
                 panic!("CPU Breeze direct mode returns validated speech artifacts")
             };
             assert_eq!(result.mode(), mode);
-            assert_eq!(result.artifacts().len(), 1);
-            assert!(output.join("result.wav").is_file());
-        }
-
-        for (mode, name) in [
-            (SpeechMode::VoiceClone, "cpu-clone-unsupported"),
-            (SpeechMode::Streaming, "cpu-streaming-unsupported"),
-        ] {
-            let request = cpu_breeze_request(mode);
-            let output = cpu_breeze_output(root.path(), name);
-            let error = run_native(
-                &catalog,
-                &request,
-                Some(&output),
-                None,
-                &context(&NeverCancel),
-            )
-            .err()
-            .expect("clone and streaming remain outside CPU direct scope");
-            assert_eq!(error.kind(), DirectRunErrorKind::InvalidRequest);
             assert_eq!(
-                error.disposition(),
-                DirectRunDisposition::Process(ProcessFailureDisposition::NoChildSpawned)
+                result.artifacts().len(),
+                if mode == SpeechMode::Streaming { 2 } else { 1 }
             );
-            assert_eq!(fs::read_dir(output).unwrap().count(), 0);
+            assert!(output.join("result.wav").is_file());
+            if mode == SpeechMode::Streaming {
+                assert_eq!(
+                    result.artifacts()[1].relative_path(),
+                    std::path::Path::new("result.wav.chunks/chunk_0001.wav")
+                );
+            }
         }
     }
 

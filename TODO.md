@@ -10,6 +10,19 @@ existing Linear migration issues rather than replacing their acceptance criteria
 
 ## Monorepo: next work
 
+CPU Breeze cloning and completed streaming chunks now share the existing direct
+path with standard/design. Real cached-weight CPU runs pass (14.20/11.52 seconds,
+validated WAV/chunks and child release), no services/downloads. Streaming is not
+live playback. Build/lint/fmt, local UI/privacy, site and standalone media checks
+pass; root suite **784 pass, 108 unchanged transport failures, 1 ignored**.
+Source adds **409 net lines**, cumulative **+4,831**; broad reduction is unfinished.
+
+Next hosted gate: pin the provider runtime, disable SDK retries explicitly, keep
+post-spawn uncertainty remote even after child cleanup. Jev/SystemOne currently
+use TypeSafe, not an OpenRouter adapter. No paid/network acceptance has run.
+GPU lifecycle and remaining native media/decision callers still gate broad
+coordinator deletion; use existing recipes rather than another platform.
+
 Latest simplification cut: remove the branch-added HTTP gateway CLI/launcher/
 transport, **1,762 net source lines and two modules**. Build/lint/fmt and actual
 retired-flag rejection pass. Full suite: **781 pass, 108 socket/transport failures,
@@ -48,6 +61,9 @@ Next gates:
 - [x] Extend CPU Breeze to offline voice design on the existing instruction/WAV
   path. Final native CPU run passed with process release, no service changes;
   this is execution evidence, not a voice-quality evaluation.
+- [x] Extend the same CPU path to clone and completed streaming chunks; require
+  clone transcript and keep hidden fields out of other modes. Native acceptance
+  and process release passed; no live playback or voice-quality claim.
 
 - [ ] Run `cargo test --all-targets --locked` in a session allowing local TCP/Unix
   sockets; verify the new native embedding HTTP/UI cases before claiming acceptance.

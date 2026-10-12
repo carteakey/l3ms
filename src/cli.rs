@@ -61,7 +61,7 @@ struct Cli {
     #[arg(long, value_name = "NAMESPACED_ID", requires_all = ["task", "input"])]
     run_profile: Option<String>,
 
-    /// Declared task name (decision, tts, design, image, video, or embeddings) required by --run-profile.
+    /// Declared task name (decision, tts, clon, design, image, video, or embeddings) required by --run-profile.
     #[arg(long, value_name = "TASK", requires = "run_profile")]
     task: Option<String>,
 
@@ -215,6 +215,33 @@ struct DirectDecisionInput {
 #[serde(deny_unknown_fields)]
 struct DirectSpeechInput {
     text: String,
+    #[serde(default)]
+    mode: DirectSpeechMode,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DirectSpeechMode {
+    #[default]
+    Offline,
+    Streaming,
+}
+
+impl DirectSpeechMode {
+    fn native_mode(self) -> crate::control::requests::SpeechMode {
+        match self {
+            Self::Offline => crate::control::requests::SpeechMode::Standard,
+            Self::Streaming => crate::control::requests::SpeechMode::Streaming,
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectVoiceCloneInput {
+    text: String,
+    voice_reference: String,
+    reference_text: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -261,6 +288,13 @@ fn parse_direct_decision_input(bytes: &[u8]) -> Result<DirectDecisionInput, Dire
 }
 
 fn parse_direct_speech_input(bytes: &[u8]) -> Result<DirectSpeechInput, DirectInputError> {
+    if bytes.len() > MAX_DIRECT_NATIVE_INPUT_BYTES {
+        return Err(DirectInputError::TooLarge);
+    }
+    serde_json::from_slice(bytes).map_err(|_| DirectInputError::Invalid)
+}
+
+fn parse_direct_voice_clone_input(bytes: &[u8]) -> Result<DirectVoiceCloneInput, DirectInputError> {
     if bytes.len() > MAX_DIRECT_NATIVE_INPUT_BYTES {
         return Err(DirectInputError::TooLarge);
     }
@@ -324,16 +358,16 @@ fn direct_native_spec(cli: &Cli) -> Result<Option<DirectNativeSpec<'_>>> {
     match (task, output_dir) {
         ("decision", None)
         | ("embeddings", None)
-        | ("tts" | "design" | "image" | "video", Some(_)) => {}
+        | ("tts" | "clon" | "design" | "image" | "video", Some(_)) => {}
         ("decision" | "embeddings", Some(_)) => {
             bail!("--output-dir is only valid with speech or Comfy workflow tasks")
         }
-        ("tts" | "design" | "image" | "video", None) => {
+        ("tts" | "clon" | "design" | "image" | "video", None) => {
             bail!("--output-dir is required with speech and Comfy workflow tasks")
         }
         (_, Some(_)) => bail!("--output-dir is only valid with speech or Comfy workflow tasks"),
         _ => bail!(
-            "--run-profile supports only --task decision, --task tts, --task design, --task image, --task video, or --task embeddings"
+            "--run-profile supports only --task decision, --task tts, --task clon, --task design, --task image, --task video, or --task embeddings"
         ),
     }
     let timeout_ms = cli
@@ -1632,10 +1666,10 @@ fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
         .map_err(|_| anyhow::anyhow!("--run-profile must be a valid namespaced profile ID"))?;
     let expected_lane = match spec.task {
         "decision" => crate::control::catalog::Lane::Decisions,
-        "tts" | "design" | "image" | "video" => crate::control::catalog::Lane::Media,
+        "tts" | "clon" | "design" | "image" | "video" => crate::control::catalog::Lane::Media,
         "embeddings" => crate::control::catalog::Lane::Language,
         _ => bail!(
-            "--run-profile supports only --task decision, --task tts, --task design, --task image, --task video, or --task embeddings"
+            "--run-profile supports only --task decision, --task tts, --task clon, --task design, --task image, --task video, or --task embeddings"
         ),
     };
     if profile.lane != expected_lane {
@@ -1677,10 +1711,20 @@ fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
         DirectNativeInput::Speech(input) => (
             crate::control::task_form::TaskFields::Speech {
                 text: input.text,
-                mode: crate::control::requests::SpeechMode::Standard,
+                mode: input.mode.native_mode(),
                 instruction: None,
                 voice_reference: None,
                 reference_text: None,
+            },
+            spec.output_dir,
+        ),
+        DirectNativeInput::VoiceClone(input) => (
+            crate::control::task_form::TaskFields::Speech {
+                text: input.text,
+                mode: crate::control::requests::SpeechMode::VoiceClone,
+                instruction: None,
+                voice_reference: Some(input.voice_reference),
+                reference_text: Some(input.reference_text),
             },
             spec.output_dir,
         ),
@@ -1811,6 +1855,7 @@ fn run_direct_native(_: &DirectNativeSpec<'_>) -> Result<u8> {
 enum DirectNativeInput {
     Decision(DirectDecisionInput),
     Speech(DirectSpeechInput),
+    VoiceClone(DirectVoiceCloneInput),
     VoiceDesign(DirectVoiceDesignInput),
     ComfyWorkflow(serde_json::Value),
     Embeddings(DirectEmbeddingInput),
@@ -1842,6 +1887,9 @@ fn read_direct_native_input(path: &Path, task: &str) -> Result<DirectNativeInput
         "tts" => parse_direct_speech_input(&bytes)
             .map(DirectNativeInput::Speech)
             .map_err(|error| anyhow::anyhow!(error.to_string())),
+        "clon" => parse_direct_voice_clone_input(&bytes)
+            .map(DirectNativeInput::VoiceClone)
+            .map_err(|error| anyhow::anyhow!(error.to_string())),
         "design" => parse_direct_voice_design_input(&bytes)
             .map(DirectNativeInput::VoiceDesign)
             .map_err(|error| anyhow::anyhow!(error.to_string())),
@@ -1852,7 +1900,7 @@ fn read_direct_native_input(path: &Path, task: &str) -> Result<DirectNativeInput
             .map(DirectNativeInput::Embeddings)
             .map_err(|error| anyhow::anyhow!(error.to_string())),
         _ => bail!(
-            "--run-profile supports only --task decision, --task tts, --task design, --task image, --task video, or --task embeddings"
+            "--run-profile supports only --task decision, --task tts, --task clon, --task design, --task image, --task video, or --task embeddings"
         ),
     }
 }
@@ -2124,7 +2172,24 @@ mod tests {
         .unwrap();
         assert!(direct_native_spec(&decision_with_output).is_err());
 
-        let unsupported_task = Cli::try_parse_from([
+        let clone = Cli::try_parse_from([
+            "l3ms",
+            "--run-profile",
+            "media:breeze-tts-2-cpu",
+            "--task",
+            "clon",
+            "--input",
+            "input.json",
+            "--output-dir",
+            "/private/job-1",
+        ])
+        .unwrap();
+        let Some(clone_spec) = direct_native_spec(&clone).unwrap() else {
+            panic!("direct clone action is present");
+        };
+        assert_eq!(clone_spec.task, "clon");
+        assert_eq!(clone_spec.output_dir, Some(Path::new("/private/job-1")));
+        let clone_without_output = Cli::try_parse_from([
             "l3ms",
             "--run-profile",
             "media:breeze-tts-2-cpu",
@@ -2134,7 +2199,7 @@ mod tests {
             "input.json",
         ])
         .unwrap();
-        assert!(direct_native_spec(&unsupported_task).is_err());
+        assert!(direct_native_spec(&clone_without_output).is_err());
 
         assert!(Cli::try_parse_from(["l3ms", "--output-dir", "/private/job-1"]).is_err());
     }
@@ -2309,14 +2374,32 @@ mod tests {
     }
 
     #[test]
-    fn direct_speech_input_requires_unique_known_text_field_and_is_bounded() {
+    fn direct_speech_input_defaults_to_offline_and_accepts_streaming_mode() {
         let parsed = parse_direct_speech_input(br#"{"text":"hello"}"#).unwrap();
         assert_eq!(parsed.text, "hello");
+        assert_eq!(parsed.mode, DirectSpeechMode::Offline);
+        assert_eq!(
+            parsed.mode.native_mode(),
+            crate::control::requests::SpeechMode::Standard
+        );
+
+        let offline = parse_direct_speech_input(br#"{"text":"hello","mode":"offline"}"#).unwrap();
+        assert_eq!(offline.mode, DirectSpeechMode::Offline);
+
+        let streamed =
+            parse_direct_speech_input(br#"{"text":"hello","mode":"streaming"}"#).unwrap();
+        assert_eq!(streamed.mode, DirectSpeechMode::Streaming);
+        assert_eq!(
+            streamed.mode.native_mode(),
+            crate::control::requests::SpeechMode::Streaming
+        );
 
         for invalid in [
             br#"{"text":"hello","text":"again"}"#.as_slice(),
             br#"{"text":"hello","unexpected":true}"#.as_slice(),
             br#"{"text":1}"#.as_slice(),
+            br#"{"text":"hello","mode":"invalid"}"#.as_slice(),
+            br#"{"text":"hello","mode":"offline","mode":"streaming"}"#.as_slice(),
             br#"[]"#.as_slice(),
             br#"{"text":"hello"} trailing"#.as_slice(),
         ] {
@@ -2326,6 +2409,34 @@ mod tests {
         let oversized = vec![b' '; MAX_DIRECT_NATIVE_INPUT_BYTES + 1];
         assert_eq!(
             parse_direct_speech_input(&oversized).err(),
+            Some(DirectInputError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn direct_voice_clone_input_requires_all_known_fields_and_is_bounded() {
+        let parsed = parse_direct_voice_clone_input(
+            br#"{"text":"spoken words","voice_reference":"samples/reference.wav","reference_text":"reference words"}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.text, "spoken words");
+        assert_eq!(parsed.voice_reference, "samples/reference.wav");
+        assert_eq!(parsed.reference_text, "reference words");
+
+        for invalid in [
+            br#"{"text":"spoken words","voice_reference":"samples/reference.wav"}"#.as_slice(),
+            br#"{"text":"spoken words","voice_reference":"samples/reference.wav","reference_text":"reference words","extra":true}"#.as_slice(),
+            br#"{"text":"spoken words","text":"again","voice_reference":"samples/reference.wav","reference_text":"reference words"}"#.as_slice(),
+            br#"{"text":1,"voice_reference":"samples/reference.wav","reference_text":"reference words"}"#.as_slice(),
+            br#"[]"#.as_slice(),
+            br#"{"text":"spoken words","voice_reference":"samples/reference.wav","reference_text":"reference words"} trailing"#.as_slice(),
+        ] {
+            assert!(parse_direct_voice_clone_input(invalid).is_err());
+        }
+
+        let oversized = vec![b' '; MAX_DIRECT_NATIVE_INPUT_BYTES + 1];
+        assert_eq!(
+            parse_direct_voice_clone_input(&oversized).err(),
             Some(DirectInputError::TooLarge)
         );
     }
@@ -2543,6 +2654,20 @@ mod tests {
         assert_eq!(output["mode"], "voice_design");
         assert_eq!(output["artifacts"][0]["path"], "/private/job-1/final.wav");
         assert_eq!(output["artifacts"][0]["native_kind"], "final_wave");
+
+        for (mode, expected) in [
+            (
+                crate::control::requests::SpeechMode::VoiceClone,
+                "voice_clone",
+            ),
+            (crate::control::requests::SpeechMode::Streaming, "streaming"),
+        ] {
+            let output: serde_json::Value =
+                serde_json::from_str(&direct_speech_output_parts_json(mode, Vec::new()).unwrap())
+                    .unwrap();
+            assert_eq!(output["mode"], expected);
+            assert_eq!(output["artifacts"], serde_json::json!([]));
+        }
 
         let oversized = DirectSpeechArtifactOutput {
             path: PathBuf::from(format!(

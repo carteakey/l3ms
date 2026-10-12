@@ -211,12 +211,13 @@ pub fn execute_breeze_speech_on_device(
     )
 }
 
-/// Execute standard or voice-design Breeze speech explicitly declared for CPU.
+/// Execute an explicitly supported Breeze speech mode on a declared CPU route.
 ///
 /// The accepted route must identify `media:breeze-tts-2-cpu` and declare CPU;
 /// the child receives an empty CUDA visibility setting and an explicit CPU
-/// backend flag. Clone and streaming modes remain unsupported. The output
-/// directory remains caller-owned.
+/// backend flag. Streaming chunk references are returned only after native
+/// completion; this is not live audio delivery. The output directory remains
+/// caller-owned.
 pub fn execute_breeze_speech_on_cpu(
     catalog: &Catalog,
     request: &InferenceRequest,
@@ -1020,14 +1021,14 @@ fi
     }
 
     #[test]
-    fn cpu_breeze_standard_and_design_are_private_cpu_runs_and_other_modes_are_rejected() {
+    fn cpu_breeze_supported_modes_run_privately_and_invalid_fields_are_rejected() {
         let fixture = Fixture::new();
         let manifest_path = fixture.media_root.join("media-runtimes.json");
         let mut manifest: serde_json::Value =
             serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
         manifest["profiles"][0]["id"] = serde_json::json!(CPU_BREEZE_PROFILE_ID);
         manifest["profiles"][0]["device"] = serde_json::json!("cpu");
-        manifest["profiles"][0]["tasks"] = serde_json::json!(["tts", "design"]);
+        manifest["profiles"][0]["tasks"] = serde_json::json!(["tts", "clon", "design"]);
         fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         let catalog = fixture.catalog();
         let accepted = crate::control::routes::resolve_profile_route(
@@ -1045,6 +1046,8 @@ fi
                 "cpu-design",
                 "[[ \"$*\" == *\"--instruction fixture voice direction\"* ]] || exit 10\n",
             ),
+            (SpeechMode::VoiceClone, "cpu-clone", ""),
+            (SpeechMode::Streaming, "cpu-streaming", ""),
         ] {
             fs::write(
                 &script_path,
@@ -1065,19 +1068,39 @@ fi
             )
             .unwrap();
             assert_eq!(result.mode(), mode);
-            assert_eq!(result.artifacts().len(), 1);
+            assert_eq!(
+                result.artifacts().len(),
+                if mode == SpeechMode::Streaming { 3 } else { 1 }
+            );
             assert_eq!(
                 result.artifacts()[0].relative_path(),
                 Path::new(OUTPUT_NAME)
             );
             assert_eq!(result.artifacts()[0].kind(), MediaArtifactKind::FinalWave);
+            if mode == SpeechMode::Streaming {
+                assert!(result.artifacts()[1..]
+                    .iter()
+                    .all(|artifact| artifact.kind() == MediaArtifactKind::StreamingChunk));
+            }
         }
 
-        for (mode, name) in [
-            (SpeechMode::VoiceClone, "cpu-clone-rejected"),
-            (SpeechMode::Streaming, "cpu-streaming-rejected"),
+        for (name, mode) in [
+            ("cpu-clone-missing-transcript", SpeechMode::VoiceClone),
+            ("cpu-streaming-with-reference", SpeechMode::Streaming),
         ] {
-            let request = cpu_request(mode, "fixture speech", &fixture);
+            let mut request = cpu_request(mode, "fixture speech", &fixture);
+            let InferenceRequest::Media {
+                input: MediaInput::Speech(input),
+                ..
+            } = &mut request
+            else {
+                unreachable!();
+            };
+            if mode == SpeechMode::VoiceClone {
+                input.reference_text = None;
+            } else {
+                input.voice_reference = Some(PathBuf::from("reference.wav"));
+            }
             let output = fixture.output_directory(name);
             let error = execute_breeze_speech_on_cpu(
                 &catalog,
@@ -1087,7 +1110,7 @@ fi
                 &context(&NeverCancel, Duration::from_secs(5)),
                 recovery(),
             )
-            .expect_err("CPU executor keeps clone and streaming unsupported");
+            .expect_err("CPU executor rejects mode-specific field conflicts");
             assert_eq!(error.kind(), MediaExecutionErrorKind::InvalidRequest);
             assert_eq!(
                 error.disposition(),

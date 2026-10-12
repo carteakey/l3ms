@@ -415,11 +415,14 @@ window.L3MS_DASHBOARD = {
       "status": "experimental-local",
       "tasks": [
         "tts",
+        "clon",
         "design"
       ],
       "modes": [
         "Standard TTS (CPU)",
-        "Offline voice design (CPU)"
+        "Offline voice design (CPU)",
+        "Voice cloning (CPU)",
+        "TTS chunks after completion (CPU)"
       ],
       "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L96",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/cpu-native-workflows.md",

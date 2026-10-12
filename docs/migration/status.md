@@ -8,7 +8,42 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
-## Current gateway retirement checkpoint — 2026-10-12
+## Current CPU cloning/chunked TTS checkpoint — 2026-10-12
+
+CPU Breeze now covers Standard, VoiceDesign, VoiceClone and Streaming through
+the same native recipe, foreground worker and WAV/chunk validator. Strict CLI
+cloning requires reference audio and its nonempty transcript; TTS accepts
+optional `mode: streaming` (offline default). UI fields follow the selected task
+and hidden retained fields are omitted from unrelated drafts. Shared field
+validation was consolidated rather than adding another execution layer.
+
+Real cached-weight CPU acceptance passed: cloning **14.20 seconds whole CLI**,
+61,440-frame WAV; streaming **11.52 seconds**, final 46,080-frame WAV plus two
+chunks. All outputs were 24 kHz mono PCM16, with owned process identities released.
+Reference audio was earlier synthetic speech. No service changes, environment
+installation or model downloads occurred. Chunks arrive after completion, not
+live playback; voice quality/similarity and GPU lifecycle are not evaluated.
+Exact retained commands/settings/copies/receipts:
+[speech evidence](direct-speech-acceptance.md).
+
+Build, strict all-target Clippy and formatting pass. Full root suite:
+**784 passed, 108 unchanged transport failures, 1 ignored**. Local clone/stream UI
+fixtures preserve privacy; standalone media checks pass (6 Rust, 14 downloader,
+17 media Python), as do 11 site data checks and DOM fixtures. Generated payload is
+deterministic; live/browser/publication acceptance remains open. This slice adds
+**409 net root source lines**, cumulative **+4,831** against `702b4cd`; control
+scope 61,981. No platform module is removed here; broad LOC reduction remains.
+
+Hosted audit found the current SDK defaults to two retries, the Nagi-only
+environment lacks that SDK, and reaping a hosted child cannot prove remote
+cancellation. Before enabling Jev/SystemOne: pin its runtime, explicitly disable
+SDK retries, and map post-spawn failures to remote uncertainty with no replay.
+Both declared aliases call TypeSafe System One; `OPENROUTER_API_KEY` is a key
+fallback, not an OpenRouter protocol adapter. No provider call or credential read
+was performed. GPU/service switching, remaining media/decision callers and their
+coordinator dependency closure still need implementation and real acceptance.
+
+## Previous gateway retirement checkpoint — 2026-10-12
 
 Removed the branch-added `--coordinator-http-gateway` action, launcher and custom
 HTTP transport (`http_launch.rs`, `http_gateway.rs`). Callsite tracing found only

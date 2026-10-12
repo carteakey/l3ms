@@ -68,8 +68,10 @@ runbook. Runtime readiness and hardware requirements still apply.
 For a focused Breeze-TTS preflight that does not load the model or request GPU
 work, run `./media-models/generate-breeze-tts-2.sh --check` from this child
 directory. It verifies the compiled audio.cpp loader and local model/spec files;
-the first actual TTS/design/clone/streaming run still needs an exclusive GPU
-window.
+CUDA TTS/design/clone/streaming requires an exclusive GPU window. The separate
+`breeze-tts-2-cpu` profile now covers all four modes without GPU service changes;
+see [CPU execution evidence](../../docs/cpu-native-workflows.md). Chunk paths are
+returned after completion, not played live.
 
 ## Checks
 
