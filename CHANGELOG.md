@@ -32,6 +32,10 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Prepare resident-service handoff safety: the shared NVIDIA probe can verify
+  only caller-checked service claimants without claiming GPU idle, and the
+  branch's llama-swap unit template stops its whole control group. No live unit
+  was installed/reloaded; automatic handoff/restoration remains pending.
 - Wire Blender headless Python/render/image tasks through the shared CLI/UI
   foreground runner and idle-GPU admission. Keep scene-selected backends and
   external GUI/MCP ownership; do not fabricate CUDA selection or code artifacts.

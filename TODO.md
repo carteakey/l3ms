@@ -24,6 +24,9 @@ committed work.
   interactive handoff and device acceptance remain pending. Do not invent inference, output artifacts, or a
   CPU/CUDA device declaration.
 - [ ] Add the small operator-owned native service handoff/restoration path.
+  Claimant preflight and a control-group stop unit template are prepared;
+  neither enables handoff or updates the live unit. Verify live KillMode and
+  the full unit cgroup, not just the router MainPID, before enabling a stop.
   Reuse native controls, perform bounded health/device checks, refuse unknown
   GPU claimants, and restore the exact prior service/runtime state. Use only an
   approved maintenance window; an advisory lock does not fence outside clients.

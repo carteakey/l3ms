@@ -21,7 +21,9 @@ Restart=on-failure
 RestartSec=5
 TimeoutStopSec=60
 KillSignal=SIGTERM
-KillMode=process
+# Model-server children belong to this unit too; stopping only the router can
+# leave GPU claimants alive. Handoff must still verify cgroup/device release.
+KillMode=control-group
 StandardOutput=journal
 StandardError=journal
 

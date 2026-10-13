@@ -9,6 +9,50 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
+## Resident-service handoff prerequisites — 2026-10-13
+
+The existing NVIDIA probe now has claimant-only preflight for a verified resident
+service/cgroup predicate. It shares strict before/compute/after device queries,
+checks every bounded positive PID, allows resident memory above the idle allowance
+only within device capacity, and returns no PID/query payload. Unknown/malformed
+claimants still refuse. Only `observe_idle` constructs an idle observation;
+claimant acceptance is not idle/release, stop authority or an external-client fence.
+No CLI/default execution or service-control behavior is enabled by this method.
+
+All **13 GPU-probe checks** pass; strict lint/fmt/build pass. Root **812 pass,
+100 unchanged socket failures, 1 ignored**; failure names match the preceding
+checkpoint. Logs: `/tmp/l3ms-resident-probe-{tests,clippy,build,full}.log`.
+This is not a fix claim for the previously recorded GPU fixture flake.
+Net root source **+107**, cumulative **+6,247** versus `702b4cd`; control source
+**62,739** lines. The reduction target remains unmet.
+
+The tracked router unit used `KillMode=process`, which does not cover model-server
+children. After a root `.toolkit/model_config_versions` snapshot, the branch
+template now uses `KillMode=control-group`. The installed `systemd.kill(5)` manual
+confirms this scope. `systemd-analyze verify` exits 0 with sandbox socket warnings.
+No live unit was installed, edited, reloaded, stopped or restarted. Live properties
+remain unknown: `systemctl --user show` fails with D-Bus EPERM. Installation or
+a persistent live-unit/drop-in change needs separate authorization; the existing
+bounded maintenance approval is not a deployment approval.
+
+Next build one private configured llama-swap handoff inside the existing GPU
+owner: strict unit/config and ready-model snapshot; current full-cgroup PID/start
+identity checks (not merely MainPID); one stop; acknowledged inactivity, empty
+exact cgroup and idle GPU; existing native job; post-job cleanup/idle; one start
+only if originally active and definition unchanged; one-shot model activation
+plus read-only ready-state polling. Inactive stays inactive. Unknown/drifting or
+unconfirmed states retain recovery/refuse further work, without inference replay.
+Do not fabricate transient-service ownership receipts or a peer-verified socket
+for the original unit, add another worker, or build the deferred Stop journal.
+
+Restore means the same configured operational state and ready model IDs in a
+new process generation, not old PIDs, KV caches, TTL remainder or in-flight work.
+Require explicit operator quiescence of engine clients and outside manager/config
+edits; advisory locks are not a fence. Existing interruption-marker/manual
+recovery limits remain, not an automatic crash-restoration guarantee. The small
+controller, its real handoff/restoration acceptance and broader platform deletion
+are still pending; full client/experience/publication gates remain intact.
+
 ## Blender shared foreground integration — 2026-10-13
 
 Root CLI and Stack forms now dispatch exact Blender `3d` code/script and

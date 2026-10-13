@@ -185,6 +185,39 @@ impl NvidiaSmiGpuProbe {
         context: &OperationContext<'_>,
         recovery_policy: RecoveryPolicy,
     ) -> Result<IdleGpuObservation, GpuProbeFailure> {
+        self.observe_with_claimants(context, recovery_policy, true, |_| false)
+            .map(|after| IdleGpuObservation {
+                gpu_uuid: self.config.gpu_uuid.clone(),
+                index: after.index,
+                memory_used_mib: after.memory_used_mib,
+                memory_total_mib: after.memory_total_mib,
+                max_idle_mib: self.config.max_idle_mib,
+            })
+    }
+
+    /// Verify that every compute PID belongs to the caller's current service
+    /// or cgroup while validating the configured device before and after the
+    /// query. The callback is not authority to stop processes or grant a GPU
+    /// lease. Resident memory may exceed the idle allowance, but must fit the
+    /// validated device capacity. No PID or native query output is returned,
+    /// persisted, or logged by this probe.
+    pub fn observe_only_claimants(
+        &self,
+        context: &OperationContext<'_>,
+        recovery_policy: RecoveryPolicy,
+        allowed: impl FnMut(u32) -> bool,
+    ) -> Result<(), GpuProbeFailure> {
+        self.observe_with_claimants(context, recovery_policy, false, allowed)
+            .map(|_| ())
+    }
+
+    fn observe_with_claimants(
+        &self,
+        context: &OperationContext<'_>,
+        recovery_policy: RecoveryPolicy,
+        require_idle_memory: bool,
+        mut allowed: impl FnMut(u32) -> bool,
+    ) -> Result<GpuSnapshot, GpuProbeFailure> {
         check_active(context)?;
 
         let before_bytes = self.query_gpu(context, recovery_policy)?;
@@ -193,35 +226,33 @@ impl NvidiaSmiGpuProbe {
 
         let apps_bytes = self.query_compute_apps(context, recovery_policy)?;
         check_active(context)?;
-        let has_compute_claimants = parse_compute_apps(&apps_bytes, &self.config)?;
+        let pids = parse_compute_apps(&apps_bytes, &self.config)?;
 
         let after_bytes = self.query_gpu(context, recovery_policy)?;
         check_active(context)?;
         let after = parse_gpu_snapshot(&after_bytes, &self.config)?;
 
-        if has_compute_claimants {
+        let mut all_claimants_allowed = true;
+        for pid in pids {
+            let pid_allowed = allowed(pid);
+            all_claimants_allowed = pid_allowed && all_claimants_allowed;
+        }
+        if !all_claimants_allowed {
             return Err(GpuProbeFailure::new(GpuProbeFailureKind::ClaimantPresent));
         }
         if before.memory_total_mib != after.memory_total_mib {
             return Err(GpuProbeFailure::new(GpuProbeFailureKind::DeviceMismatch));
         }
         for snapshot in [&before, &after] {
-            if snapshot.memory_used_mib > self.config.max_idle_mib
-                || snapshot.memory_total_mib <= self.config.max_idle_mib
-                || snapshot.memory_used_mib > snapshot.memory_total_mib
+            if snapshot.memory_total_mib <= self.config.max_idle_mib
+                || (require_idle_memory && snapshot.memory_used_mib > self.config.max_idle_mib)
             {
                 return Err(GpuProbeFailure::new(GpuProbeFailureKind::MemoryBusy));
             }
         }
         check_active(context)?;
 
-        Ok(IdleGpuObservation {
-            gpu_uuid: self.config.gpu_uuid.clone(),
-            index: after.index,
-            memory_used_mib: after.memory_used_mib,
-            memory_total_mib: after.memory_total_mib,
-            max_idle_mib: self.config.max_idle_mib,
-        })
+        Ok(after)
     }
 
     fn query_gpu(
@@ -354,12 +385,13 @@ fn parse_gpu_snapshot(
     parsed.ok_or_else(malformed_output)
 }
 
-/// Validate every compute-app row without retaining a PID or other row data.
-/// An empty response is the only representation of no compute claimants.
-fn parse_compute_apps(bytes: &[u8], config: &GpuProbeConfig) -> Result<bool, GpuProbeFailure> {
+/// Validate every compute-app row and return only bounded positive PIDs.
+/// Callers must not retain or expose them beyond their local ownership check.
+fn parse_compute_apps(bytes: &[u8], config: &GpuProbeConfig) -> Result<Vec<u32>, GpuProbeFailure> {
     let text = std::str::from_utf8(bytes)
         .map_err(|_| GpuProbeFailure::new(GpuProbeFailureKind::MalformedOutput))?;
     let mut row_count = 0usize;
+    let mut pids = Vec::new();
 
     for row in text.lines() {
         row_count += 1;
@@ -378,12 +410,10 @@ fn parse_compute_apps(bytes: &[u8], config: &GpuProbeConfig) -> Result<bool, Gpu
         if uuid != config.gpu_uuid {
             return Err(GpuProbeFailure::new(GpuProbeFailureKind::DeviceMismatch));
         }
-        // Deliberately consume only a positive numeric check; never store or
-        // report the PID.
-        let _ = pid;
+        pids.push(pid);
     }
 
-    Ok(row_count > 0)
+    Ok(pids)
 }
 
 fn text_field(value: Option<&str>) -> Option<&str> {
@@ -615,6 +645,83 @@ mod tests {
             fs::read_to_string(fixture.directory.path().join("gpu-count")).unwrap(),
             "2\n"
         );
+    }
+
+    #[test]
+    fn claimant_only_accepts_known_pids_above_idle_memory_allowance() {
+        let fixture = fake_probe(
+            &snapshot(0, UUID, 2048, 8192),
+            &format!("{UUID},123\n{UUID},456\n"),
+            &snapshot(0, UUID, 3072, 8192),
+        );
+        let mut checked = Vec::new();
+        fixture
+            .probe
+            .observe_only_claimants(
+                &context(Duration::from_secs(3), &NeverCancel),
+                recovery(),
+                |pid| {
+                    checked.push(pid);
+                    matches!(pid, 123 | 456)
+                },
+            )
+            .unwrap();
+        assert_eq!(checked, [123, 456]);
+    }
+
+    #[test]
+    fn claimant_only_checks_every_pid_and_redacts_unknown_claimants() {
+        let fixture = fake_probe(
+            &snapshot(0, UUID, 2048, 8192),
+            &format!("{UUID},123456\n{UUID},654321\n"),
+            &snapshot(0, UUID, 2048, 8192),
+        );
+        let mut checked = Vec::new();
+        let error = fixture
+            .probe
+            .observe_only_claimants(
+                &context(Duration::from_secs(3), &NeverCancel),
+                recovery(),
+                |pid| {
+                    checked.push(pid);
+                    false
+                },
+            )
+            .unwrap_err();
+        assert_eq!(checked, [123456, 654321]);
+        assert_kind(error, GpuProbeFailureKind::ClaimantPresent);
+        assert!(!error.to_string().contains("123456"));
+        assert!(!format!("{error:?}").contains("654321"));
+    }
+
+    #[test]
+    fn claimant_only_rejects_mismatched_device_and_malformed_rows() {
+        let wrong_device = snapshot(1, UUID, 2048, 8192);
+        let fixture = fake_probe(&wrong_device, &format!("{UUID},42\n"), &wrong_device);
+        let error = fixture
+            .probe
+            .observe_only_claimants(
+                &context(Duration::from_secs(3), &NeverCancel),
+                recovery(),
+                |_| true,
+            )
+            .unwrap_err();
+        assert_kind(error, GpuProbeFailureKind::DeviceMismatch);
+
+        let fixture = fake_probe(
+            &snapshot(0, UUID, 2048, 8192),
+            &format!("{UUID},N/A\n"),
+            &snapshot(0, UUID, 2048, 8192),
+        );
+        let error = fixture
+            .probe
+            .observe_only_claimants(
+                &context(Duration::from_secs(3), &NeverCancel),
+                recovery(),
+                |_| true,
+            )
+            .unwrap_err();
+        assert_kind(error, GpuProbeFailureKind::MalformedOutput);
     }
 
     #[test]
