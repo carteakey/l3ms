@@ -384,7 +384,7 @@ window.L3MS_DASHBOARD = {
         "music"
       ],
       "modes": [],
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L51",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L52",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/audio-cpp-runtimes.md",
       "experimentUrl": null
     },
@@ -404,7 +404,7 @@ window.L3MS_DASHBOARD = {
         "Voice cloning",
         "Streaming"
       ],
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L73",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L74",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/audio-cpp-runtimes.md",
       "experimentUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/experiments/breeze-tts-2-baseline.md"
     },
@@ -424,7 +424,7 @@ window.L3MS_DASHBOARD = {
         "Voice cloning (CPU)",
         "TTS chunks after completion (CPU)"
       ],
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L98",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L99",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/cpu-native-workflows.md",
       "experimentUrl": "https://github.com/carteakey/l3ms/blob/main/docs/cpu-native-workflows.md"
     },
@@ -439,7 +439,7 @@ window.L3MS_DASHBOARD = {
         "image"
       ],
       "modes": [],
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L118",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L119",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/blender-mcp-setup.md",
       "experimentUrl": null
     },
@@ -452,7 +452,7 @@ window.L3MS_DASHBOARD = {
         "image"
       ],
       "modes": [],
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L140",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L141",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/qwen-image-2.1-setup.md",
       "experimentUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/experiments/qwen-vs-krea2-comparison.md"
     },
@@ -465,7 +465,7 @@ window.L3MS_DASHBOARD = {
         "image"
       ],
       "modes": [],
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L161",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L162",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/krea-2-setup.md",
       "experimentUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/experiments/qwen-vs-krea2-comparison.md"
     }

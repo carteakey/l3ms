@@ -28,6 +28,7 @@
       "id": "ltx-2.5",
       "name": "LTX-2.5 synchronized video",
       "runtime": "LTX-2 Python",
+      "device": "cuda",
       "variant": "22B distilled, FP8-cast at load, CPU offload",
       "tasks": ["video", "music"],
       "inputs": ["text", "image"],

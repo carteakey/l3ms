@@ -382,6 +382,7 @@ struct TaskFormEditor {
     direct_breeze_speech: bool,
     direct_native_music: bool,
     direct_native_h3: bool,
+    direct_native_ltx: bool,
     direct_comfy_workflow: bool,
     direct_language_embeddings: bool,
     declared_tasks: Vec<String>,
@@ -408,6 +409,7 @@ impl TaskFormEditor {
         let direct_breeze_speech = is_direct_breeze_speech_profile(profile);
         let direct_native_music = is_direct_cuda_music_profile(profile);
         let direct_native_h3 = is_direct_cuda_h3_profile(profile);
+        let direct_native_ltx = is_direct_cuda_ltx_profile(profile);
         #[cfg(target_os = "linux")]
         let direct_comfy_workflow = is_direct_comfy_workflow_profile(profile);
         #[cfg(not(target_os = "linux"))]
@@ -432,6 +434,9 @@ impl TaskFormEditor {
         if direct_native_h3 {
             declared_tasks.retain(|task| matches!(task.as_str(), "music" | "tts" | "video"));
         }
+        if direct_native_ltx {
+            declared_tasks.retain(|task| matches!(task.as_str(), "music" | "video"));
+        }
         if profile.key.lane == Lane::Language
             && profile
                 .tasks
@@ -447,6 +452,7 @@ impl TaskFormEditor {
             direct_breeze_speech,
             direct_native_music,
             direct_native_h3,
+            direct_native_ltx,
             direct_comfy_workflow,
             direct_language_embeddings,
             declared_tasks,
@@ -460,8 +466,7 @@ impl TaskFormEditor {
         };
         if direct_native_decision
             || direct_breeze_speech
-            || direct_native_music
-            || direct_native_h3
+            || editor.is_direct_script_media()
             || direct_comfy_workflow
             || direct_language_embeddings
         {
@@ -500,6 +505,14 @@ impl TaskFormEditor {
                 .or_else(|| (!editor.declared_tasks.is_empty()).then_some(0));
             editor.media_operation = Some(TaskFormMediaOperation::Script);
         }
+        if direct_native_ltx {
+            editor.selected_task = editor
+                .declared_tasks
+                .iter()
+                .position(|task| task == "video")
+                .or_else(|| (!editor.declared_tasks.is_empty()).then_some(0));
+            editor.media_operation = Some(TaskFormMediaOperation::Script);
+        }
         if direct_comfy_workflow {
             editor.media_operation = Some(TaskFormMediaOperation::Workflow);
         }
@@ -516,10 +529,13 @@ impl TaskFormEditor {
     fn is_direct_native(&self) -> bool {
         self.direct_native_decision
             || self.direct_breeze_speech
-            || self.direct_native_music
-            || self.direct_native_h3
+            || self.is_direct_script_media()
             || self.direct_comfy_workflow
             || self.direct_language_embeddings
+    }
+
+    fn is_direct_script_media(&self) -> bool {
+        self.direct_native_music || self.direct_native_h3 || self.direct_native_ltx
     }
 
     fn refresh_fields(&mut self) {
@@ -530,8 +546,7 @@ impl TaskFormEditor {
         fields.push(TaskFormField::Timeout);
         if !self.direct_native_decision
             && (!self.direct_breeze_speech || self.declared_tasks.len() > 1)
-            && !self.direct_native_music
-            && (!self.direct_native_h3 || self.declared_tasks.len() > 1)
+            && (!self.is_direct_script_media() || self.declared_tasks.len() > 1)
             && !self.direct_language_embeddings
         {
             fields.push(TaskFormField::DeclaredTask);
@@ -571,7 +586,7 @@ impl TaskFormEditor {
                     }
                 } else if self.direct_comfy_workflow {
                     fields.push(TaskFormField::MediaWorkflowGraph);
-                } else if self.direct_native_music || self.direct_native_h3 {
+                } else if self.is_direct_script_media() {
                     fields.push(TaskFormField::MediaScriptArgv);
                 } else {
                     fields.push(TaskFormField::MediaOperation);
@@ -4553,7 +4568,9 @@ impl App {
                 direct_language_embeddings,
             ));
             self.input_mode = InputMode::TaskForm;
-            self.status = if is_direct_cuda_h3_profile(&profile) {
+            self.status = if is_direct_cuda_ltx_profile(&profile) {
+                "Foreground CUDA LTX-2.5 form open · choose video or music; both generate synchronized MP4 · prompt/argv stay in memory · the selected GPU must be idle; no service is stopped automatically · run once with Ctrl+Enter".into()
+            } else if is_direct_cuda_h3_profile(&profile) {
                 "Foreground CUDA MiniMax H3 form open · choose music, tts, or video; prompt/argv stay in memory · the selected GPU must be idle; no service is stopped automatically · run once with Ctrl+Enter".into()
             } else if is_direct_cuda_music_profile(&profile) {
                 "Foreground CUDA HeartMuLa music form open · the selected GPU must be idle; prompt/lyrics stay in memory; no service is stopped automatically · run once with Ctrl+Enter".into()
@@ -5446,8 +5463,10 @@ impl App {
                                         .tasks
                                         .iter()
                                         .any(|task| task.as_str() == summary.task)
-                                    && (summary.profile_id != "heartmula-music"
-                                        || summary.task == "music")
+                                    && is_direct_script_media_task(
+                                        &summary.profile_id,
+                                        &summary.task,
+                                    )
                             })
                         })
                 }
@@ -7601,7 +7620,9 @@ impl App {
                 Constraint::Length(3),
             ])
             .split(area);
-        let form_hint = if editor.direct_native_h3 {
+        let form_hint = if editor.direct_native_ltx {
+            "LTX-2.5 · video/music both generate synchronized MP4 · JSON argv only · prompt/settings stay in memory · GPU must be idle; no automatic service stop"
+        } else if editor.direct_native_h3 {
             "MiniMax H3 · choose music/tts/video; JSON argv only · prompt stays in memory · GPU must be idle; no automatic service stop"
         } else if editor.direct_native_music {
             "HeartMuLa music · JSON argv only · prompt/lyrics stay in memory · GPU must be idle; no automatic service stop"
@@ -8331,6 +8352,16 @@ fn is_direct_cuda_h3_profile(_profile: &CatalogProfile) -> bool {
     false
 }
 
+#[cfg(target_os = "linux")]
+fn is_direct_cuda_ltx_profile(profile: &CatalogProfile) -> bool {
+    direct_run::is_supported_direct_ltx_profile(profile)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_direct_cuda_ltx_profile(_profile: &CatalogProfile) -> bool {
+    false
+}
+
 fn is_direct_cpu_speech_profile(profile: &CatalogProfile) -> bool {
     profile.key.lane == Lane::Media
         && profile.key.profile_id.as_str() == "breeze-tts-2-cpu"
@@ -8427,6 +8458,12 @@ fn direct_script_media_task_label(profile_id: &str, task: &str) -> &'static str 
             _ => "CUDA H3 media",
         };
     }
+    if profile_id == "ltx-2.5" {
+        return match task {
+            "music" | "video" => "CUDA LTX synchronized MP4",
+            _ => "CUDA LTX media",
+        };
+    }
     if profile_id == "heartmula-music" && task == "music" {
         "CUDA music"
     } else {
@@ -8438,7 +8475,7 @@ fn direct_script_media_task_label(profile_id: &str, task: &str) -> &'static str 
 fn direct_native_summary_label(summary: &DirectNativeSummary) -> &'static str {
     if summary.native_id.is_some() {
         "Comfy workflow"
-    } else if summary.cuda && summary.profile_id == "minimax-h3" {
+    } else if summary.cuda && matches!(summary.profile_id.as_str(), "minimax-h3" | "ltx-2.5") {
         direct_script_media_task_label(&summary.profile_id, &summary.task)
     } else if summary.cuda {
         direct_cuda_task_label(&summary.task)
@@ -8489,10 +8526,19 @@ fn is_direct_cuda_script_request(
                     .tasks
                     .iter()
                     .any(|declared| declared.as_str() == task.as_str())
-                && (profile.key.profile_id.as_str() != "heartmula-music"
-                    || task.as_str() == "music")
+                && is_direct_script_media_task(profile.key.profile_id.as_str(), task.as_str())
         })
         && request.validate(catalog).is_ok()
+}
+
+#[cfg(target_os = "linux")]
+fn is_direct_script_media_task(profile_id: &str, task: &str) -> bool {
+    match profile_id {
+        "heartmula-music" => task == "music",
+        "minimax-h3" => matches!(task, "music" | "tts" | "video"),
+        "ltx-2.5" => matches!(task, "music" | "video"),
+        _ => false,
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -10170,6 +10216,16 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    fn write_ltx_25_media_manifest(fixture: &AppFixture) {
+        write_stack_fixture(fixture);
+        fs::write(
+            fixture.root.join("toolkits/l2m2/media-runtimes.json"),
+            r#"{"schema_version":1,"profiles":[{"id":"ltx-2.5","name":"LTX-2.5 fixture","runtime":"LTX-2 Python","device":"cuda","tasks":["video","music"],"script":"media-models/generate-ltx-2.5.sh"}]}"#,
+        )
+        .unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
     fn write_comfy_stack_fixture(fixture: &AppFixture) {
         write_stack_fixture(fixture);
         fs::write(
@@ -10570,6 +10626,79 @@ mod tests {
         let persisted =
             fs::read_to_string(crate::state_store::jobs_path_in(&fixture.data)).unwrap_or_default();
         assert!(!persisted.contains("private H3 input"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ltx_form_keeps_only_declared_synchronized_media_tasks_ephemeral() {
+        let fixture = AppFixture::new();
+        write_ltx_25_media_manifest(&fixture);
+        let mut app = fixture.app();
+        assert!(app.stack_coordinator_socket_dir.is_none());
+
+        focus_stack_profile_by_id(&mut app, "ltx-2.5");
+        let profile = app.selected_stack_profile().unwrap();
+        assert!(is_direct_cuda_ltx_profile(profile));
+        assert!(is_direct_cuda_profile(profile));
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+            .unwrap();
+
+        let catalog = app.stack_catalog.as_ref().unwrap().clone();
+        {
+            let editor = app.task_form_editor.as_ref().unwrap();
+            assert!(editor.direct_native_ltx);
+            assert!(!editor.direct_native_music);
+            assert!(!editor.direct_native_h3);
+            assert!(editor.is_direct_native());
+            assert_eq!(editor.declared_tasks, ["video", "music"]);
+            assert!(editor.fields.contains(&TaskFormField::DeclaredTask));
+            assert!(!editor.fields.contains(&TaskFormField::RequestId));
+            assert!(!editor.fields.contains(&TaskFormField::MediaOperation));
+            assert!(editor.fields.contains(&TaskFormField::MediaScriptArgv));
+            assert!(!editor.fields.contains(&TaskFormField::SpeechText));
+            assert!(!editor.fields.contains(&TaskFormField::SpeechMode));
+            assert!(!editor.fields.contains(&TaskFormField::SpeechInstruction));
+            assert!(!editor.fields.contains(&TaskFormField::SpeechVoiceReference));
+            assert!(!editor.fields.contains(&TaskFormField::SpeechReferenceText));
+            assert!(!editor.fields.contains(&TaskFormField::MediaWorkflowGraph));
+        }
+
+        for task in ["video", "music"] {
+            select_task_form_declared_task(&mut app, task);
+            let editor = app.task_form_editor.as_mut().unwrap();
+            editor.values.script_argv = r#"["--prompt","private LTX prompt","--seed","42"]"#.into();
+            let draft = editor.to_draft().unwrap();
+            assert!(!format!("{draft:?}").contains("private LTX prompt"));
+            let (request, _) = build_direct_native(&catalog, draft).unwrap();
+            assert!(is_direct_cuda_script_request(&catalog, &request));
+            let crate::control::requests::InferenceRequest::Media {
+                profile,
+                input:
+                    crate::control::requests::MediaInput::Script {
+                        task: built_task,
+                        args,
+                    },
+            } = request
+            else {
+                panic!("LTX form builds a native script argv request")
+            };
+            assert_eq!(profile.profile_id.as_str(), "ltx-2.5");
+            assert_eq!(built_task.as_str(), task);
+            assert_eq!(args, ["--prompt", "private LTX prompt", "--seed", "42"]);
+        }
+
+        assert!(app.status.contains("selected GPU must be idle"));
+        assert!(!app.status.contains("private LTX prompt"));
+        assert!(app
+            .log
+            .iter()
+            .all(|line| !line.contains("private LTX prompt")));
+        assert!(app.job_history.records().is_empty());
+        assert!(app.direct_native_job.is_none());
+        assert!(app.coordinator_workbench.is_none());
+        let persisted =
+            fs::read_to_string(crate::state_store::jobs_path_in(&fixture.data)).unwrap_or_default();
+        assert!(!persisted.contains("private LTX prompt"));
     }
 
     #[cfg(target_os = "linux")]

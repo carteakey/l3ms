@@ -10,6 +10,16 @@ existing Linear migration issues rather than replacing their acceptance criteria
 
 ## Monorepo: next work
 
+LTX-2.5 video/music now retains synchronized audio/video and image conditioning
+through the shared native script path. Prepared-only Python dispatch prevents
+implicit `uv` setup; default standalone behavior is unchanged. Four focused Rust
+and 18 toolkit media fixtures pass; root **809 pass, 102 unchanged socket
+failures, 1 ignored**, build/strict lint/fmt pass. Source grew **637 net lines**
+including tests; the reduction target remains unmet. Next retire branch-added
+coordinator UI submission fallback/helpers, preserve observe/cancel/history,
+then bounded Blender and live GPU/handoff/codec acceptance. Live service/GPU
+access and the default LTX runtime are unavailable in this session.
+
 H3 music/TTS/video now uses the shared native script-media path: private WAV,
 validated retained RGB24 JSON and optional MP4, no graph/speech reinterpretation.
 Seven H3 fixtures and HeartMuLa compatibility checks pass; root **805 pass,

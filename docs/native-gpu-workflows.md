@@ -1,6 +1,6 @@
 # Explicit idle-GPU native work
 
-CUDA-local Nagi/Laya decisions, `media:breeze-tts-2` speech, HeartMuLa and H3 use the same
+CUDA-local Nagi/Laya decisions, `media:breeze-tts-2` speech, HeartMuLa, H3 and LTX use the same
 foreground runner as CPU work. This is an **operator-managed idle window**, not
 automatic switching of a live router. No service is adopted, stopped, installed
 or restored automatically. Original standalone commands remain available.
@@ -105,6 +105,31 @@ no tools are installed and no MP4 is invented. Native failure produces no result
 references or inference retry, even if partial private files remain. Fixtures
 cover audio, raw-only and raw+MP4 results, but real H3 output/decoder/GPU behavior
 and interactive acceptance still require the original runtime and a live window.
+
+### LTX-2.5 synchronized audio/video
+
+Use `media:ltx-2.5` with its declared `video` or `music` task. Both invoke the
+existing distilled pipeline and return synchronized audio/video in `result.mp4`;
+the music label does not select a fabricated audio-only pipeline.
+
+```json
+{"args":["--prompt","a paper boat crossing a puddle","--frames","121","--seed","42"]}
+```
+
+Native prompt/file, frames, seed, transformer, quantization and offload options
+remain available, including repeated `--image PATH FRAME STRENGTH` conditioning.
+The wrapper refuses conflicting/incomplete/unknown flags and caller output
+overrides, and supplies a fresh private MP4 target. Numeric interpretation stays
+with the native pipeline. This is not audio-to-video or video-to-video support.
+
+The LTX checkout, five model files and its `.venv/bin/python` must already be
+prepared. Workbench execution sets `L3MS_LTX_PREPARED_ONLY=1`: the native script
+uses that interpreter directly with Hugging Face/Transformers offline settings,
+without `uv` resolution, syncing or interpreter downloads. Normal standalone
+execution keeps its original `uv run` behavior. Missing assets fail; no fallback
+or automatic setup runs. MP4 checks are bounded header sanity, not proof of
+playable synchronized tracks or generation quality. Real model/GPU/codec and
+interactive acceptance remain open.
 
 ## What the wrapper checks
 

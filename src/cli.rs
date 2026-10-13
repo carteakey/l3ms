@@ -69,7 +69,7 @@ struct Cli {
     #[arg(long, value_name = "PATH", requires = "run_profile")]
     input: Option<PathBuf>,
 
-    /// Existing private empty output directory required for speech, music and Comfy workflows.
+    /// Existing private empty output directory required for speech and media workflows.
     #[arg(long, value_name = "PATH", requires = "run_profile")]
     output_dir: Option<PathBuf>,
 
@@ -1632,7 +1632,7 @@ fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
         .map_err(|_| anyhow::anyhow!("--task is invalid"))?;
     let script_media = matches!(
         profile.profile_id.as_str(),
-        "heartmula-music" | "minimax-h3"
+        "heartmula-music" | "minimax-h3" | "ltx-2.5"
     );
     let input = read_direct_native_input(spec.input, spec.task, script_media)?;
     let is_comfy_workflow = !script_media && matches!(spec.task, "image" | "video");
@@ -1787,10 +1787,10 @@ fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
             let response = serde_json::json!({"artifacts": direct_wave_artifact_outputs(&result)});
             let mut writer = BoundedJsonWriter::new(MAX_DIRECT_NATIVE_OUTPUT_BYTES);
             serde_json::to_writer(&mut writer, &response).map_err(|_| {
-                anyhow::anyhow!("native music output could not be encoded within its bound")
+                anyhow::anyhow!("native script-media output could not be encoded within its bound")
             })?;
             String::from_utf8(writer.bytes)
-                .map_err(|_| anyhow::anyhow!("native music output could not be encoded"))?
+                .map_err(|_| anyhow::anyhow!("native script-media output could not be encoded"))?
         }
         crate::control::direct_run::DirectRunResult::Embeddings(result) => {
             direct_embedding_output_json(&result)?

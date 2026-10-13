@@ -564,6 +564,8 @@ pub fn run_native(
         }
         let execute = if is_supported_direct_h3_profile(profile) {
             super::media_execution::execute_h3_on_device
+        } else if is_supported_direct_ltx_profile(profile) {
+            super::media_execution::execute_ltx_on_device
         } else {
             execute_heartmula_music_on_device
         };
@@ -904,7 +906,24 @@ pub(crate) fn is_supported_direct_cuda_profile(profile: &CatalogProfile) -> bool
 }
 
 pub(crate) fn is_supported_direct_script_profile(profile: &CatalogProfile) -> bool {
-    is_supported_direct_music_profile(profile) || is_supported_direct_h3_profile(profile)
+    is_supported_direct_music_profile(profile)
+        || is_supported_direct_h3_profile(profile)
+        || is_supported_direct_ltx_profile(profile)
+}
+
+pub(crate) fn is_supported_direct_ltx_profile(profile: &CatalogProfile) -> bool {
+    !profile.disabled
+        && profile.key.lane == Lane::Media
+        && profile.key.profile_id.as_str() == "ltx-2.5"
+        && profile.runtime.lane == Lane::Media
+        && profile.runtime.as_str() == "LTX-2 Python"
+        && profile.device.as_ref() == Some(&Device::Cuda)
+        && profile
+            .tasks
+            .iter()
+            .any(|task| matches!(task.as_str(), "video" | "music"))
+        && matches!(&profile.native_source, NativeProfileSource::Media { script }
+            if script == "media-models/generate-ltx-2.5.sh")
 }
 
 pub(crate) fn is_supported_direct_h3_profile(profile: &CatalogProfile) -> bool {

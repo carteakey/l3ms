@@ -3,10 +3,41 @@
 Working branch: `feature/l3ms-monorepo` in the isolated checkout
 `/home/kchauhan/repos/l3ms-monorepo`.
 
-Plan: [monorepo-consolidation-plan.md](../monorepo-consolidation-plan.md).
+Current authority: [simplification-plan.md](simplification-plan.md), which
+supersedes the platform requirements in the earlier consolidation plan.
 This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
+
+## LTX prepared native integration — 2026-10-13
+
+Declared LTX-2.5 `video`/`music` now shares the script-media CLI/UI owner and
+idle-GPU guard. Both retain synchronized audio/video and repeated still-image
+conditioning; neither is replaced by an audio-only pipeline. Native argv is
+ephemeral, output is fixed to fresh private `result.mp4`, and bounded MP4 header
+sanity precedes the one Video artifact reference. No codec/quality claim.
+
+Workbench execution opts into the native script's prepared-only mode: existing
+`.venv/bin/python`, the same distilled pipeline arguments and offline model
+settings, no `uv` sync/resolution/interpreter download. Missing setup/weights
+fail rather than install; normal standalone `uv run` is unchanged. Config/script
+snapshots are in the root `.toolkit` directory. No worker/module was added.
+
+Four focused Rust checks pass, plus seven H3/five Heart compatibility tests.
+Root **809 pass, 102 unchanged socket failures, 1 ignored**; build/strict lint/fmt
+pass. Six toolkit Rust, 18 media Python, 14 downloader Python, 11 site generator
+checks and DOM fixtures pass. Logs: `/tmp/l3ms-ltx-{focused,h3,heart,tests,clippy,build}.log`.
+Actual CLI `video` and `music` each exit 1 before dispatch when GPU config is
+unset; fixture `/tmp/l3ms-ltx-cli-ZBLrkt`. No service or model was started.
+
+Read-only service access still fails with D-Bus EPERM; NVIDIA cannot communicate
+with its driver here. The default LTX checkout/model paths are absent. Live GPU,
+tracks/codec, interactive and handoff/restoration acceptance remain open.
+Source delta **+637**, cumulative **+6,579** versus `702b4cd`; control source
+**62,895** lines. This is replacement overlap, not achieved simplification.
+Next retire branch-added UI coordinator submission fallback and its now-unused
+helpers, preserving observation/cancellation/history and original native tools;
+then bounded Blender and live acceptance. Do not expand the old managed platform.
 
 ## H3 complete native output path — 2026-10-12; checks repeated 2026-10-13
 

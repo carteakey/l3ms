@@ -179,7 +179,7 @@ pub fn build_direct_native(
         TaskFields::MediaScript { args } => {
             let supported = catalog.inspect(&selected_profile).is_some_and(|profile| {
                 selected_profile.lane == Lane::Media
-                    && profile.runtime.as_str() == "audio.cpp"
+                    && matches!(profile.runtime.as_str(), "audio.cpp" | "LTX-2 Python")
                     && profile.device.as_ref() == Some(&super::catalog::Device::Cuda)
             });
             let accepted_args = match selected_profile.profile_id.as_str() {
@@ -188,6 +188,9 @@ pub fn build_direct_native(
                 }
                 "minimax-h3" => {
                     super::native_commands::is_supported_h3_args(&args, declared_task.as_str())
+                }
+                "ltx-2.5" => {
+                    super::native_commands::is_supported_ltx_args(&args, declared_task.as_str())
                 }
                 _ => false,
             };

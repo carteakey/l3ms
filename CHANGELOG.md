@@ -27,6 +27,10 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Run prepared LTX-2.5 video/music through the shared script-media owner and
+  explicit idle-GPU window, retaining native synchronized audio/video and image
+  conditioning. Pin its MP4 output and require its existing Python environment
+  offline; no automatic setup, service takeover or live quality claim.
 - Run native H3 music/TTS/video through the same script-media foreground owner
   and explicit idle-GPU window. Pin WAV/raw-video/MP4/temp outputs to the private
   job directory, validate RGB24 metadata/payload and optional MP4 headers, and

@@ -22,9 +22,10 @@ use super::catalog::{Catalog, Device};
 use super::cuda_device::CudaDevice;
 use super::native_commands::{
     is_supported_cpu_breeze_speech, is_supported_h3_request_route,
-    is_supported_heartmula_request_route, prepare_breeze_speech_recipe,
-    prepare_breeze_speech_recipe_for_route, prepare_h3_recipe_for_route,
-    prepare_heartmula_music_recipe_for_route, NativeOutputExpectation, CPU_BREEZE_PROFILE_ID,
+    is_supported_heartmula_request_route, is_supported_ltx_request_route,
+    prepare_breeze_speech_recipe, prepare_breeze_speech_recipe_for_route,
+    prepare_h3_recipe_for_route, prepare_heartmula_music_recipe_for_route,
+    prepare_ltx_recipe_for_route, NativeOutputExpectation, CPU_BREEZE_PROFILE_ID,
 };
 use super::process::{self, ProcessFailureDisposition, ProcessFailureKind, ProcessLimits};
 use super::requests::{InferenceRequest, MediaInput, SpeechMode};
@@ -35,6 +36,7 @@ const OUTPUT_NAME: &str = "result.wav";
 const CHUNKS_NAME: &str = "result.wav.chunks";
 const H3_RAW_VIDEO_NAME: &str = "minimax_h3_video_rgb24.json";
 const H3_VIDEO_NAME: &str = "result.mp4";
+const LTX_VIDEO_NAME: &str = H3_VIDEO_NAME;
 const MAX_CAPTURE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_STREAM_CHUNKS: usize = 63;
 const MAX_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
@@ -247,7 +249,7 @@ pub(crate) fn execute_heartmula_music_on_device(
     )
     .map_err(|_| not_dispatched(MediaExecutionErrorKind::InvalidRequest))?;
 
-    execute_script_recipe(&recipe, &output_root, device, context, recovery)?;
+    execute_script_recipe(&recipe, &output_root, device, context, recovery, false)?;
     // The shared validator's Standard mode means one final WAV and no chunks;
     // it does not imply that the HeartMuLa result is speech.
     let artifacts = discover_artifacts(&output_root, SpeechMode::Standard, context)?;
@@ -294,12 +296,45 @@ pub(crate) fn execute_h3_on_device(
         video_output.as_deref(),
     )
     .map_err(|_| not_dispatched(MediaExecutionErrorKind::InvalidRequest))?;
-    execute_script_recipe(&recipe, &output_root, device, context, recovery)?;
+    execute_script_recipe(&recipe, &output_root, device, context, recovery, false)?;
 
     let artifacts = discover_h3_artifacts(&output_root, video_task, context)?;
     check_after_child(context)?;
     Ok(MediaExecutionResult {
         output_root,
+        mode: SpeechMode::Standard,
+        artifacts,
+    })
+}
+
+/// Run one LTX-2.5 synchronized audio/video request on its exact accepted CUDA
+/// route. The prepared-only script path must use the already-installed Python
+/// interpreter and weights; this function does not prepare or download either.
+pub(crate) fn execute_ltx_on_device(
+    catalog: &Catalog,
+    request: &InferenceRequest,
+    accepted_route: &ResolvedProfileRoute,
+    device: &CudaDevice,
+    job_directory: &Path,
+    context: &OperationContext<'_>,
+    recovery: RecoveryPolicy,
+) -> Result<MediaExecutionResult, MediaExecutionFailure> {
+    if !is_supported_ltx_request_route(request, accepted_route) {
+        return Err(not_dispatched(MediaExecutionErrorKind::InvalidRequest));
+    }
+    let output_root = validate_job_directory(job_directory)?;
+    let output_path = output_root.join(LTX_VIDEO_NAME);
+    ensure_absent(&output_path)?;
+    let recipe = prepare_ltx_recipe_for_route(catalog, request, accepted_route, &output_path)
+        .map_err(|_| not_dispatched(MediaExecutionErrorKind::InvalidRequest))?;
+
+    execute_script_recipe(&recipe, &output_root, device, context, recovery, true)?;
+    let artifacts = discover_ltx_artifacts(&output_root, context)?;
+    check_after_child(context)?;
+    Ok(MediaExecutionResult {
+        output_root,
+        // The result type predates synchronized video. Callers distinguish it
+        // by its single Video artifact, not this speech-mode compatibility tag.
         mode: SpeechMode::Standard,
         artifacts,
     })
@@ -311,6 +346,7 @@ fn execute_script_recipe(
     device: &CudaDevice,
     context: &OperationContext<'_>,
     recovery: RecoveryPolicy,
+    prepared_ltx: bool,
 ) -> Result<(), MediaExecutionFailure> {
     let mut command = Command::new(&recipe.executable);
     command
@@ -320,6 +356,9 @@ fn execute_script_recipe(
         // output and the H3 muxer's temporary raw stream in this private job.
         .env("L3MS_MEDIA_OUTPUT_DIR", output_root)
         .env("TMPDIR", output_root);
+    if prepared_ltx {
+        command.env("L3MS_LTX_PREPARED_ONLY", "1");
+    }
     device.apply_to(&mut command);
     let limits = ProcessLimits::new(0, MAX_CAPTURE_BYTES)
         .map_err(|error| process_failure(error.disposition(), error.kind()))?;
@@ -601,6 +640,22 @@ fn discover_artifacts(
     Ok(artifacts)
 }
 
+fn discover_ltx_artifacts(
+    root: &Path,
+    context: &OperationContext<'_>,
+) -> Result<Vec<MediaArtifact>, MediaExecutionFailure> {
+    check_after_child(context)?;
+    validate_mp4(&root.join(LTX_VIDEO_NAME), root, context)?;
+    for name in [OUTPUT_NAME, CHUNKS_NAME, H3_RAW_VIDEO_NAME] {
+        require_missing_after_child(&root.join(name))?;
+    }
+    check_after_child(context)?;
+    Ok(vec![MediaArtifact {
+        relative_path: PathBuf::from(LTX_VIDEO_NAME),
+        kind: MediaArtifactKind::Video,
+    }])
+}
+
 fn discover_h3_artifacts(
     root: &Path,
     video_task: bool,
@@ -631,7 +686,7 @@ fn discover_h3_artifacts(
         let mp4_path = root.join(H3_VIDEO_NAME);
         match fs::symlink_metadata(&mp4_path) {
             Ok(_) => {
-                let mp4_size = validate_h3_mp4(&mp4_path, root, context)?;
+                let mp4_size = validate_mp4(&mp4_path, root, context)?;
                 total_size = total_size.saturating_add(mp4_size);
                 if total_size > MAX_TOTAL_ARTIFACT_BYTES {
                     return Err(artifact_too_large());
@@ -879,7 +934,7 @@ impl Read for ContextCheckedReader<'_, '_> {
     }
 }
 
-fn validate_h3_mp4(
+fn validate_mp4(
     path: &Path,
     root: &Path,
     context: &OperationContext<'_>,
@@ -1263,6 +1318,35 @@ else
 fi
 "#;
 
+    const LTX_FIXTURE_SCRIPT: &str = r#"#!/usr/bin/env bash
+set -euo pipefail
+output=""
+prompt=""
+while (($#)); do
+  case "$1" in
+    --prompt|--prompt-file) prompt="$2"; shift 2 ;;
+    --frames|--num-frames|--seed|--transformer|--quantization|--offload) shift 2 ;;
+    --image|--input-image) shift 4 ;;
+    --output) output="$2"; shift 2 ;;
+    *) exit 92 ;;
+  esac
+done
+[[ "${CUDA_VISIBLE_DEVICES-unset}" == "GPU-01234567-89ab-cdef-0123-456789abcdef" ]] || exit 93
+[[ "${L3MS_LTX_PREPARED_ONLY-unset}" == "1" ]] || exit 94
+[[ -n "$L3MS_MEDIA_OUTPUT_DIR" && "$TMPDIR" == "$L3MS_MEDIA_OUTPUT_DIR" ]] || exit 95
+[[ "$output" == "$L3MS_MEDIA_OUTPUT_DIR/result.mp4" ]] || exit 96
+printf x >> '__ATTEMPT_MARKER__'
+if [[ "$prompt" == *child-failure* ]]; then
+  printf 'private LTX log'
+  exit 9
+fi
+if [[ "$prompt" == *invalid-mp4* ]]; then
+  printf 'not an mp4' > "$output"
+  exit 0
+fi
+printf '\000\000\000\014ftypisom' > "$output"
+"#;
+
     struct Fixture {
         _parent: TempDir,
         language_root: PathBuf,
@@ -1311,6 +1395,14 @@ fi
                             "device": "cuda",
                             "tasks": ["music", "tts", "video"],
                             "script": "media-models/generate-minimax-h3.sh"
+                        },
+                        {
+                            "id": "ltx-2.5",
+                            "name": "Fixture LTX",
+                            "runtime": "LTX-2 Python",
+                            "device": "cuda",
+                            "tasks": ["video", "music"],
+                            "script": "media-models/generate-ltx-2.5.sh"
                         }
                     ]
                 })
@@ -1330,6 +1422,11 @@ fi
             fs::write(
                 media_root.join("media-models/generate-minimax-h3.sh"),
                 H3_FIXTURE_SCRIPT,
+            )
+            .unwrap();
+            fs::write(
+                media_root.join("media-models/generate-ltx-2.5.sh"),
+                "#!/usr/bin/env bash\nexit 97\n",
             )
             .unwrap();
             fs::write(
@@ -1406,6 +1503,16 @@ fi
     fn h3_request(task: &str, args: &[&str]) -> InferenceRequest {
         InferenceRequest::Media {
             profile: ProfileKey::new(Lane::Media, "minimax-h3").unwrap(),
+            input: MediaInput::Script {
+                task: super::super::catalog::Task::new(task).unwrap(),
+                args: args.iter().map(|argument| (*argument).to_owned()).collect(),
+            },
+        }
+    }
+
+    fn ltx_request(task: &str, args: &[&str]) -> InferenceRequest {
+        InferenceRequest::Media {
+            profile: ProfileKey::new(Lane::Media, "ltx-2.5").unwrap(),
             input: MediaInput::Script {
                 task: super::super::catalog::Task::new(task).unwrap(),
                 args: args.iter().map(|argument| (*argument).to_owned()).collect(),
@@ -2018,6 +2125,142 @@ fi
         assert_eq!(fs::read(marker).unwrap(), b"x");
         assert!(!format!("{error:?}").contains("private h3 log"));
         assert!(!error.to_string().contains("private h3 log"));
+    }
+
+    #[test]
+    fn ltx_runs_once_with_private_output_and_returns_only_a_video_artifact() {
+        const UUID: &str = "GPU-01234567-89ab-cdef-0123-456789abcdef";
+        let fixture = Fixture::new();
+        let marker = fixture._parent.path().join("ltx-attempts");
+        let script =
+            LTX_FIXTURE_SCRIPT.replace("__ATTEMPT_MARKER__", &marker.display().to_string());
+        fs::write(
+            fixture.media_root.join("media-models/generate-ltx-2.5.sh"),
+            script,
+        )
+        .unwrap();
+        let conditioning = fixture._parent.path().join("conditioning.png");
+        fs::write(&conditioning, b"fixture image").unwrap();
+        let conditioning = conditioning.to_str().unwrap();
+        let request = ltx_request(
+            "video",
+            &[
+                "--prompt",
+                "the camera approaches the boat",
+                "--input-image",
+                conditioning,
+                "0",
+                "0.8",
+                "--frames",
+                "121",
+            ],
+        );
+        let catalog = fixture.catalog();
+        let accepted =
+            crate::control::routes::resolve_profile_route(&catalog, request.profile()).unwrap();
+        let device = CudaDevice::new(UUID).unwrap();
+        let context = context(&NeverCancel, Duration::from_secs(5));
+        let output = fixture.output_directory("ltx-private-output");
+        let result = execute_ltx_on_device(
+            &catalog,
+            &request,
+            &accepted,
+            &device,
+            &output,
+            &context,
+            recovery(),
+        )
+        .unwrap();
+        assert_eq!(result.artifacts().len(), 1);
+        assert_eq!(result.artifacts()[0].kind(), MediaArtifactKind::Video);
+        assert_eq!(
+            result.artifacts()[0].relative_path(),
+            Path::new("result.mp4")
+        );
+        assert_eq!(fs::read_dir(&output).unwrap().count(), 1);
+        assert_eq!(fs::read(&marker).unwrap(), b"x");
+
+        let music_request = ltx_request("music", &["--prompt", "ambient orchestral music"]);
+        let music_output = fixture.output_directory("ltx-music-output");
+        let music_result = execute_ltx_on_device(
+            &catalog,
+            &music_request,
+            &accepted,
+            &device,
+            &music_output,
+            &context,
+            recovery(),
+        )
+        .unwrap();
+        assert_eq!(music_result.artifacts().len(), 1);
+        assert_eq!(music_result.artifacts()[0].kind(), MediaArtifactKind::Video);
+        assert_eq!(fs::read_dir(&music_output).unwrap().count(), 1);
+        assert_eq!(fs::read(&marker).unwrap(), b"xx");
+
+        let existing_output = fixture.output_directory("ltx-existing-output");
+        fs::write(existing_output.join("result.mp4"), b"existing").unwrap();
+        let error = execute_ltx_on_device(
+            &catalog,
+            &request,
+            &accepted,
+            &device,
+            &existing_output,
+            &context,
+            recovery(),
+        )
+        .expect_err("LTX must refuse to clobber an existing result");
+        assert_eq!(error.kind(), MediaExecutionErrorKind::OutputAlreadyExists);
+        assert_eq!(
+            error.disposition(),
+            ProcessFailureDisposition::NoChildSpawned
+        );
+        assert_eq!(fs::read(&marker).unwrap(), b"xx");
+
+        let invalid_request = ltx_request("video", &["--prompt", "invalid-mp4 output"]);
+        let invalid_output = fixture.output_directory("ltx-invalid-mp4");
+        let error = execute_ltx_on_device(
+            &catalog,
+            &invalid_request,
+            &accepted,
+            &device,
+            &invalid_output,
+            &context,
+            recovery(),
+        )
+        .expect_err("malformed MP4 must not be reported as a video artifact");
+        assert_eq!(error.kind(), MediaExecutionErrorKind::InvalidArtifact);
+        assert_eq!(
+            error.disposition(),
+            ProcessFailureDisposition::ChildGroupReaped
+        );
+        assert_eq!(fs::read(&marker).unwrap(), b"xxx");
+
+        let failed_request = ltx_request("music", &["--prompt", "child-failure prompt"]);
+        let failed_output = fixture.output_directory("ltx-child-failure");
+        let error = execute_ltx_on_device(
+            &catalog,
+            &failed_request,
+            &accepted,
+            &device,
+            &failed_output,
+            &context,
+            recovery(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            MediaExecutionErrorKind::Process(ProcessFailureKind::ChildExitedUnsuccessfully {
+                code: Some(9)
+            })
+        ));
+        assert_eq!(
+            error.disposition(),
+            ProcessFailureDisposition::ChildGroupReaped
+        );
+        assert_eq!(fs::read(&marker).unwrap(), b"xxxx");
+        assert_eq!(fs::read_dir(&failed_output).unwrap().count(), 0);
+        assert!(!format!("{error:?}").contains("private LTX log"));
+        assert!(!error.to_string().contains("private LTX log"));
     }
 
     #[test]

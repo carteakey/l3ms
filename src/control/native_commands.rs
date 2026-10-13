@@ -366,6 +366,45 @@ pub(crate) fn prepare_h3_recipe_for_route(
     append_private_output_controls(recipe, output_wav, video_output)
 }
 
+/// Prepare the declared LTX-2.5 synchronized audio/video pipeline on its exact
+/// accepted CUDA route. LTX has one native output path and no output-directory
+/// option, so only the fixed private MP4 target is appended.
+pub(crate) fn prepare_ltx_recipe_for_route(
+    catalog: &Catalog,
+    request: &InferenceRequest,
+    accepted_route: &ResolvedProfileRoute,
+    output_mp4: &std::path::Path,
+) -> Result<NativeCommandRecipe> {
+    ensure!(
+        is_supported_ltx_request_route(request, accepted_route),
+        "request is not a supported LTX-2.5 route"
+    );
+    let InferenceRequest::Media {
+        input: MediaInput::Script { task, .. },
+        ..
+    } = request
+    else {
+        unreachable!("supported LTX route requires script media")
+    };
+    ensure!(
+        output_mp4.is_absolute()
+            && output_mp4.file_name().and_then(|name| name.to_str()) == Some("result.mp4"),
+        "LTX output must use the fixed absolute result filename"
+    );
+    let mut recipe = prepare_native_command_for_route(catalog, request, accepted_route)?;
+    ensure!(
+        matches!(
+            &recipe.expectation,
+            NativeOutputExpectation::MediaScript { task: expected } if expected == task.as_str()
+        ),
+        "LTX preparation did not resolve to the accepted task"
+    );
+    recipe.argv.push(text_argument("--output")?);
+    recipe.argv.push(path_argument(output_mp4)?);
+    ensure_argv_budget(&recipe.executable, &recipe.argv)?;
+    Ok(recipe)
+}
+
 fn append_private_output_controls(
     mut recipe: NativeCommandRecipe,
     output_wav: &std::path::Path,
@@ -496,7 +535,7 @@ pub(crate) fn is_supported_h3_args(arguments: &[String], task: &str) -> bool {
     while index < arguments.len() {
         let option = arguments[index].as_str();
         if option == "--prompt" || option == "--text" || option == "--prompt-file" {
-            if prompt_seen || !valid_h3_value(arguments.get(index + 1)) {
+            if prompt_seen || !valid_native_value(arguments.get(index + 1)) {
                 return false;
             }
             prompt_seen = true;
@@ -512,7 +551,7 @@ pub(crate) fn is_supported_h3_args(arguments: &[String], task: &str) -> bool {
             _ => None,
         };
         if let Some(slot) = slot {
-            if seen[slot] || !valid_h3_value(arguments.get(index + 1)) {
+            if seen[slot] || !valid_native_value(arguments.get(index + 1)) {
                 return false;
             }
             seen[slot] = true;
@@ -576,7 +615,82 @@ pub(crate) fn is_supported_h3_request_route(
         && is_supported_h3_args(args, task.as_str())
 }
 
-fn valid_h3_value(value: Option<&String>) -> bool {
+/// Shape-only admission for the LTX wrapper's supported DistilledPipeline
+/// arguments. Numeric and image semantics remain native pipeline inputs.
+pub(crate) fn is_supported_ltx_args(arguments: &[String], task: &str) -> bool {
+    if !matches!(task, "video" | "music") {
+        return false;
+    }
+    let mut prompt_seen = false;
+    let mut seen = [false; 5]; // frames, seed, transformer, quantization, offload
+    let mut index = 0;
+    while index < arguments.len() {
+        let option = arguments[index].as_str();
+        if option == "--prompt" || option == "--prompt-file" {
+            if prompt_seen || !valid_native_value(arguments.get(index + 1)) {
+                return false;
+            }
+            prompt_seen = true;
+            index += 2;
+            continue;
+        }
+        if option == "--image" || option == "--input-image" {
+            if !(1..=3).all(|offset| valid_native_value(arguments.get(index + offset))) {
+                return false;
+            }
+            index += 4;
+            continue;
+        }
+        let slot = match option {
+            "--frames" | "--num-frames" => Some(0),
+            "--seed" => Some(1),
+            "--transformer" => Some(2),
+            "--quantization" => Some(3),
+            "--offload" => Some(4),
+            _ => None,
+        };
+        if let Some(slot) = slot {
+            if seen[slot] || !valid_native_value(arguments.get(index + 1)) {
+                return false;
+            }
+            seen[slot] = true;
+            index += 2;
+            continue;
+        }
+        // Output controls, help, backend overrides, delimiters, and unknown
+        // flags are not request-owned.
+        return false;
+    }
+    prompt_seen
+}
+
+pub(crate) fn is_supported_ltx_request_route(
+    request: &InferenceRequest,
+    route: &ResolvedProfileRoute,
+) -> bool {
+    let InferenceRequest::Media {
+        profile,
+        input: MediaInput::Script { task, args },
+    } = request
+    else {
+        return false;
+    };
+    let NativeRoute::MediaScript { path } = &route.native_route else {
+        return false;
+    };
+    profile == &route.profile
+        && profile.lane == Lane::Media
+        && profile.profile_id.as_str() == "ltx-2.5"
+        && matches!(task.as_str(), "video" | "music")
+        && route.runtime.lane == Lane::Media
+        && route.runtime.as_str() == "LTX-2 Python"
+        && route.device.as_ref() == Some(&Device::Cuda)
+        && route.tasks.iter().any(|declared| declared == task)
+        && path.ends_with(std::path::Path::new("media-models/generate-ltx-2.5.sh"))
+        && is_supported_ltx_args(args, task.as_str())
+}
+
+fn valid_native_value(value: Option<&String>) -> bool {
     value
         .is_some_and(|value| !value.is_empty() && !value.contains('\0') && !value.starts_with("--"))
 }
@@ -1443,6 +1557,135 @@ mod tests {
         assert!(audio_argv.contains(&"--audio-only".to_owned()));
         assert!(!audio_argv.contains(&"--video".to_owned()));
         assert!(!audio_argv.contains(&"--video-output".to_owned()));
+    }
+
+    #[test]
+    fn ltx_argument_admission_is_task_bound_and_allows_only_pipeline_inputs() {
+        for task in ["video", "music"] {
+            assert!(is_supported_ltx_args(
+                &[
+                    "--prompt".into(),
+                    "a quiet shore".into(),
+                    "--frames".into(),
+                    "121".into(),
+                    "--image".into(),
+                    "shore.png".into(),
+                    "0".into(),
+                    "0.8".into(),
+                    "--input-image".into(),
+                    "clouds.png".into(),
+                    "48".into(),
+                    "1.0".into(),
+                ],
+                task
+            ));
+            assert!(is_supported_ltx_args(
+                &["--prompt-file".into(), "prompt.txt".into()],
+                task
+            ));
+        }
+
+        for (task, rejected) in [
+            ("video", vec![]),
+            ("video", vec!["--prompt"]),
+            ("video", vec!["--prompt", ""]),
+            (
+                "video",
+                vec!["--prompt", "scene", "--prompt-file", "prompt.txt"],
+            ),
+            (
+                "video",
+                vec!["--prompt", "scene", "--frames", "121", "--num-frames", "12"],
+            ),
+            ("music", vec!["--prompt", "song", "--output", "/tmp/x.mp4"]),
+            (
+                "music",
+                vec!["--prompt", "song", "--output-path", "/tmp/x.mp4"],
+            ),
+            ("video", vec!["--prompt", "scene", "--out-dir", "/tmp/x"]),
+            ("video", vec!["--prompt", "scene", "--backend", "cuda"]),
+            ("video", vec!["--prompt", "scene", "--help"]),
+            ("video", vec!["--prompt", "scene", "--"]),
+            ("audio", vec!["--prompt", "scene"]),
+        ] {
+            assert!(
+                !is_supported_ltx_args(
+                    &rejected.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+                    task,
+                ),
+                "accepted unsupported LTX argument shape for {task}"
+            );
+        }
+    }
+
+    #[test]
+    fn ltx_recipe_requires_exact_cuda_profile_and_pins_one_mp4_target() {
+        let fixture = Fixture::new(
+            "ltx-2.5",
+            "media-models/generate-ltx-2.5.sh",
+            &["video", "music"],
+        );
+        fixture.write_media_script("media-models/generate-ltx-2.5.sh");
+        let manifest_path = fixture.media_root.join("media-runtimes.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["profiles"][0]["runtime"] = Value::String("LTX-2 Python".into());
+        manifest["profiles"][0]["device"] = Value::String("cuda".into());
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let catalog = fixture.catalog();
+        let request = InferenceRequest::Media {
+            profile: key(Lane::Media, "ltx-2.5"),
+            input: MediaInput::Script {
+                task: super::super::catalog::Task::new("video").unwrap(),
+                args: vec![
+                    "--prompt".into(),
+                    "the paper boat".into(),
+                    "--image".into(),
+                    "boat.png".into(),
+                    "0".into(),
+                    "0.8".into(),
+                ],
+            },
+        };
+        let accepted = resolve_profile_route(&catalog, request.profile()).unwrap();
+        assert!(is_supported_ltx_request_route(&request, &accepted));
+        let output = fixture._parent.path().join("private-job/result.mp4");
+        let recipe = prepare_ltx_recipe_for_route(&catalog, &request, &accepted, &output).unwrap();
+        let argv = argv_strings(&recipe);
+        assert_eq!(
+            &argv[argv.len() - 2..],
+            ["--output", output.to_str().unwrap()]
+        );
+        assert!(matches!(
+            recipe.expectation,
+            NativeOutputExpectation::MediaScript { task } if task == "video"
+        ));
+
+        for wrong_route in [
+            {
+                let mut route = accepted.clone();
+                route.device = Some(Device::Cpu);
+                route
+            },
+            {
+                let mut route = accepted.clone();
+                route.runtime =
+                    super::super::catalog::RuntimeIdentity::new(Lane::Media, "other").unwrap();
+                route
+            },
+        ] {
+            assert!(!is_supported_ltx_request_route(&request, &wrong_route));
+            assert!(
+                prepare_ltx_recipe_for_route(&catalog, &request, &wrong_route, &output).is_err()
+            );
+        }
+        assert!(prepare_ltx_recipe_for_route(
+            &catalog,
+            &request,
+            &accepted,
+            &output.with_file_name("elsewhere.mp4"),
+        )
+        .is_err());
     }
 
     fn speech_request(profile: &str, mode: SpeechMode, fixture: &Fixture) -> InferenceRequest {

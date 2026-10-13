@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Declare LTX-2.5's CUDA requirement and add opt-in prepared-only generation
+  using the existing `.venv/bin/python` offline, without `uv` syncing/downloads.
+  Default standalone `uv run` and synchronized audio/video/image arguments stay
+  unchanged. Shared execution uses a private MP4 target and idle GPU window.
+
 - Explicitly declare H3's existing CUDA requirement for shared root routing.
   Original standalone script behavior, arbitrary native request options and
   optional MP4 muxing remain unchanged.

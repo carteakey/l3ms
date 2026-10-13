@@ -31,6 +31,8 @@ Environment:
   L3MS_LTX_MODEL_DIR        LTX-2.5 model directory (default: $HOME/models/media/ltx-2.5)
   L3MS_LTX_TRANSFORMER      Transformer checkpoint override
   L3MS_MEDIA_OUTPUT_DIR     Output directory (default: $HOME/media-output)
+  L3MS_LTX_PREPARED_ONLY    Set to 1 to use the existing .venv Python offline,
+                            without uv sync or downloads (workbench mode)
 EOF
 }
 
@@ -146,10 +148,22 @@ for ((image_index = 0; image_index < ${#image_args[@]}; image_index += 3)); do
     esac
 done
 
-command -v uv >/dev/null 2>&1 || {
-    echo "uv is required to run LTX-2.5" >&2
-    exit 1
-}
+if [[ "${L3MS_LTX_PREPARED_ONLY:-0}" == 1 ]]; then
+    prepared_python="$ltx_root/.venv/bin/python"
+    case "$prepared_python" in
+        /*) ;;
+        *) prepared_python="$PWD/$prepared_python" ;;
+    esac
+    [[ -x "$prepared_python" ]] || {
+        echo "Prepared LTX-2 Python environment not found; run setup separately" >&2
+        exit 1
+    }
+else
+    command -v uv >/dev/null 2>&1 || {
+        echo "uv is required to run LTX-2.5" >&2
+        exit 1
+    }
+fi
 
 mkdir -p "$output_dir"
 if [[ -z "$output" ]]; then
@@ -183,4 +197,8 @@ for ((image_index = 0; image_index < ${#image_args[@]}; image_index += 3)); do
         "${image_args[image_index + 2]}"
     )
 done
+if [[ "${L3MS_LTX_PREPARED_ONLY:-0}" == 1 ]]; then
+    export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+    exec "$prepared_python" -m ltx_pipelines.distilled "${args[@]}"
+fi
 exec uv run python -m ltx_pipelines.distilled "${args[@]}"
