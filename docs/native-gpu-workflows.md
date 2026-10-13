@@ -1,6 +1,6 @@
 # Explicit idle-GPU native work
 
-CUDA-local Nagi/Laya decisions, `media:breeze-tts-2` speech and HeartMuLa music use the same
+CUDA-local Nagi/Laya decisions, `media:breeze-tts-2` speech, HeartMuLa and H3 use the same
 foreground runner as CPU work. This is an **operator-managed idle window**, not
 automatic switching of a live router. No service is adopted, stopped, installed
 or restored automatically. Original standalone commands remain available.
@@ -75,6 +75,36 @@ speech-mode field. Prompts, lyrics and argv stay out of status/log/history.
 This integration has model-free native-script fixtures, not real HeartMuLa
 generation or music-quality acceptance. GPU inference/release, installed native
 WAV compatibility and interactive acceptance still need a live test.
+
+### MiniMax H3 audio and video
+
+Use `media:minimax-h3` with `--task music`, `tts` or `video`. Each accepts the same
+`{"args":["--prompt","native H3 prompt","--seed","42"]}` shape, not a Breeze
+speech object or Comfy graph. The UI offers a declared task selector and native
+argv field. The runner supplies `--audio-only` or `--video` from the selected task;
+caller mode/output/backend/help overrides are refused.
+
+Prompt/text/file, steps, seed, width, height and frames remain native. Direct
+`--request-option` supports only the wrapper-evidenced layerwise keys:
+`text_layerwise`, `text_layerwise_batch`, `dit_layerwise`, `dit_layerwise_batch`,
+`dit_mlp_chunk_tokens`. Unknown or duplicate keys and `return_video`/dimension/
+output overrides are refused; the original standalone script still permits its
+original options.
+
+Outputs stay in the private root: `result.wav`, video mode's retained
+`minimax_h3_video_rgb24.json`, and optional `result.mp4`. Native mux temporaries
+also use that root. All fixed targets must be absent before dispatch. The raw
+JSON validator checks positive dimensions/frame count/fps, duplicate fields,
+hex shape and exact RGB24 byte count with bounded, cancellation-aware reading;
+additional native metadata fields are allowed. WAV validation is shared; MP4
+checking is header/container sanity, not codec/playback/quality verification.
+The existing aggregate 512 MiB artifact cap applies.
+
+If muxing tools are unavailable, the native script's raw-only success is retained;
+no tools are installed and no MP4 is invented. Native failure produces no result
+references or inference retry, even if partial private files remain. Fixtures
+cover audio, raw-only and raw+MP4 results, but real H3 output/decoder/GPU behavior
+and interactive acceptance still require the original runtime and a live window.
 
 ## What the wrapper checks
 

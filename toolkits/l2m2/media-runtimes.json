@@ -5,6 +5,7 @@
       "id": "minimax-h3",
       "name": "MiniMax H3 audio + video",
       "runtime": "audio.cpp",
+      "device": "cuda",
       "variant": "Q4_K GGUF, CUDA, staged/layerwise",
       "tasks": ["music", "video", "tts"],
       "inputs": ["text"],

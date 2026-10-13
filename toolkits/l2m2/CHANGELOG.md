@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Explicitly declare H3's existing CUDA requirement for shared root routing.
+  Original standalone script behavior, arbitrary native request options and
+  optional MP4 muxing remain unchanged.
+
 - Explicitly declare HeartMuLa's existing CUDA requirement in the media manifest
   for root native routing. Original standalone script flags/defaults are unchanged;
   shared execution requires an operator-managed idle GPU window.

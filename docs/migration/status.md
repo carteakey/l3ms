@@ -8,6 +8,45 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
+## H3 complete native output path — 2026-10-12; checks repeated 2026-10-13
+
+H3 music/TTS/video now uses shared script-media recipes, foreground owner and
+operator idle-GPU guard. Native args remain ephemeral; selected task injects the
+wrapper's audio/video mode. WAV, retained RGB24 JSON, optional MP4 and mux temp
+locations are pinned inside the private root with absent-target checks. Full
+video is implemented, not replaced with an audio-only subset.
+
+Shared WAV checks plus bounded RGB24 metadata/hex-length validation and optional
+MP4 header sanity precede result references. Native raw-only success when mux
+tools are unavailable is preserved; no tools/models are downloaded. Unknown
+native metadata is allowed while duplicate fields and invalid known fields fail.
+Direct request-option keys are confined to wrapper-evidenced layerwise settings;
+standalone options remain unchanged. Legacy Breeze packet/receipt paths explicitly
+reject video artifact kinds; no managed artifact protocol is expanded.
+
+Seven H3 tests and five HeartMuLa compatibility tests pass; root **805 pass,
+102 fail, 1 ignored**. Failure names match the preceding socket-only checkpoint;
+the earlier GPU fixture flake remains open, not suppressed or claimed fixed.
+Build/strict lint/fmt, six standalone Rust +17 media +14 downloader checks,
+11 site generator tests and DOM fixtures pass. Logs:
+`/tmp/l3ms-h3-{focused,heart-compat,tests,clippy,build}.log`.
+
+Actual CLI routes for all three tasks reach the explicit missing-GPU-config
+refusal (exit 1) without dispatch, rather than graph/speech parsing. Private
+fixture `/tmp/l3ms-h3-cli-0wdhuM` was from the preceding session and is no
+longer retained after the interruption; this CLI observation is historical,
+not a fresh live check. No model or service was started. Read-only
+`systemctl --user is-active llama-swap.service` currently fails with D-Bus EPERM;
+the previously referenced `/home/kchauhan/repos/audio.cpp` source path is absent.
+The existing maintenance approval does not make those resources available, and
+no alternate transport or sandbox bypass is attempted.
+
+Source delta **+1,296**, cumulative **+5,942** versus `702b4cd`; control source
+**62,387 lines** versus 60,729 baseline. The reduction target remains unmet.
+This adds native output-contract checks and fixtures, not a module/daemon. Real
+H3/codec/GPU/handoff restoration and interactive acceptance remain unverified.
+Next: LTX and scoped Blender native contracts, then broader platform deletion.
+
 ## HeartMuLa native music integration — 2026-10-12
 
 Declared `media:heartmula-music` now routes through the existing native command

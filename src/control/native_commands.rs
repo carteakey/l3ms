@@ -313,7 +313,7 @@ pub(crate) fn prepare_heartmula_music_recipe_for_route(
         is_supported_heartmula_request_route(request, accepted_route),
         "request is not a supported HeartMuLa music route"
     );
-    let mut recipe = prepare_native_command_for_route(catalog, request, accepted_route)?;
+    let recipe = prepare_native_command_for_route(catalog, request, accepted_route)?;
     ensure!(
         matches!(
             &recipe.expectation,
@@ -321,19 +321,76 @@ pub(crate) fn prepare_heartmula_music_recipe_for_route(
         ),
         "HeartMuLa preparation did not resolve to the declared music script"
     );
+    append_private_output_controls(recipe, output_file, None)
+}
+
+/// Prepare audio.cpp MiniMax-H3 for one declared task, keeping generation mode
+/// and output locations under caller control rather than the request payload.
+pub(crate) fn prepare_h3_recipe_for_route(
+    catalog: &Catalog,
+    request: &InferenceRequest,
+    accepted_route: &ResolvedProfileRoute,
+    output_wav: &std::path::Path,
+    video_output: Option<&std::path::Path>,
+) -> Result<NativeCommandRecipe> {
     ensure!(
-        output_file.is_absolute(),
-        "music output target must be absolute"
+        is_supported_h3_request_route(request, accepted_route),
+        "request is not a supported MiniMax-H3 route"
     );
+    let InferenceRequest::Media {
+        input: MediaInput::Script { task, .. },
+        ..
+    } = request
+    else {
+        unreachable!("supported H3 route requires script media")
+    };
+    let video_task = task.as_str() == "video";
+    let expected_task = task.as_str();
     ensure!(
-        output_file.file_name().and_then(|name| name.to_str()) == Some("result.wav"),
-        "music output target must use the fixed result filename"
+        video_task == video_output.is_some(),
+        "only video tasks have an MP4 output target"
     );
-    recipe.argv.push(text_argument("--output")?);
-    recipe.argv.push(path_argument(output_file)?);
-    let output_directory = output_file
+    let mut recipe = prepare_native_command_for_route(catalog, request, accepted_route)?;
+    ensure!(
+        matches!(
+            &recipe.expectation,
+            NativeOutputExpectation::MediaScript { task } if task == expected_task
+        ),
+        "MiniMax-H3 preparation did not resolve to the accepted task"
+    );
+    recipe.argv.push(text_argument(if video_task {
+        "--video"
+    } else {
+        "--audio-only"
+    })?);
+    append_private_output_controls(recipe, output_wav, video_output)
+}
+
+fn append_private_output_controls(
+    mut recipe: NativeCommandRecipe,
+    output_wav: &std::path::Path,
+    video_output: Option<&std::path::Path>,
+) -> Result<NativeCommandRecipe> {
+    ensure!(
+        output_wav.is_absolute()
+            && output_wav.file_name().and_then(|name| name.to_str()) == Some("result.wav"),
+        "media WAV target must use the fixed absolute result filename"
+    );
+    let output_directory = output_wav
         .parent()
-        .ok_or_else(|| anyhow!("music output target has no parent directory"))?;
+        .ok_or_else(|| anyhow!("media WAV target has no parent directory"))?;
+    if let Some(video_output) = video_output {
+        ensure!(
+            video_output.is_absolute()
+                && video_output.file_name().and_then(|name| name.to_str()) == Some("result.mp4")
+                && video_output.parent() == Some(output_directory),
+            "media video target must use the fixed result filename in the WAV directory"
+        );
+        recipe.argv.push(text_argument("--video-output")?);
+        recipe.argv.push(path_argument(video_output)?);
+    }
+    recipe.argv.push(text_argument("--output")?);
+    recipe.argv.push(path_argument(output_wav)?);
     recipe.argv.push(text_argument("--out-dir")?);
     recipe.argv.push(path_argument(output_directory)?);
     ensure_argv_budget(&recipe.executable, &recipe.argv)?;
@@ -423,6 +480,105 @@ pub(crate) fn is_supported_heartmula_request_route(
             "media-models/generate-heartmula-music.sh",
         ))
         && is_supported_heartmula_args(args)
+}
+
+/// Shape-only H3 wrapper admission. Request options are limited to the
+/// layerwise controls evidenced in the wrapper; mode/output and `return_video`
+/// remain controlled by the route/task adapter.
+pub(crate) fn is_supported_h3_args(arguments: &[String], task: &str) -> bool {
+    if !matches!(task, "music" | "tts" | "video") {
+        return false;
+    }
+    let mut prompt_seen = false;
+    let mut seen = [false; 5]; // steps, seed, width, height, frames
+    let mut request_options = std::collections::BTreeSet::new();
+    let mut index = 0;
+    while index < arguments.len() {
+        let option = arguments[index].as_str();
+        if option == "--prompt" || option == "--text" || option == "--prompt-file" {
+            if prompt_seen || !valid_h3_value(arguments.get(index + 1)) {
+                return false;
+            }
+            prompt_seen = true;
+            index += 2;
+            continue;
+        }
+        let slot = match option {
+            "--steps" | "--num-inference-steps" => Some(0),
+            "--seed" => Some(1),
+            "--width" => Some(2),
+            "--height" => Some(3),
+            "--frames" => Some(4),
+            _ => None,
+        };
+        if let Some(slot) = slot {
+            if seen[slot] || !valid_h3_value(arguments.get(index + 1)) {
+                return false;
+            }
+            seen[slot] = true;
+            index += 2;
+            continue;
+        }
+        if option == "--request-option" {
+            let Some(value) = arguments.get(index + 1) else {
+                return false;
+            };
+            let Some((key, option_value)) = value.split_once('=') else {
+                return false;
+            };
+            const ALLOWED_REQUEST_KEYS: [&str; 5] = [
+                "text_layerwise",
+                "text_layerwise_batch",
+                "dit_layerwise",
+                "dit_layerwise_batch",
+                "dit_mlp_chunk_tokens",
+            ];
+            if !ALLOWED_REQUEST_KEYS.contains(&key)
+                || option_value.is_empty()
+                || option_value.contains('\0')
+                || option_value.starts_with("--")
+                || !request_options.insert(key)
+            {
+                return false;
+            }
+            index += 2;
+            continue;
+        }
+        // --video/--audio-only, all output controls, help, backend selection,
+        // delimiters, and unknown flags are not request-owned.
+        return false;
+    }
+    prompt_seen
+}
+
+pub(crate) fn is_supported_h3_request_route(
+    request: &InferenceRequest,
+    route: &ResolvedProfileRoute,
+) -> bool {
+    let InferenceRequest::Media {
+        profile,
+        input: MediaInput::Script { task, args },
+    } = request
+    else {
+        return false;
+    };
+    let NativeRoute::MediaScript { path } = &route.native_route else {
+        return false;
+    };
+    profile == &route.profile
+        && profile.lane == Lane::Media
+        && profile.profile_id.as_str() == "minimax-h3"
+        && route.runtime.lane == Lane::Media
+        && route.runtime.as_str() == "audio.cpp"
+        && route.device.as_ref() == Some(&Device::Cuda)
+        && route.tasks.iter().any(|declared| declared == task)
+        && path.ends_with(std::path::Path::new("media-models/generate-minimax-h3.sh"))
+        && is_supported_h3_args(args, task.as_str())
+}
+
+fn valid_h3_value(value: Option<&String>) -> bool {
+    value
+        .is_some_and(|value| !value.is_empty() && !value.contains('\0') && !value.starts_with("--"))
 }
 
 fn breeze_recipe_with_output(
@@ -1131,6 +1287,162 @@ mod tests {
             &output,
         )
         .is_err());
+    }
+
+    #[test]
+    fn h3_argument_admission_is_task_bound_and_limits_request_options() {
+        for accepted in [
+            (
+                "music",
+                vec!["--prompt", "soft ambient music", "--steps", "8"],
+            ),
+            ("tts", vec!["--prompt-file", "prompt.txt", "--seed", "42"]),
+            (
+                "video",
+                vec![
+                    "--text",
+                    "rainy neon street",
+                    "--width",
+                    "832",
+                    "--height",
+                    "480",
+                    "--frames",
+                    "121",
+                    "--request-option",
+                    "text_layerwise=true",
+                    "--request-option",
+                    "dit_layerwise=true",
+                    "--request-option",
+                    "dit_mlp_chunk_tokens=512",
+                ],
+            ),
+        ] {
+            assert!(is_supported_h3_args(
+                &accepted
+                    .1
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>(),
+                accepted.0
+            ));
+        }
+
+        for (task, rejected) in [
+            ("music", vec![]),
+            ("music", vec!["--prompt"]),
+            ("video", vec!["--prompt", "scene", "--audio-only"]),
+            ("music", vec!["--prompt", "song", "--video"]),
+            (
+                "video",
+                vec!["--prompt", "scene", "--video-output", "/tmp/x.mp4"],
+            ),
+            ("music", vec!["--prompt", "song", "--output", "/tmp/x.wav"]),
+            ("music", vec!["--prompt", "song", "--out", "/tmp/x.wav"]),
+            ("music", vec!["--prompt", "song", "--out-dir", "/tmp/x"]),
+            ("video", vec!["--prompt", "scene", "--help"]),
+            ("video", vec!["--prompt", "scene", "--"]),
+            ("video", vec!["--prompt", "scene", "--backend", "cuda"]),
+            ("video", vec!["--prompt", "scene", "--request-option"]),
+            (
+                "video",
+                vec![
+                    "--prompt",
+                    "scene",
+                    "--request-option",
+                    "return_video=false",
+                ],
+            ),
+            (
+                "video",
+                vec!["--prompt", "scene", "--request-option", "width=32"],
+            ),
+            (
+                "video",
+                vec![
+                    "--prompt",
+                    "scene",
+                    "--request-option",
+                    "dit_layerwise=true",
+                    "--request-option",
+                    "dit_layerwise=false",
+                ],
+            ),
+            ("image", vec!["--prompt", "scene"]),
+        ] {
+            assert!(
+                !is_supported_h3_args(
+                    &rejected.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+                    task
+                ),
+                "accepted unsupported H3 argument shape"
+            );
+        }
+    }
+
+    #[test]
+    fn h3_recipe_injects_task_mode_and_fixed_private_targets() {
+        let fixture = Fixture::new(
+            "minimax-h3",
+            "media-models/generate-minimax-h3.sh",
+            &["music", "tts", "video"],
+        );
+        fixture.write_media_script("media-models/generate-minimax-h3.sh");
+        let manifest_path = fixture.media_root.join("media-runtimes.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["profiles"][0]["device"] = Value::String("cuda".into());
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let catalog = fixture.catalog();
+
+        let video_request = InferenceRequest::Media {
+            profile: key(Lane::Media, "minimax-h3"),
+            input: MediaInput::Script {
+                task: super::super::catalog::Task::new("video").unwrap(),
+                args: vec![
+                    "--prompt".into(),
+                    "fixture video".into(),
+                    "--request-option".into(),
+                    "dit_layerwise=true".into(),
+                ],
+            },
+        };
+        let accepted = resolve_profile_route(&catalog, video_request.profile()).unwrap();
+        assert!(is_supported_h3_request_route(&video_request, &accepted));
+        let output = fixture._parent.path().join("private-job/result.wav");
+        let mp4 = output.parent().unwrap().join("result.mp4");
+        let recipe =
+            prepare_h3_recipe_for_route(&catalog, &video_request, &accepted, &output, Some(&mp4))
+                .unwrap();
+        let argv = argv_strings(&recipe);
+        assert!(argv.contains(&"--video".to_owned()));
+        assert!(!argv.contains(&"--audio-only".to_owned()));
+        assert_eq!(
+            &argv[argv.len() - 6..],
+            [
+                "--video-output",
+                mp4.to_str().unwrap(),
+                "--output",
+                output.to_str().unwrap(),
+                "--out-dir",
+                output.parent().unwrap().to_str().unwrap(),
+            ]
+        );
+
+        let audio_request = InferenceRequest::Media {
+            profile: key(Lane::Media, "minimax-h3"),
+            input: MediaInput::Script {
+                task: super::super::catalog::Task::new("tts").unwrap(),
+                args: vec!["--prompt".into(), "fixture audio".into()],
+            },
+        };
+        let audio_route = resolve_profile_route(&catalog, audio_request.profile()).unwrap();
+        let audio_recipe =
+            prepare_h3_recipe_for_route(&catalog, &audio_request, &audio_route, &output, None)
+                .unwrap();
+        let audio_argv = argv_strings(&audio_recipe);
+        assert!(audio_argv.contains(&"--audio-only".to_owned()));
+        assert!(!audio_argv.contains(&"--video".to_owned()));
+        assert!(!audio_argv.contains(&"--video-output".to_owned()));
     }
 
     fn speech_request(profile: &str, mode: SpeechMode, fixture: &Fixture) -> InferenceRequest {

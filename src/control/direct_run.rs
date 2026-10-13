@@ -42,7 +42,7 @@ const PROCESS_RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 pub enum DirectRunResult {
     Decision(NativeDecisionResult),
     Speech(MediaExecutionResult),
-    Music(MediaExecutionResult),
+    ScriptMedia(MediaExecutionResult),
     Embeddings(EmbeddingPayload),
     Comfy(NativeComfyResult),
 }
@@ -401,7 +401,7 @@ fn with_idle_gpu<T>(
 pub fn run_native(
     catalog: &Catalog,
     request: &InferenceRequest,
-    speech_output_directory: Option<&Path>,
+    output_directory: Option<&Path>,
     connection: Option<DirectConnection<'_>>,
     context: &OperationContext<'_>,
 ) -> Result<DirectRunResult, DirectRunError> {
@@ -432,7 +432,13 @@ pub fn run_native(
                 | SpeechMode::Streaming
         )
     );
-    let is_music = matches!(request, InferenceRequest::Media { input: MediaInput::Script { task, .. }, .. } if task.as_str() == "music");
+    let is_script_media = matches!(
+        request,
+        InferenceRequest::Media {
+            input: MediaInput::Script { .. },
+            ..
+        }
+    );
     let (language, comfy, cuda) = match connection {
         Some(DirectConnection::Language(adapter)) => (Some(adapter), None, None),
         Some(DirectConnection::Cuda(device)) => (None, None, Some(device)),
@@ -443,22 +449,16 @@ pub fn run_native(
     };
     let valid_lane_arguments = match request {
         InferenceRequest::Decision { .. } => {
-            speech_output_directory.is_none() && language.is_none() && comfy.is_none()
+            output_directory.is_none() && language.is_none() && comfy.is_none()
         }
-        InferenceRequest::Media { .. } if is_breeze_speech || is_music => {
-            speech_output_directory.is_some() && language.is_none() && comfy.is_none()
+        InferenceRequest::Media { .. } if is_breeze_speech || is_script_media => {
+            output_directory.is_some() && language.is_none() && comfy.is_none()
         }
         InferenceRequest::Media { .. } if is_comfy_workflow => {
-            speech_output_directory.is_some()
-                && language.is_none()
-                && comfy.is_some()
-                && cuda.is_none()
+            output_directory.is_some() && language.is_none() && comfy.is_some() && cuda.is_none()
         }
         InferenceRequest::Embeddings { .. } => {
-            speech_output_directory.is_none()
-                && language.is_some()
-                && comfy.is_none()
-                && cuda.is_none()
+            output_directory.is_none() && language.is_some() && comfy.is_none() && cuda.is_none()
         }
         _ => false,
     };
@@ -503,7 +503,7 @@ pub fn run_native(
             ));
         }
         let (adapter, native_id) = comfy.expect("validated Comfy connection");
-        let output_directory = speech_output_directory.expect("validated Comfy output directory");
+        let output_directory = output_directory.expect("validated Comfy output directory");
         execute_comfy_workflow(
             &catalog,
             request,
@@ -552,26 +552,31 @@ pub fn run_native(
                 .map(DirectRunResult::Decision)
                 .map_err(|error| execution_error(error, context))
         }
-    } else if is_music {
+    } else if is_script_media {
         let profile = catalog
             .inspect(request.profile())
             .expect("validated refreshed profile");
-        if !is_supported_direct_music_profile(profile) || cuda.is_none() {
+        if !is_supported_direct_script_profile(profile) || cuda.is_none() {
             return Err(DirectRunError::new(
                 DirectRunErrorKind::UnsupportedRoute,
                 ProcessFailureDisposition::NoChildSpawned,
             ));
         }
-        execute_heartmula_music_on_device(
+        let execute = if is_supported_direct_h3_profile(profile) {
+            super::media_execution::execute_h3_on_device
+        } else {
+            execute_heartmula_music_on_device
+        };
+        execute(
             &catalog,
             request,
             &route,
             cuda.expect("validated CUDA device"),
-            speech_output_directory.expect("validated music output directory"),
+            output_directory.expect("validated music output directory"),
             context,
             recovery,
         )
-        .map(DirectRunResult::Music)
+        .map(DirectRunResult::ScriptMedia)
         .map_err(|error| media_execution_error(error, context))
     } else if is_breeze_speech {
         if is_supported_cpu_breeze_route(request, &route) {
@@ -581,8 +586,7 @@ pub fn run_native(
                     ProcessFailureDisposition::NoChildSpawned,
                 ));
             }
-            let output_directory =
-                speech_output_directory.expect("validated speech output directory");
+            let output_directory = output_directory.expect("validated speech output directory");
             execute_breeze_speech_on_cpu(
                 &catalog,
                 request,
@@ -600,8 +604,7 @@ pub fn run_native(
                     ProcessFailureDisposition::NoChildSpawned,
                 ));
             };
-            let output_directory =
-                speech_output_directory.expect("validated speech output directory");
+            let output_directory = output_directory.expect("validated speech output directory");
             execute_breeze_speech_on_device(
                 &catalog,
                 request,
@@ -897,7 +900,26 @@ pub(crate) fn is_supported_cuda_breeze_profile(profile: &CatalogProfile) -> bool
 pub(crate) fn is_supported_direct_cuda_profile(profile: &CatalogProfile) -> bool {
     is_supported_cuda_direct_decision_profile(profile)
         || is_supported_cuda_breeze_profile(profile)
-        || is_supported_direct_music_profile(profile)
+        || is_supported_direct_script_profile(profile)
+}
+
+pub(crate) fn is_supported_direct_script_profile(profile: &CatalogProfile) -> bool {
+    is_supported_direct_music_profile(profile) || is_supported_direct_h3_profile(profile)
+}
+
+pub(crate) fn is_supported_direct_h3_profile(profile: &CatalogProfile) -> bool {
+    !profile.disabled
+        && profile.key.lane == Lane::Media
+        && profile.key.profile_id.as_str() == "minimax-h3"
+        && profile.runtime.lane == Lane::Media
+        && profile.runtime.as_str() == "audio.cpp"
+        && profile.device.as_ref() == Some(&Device::Cuda)
+        && profile
+            .tasks
+            .iter()
+            .any(|task| matches!(task.as_str(), "music" | "tts" | "video"))
+        && matches!(&profile.native_source, NativeProfileSource::Media { script }
+            if script == "media-models/generate-minimax-h3.sh")
 }
 
 pub(crate) fn is_supported_direct_music_profile(profile: &CatalogProfile) -> bool {

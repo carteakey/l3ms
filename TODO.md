@@ -10,10 +10,18 @@ existing Linear migration issues rather than replacing their acceptance criteria
 
 ## Monorepo: next work
 
+H3 music/TTS/video now uses the shared native script-media path: private WAV,
+validated retained RGB24 JSON and optional MP4, no graph/speech reinterpretation.
+Seven H3 fixtures and HeartMuLa compatibility checks pass; root **805 pass,
+102 unchanged socket failures, 1 ignored**, build/strict lint/fmt pass. Real CUDA/
+native-codec/interactive acceptance remains open. Current read-only user-service
+query is denied by the sandbox; prior audio.cpp source path is absent. Remaining
+script ports: LTX and bounded Blender, then broader deletion and live acceptance.
+
 HeartMuLa music now uses the shared native foreground/GPU-window path with
 native argv, controlled private WAV outputs and payload-free history. Model-free
 execution/form/CLI fixtures pass; real music generation is not accepted yet.
-Remaining native script ports: H3 multi-artifact video/audio, LTX and bounded
+Remaining native script ports: LTX and bounded
 Blender workflows. Reuse their actual contracts, not a generic engine framework.
 Live GPU/HTTP acceptance, handoff/restoration and broader deletion remain open.
 

@@ -27,6 +27,12 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Run native H3 music/TTS/video through the same script-media foreground owner
+  and explicit idle-GPU window. Pin WAV/raw-video/MP4/temp outputs to the private
+  job directory, validate RGB24 metadata/payload and optional MP4 headers, and
+  retain native raw-only success when muxing tools are absent. Do not reinterpret
+  H3 input as Breeze speech or a Comfy graph. No install, service takeover or
+  live CUDA/codec/quality acceptance claim.
 - Run declared HeartMuLa music through the existing native recipe, foreground
   CLI/UI owner and explicit idle-GPU window. Keep native argv/prompt/lyrics
   ephemeral, pin both output controls to a private job directory, and validate

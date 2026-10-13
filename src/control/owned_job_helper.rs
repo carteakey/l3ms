@@ -45,6 +45,7 @@ pub(crate) fn revalidate_candidate(
                 let kind = match actual.kind() {
                     MediaArtifactKind::FinalWave => BreezeArtifactKind::FinalWave,
                     MediaArtifactKind::StreamingChunk => BreezeArtifactKind::StreamingChunk,
+                    MediaArtifactKind::RawRgb24Video | MediaArtifactKind::Video => return false,
                 };
                 kind == expected.kind()
                     && actual.relative_path().to_str() == Some(expected.relative_path())

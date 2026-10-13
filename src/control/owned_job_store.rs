@@ -323,6 +323,9 @@ impl NativeJobResult {
                 let kind = match artifact.kind() {
                     MediaArtifactKind::FinalWave => BreezeArtifactKind::FinalWave,
                     MediaArtifactKind::StreamingChunk => BreezeArtifactKind::StreamingChunk,
+                    MediaArtifactKind::RawRgb24Video | MediaArtifactKind::Video => {
+                        return Err(OwnedJobStoreError::InvalidResult)
+                    }
                 };
                 Ok(BreezeArtifactRef {
                     kind,

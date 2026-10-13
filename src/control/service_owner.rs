@@ -1396,6 +1396,8 @@ fn breeze_receipt_matches(
                     super::media_execution::MediaArtifactKind::StreamingChunk => {
                         BreezeArtifactKind::StreamingChunk
                     }
+                    super::media_execution::MediaArtifactKind::RawRgb24Video
+                    | super::media_execution::MediaArtifactKind::Video => return false,
                 };
                 candidate.kind() == fresh_kind
                     && candidate.relative_path() == artifact.relative_path().to_str().unwrap_or("")

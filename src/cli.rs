@@ -217,7 +217,7 @@ struct DirectSpeechInput {
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct DirectMusicInput {
+struct DirectScriptInput {
     args: Vec<String>,
 }
 
@@ -1630,8 +1630,12 @@ fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
     }
     let task = crate::control::catalog::Task::new(spec.task.to_owned())
         .map_err(|_| anyhow::anyhow!("--task is invalid"))?;
-    let input = read_direct_native_input(spec.input, spec.task)?;
-    let is_comfy_workflow = matches!(spec.task, "image" | "video");
+    let script_media = matches!(
+        profile.profile_id.as_str(),
+        "heartmula-music" | "minimax-h3"
+    );
+    let input = read_direct_native_input(spec.input, spec.task, script_media)?;
+    let is_comfy_workflow = !script_media && matches!(spec.task, "image" | "video");
     let comfy_output_directory = if is_comfy_workflow {
         Some(absolute_comfy_output_path(spec.output_dir.ok_or_else(
             || anyhow::anyhow!("Comfy output directory is required"),
@@ -1699,7 +1703,7 @@ fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
             crate::control::task_form::TaskFields::LanguageEmbeddings { input: input.input },
             None,
         ),
-        DirectNativeInput::Music(input) => (
+        DirectNativeInput::Script(input) => (
             crate::control::task_form::TaskFields::MediaScript { args: input.args },
             spec.output_dir,
         ),
@@ -1779,7 +1783,7 @@ fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
         crate::control::direct_run::DirectRunResult::Speech(result) => {
             direct_speech_output_json(&result)?
         }
-        crate::control::direct_run::DirectRunResult::Music(result) => {
+        crate::control::direct_run::DirectRunResult::ScriptMedia(result) => {
             let response = serde_json::json!({"artifacts": direct_wave_artifact_outputs(&result)});
             let mut writer = BoundedJsonWriter::new(MAX_DIRECT_NATIVE_OUTPUT_BYTES);
             serde_json::to_writer(&mut writer, &response).map_err(|_| {
@@ -1825,11 +1829,15 @@ enum DirectNativeInput {
     VoiceDesign(DirectVoiceDesignInput),
     ComfyWorkflow(serde_json::Value),
     Embeddings(DirectEmbeddingInput),
-    Music(DirectMusicInput),
+    Script(DirectScriptInput),
 }
 
 #[cfg(target_os = "linux")]
-fn read_direct_native_input(path: &Path, task: &str) -> Result<DirectNativeInput> {
+fn read_direct_native_input(
+    path: &Path,
+    task: &str,
+    script_media: bool,
+) -> Result<DirectNativeInput> {
     use std::os::unix::fs::OpenOptionsExt;
 
     let file = OpenOptions::new()
@@ -1847,6 +1855,14 @@ fn read_direct_native_input(path: &Path, task: &str) -> Result<DirectNativeInput
     file.take((MAX_DIRECT_NATIVE_INPUT_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(|_| anyhow::anyhow!("native input file could not be read"))?;
+    if script_media {
+        if bytes.len() > MAX_DIRECT_NATIVE_INPUT_BYTES {
+            bail!("native input exceeds the 1 MiB limit");
+        }
+        return serde_json::from_slice(&bytes)
+            .map(DirectNativeInput::Script)
+            .map_err(|_| anyhow::anyhow!("native script input is invalid"));
+    }
     match task {
         "decision" => parse_direct_decision_input(&bytes)
             .map(DirectNativeInput::Decision)
@@ -1866,11 +1882,6 @@ fn read_direct_native_input(path: &Path, task: &str) -> Result<DirectNativeInput
         "embeddings" => parse_direct_embedding_input(&bytes)
             .map(DirectNativeInput::Embeddings)
             .map_err(|error| anyhow::anyhow!(error.to_string())),
-        "music" => {
-            if bytes.len() > MAX_DIRECT_NATIVE_INPUT_BYTES { bail!("native input exceeds the 1 MiB limit"); }
-            serde_json::from_slice(&bytes).map(DirectNativeInput::Music)
-                .map_err(|_| anyhow::anyhow!("native music input is invalid"))
-        }
         _ => bail!(
             "--run-profile supports only --task decision, --task tts, --task clon, --task design, --task music, --task image, --task video, or --task embeddings"
         ),
@@ -1942,6 +1953,10 @@ fn direct_wave_artifact_outputs(
                 crate::control::media_execution::MediaArtifactKind::FinalWave => "final_wave",
                 crate::control::media_execution::MediaArtifactKind::StreamingChunk => {
                     "streaming_chunk"
+                }
+                crate::control::media_execution::MediaArtifactKind::Video => "video",
+                crate::control::media_execution::MediaArtifactKind::RawRgb24Video => {
+                    "raw_rgb24_video"
                 }
             },
         })
@@ -3855,59 +3870,92 @@ mod tests {
         assert_eq!(dispatch(cli).unwrap(), 0);
         server.join().unwrap();
     }
-}
-#[cfg(target_os = "linux")]
-#[test]
-fn direct_music_input_and_output_requirement_are_explicit() {
-    let valid: DirectMusicInput = serde_json::from_slice(
-        br#"{"args":["--prompt","ambient music","--instrumental","--seed","42"]}"#,
-    )
-    .unwrap();
-    assert_eq!(valid.args[1], "ambient music");
-    for invalid in [
-        br#"{"args":"--prompt x"}"#.as_slice(),
-        br#"{"args":[],"simulate":true}"#.as_slice(),
-        br#"{}"#.as_slice(),
-    ] {
-        assert!(serde_json::from_slice::<DirectMusicInput>(invalid).is_err());
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn direct_music_input_and_output_requirement_are_explicit() {
+        let valid: DirectScriptInput = serde_json::from_slice(
+            br#"{"args":["--prompt","ambient music","--instrumental","--seed","42"]}"#,
+        )
+        .unwrap();
+        assert_eq!(valid.args[1], "ambient music");
+        for invalid in [
+            br#"{"args":"--prompt x"}"#.as_slice(),
+            br#"{"args":[],"simulate":true}"#.as_slice(),
+            br#"{}"#.as_slice(),
+        ] {
+            assert!(serde_json::from_slice::<DirectScriptInput>(invalid).is_err());
+        }
+        let cli = Cli::try_parse_from([
+            "l3ms",
+            "--run-profile",
+            "media:heartmula-music",
+            "--task",
+            "music",
+            "--input",
+            "music.json",
+            "--output-dir",
+            "/private/new-job",
+        ])
+        .unwrap();
+        assert_eq!(direct_native_spec(&cli).unwrap().unwrap().task, "music");
+        let missing = Cli::try_parse_from([
+            "l3ms",
+            "--run-profile",
+            "media:heartmula-music",
+            "--task",
+            "music",
+            "--input",
+            "music.json",
+        ])
+        .unwrap();
+        assert!(direct_native_spec(&missing).is_err());
+        let fixture = tempfile::tempdir().unwrap();
+        let missing_input = fixture.path().join("missing.json");
+        let request = DirectNativeSpec {
+            profile: "media:heartmula-music",
+            task: "music",
+            input: &missing_input,
+            output_dir: Some(fixture.path()),
+            timeout_ms: 5000,
+        };
+        // Exercise the real launcher lane selection, not only clap/spec parsing;
+        // missing input must stop it before settings, GPU queries or execution.
+        assert_eq!(
+            run_direct_native(&request).unwrap_err().to_string(),
+            "native input file is unavailable"
+        );
     }
-    let cli = Cli::try_parse_from([
-        "l3ms",
-        "--run-profile",
-        "media:heartmula-music",
-        "--task",
-        "music",
-        "--input",
-        "music.json",
-        "--output-dir",
-        "/private/new-job",
-    ])
-    .unwrap();
-    assert_eq!(direct_native_spec(&cli).unwrap().unwrap().task, "music");
-    let missing = Cli::try_parse_from([
-        "l3ms",
-        "--run-profile",
-        "media:heartmula-music",
-        "--task",
-        "music",
-        "--input",
-        "music.json",
-    ])
-    .unwrap();
-    assert!(direct_native_spec(&missing).is_err());
-    let fixture = tempfile::tempdir().unwrap();
-    let missing_input = fixture.path().join("missing.json");
-    let request = DirectNativeSpec {
-        profile: "media:heartmula-music",
-        task: "music",
-        input: &missing_input,
-        output_dir: Some(fixture.path()),
-        timeout_ms: 5000,
-    };
-    // Exercise the real launcher lane selection, not only clap/spec parsing;
-    // missing input must stop it before settings, GPU queries or execution.
-    assert_eq!(
-        run_direct_native(&request).unwrap_err().to_string(),
-        "native input file is unavailable"
-    );
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_h3_inputs_do_not_become_comfy_graphs_or_breeze_speech() {
+        let fixture = tempfile::tempdir().unwrap();
+        let input = fixture.path().join("input.json");
+        std::fs::write(
+            &input,
+            br#"{"args":["--prompt","native H3 input","--seed","42"]}"#,
+        )
+        .unwrap();
+        for task in ["music", "tts", "video"] {
+            assert!(matches!(
+                read_direct_native_input(&input, task, true).unwrap(),
+                DirectNativeInput::Script(_)
+            ));
+        }
+        assert!(read_direct_native_input(&input, "video", false).is_err());
+        std::fs::write(
+            &input,
+            br#"{"graph":{"1":{"class_type":"fixture","inputs":{}}}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            read_direct_native_input(&input, "video", false).unwrap(),
+            DirectNativeInput::ComfyWorkflow(_)
+        ));
+        std::fs::write(&input, br#"{"text":"native Breeze input"}"#).unwrap();
+        assert!(matches!(
+            read_direct_native_input(&input, "tts", false).unwrap(),
+            DirectNativeInput::Speech(_)
+        ));
+    }
 }
