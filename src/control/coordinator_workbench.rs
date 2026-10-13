@@ -1,9 +1,6 @@
-//! One-shot, private-socket actions for the Stack Catalog workbench.
-//!
-//! Typed Submit preparation is synchronous; its opaque envelope can only be
-//! consumed once by the dedicated worker. The worker does no service discovery,
-//! startup, retry, history write, or payload logging. Every caller supplies the
-//! explicit coordinator socket directory.
+//! Retained-request observation and cancellation over explicit private sockets.
+//! The worker does no service discovery, startup, retry, history
+//! write, or payload logging. Every caller supplies the explicit socket directory.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
@@ -13,39 +10,18 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use super::catalog::{Catalog, Lane, ProfileKey};
+use super::catalog::Lane;
 use super::client::{self, ClientError};
 use super::ipc::{
-    self, AcceptedOperation, ClientRequest, RequestEnvelope, RequestStatus, ResponseErrorCode,
-    ResponseMessage, WireRequestMessage,
+    self, AcceptedOperation, RequestEnvelope, RequestStatus, ResponseErrorCode, ResponseMessage,
+    WireRequestMessage,
 };
 use super::result_consumer::NativeOutput;
 use super::runtime::{Cancellation, OperationContext};
-use super::task_form::{self, TaskFormDraft, TaskFormError};
 
 const ACTION_TIMEOUT: Duration = Duration::from_secs(3);
 const ACTION_QUEUE_CAPACITY: usize = 1;
 const EVENT_QUEUE_CAPACITY: usize = 4;
-
-/// A fixed failure while preparing an in-memory typed task form.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PreparationError {
-    TaskForm(TaskFormError),
-    SelectedProfileMismatch,
-}
-
-impl std::fmt::Display for PreparationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::TaskForm(error) => error.fmt(f),
-            Self::SelectedProfileMismatch => {
-                f.write_str("submit profile does not match the selected Stack Catalog profile")
-            }
-        }
-    }
-}
-
-impl std::error::Error for PreparationError {}
 
 /// An explicit caller-supplied ID and lane. Its Debug intentionally hides the
 /// ID, and it is never generated or persisted by this module.
@@ -74,71 +50,6 @@ impl std::fmt::Debug for RetainedRequest {
     }
 }
 
-/// A validated v1 Submit plus the exact caller-owned identity. This is
-/// intentionally non-Clone so UI code cannot accidentally replay it.
-pub struct PreparedSubmission {
-    envelope: RequestEnvelope,
-    request: RetainedRequest,
-}
-
-impl PreparedSubmission {
-    pub fn request_id(&self) -> &str {
-        self.request.request_id()
-    }
-
-    pub fn lane(&self) -> Lane {
-        self.request.lane()
-    }
-}
-
-impl std::fmt::Debug for PreparedSubmission {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PreparedSubmission")
-            .field("request", &self.request)
-            .field("envelope", &"<redacted native request>")
-            .finish()
-    }
-}
-
-/// Construct an opaque one-shot submission from the in-memory native task
-/// form. `build_submit` performs the bounded envelope and refreshed-catalog
-/// validation before this function accepts the envelope for enqueue.
-pub(crate) fn prepare_task_form_submission(
-    catalog: &Catalog,
-    draft: TaskFormDraft,
-    selected_profile: &ProfileKey,
-) -> Result<PreparedSubmission, PreparationError> {
-    let envelope = task_form::build_submit(catalog, draft).map_err(PreparationError::TaskForm)?;
-    prepare_validated_envelope(envelope, selected_profile)
-}
-
-fn prepare_validated_envelope(
-    envelope: RequestEnvelope,
-    selected_profile: &ProfileKey,
-) -> Result<PreparedSubmission, PreparationError> {
-    let ClientRequest::Submit {
-        request_id,
-        request,
-        ..
-    } = envelope
-        .clone()
-        .into_client_request()
-        .map_err(|_| PreparationError::TaskForm(TaskFormError::InvalidRequest))?
-    else {
-        return Err(PreparationError::TaskForm(TaskFormError::InvalidRequest));
-    };
-    if request.profile() != selected_profile {
-        return Err(PreparationError::SelectedProfileMismatch);
-    }
-    Ok(PreparedSubmission {
-        envelope,
-        request: RetainedRequest {
-            request_id,
-            lane: request.lane(),
-        },
-    })
-}
-
 /// Fixed refusal to enqueue more work on the single bounded coordinator
 /// worker. No action has been sent when this is returned.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -156,15 +67,6 @@ impl std::fmt::Display for EnqueueError {
             Self::InvalidRequestId => "coordinator request ID is invalid",
         })
     }
-}
-
-/// A one-shot Submit result. `Unconfirmed` deliberately preserves uncertainty:
-/// callers must observe the retained ID and must not automatically resubmit.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SubmitOutcome {
-    Accepted,
-    Rejected(ResponseErrorCode),
-    Unconfirmed(ClientError),
 }
 
 /// Bounded status and native-output snapshot from an explicit read-only query.
@@ -217,10 +119,6 @@ pub enum CancelOutcome {
 /// Completed background action. Request IDs are available to correlate with
 /// the UI's retained caller identity but are hidden in Debug.
 pub enum WorkbenchEvent {
-    Submitted {
-        request_id: String,
-        outcome: SubmitOutcome,
-    },
     Observed {
         request_id: String,
         outcome: Result<Observation, ObserveFailure>,
@@ -237,8 +135,7 @@ pub enum WorkbenchEvent {
 impl WorkbenchEvent {
     pub fn request_id(&self) -> &str {
         match self {
-            Self::Submitted { request_id, .. }
-            | Self::Observed { request_id, .. }
+            Self::Observed { request_id, .. }
             | Self::Cancelled { request_id, .. }
             | Self::WorkerFailed { request_id } => request_id,
         }
@@ -248,7 +145,6 @@ impl WorkbenchEvent {
 impl std::fmt::Debug for WorkbenchEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let (name, outcome) = match self {
-            Self::Submitted { outcome, .. } => ("Submitted", format!("{outcome:?}")),
             Self::Observed { outcome, .. } => ("Observed", format!("{outcome:?}")),
             Self::Cancelled { outcome, .. } => ("Cancelled", format!("{outcome:?}")),
             Self::WorkerFailed { .. } => ("WorkerFailed", "<fixed>".to_owned()),
@@ -262,10 +158,6 @@ impl std::fmt::Debug for WorkbenchEvent {
 }
 
 enum Action {
-    Submit {
-        socket_directory: PathBuf,
-        prepared: PreparedSubmission,
-    },
     Observe {
         socket_directory: PathBuf,
         request: RetainedRequest,
@@ -279,7 +171,6 @@ enum Action {
 impl Action {
     fn request_id(&self) -> &str {
         match self {
-            Self::Submit { prepared, .. } => prepared.request_id(),
             Self::Observe { request, .. } => request.request_id(),
             Self::Cancel { request_id, .. } => request_id,
         }
@@ -287,8 +178,7 @@ impl Action {
 }
 
 /// Dedicated single-thread, one-slot worker for explicit local coordinator
-/// exchanges. The caller prepares Submit files before enqueue and retains the
-/// returned ID before any network exchange can happen.
+/// observation and cancellation exchanges.
 pub struct CoordinatorWorkbench {
     actions: Option<SyncSender<Action>>,
     events: Option<Receiver<WorkbenchEvent>>,
@@ -314,22 +204,6 @@ impl CoordinatorWorkbench {
             stop,
             worker: Some(worker),
         })
-    }
-
-    /// Enqueue the opaque one-shot Submit. The caller must copy and retain
-    /// `prepared.request_id()` and `prepared.lane()` before calling this:
-    /// once enqueued, the worker may exchange IPC immediately.
-    pub fn submit(
-        &mut self,
-        socket_directory: PathBuf,
-        prepared: PreparedSubmission,
-    ) -> Result<RetainedRequest, EnqueueError> {
-        let retained = prepared.request.clone();
-        self.enqueue(Action::Submit {
-            socket_directory,
-            prepared,
-        })?;
-        Ok(retained)
     }
 
     pub fn observe(
@@ -439,26 +313,6 @@ fn execute(
     let cancellation = WorkerStop(stop);
     let context = OperationContext::new(Instant::now() + ACTION_TIMEOUT, &cancellation);
     match action {
-        Action::Submit {
-            socket_directory,
-            prepared,
-        } => {
-            *output_cache = None;
-            let request_id = prepared.request.request_id.clone();
-            let outcome = match client::exchange(&socket_directory, prepared.envelope, &context) {
-                Ok(ResponseMessage::Accepted {
-                    operation: AcceptedOperation::Submit,
-                    ..
-                }) => SubmitOutcome::Accepted,
-                Ok(ResponseMessage::Error { code, .. }) => SubmitOutcome::Rejected(code),
-                Ok(_) => SubmitOutcome::Unconfirmed(ClientError::InvalidResponse),
-                Err(error) => SubmitOutcome::Unconfirmed(error),
-            };
-            WorkbenchEvent::Submitted {
-                request_id,
-                outcome,
-            }
-        }
         Action::Observe {
             socket_directory,
             request,
@@ -597,44 +451,13 @@ mod tests {
     use std::os::unix::net::UnixListener;
     use std::thread;
 
-    use crate::control::ipc::{self, ResponseEnvelope};
-    use crate::control::result_buffer::{
-        ResultBuffer, ResultEvent, ResultTerminal, MAX_PAGE_BYTES,
-    };
+    use crate::control::ipc::{self, ClientRequest, ResponseEnvelope};
+    use crate::control::result_buffer::{ResultBuffer, ResultEvent, MAX_PAGE_BYTES};
 
     fn private_socket_directory() -> tempfile::TempDir {
         let directory = tempfile::tempdir().unwrap();
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         directory
-    }
-
-    fn embedding_catalog() -> (tempfile::TempDir, Catalog) {
-        let language_root = tempfile::tempdir().unwrap();
-        std::fs::write(
-            language_root.path().join("llama-swap.yaml"),
-            "models:\n  fixture-embeddings:\n    cmd: llama-server --embedding\n",
-        )
-        .unwrap();
-        let repository_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let catalog = Catalog::load_from_roots(
-            language_root.path(),
-            repository_root.join("toolkits/l2m2"),
-            repository_root.join("toolkits/l3ds"),
-        )
-        .unwrap();
-        (language_root, catalog)
-    }
-
-    fn embedding_draft(id: &str) -> TaskFormDraft {
-        TaskFormDraft::new(
-            ProfileKey::new(Lane::Language, "fixture-embeddings").unwrap(),
-            super::super::catalog::Task::new("embeddings").unwrap(),
-            id.into(),
-            5_000,
-            task_form::TaskFields::LanguageEmbeddings {
-                input: vec!["private-submit-payload".into()],
-            },
-        )
     }
 
     fn receive_event(worker: &mut CoordinatorWorkbench) -> WorkbenchEvent {
@@ -649,27 +472,6 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(5));
         }
-    }
-
-    #[test]
-    fn preparation_enforces_selected_profile_and_hides_request_body() {
-        let (_language_root, catalog) = embedding_catalog();
-        let selected = ProfileKey::new(Lane::Language, "fixture-embeddings").unwrap();
-        let prepared = prepare_task_form_submission(
-            &catalog,
-            embedding_draft("caller:workbench-id"),
-            &selected,
-        )
-        .unwrap();
-        assert_eq!(prepared.request_id(), "caller:workbench-id");
-        assert_eq!(prepared.lane(), Lane::Language);
-        assert!(!format!("{prepared:?}").contains("private-submit-payload"));
-        let wrong = ProfileKey::new(Lane::Decisions, "nagi-small").unwrap();
-        assert_eq!(
-            prepare_task_form_submission(&catalog, embedding_draft("caller:workbench-id"), &wrong,)
-                .unwrap_err(),
-            PreparationError::SelectedProfileMismatch
-        );
     }
 
     #[test]
@@ -749,139 +551,6 @@ mod tests {
                 panic!("expected native chat output")
             };
             assert_eq!(content, expected);
-        }
-        server.join().unwrap();
-    }
-
-    #[test]
-    fn submit_uncertainty_is_retained_and_a_followup_observe_is_read_only() {
-        let directory = private_socket_directory();
-        let socket = directory.path().to_owned();
-        let listener = UnixListener::bind(socket.join("coordinator.sock")).unwrap();
-        std::fs::set_permissions(
-            socket.join("coordinator.sock"),
-            std::fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
-        let server = thread::spawn(move || {
-            let mut stream = listener.accept().unwrap().0;
-            let ipc::IncomingRequest::Control(ClientRequest::Submit {
-                request_id,
-                request,
-                ..
-            }) = ipc::read_incoming_request(&mut stream).unwrap()
-            else {
-                panic!("first workbench operation should be submit")
-            };
-            assert_eq!(request_id, "caller:workbench-id");
-            let crate::control::requests::InferenceRequest::Embeddings { profile, input } = request
-            else {
-                panic!("typed workbench submit should retain embeddings")
-            };
-            assert_eq!(profile.profile_id.as_str(), "fixture-embeddings");
-            assert_eq!(input, vec![String::from("private-submit-payload")]);
-            drop(stream); // Simulate a lost acknowledgment; client must not retry.
-
-            let mut status_stream = listener.accept().unwrap().0;
-            let ipc::IncomingRequest::Control(ClientRequest::Status {
-                request_id: status_id,
-            }) = ipc::read_incoming_request(&mut status_stream).unwrap()
-            else {
-                panic!("follow-up should be read-only status")
-            };
-            assert_eq!(status_id, "caller:workbench-id");
-            ipc::write_response(
-                &mut status_stream,
-                &ResponseEnvelope::v1(ResponseMessage::Status {
-                    request_id: status_id,
-                    state: RequestStatus::Succeeded,
-                }),
-            )
-            .unwrap();
-
-            let mut results_stream = listener.accept().unwrap().0;
-            let ipc::IncomingRequest::Results(query) =
-                ipc::read_incoming_request(&mut results_stream).unwrap()
-            else {
-                panic!("observation should query native results")
-            };
-            assert_eq!(query.request_id, "caller:workbench-id");
-            let mut buffer = ResultBuffer::new();
-            buffer.begin(&query.request_id, Lane::Language).unwrap();
-            buffer
-                .append(
-                    &query.request_id,
-                    ResultEvent::Embeddings {
-                        vectors: vec![vec![0.25, -0.5]],
-                        usage: crate::control::requests::EmbeddingUsage {
-                            prompt_tokens: 1,
-                            total_tokens: 1,
-                        },
-                    },
-                )
-                .unwrap();
-            buffer
-                .terminal(&query.request_id, ResultTerminal::Succeeded)
-                .unwrap();
-            let page = buffer.page(&query.request_id, 0, MAX_PAGE_BYTES).unwrap();
-            ipc::write_response(
-                &mut results_stream,
-                &ResponseEnvelope::v2_results(ResponseMessage::Results {
-                    request_id: query.request_id,
-                    state: RequestStatus::Succeeded,
-                    after_cursor: query.after_cursor,
-                    byte_budget: query.byte_budget,
-                    page,
-                }),
-            )
-            .unwrap();
-        });
-
-        let (_language_root, catalog) = embedding_catalog();
-        let selected = ProfileKey::new(Lane::Language, "fixture-embeddings").unwrap();
-        let prepared = prepare_task_form_submission(
-            &catalog,
-            embedding_draft("caller:workbench-id"),
-            &selected,
-        )
-        .unwrap();
-        let mut worker = CoordinatorWorkbench::start().unwrap();
-        let retained = worker.submit(socket.clone(), prepared).unwrap();
-        assert_eq!(retained.request_id(), "caller:workbench-id");
-        let submitted = receive_event(&mut worker);
-        assert!(matches!(
-            submitted,
-            WorkbenchEvent::Submitted {
-                ref request_id,
-                outcome: SubmitOutcome::Unconfirmed(_),
-            } if request_id == "caller:workbench-id"
-        ));
-        worker
-            .observe(
-                socket.clone(),
-                retained.request_id().into(),
-                retained.lane(),
-            )
-            .unwrap();
-        let observed = receive_event(&mut worker);
-        match &observed {
-            WorkbenchEvent::Observed {
-                request_id,
-                outcome: Ok(observation),
-            } => {
-                assert_eq!(request_id, "caller:workbench-id");
-                assert_eq!(observation.status, RequestStatus::Succeeded);
-                assert!(observation.output_complete);
-                let Some(NativeOutput::LanguageEmbeddings { vectors, usage }) = &observation.output
-                else {
-                    panic!("expected language-native embeddings output")
-                };
-                assert_eq!(vectors, &vec![vec![0.25, -0.5]]);
-                assert_eq!(usage.prompt_tokens, 1);
-                assert_eq!(usage.total_tokens, 1);
-                assert!(!format!("{observed:?}").contains("private-submit-payload"));
-            }
-            _ => panic!("expected native result observation"),
         }
         server.join().unwrap();
     }

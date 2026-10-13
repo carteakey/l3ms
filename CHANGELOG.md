@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### Breaking changes
+- Retire the branch-added Stack coordinator task-form submission fallback and
+  its envelope builder. Supported forms use the foreground native runner;
+  unsupported profiles refuse without dispatch. Keep retained-ID observation,
+  cancellation, results/history and original standalone commands. No external
+  engine or stored request is changed; no replacement daemon is introduced.
 - Remove the retired CPU coordinator's dispatch loop, worker module and their
   private helpers. Direct CPU execution remains; retain managed-session lifecycle
   coverage and original tools. This removes code rather than disabling tests for

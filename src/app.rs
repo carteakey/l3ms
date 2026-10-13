@@ -20,7 +20,7 @@ use std::os::unix::process::CommandExt;
 #[cfg(target_os = "linux")]
 use crate::control::coordinator_workbench::{
     self as coordinator_workbench, CancelOutcome, CoordinatorWorkbench, ObserveFailure,
-    PreparationError, SubmitOutcome, WorkbenchEvent,
+    WorkbenchEvent,
 };
 use crate::control::requests::SpeechMode;
 use crate::control::result_consumer::NativeOutput;
@@ -110,7 +110,7 @@ const MODEL_PAGE_SIZE: usize = 50;
 const DOWNLOAD_PAGE_SIZE: usize = 50;
 const DOWNLOAD_ESTIMATE_TIMEOUT: Duration = Duration::from_secs(180);
 const DOWNLOAD_DISK_TIMEOUT: Duration = Duration::from_secs(3);
-const MAX_STACK_ID_INPUT_BYTES: usize = 128;
+const MAX_COORDINATOR_ID_INPUT_BYTES: usize = 128;
 const MAX_STACK_OUTPUT_PREVIEW_CHARS: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -245,7 +245,6 @@ enum CoordinatorInputAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TaskFormField {
-    RequestId,
     Timeout,
     DeclaredTask,
     MediaOperation,
@@ -259,13 +258,12 @@ enum TaskFormField {
     SpeechReferenceText,
     DecisionState,
     DecisionQuestions,
-    Submit,
+    Run,
 }
 
 impl TaskFormField {
     fn label(self) -> &'static str {
         match self {
-            Self::RequestId => "Caller request ID",
             Self::Timeout => "Timeout (ms)",
             Self::DeclaredTask => "Declared task",
             Self::MediaOperation => "Media input kind",
@@ -279,7 +277,7 @@ impl TaskFormField {
             Self::SpeechReferenceText => "Reference transcript",
             Self::DecisionState => "Decision state JSON",
             Self::DecisionQuestions => "Decision questions JSON",
-            Self::Submit => "Submit once",
+            Self::Run => "Run once",
         }
     }
 
@@ -331,7 +329,6 @@ impl SpeechMode {
 
 #[derive(Default)]
 struct TaskFormValues {
-    request_id: String,
     timeout: String,
     embedding_inputs: String,
     workflow_graph: String,
@@ -347,7 +344,6 @@ struct TaskFormValues {
 impl TaskFormValues {
     fn total_bytes(&self) -> usize {
         [
-            self.request_id.len(),
             self.timeout.len(),
             self.embedding_inputs.len(),
             self.workflow_graph.len(),
@@ -396,11 +392,6 @@ struct TaskFormEditor {
 }
 
 impl TaskFormEditor {
-    #[cfg(test)]
-    fn new(profile: &CatalogProfile) -> Self {
-        Self::new_with_direct_embeddings(profile, false)
-    }
-
     fn new_with_direct_embeddings(
         profile: &CatalogProfile,
         direct_language_embeddings: bool,
@@ -540,9 +531,6 @@ impl TaskFormEditor {
 
     fn refresh_fields(&mut self) {
         let mut fields = Vec::with_capacity(8);
-        if !self.is_direct_native() {
-            fields.push(TaskFormField::RequestId);
-        }
         fields.push(TaskFormField::Timeout);
         if !self.direct_native_decision
             && (!self.direct_breeze_speech || self.declared_tasks.len() > 1)
@@ -609,7 +597,7 @@ impl TaskFormEditor {
                 }
             }
         }
-        fields.push(TaskFormField::Submit);
+        fields.push(TaskFormField::Run);
         self.fields = fields;
         self.active = self.active.min(self.fields.len().saturating_sub(1));
         self.sync_cursor();
@@ -629,7 +617,6 @@ impl TaskFormEditor {
 
     fn value(&self, field: TaskFormField) -> Option<&String> {
         match field {
-            TaskFormField::RequestId => Some(&self.values.request_id),
             TaskFormField::Timeout => Some(&self.values.timeout),
             TaskFormField::EmbeddingInputs => Some(&self.values.embedding_inputs),
             TaskFormField::MediaWorkflowGraph => Some(&self.values.workflow_graph),
@@ -643,13 +630,12 @@ impl TaskFormEditor {
             TaskFormField::DeclaredTask
             | TaskFormField::MediaOperation
             | TaskFormField::SpeechMode
-            | TaskFormField::Submit => None,
+            | TaskFormField::Run => None,
         }
     }
 
     fn value_mut(&mut self, field: TaskFormField) -> Option<&mut String> {
         match field {
-            TaskFormField::RequestId => Some(&mut self.values.request_id),
             TaskFormField::Timeout => Some(&mut self.values.timeout),
             TaskFormField::EmbeddingInputs => Some(&mut self.values.embedding_inputs),
             TaskFormField::MediaWorkflowGraph => Some(&mut self.values.workflow_graph),
@@ -663,7 +649,7 @@ impl TaskFormEditor {
             TaskFormField::DeclaredTask
             | TaskFormField::MediaOperation
             | TaskFormField::SpeechMode
-            | TaskFormField::Submit => None,
+            | TaskFormField::Run => None,
         }
     }
 
@@ -684,7 +670,7 @@ impl TaskFormEditor {
                 .map(SpeechMode::task_form_label)
                 .unwrap_or("(choose with ↑/↓)")
                 .to_owned(),
-            TaskFormField::Submit => "Ctrl+Enter or focus this row and press Enter".into(),
+            TaskFormField::Run => "Ctrl+Enter or focus this row and press Enter".into(),
             text_field => self
                 .value(text_field)
                 .filter(|value| !value.is_empty())
@@ -783,7 +769,6 @@ impl TaskFormEditor {
             return false;
         };
         let field_limit = match self.active_field() {
-            TaskFormField::RequestId => MAX_STACK_ID_INPUT_BYTES,
             TaskFormField::Timeout => 32,
             _ => MAX_TASK_FORM_FIELD_BYTES,
         };
@@ -847,11 +832,6 @@ impl TaskFormEditor {
     }
 
     fn to_draft(&self) -> Result<TaskFormDraft, TaskFormError> {
-        let request_id = if self.is_direct_native() {
-            String::new()
-        } else {
-            self.values.request_id.clone()
-        };
         let timeout_ms = self
             .values
             .timeout
@@ -923,7 +903,6 @@ impl TaskFormEditor {
         Ok(TaskFormDraft::new(
             self.profile.clone(),
             declared_task,
-            request_id,
             timeout_ms,
             fields,
         ))
@@ -2041,18 +2020,6 @@ impl App {
             }
             self.coordinator_action_pending = false;
             match event {
-                WorkbenchEvent::Submitted { outcome, .. } => match outcome {
-                    SubmitOutcome::Accepted => {
-                        self.status = "Submit accepted; press o to observe this caller ID".into();
-                    }
-                    SubmitOutcome::Rejected(_) => {
-                        self.status =
-                            "Submit was rejected; retained ID is available for observation".into();
-                    }
-                    SubmitOutcome::Unconfirmed(_) => {
-                        self.status = "Submit acknowledgment unavailable; ID retained. Press o to observe; do not resubmit".into();
-                    }
-                },
                 WorkbenchEvent::Observed { outcome, .. } => match outcome {
                     Ok(observation) => {
                         self.coordinator_request_terminal = matches!(
@@ -2542,9 +2509,9 @@ impl App {
                         || self
                             .task_form_editor
                             .as_ref()
-                            .is_some_and(|editor| editor.active_field() == TaskFormField::Submit)
+                            .is_some_and(|editor| editor.active_field() == TaskFormField::Run)
                     {
-                        self.submit_task_form();
+                        self.run_task_form();
                     } else if let Some(editor) = self.task_form_editor.as_mut() {
                         if !editor.insert_newline() {
                             self.status = "Task form field or aggregate input limit reached".into();
@@ -2653,7 +2620,7 @@ impl App {
                     InputMode::ChatSystemPrompt => self.chat_system_prompt.push(character),
                     InputMode::ChatEndpoint => self.chat_endpoint_draft.push(character),
                     InputMode::CoordinatorInput => {
-                        let max_bytes = MAX_STACK_ID_INPUT_BYTES;
+                        let max_bytes = MAX_COORDINATOR_ID_INPUT_BYTES;
                         if self.coordinator_input.len() + character.len_utf8() <= max_bytes
                             && !character.is_control()
                         {
@@ -4516,12 +4483,6 @@ impl App {
 
         #[cfg(target_os = "linux")]
         if direct_native_profile {
-            if self.coordinator_action_pending
-                || (self.coordinator_request_id.is_some() && !self.coordinator_request_terminal)
-            {
-                self.status = "A coordinator request is pending or nonterminal; observe or cancel it before starting a foreground native run".into();
-                return;
-            }
             if self.direct_native_admission_closed {
                 self.status = "Foreground native admission is closed after an unconfirmed completion; inspect Jobs and recover the backend before retrying".into();
                 return;
@@ -4530,15 +4491,19 @@ impl App {
                 self.status = "A foreground native task is still running; press c to cancel and wait for its outcome".into();
                 return;
             }
-        } else {
-            if self.direct_native_job.is_some() || self.direct_native_admission_closed {
-                self.status = "A foreground native task is active or interrupted; finish or recover it before using the coordinator lane".into();
-                return;
-            }
+        }
+        #[cfg(target_os = "linux")]
+        {
             if self.coordinator_action_pending
                 || (self.coordinator_request_id.is_some() && !self.coordinator_request_terminal)
             {
-                self.status = "Caller ID remains ambiguous or nonterminal; observe or cancel it before another Submit".into();
+                self.status = "A coordinator request is pending or nonterminal; observe or cancel it before starting other work".into();
+                return;
+            }
+            if !direct_native_profile
+                && (self.direct_native_job.is_some() || self.direct_native_admission_closed)
+            {
+                self.status = "A foreground native task is active or interrupted; finish or recover it before other work".into();
                 return;
             }
         }
@@ -4547,20 +4512,14 @@ impl App {
             return;
         }
 
-        #[cfg(not(target_os = "linux"))]
-        {
-            self.status = "The private coordinator workbench is available on Linux only".into();
-        }
         #[cfg(target_os = "linux")]
         {
-            if !direct_native_profile && self.stack_coordinator_socket_dir.is_none() {
-                self.status =
-                    "No explicit private coordinator socket is configured in shared settings"
-                        .into();
-                return;
-            }
             if profile.tasks.is_empty() {
                 self.status = "Selected profile declares no task forms".into();
+                return;
+            }
+            if !direct_native_profile {
+                self.status = "No direct native workflow is available for this profile; coordinator task submission has been retired".into();
                 return;
             }
             self.task_form_editor = Some(TaskFormEditor::new_with_direct_embeddings(
@@ -4588,6 +4547,16 @@ impl App {
             } else {
                 "Native task form open · choose the declared task explicitly".into()
             };
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            if profile.tasks.is_empty() {
+                self.status = "Selected profile declares no task forms".into();
+            } else {
+                self.status =
+                    "No direct native workflow is available for this profile on this platform"
+                        .into();
+            }
         }
     }
 
@@ -4699,10 +4668,10 @@ impl App {
         true
     }
 
-    fn submit_task_form(&mut self) {
+    fn run_task_form(&mut self) {
         #[cfg(not(target_os = "linux"))]
         {
-            self.status = "The private coordinator workbench is available on Linux only".into();
+            self.status = "Direct native task execution is available on Linux only".into();
         }
         #[cfg(target_os = "linux")]
         {
@@ -4711,115 +4680,15 @@ impl App {
                 .as_ref()
                 .is_some_and(TaskFormEditor::is_direct_native)
             {
-                self.submit_direct_native();
+                self.run_direct_native();
                 return;
             }
-            if self.direct_native_job.is_some() || self.direct_native_admission_closed {
-                self.status = "A foreground native task is active or interrupted; finish or recover it before using the coordinator lane".into();
-                return;
-            }
-            if self.coordinator_action_pending
-                || (self.coordinator_request_id.is_some() && !self.coordinator_request_terminal)
-            {
-                self.status = "Caller ID remains ambiguous or nonterminal; observe or cancel it before another Submit".into();
-                return;
-            }
-            let Some(socket_directory) = self.stack_coordinator_socket_dir.clone() else {
-                self.status =
-                    "No explicit private coordinator socket is configured in shared settings"
-                        .into();
-                return;
-            };
-            let Some(catalog) = self.stack_catalog.as_ref() else {
-                self.status = "Refresh the Stack Catalog before submitting".into();
-                return;
-            };
-            let Some(editor) = self.task_form_editor.as_ref() else {
-                self.status = "Native task form is not open".into();
-                return;
-            };
-            let selected_profile = editor.profile.clone();
-            if catalog.inspect(&selected_profile) != Some(&editor.profile_snapshot) {
-                self.status =
-                    "Selected profile changed; refresh and reopen the form before submitting"
-                        .into();
-                return;
-            }
-            let draft = match editor.to_draft() {
-                Ok(draft) => draft,
-                Err(error) => {
-                    self.status = error.to_string();
-                    return;
-                }
-            };
-            let prepared = match coordinator_workbench::prepare_task_form_submission(
-                catalog,
-                draft,
-                &selected_profile,
-            ) {
-                Ok(prepared) => prepared,
-                Err(PreparationError::SelectedProfileMismatch) => {
-                    self.status =
-                        "Selected profile or declared task changed; refresh and reopen the form"
-                            .into();
-                    return;
-                }
-                Err(PreparationError::TaskForm(error)) => {
-                    self.status = error.to_string();
-                    return;
-                }
-            };
-            if self.coordinator_request_id.as_deref() == Some(prepared.request_id()) {
-                self.status =
-                    "Use a different caller-supplied ID after a terminal request; IDs are never replayed".into();
-                return;
-            }
-            if !self.ensure_coordinator_worker() {
-                return;
-            }
-            let request_id = prepared.request_id().to_owned();
-            let lane = prepared.lane();
-            let previous_request = (
-                self.coordinator_request_id.clone(),
-                self.coordinator_request_lane,
-                self.coordinator_request_terminal,
-            );
-            // Retain explicit identity before enqueue; the worker may begin
-            // the private IPC exchange as soon as this call succeeds.
-            self.coordinator_request_id = Some(request_id.clone());
-            self.coordinator_request_lane = Some(lane);
-            self.coordinator_request_terminal = false;
-            let result = self
-                .coordinator_workbench
-                .as_mut()
-                .expect("worker initialized")
-                .submit(socket_directory, prepared);
-            match result {
-                Ok(_) => {
-                    self.clear_direct_native_result_display();
-                    self.coordinator_output = None;
-                    self.coordinator_decision_metadata = None;
-                    self.coordinator_output_complete = false;
-                    self.coordinator_results_available = false;
-                    self.coordinator_action_pending = true;
-                    self.task_form_editor = None;
-                    self.input_mode = InputMode::Normal;
-                    self.status =
-                        "Caller ID retained; submitting native task form once to the configured coordinator".into();
-                }
-                Err(_) => {
-                    self.coordinator_request_id = previous_request.0;
-                    self.coordinator_request_lane = previous_request.1;
-                    self.coordinator_request_terminal = previous_request.2;
-                    self.status =
-                        "Coordinator worker did not accept the form; nothing was dispatched".into();
-                }
-            }
+            self.status = "Coordinator task submission has been retired; only allowlisted direct native forms can run".into();
         }
     }
 
     #[cfg(target_os = "linux")]
-    fn submit_direct_native(&mut self) {
+    fn run_direct_native(&mut self) {
         if self.chat_connection_pending
             || self.chat_pending
             || self.chat_stream_cancellation.is_some()
@@ -7499,9 +7368,9 @@ impl App {
             let lifecycle = if self.coordinator_request_id.is_none() {
                 "no caller ID retained"
             } else if self.coordinator_request_terminal {
-                "terminal observed · next Submit requires a different caller ID"
+                "terminal observed · caller ID retained for lookup"
             } else {
-                "ambiguous or nonterminal · observe/cancel before another Submit"
+                "ambiguous or nonterminal · observe/cancel before other work"
             };
             let socket = if self.stack_coordinator_socket_dir.is_some() {
                 "explicit socket configured"
@@ -7524,7 +7393,7 @@ impl App {
                     }
                 )
             };
-            (text, "Coordinator · opt-in only")
+            (text, "Coordinator · observation/cancel only")
         };
         #[cfg(not(target_os = "linux"))]
         let (action_text, action_title) = {
@@ -7533,9 +7402,9 @@ impl App {
             let lifecycle = if self.coordinator_request_id.is_none() {
                 "no caller ID retained"
             } else if self.coordinator_request_terminal {
-                "terminal observed · next Submit requires a different caller ID"
+                "terminal observed · caller ID retained for lookup"
             } else {
-                "ambiguous or nonterminal · observe/cancel before another Submit"
+                "ambiguous or nonterminal · observe/cancel before other work"
             };
             let socket = if self.stack_coordinator_socket_dir.is_some() {
                 "explicit socket configured"
@@ -7544,7 +7413,7 @@ impl App {
             };
             (
                 format!("{socket}\nretained ID: {retained}\nlane: {lane}\n{lifecycle}"),
-                "Coordinator · opt-in only",
+                "Coordinator · observation/cancel only",
             )
         };
         frame.render_widget(
@@ -7718,11 +7587,9 @@ impl App {
             panes[1],
         );
         frame.render_widget(
-            Paragraph::new(if editor.is_direct_native() {
-                "Tab/Shift+Tab move fields · Enter inserts newline · Ctrl+Enter runs once · Esc clears draft · c cancels active run"
-            } else {
-                "Tab/Shift+Tab move fields · ↑/↓ choose task/kind/mode · Enter inserts newline · Ctrl+Enter submits once · Esc clears draft"
-            })
+            Paragraph::new(
+                "Tab/Shift+Tab move fields · ↑/↓ choose task/kind/mode · Enter inserts newline · Ctrl+Enter runs once · Esc clears draft · c cancels active run",
+            )
                 .style(theme::warning())
                 .block(theme::block().borders(Borders::ALL))
                 .wrap(Wrap { trim: false }),
@@ -7731,7 +7598,7 @@ impl App {
 
         let field = editor.active_field();
         if !field.is_selector()
-            && field != TaskFormField::Submit
+            && field != TaskFormField::Run
             && panes[1].width > 2
             && panes[1].height > 2
         {
@@ -8102,7 +7969,7 @@ impl App {
         let controls = if self.script_input_target.is_some() {
             "Esc list │ F1–F8 tabs │ Ctrl+P palette │ Ctrl+C quit"
         } else if self.input_mode == InputMode::TaskForm {
-            "Tab/Shift+Tab fields │ Enter newline │ Ctrl+Enter submit once │ Esc discard"
+            "Tab/Shift+Tab fields │ Enter newline │ Ctrl+Enter run once │ Esc discard"
         } else if self.tab == Tab::Download && self.download.focus() != DownloadFocus::Table {
             "Tab/Shift+Tab fields │ Esc table │ Ctrl+P palette │ Ctrl+C quit"
         } else {
@@ -10362,7 +10229,6 @@ mod tests {
             .unwrap();
         let editor = app.task_form_editor.as_mut().unwrap();
         assert!(editor.direct_breeze_speech);
-        assert!(!editor.fields.contains(&TaskFormField::RequestId));
         assert!(!editor.fields.contains(&TaskFormField::MediaOperation));
         assert!(editor.fields.contains(&TaskFormField::SpeechMode));
         assert!(!editor.fields.contains(&TaskFormField::SpeechInstruction));
@@ -10391,7 +10257,6 @@ mod tests {
         assert!(app.status.contains("selected GPU must be idle"));
         let editor = app.task_form_editor.as_mut().unwrap();
         assert!(editor.direct_native_decision);
-        assert!(!editor.fields.contains(&TaskFormField::RequestId));
         assert!(!editor.fields.contains(&TaskFormField::DeclaredTask));
         editor.values.decision_questions =
             r#"{"route":{"type":"choice","criteria":{"yes":"Proceed","no":"Stop"}}}"#.into();
@@ -10408,7 +10273,7 @@ mod tests {
         assert!(app.job_history.records().is_empty());
 
         app.chat_pending = true;
-        app.submit_direct_native();
+        app.run_direct_native();
         assert!(app.status.contains("Wait for active Chat"));
         assert!(app.direct_native_job.is_none());
         assert!(app.job_history.records().is_empty());
@@ -10428,7 +10293,6 @@ mod tests {
         assert!(editor.direct_breeze_speech);
         assert_eq!(editor.declared_tasks, ["tts", "clon", "design"]);
         assert_eq!(editor.selected_task, Some(0));
-        assert!(!editor.fields.contains(&TaskFormField::RequestId));
         assert!(!editor.fields.contains(&TaskFormField::MediaOperation));
         assert!(editor.fields.contains(&TaskFormField::SpeechMode));
         assert_eq!(editor.speech_mode, Some(SpeechMode::Standard));
@@ -10507,7 +10371,6 @@ mod tests {
         assert!(editor.is_direct_native());
         assert_eq!(editor.declared_tasks, ["music"]);
         assert_eq!(editor.selected_task, Some(0));
-        assert!(!editor.fields.contains(&TaskFormField::RequestId));
         assert!(!editor.fields.contains(&TaskFormField::DeclaredTask));
         assert!(!editor.fields.contains(&TaskFormField::MediaOperation));
         assert!(editor.fields.contains(&TaskFormField::MediaScriptArgv));
@@ -10577,7 +10440,6 @@ mod tests {
             assert!(editor.is_direct_native());
             assert_eq!(editor.declared_tasks, ["music", "video", "tts"]);
             assert!(editor.fields.contains(&TaskFormField::DeclaredTask));
-            assert!(!editor.fields.contains(&TaskFormField::RequestId));
             assert!(!editor.fields.contains(&TaskFormField::MediaOperation));
             assert!(editor.fields.contains(&TaskFormField::MediaScriptArgv));
             assert!(!editor.fields.contains(&TaskFormField::SpeechText));
@@ -10652,7 +10514,6 @@ mod tests {
             assert!(editor.is_direct_native());
             assert_eq!(editor.declared_tasks, ["video", "music"]);
             assert!(editor.fields.contains(&TaskFormField::DeclaredTask));
-            assert!(!editor.fields.contains(&TaskFormField::RequestId));
             assert!(!editor.fields.contains(&TaskFormField::MediaOperation));
             assert!(editor.fields.contains(&TaskFormField::MediaScriptArgv));
             assert!(!editor.fields.contains(&TaskFormField::SpeechText));
@@ -10764,7 +10625,6 @@ mod tests {
             .unwrap();
         let editor = app.task_form_editor.as_mut().unwrap();
         assert!(editor.direct_native_decision);
-        assert!(!editor.fields.contains(&TaskFormField::RequestId));
         assert!(!editor.fields.contains(&TaskFormField::DeclaredTask));
         assert_eq!(editor.values.timeout, "30000");
         assert_eq!(editor.declared_tasks, ["decision"]);
@@ -10783,7 +10643,6 @@ mod tests {
         let editor = app.task_form_editor.as_mut().unwrap();
         assert!(editor.direct_language_embeddings);
         assert!(editor.is_direct_native());
-        assert!(!editor.fields.contains(&TaskFormField::RequestId));
         assert!(!editor.fields.contains(&TaskFormField::DeclaredTask));
         assert!(editor.fields.contains(&TaskFormField::EmbeddingInputs));
         assert_eq!(editor.selected_task, Some(0));
@@ -10812,7 +10671,6 @@ mod tests {
             let editor = app.task_form_editor.as_mut().unwrap();
             assert!(editor.direct_comfy_workflow);
             assert!(editor.is_direct_native());
-            assert!(!editor.fields.contains(&TaskFormField::RequestId));
             assert!(!editor.fields.contains(&TaskFormField::MediaOperation));
             assert!(editor.fields.contains(&TaskFormField::DeclaredTask));
             assert!(editor.fields.contains(&TaskFormField::MediaWorkflowGraph));
@@ -11187,45 +11045,6 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    fn submit_coordinator_decision_form(
-        app: &mut App,
-        request_id: &str,
-        state_json: &str,
-        questions_json: &str,
-    ) {
-        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
-            .unwrap();
-        for character in request_id.chars() {
-            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
-                .unwrap();
-        }
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
-            .unwrap();
-        for character in "5000".chars() {
-            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
-                .unwrap();
-        }
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
-            .unwrap();
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
-            .unwrap();
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
-            .unwrap();
-        for character in state_json.chars() {
-            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
-                .unwrap();
-        }
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
-            .unwrap();
-        for character in questions_json.chars() {
-            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
-                .unwrap();
-        }
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL))
-            .unwrap();
-    }
-
-    #[cfg(target_os = "linux")]
     fn wait_for_direct_native(app: &mut App) {
         let deadline = Instant::now() + Duration::from_secs(8);
         while app.direct_native_job.is_some() && Instant::now() < deadline {
@@ -11248,7 +11067,7 @@ mod tests {
         write_direct_decision_runner(&fixture, &marker, false);
         let mut app = fixture.app();
         open_direct_decision_form(&mut app);
-        app.submit_task_form();
+        app.run_task_form();
         assert!(app.direct_native_job.is_some());
         assert!(app.coordinator_workbench.is_none());
         assert!(app.task_form_editor.is_none());
@@ -11327,7 +11146,6 @@ mod tests {
         let editor = app.task_form_editor.as_mut().unwrap();
         assert!(editor.direct_native_decision);
         assert!(editor.is_direct_native());
-        assert!(!editor.fields.contains(&TaskFormField::RequestId));
         assert!(!editor.fields.contains(&TaskFormField::DeclaredTask));
         assert_eq!(editor.profile.profile_id.as_str(), "jev-api");
 
@@ -11365,7 +11183,7 @@ mod tests {
         write_direct_cpu_tts_runner(&fixture, &marker, false);
         let mut app = fixture.app();
         open_direct_cpu_speech_form(&mut app, "tts-private-secret");
-        app.submit_task_form();
+        app.run_task_form();
         assert!(app.direct_native_job.is_some());
         assert!(app.coordinator_workbench.is_none());
         assert!(app.task_form_editor.is_none());
@@ -11554,7 +11372,7 @@ mod tests {
             Some("clone-private-transcript")
         );
 
-        app.submit_task_form();
+        app.run_task_form();
         assert!(app.direct_native_job.is_some());
         assert!(app.coordinator_workbench.is_none());
         wait_for_direct_native(&mut app);
@@ -11631,7 +11449,7 @@ mod tests {
         assert!(input.voice_reference.is_none());
         assert!(input.reference_text.is_none());
 
-        app.submit_task_form();
+        app.run_task_form();
         assert!(app.direct_native_job.is_some());
         assert!(app.coordinator_workbench.is_none());
         wait_for_direct_native(&mut app);
@@ -11687,7 +11505,7 @@ mod tests {
         write_direct_cpu_tts_runner(&fixture, &marker, true);
         let mut app = fixture.app();
         open_direct_cpu_speech_form(&mut app, "tts-private-secret");
-        app.submit_task_form();
+        app.run_task_form();
         let job_id = app.direct_native_job.as_ref().unwrap().job_id;
         let start_deadline = Instant::now() + Duration::from_secs(3);
         while !marker.exists() && Instant::now() < start_deadline {
@@ -11750,7 +11568,7 @@ mod tests {
         // deterministically, without relying on the test user's privileges.
         fs::create_dir(crate::state_store::jobs_path_in(&fixture.data)).unwrap();
         open_direct_decision_form(&mut app);
-        app.submit_task_form();
+        app.run_task_form();
         assert!(app.direct_native_job.is_none());
         assert!(!marker.exists());
         assert!(app.status.contains("nothing was started"));
@@ -11772,7 +11590,7 @@ mod tests {
         write_direct_decision_runner(&fixture, &marker, true);
         let mut app = fixture.app();
         open_direct_decision_form(&mut app);
-        app.submit_task_form();
+        app.run_task_form();
         let job_id = app.direct_native_job.as_ref().unwrap().job_id;
         let start_deadline = Instant::now() + Duration::from_secs(3);
         while !marker.exists() && Instant::now() < start_deadline {
@@ -11844,7 +11662,7 @@ mod tests {
         write_direct_decision_runner(&fixture, &marker, true);
         let mut app = fixture.app();
         open_direct_decision_form(&mut app);
-        app.submit_task_form();
+        app.run_task_form();
         let start_deadline = Instant::now() + Duration::from_secs(3);
         while !marker.exists() && Instant::now() < start_deadline {
             thread::sleep(Duration::from_millis(10));
@@ -11916,7 +11734,6 @@ mod tests {
         assert_eq!(app.input_mode, InputMode::TaskForm);
         let editor = app.task_form_editor.as_ref().unwrap();
         assert_eq!(editor.active_field(), TaskFormField::Timeout);
-        assert!(!editor.fields.contains(&TaskFormField::RequestId));
         assert!(!editor.fields.contains(&TaskFormField::DeclaredTask));
         assert_eq!(editor.values.embedding_inputs, r#"["private text π"]"#);
         assert!(app.stack_coordinator_socket_dir.is_none());
@@ -11953,7 +11770,6 @@ mod tests {
         editor.selected_task = Some(0);
         assert_eq!(editor.declared_tasks, ["embeddings"]);
         assert!(editor.fields.contains(&TaskFormField::EmbeddingInputs));
-        assert!(!editor.fields.contains(&TaskFormField::RequestId));
         editor.values.embedding_inputs = r#"["first private text","second private text"]"#.into();
         let (request, timeout) = build_direct_native(&catalog, editor.to_draft().unwrap()).unwrap();
         let crate::control::requests::InferenceRequest::Embeddings { input, .. } = request else {
@@ -12019,32 +11835,30 @@ mod tests {
     #[test]
     fn task_form_bounds_each_field_and_aggregate_before_typing_more() {
         let fixture = AppFixture::new();
-        write_coordinator_decision_stack_fixture(&fixture);
+        write_stack_fixture(&fixture);
         let catalog = Catalog::load(&fixture.root).unwrap();
         let profile = catalog
             .list()
             .iter()
-            .find(|profile| profile.key.profile_id.as_str() == "semif-fixture")
+            .find(|profile| profile.key.profile_id.as_str() == "nagi")
             .unwrap();
-        let mut editor = TaskFormEditor::new(profile);
-        editor.selected_task = Some(0);
-        editor.refresh_fields();
-        editor.values.request_id = "a".repeat(MAX_STACK_ID_INPUT_BYTES);
+        let mut editor = TaskFormEditor::new_with_direct_embeddings(profile, false);
+        assert!(editor.direct_native_decision);
+        editor.move_focus(1);
+        assert_eq!(editor.active_field(), TaskFormField::DecisionState);
+        editor.values.decision_state = "c".repeat(MAX_TASK_FORM_FIELD_BYTES);
         editor.sync_cursor();
         assert!(!editor.insert_char('x'));
 
-        editor.values.request_id = "a".repeat(MAX_STACK_ID_INPUT_BYTES);
         editor.values.timeout = "3".repeat(32);
-        editor.values.decision_state = "c".repeat(MAX_TASK_FORM_FIELD_BYTES - 1);
+        editor.values.decision_state = "c".repeat(400 * 1024);
         let remaining = MAX_TASK_FORM_TOTAL_BYTES
-            - editor.values.request_id.len()
             - editor.values.timeout.len()
             - editor.values.decision_state.len();
         editor.values.decision_questions = "4".repeat(remaining);
-        editor.move_focus(1);
-        editor.move_focus(1);
-        editor.move_focus(1);
         assert_eq!(editor.active_field(), TaskFormField::DecisionState);
+        assert_eq!(editor.values.total_bytes(), MAX_TASK_FORM_TOTAL_BYTES);
+        editor.sync_cursor();
         assert!(!editor.insert_char('x'));
     }
 
@@ -12122,7 +11936,37 @@ mod tests {
     }
 
     #[test]
-    fn stack_catalog_typed_decision_submit_observe_cancel_keeps_native_output_private() {
+    fn unsupported_task_form_refuses_without_contacting_configured_coordinator() {
+        let fixture = AppFixture::new();
+        write_coordinator_decision_stack_fixture(&fixture);
+        let mut settings = crate::settings::Settings::default();
+        settings.stack.coordinator_socket_dir = Some(
+            fixture
+                .data
+                .path()
+                .join("no-listener")
+                .display()
+                .to_string(),
+        );
+        crate::settings::save_settings_in(fixture.data.path(), &settings).unwrap();
+        let mut app = fixture.app();
+        focus_stack_profile_by_id(&mut app, "semif-fixture");
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app
+            .status
+            .contains("coordinator task submission has been retired"));
+        assert!(app.task_form_editor.is_none());
+        assert!(app.coordinator_workbench.is_none());
+        assert!(!app.coordinator_action_pending);
+        assert!(app.coordinator_request_id.is_none());
+        assert!(app.direct_native_job.is_none());
+        assert!(app.job_history.records().is_empty());
+    }
+
+    #[test]
+    fn stack_catalog_external_request_observe_cancel_shows_native_results() {
         use std::os::unix::fs::PermissionsExt;
         use std::os::unix::net::UnixListener;
 
@@ -12135,12 +11979,8 @@ mod tests {
         };
 
         const REQUEST_ID: &str = "caller:keyboard-workbench";
-        const NEXT_REQUEST_ID: &str = "caller:keyboard-workbench-next";
-        const PRIVATE_STATE: &str = "private decision state";
-        const SECOND_PRIVATE_STATE: &str = "second private decision state";
-        const QUESTIONS: &str =
-            r#"{"route":{"type":"choice","criteria":{"yes":"Proceed","no":"Stop"}}}"#;
         const RESULT_PREVIEW: &str = "Answers:";
+        const PRIVATE_RESULT: &str = "private coordinator result";
 
         let fixture = AppFixture::new();
         write_coordinator_decision_stack_fixture(&fixture);
@@ -12158,33 +11998,11 @@ mod tests {
         crate::settings::save_settings_in(fixture.data.path(), &settings).unwrap();
 
         let server = thread::spawn(move || {
-            let mut submitted = listener.accept().unwrap().0;
-            let ipc::IncomingRequest::Control(ClientRequest::Submit {
-                request_id,
-                timeout,
-                request,
-            }) = ipc::read_incoming_request(&mut submitted).unwrap()
-            else {
-                panic!("typed task form should issue exactly one Submit")
-            };
-            assert_eq!(request_id, REQUEST_ID);
-            assert_eq!(timeout.as_millis(), 5_000);
-            assert_eq!(request.profile().profile_id.as_str(), "semif-fixture");
-            let crate::control::requests::InferenceRequest::Decision {
-                state, questions, ..
-            } = request
-            else {
-                panic!("typed form retains the native decision shape")
-            };
-            assert_eq!(state["private_state"], PRIVATE_STATE);
-            assert_eq!(questions["route"]["type"], "choice");
-            drop(submitted); // Lost acknowledgment must not trigger a replay.
-
             let mut status_stream = listener.accept().unwrap().0;
             let ipc::IncomingRequest::Control(ClientRequest::Status { request_id }) =
                 ipc::read_incoming_request(&mut status_stream).unwrap()
             else {
-                panic!("keyboard o should query status, never resubmit")
+                panic!("keyboard o should observe an externally submitted request")
             };
             assert_eq!(request_id, REQUEST_ID);
             ipc::write_response(
@@ -12209,7 +12027,7 @@ mod tests {
                 .append(
                     &query.request_id,
                     ResultEvent::DecisionResult {
-                        answers: serde_json::json!({"route":{"choice":"yes","confidence":0.9}})
+                        answers: serde_json::json!({"answer":PRIVATE_RESULT})
                             .as_object()
                             .unwrap()
                             .clone(),
@@ -12257,30 +12075,6 @@ mod tests {
                 }),
             )
             .unwrap();
-
-            let mut next_submit_stream = listener.accept().unwrap().0;
-            let ipc::IncomingRequest::Control(ClientRequest::Submit {
-                request_id,
-                request,
-                ..
-            }) = ipc::read_incoming_request(&mut next_submit_stream).unwrap()
-            else {
-                panic!("a new typed Submit is allowed after observing terminal status")
-            };
-            assert_eq!(request_id, NEXT_REQUEST_ID);
-            let crate::control::requests::InferenceRequest::Decision { state, .. } = request else {
-                panic!("second typed form retains the native decision shape")
-            };
-            assert_eq!(state["private_state"], SECOND_PRIVATE_STATE);
-            ipc::write_response(
-                &mut next_submit_stream,
-                &ResponseEnvelope::v1(ResponseMessage::Accepted {
-                    request_id,
-                    operation: AcceptedOperation::Submit,
-                    state: RequestStatus::Queued,
-                }),
-            )
-            .unwrap();
         });
 
         let mut app = fixture.app();
@@ -12299,53 +12093,43 @@ mod tests {
             .position(|profile| profile.key.profile_id.as_str() == "semif-fixture")
             .unwrap();
         app.stack_catalog_state.select(Some(selected));
-        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
-            .unwrap();
-        assert_eq!(app.input_mode, InputMode::Normal);
-        assert!(app.coordinator_workbench.is_none());
-        submit_coordinator_decision_form(
-            &mut app,
-            REQUEST_ID,
-            &format!(r#"{{"private_state":"{PRIVATE_STATE}"}}"#),
-            QUESTIONS,
-        );
-        assert_eq!(app.coordinator_request_id.as_deref(), Some(REQUEST_ID));
-        assert!(!app.status.contains(PRIVATE_STATE));
-
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while app.coordinator_action_pending && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(5));
-            app.drain_background_events();
-        }
-        assert!(!app.coordinator_action_pending);
-        assert!(app.status.contains("acknowledgment unavailable"));
-        assert_eq!(app.coordinator_request_id.as_deref(), Some(REQUEST_ID));
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
             .unwrap();
         assert_eq!(app.input_mode, InputMode::Normal);
-        assert_eq!(app.coordinator_request_id.as_deref(), Some(REQUEST_ID));
         assert!(app
             .status
-            .contains("Caller ID remains ambiguous or nonterminal"));
-
+            .contains("coordinator task submission has been retired"));
+        assert!(app.task_form_editor.is_none());
+        assert!(app.coordinator_workbench.is_none());
         app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE))
             .unwrap();
+        for character in REQUEST_ID.chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.coordinator_request_id.as_deref(), Some(REQUEST_ID));
+
         let deadline = Instant::now() + Duration::from_secs(3);
         while app.coordinator_action_pending && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(5));
             app.drain_background_events();
         }
         assert!(!app.coordinator_action_pending);
+        assert!(app.status.contains("native results refreshed"));
+        assert_eq!(app.coordinator_request_id.as_deref(), Some(REQUEST_ID));
         assert!(app.coordinator_results_available);
         assert!(app.coordinator_output_complete);
-        assert!(!app.status.contains(PRIVATE_STATE));
-        assert!(!app.log.iter().any(|line| line.contains(PRIVATE_STATE)));
+        assert!(!app.status.contains(PRIVATE_RESULT));
+        assert!(!app.log.iter().any(|line| line.contains(PRIVATE_RESULT)));
         assert!(app.job_history.records().is_empty());
 
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
         assert!(terminal_text(&terminal).contains(RESULT_PREVIEW));
         assert!(terminal_text(&terminal).contains("Private native result panel"));
+        assert!(terminal_text(&terminal).contains(PRIVATE_RESULT));
 
         app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
             .unwrap();
@@ -12356,175 +12140,7 @@ mod tests {
         }
         assert!(!app.coordinator_action_pending);
         assert!(app.status.contains("Cancel acknowledged"));
-        assert!(!app.status.contains(PRIVATE_STATE));
-
-        submit_coordinator_decision_form(
-            &mut app,
-            NEXT_REQUEST_ID,
-            &format!(r#"{{"private_state":"{SECOND_PRIVATE_STATE}"}}"#),
-            QUESTIONS,
-        );
-        assert_eq!(app.coordinator_request_id.as_deref(), Some(NEXT_REQUEST_ID));
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while app.coordinator_action_pending && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(5));
-            app.drain_background_events();
-        }
-        assert!(!app.coordinator_action_pending);
-        assert!(app.status.contains("Submit accepted"));
         server.join().unwrap();
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn native_task_form_submits_once_through_the_same_private_coordinator_gate() {
-        use std::os::unix::fs::PermissionsExt;
-        use std::os::unix::net::UnixListener;
-
-        use crate::control::ipc::{
-            self, AcceptedOperation, ClientRequest, RequestStatus, ResponseEnvelope,
-            ResponseMessage,
-        };
-
-        const REQUEST_ID: &str = "caller:form-ui";
-        const PRIVATE_STATE: &str = "task form state stays private";
-        const QUESTIONS: &str =
-            r#"{"route":{"type":"choice","criteria":{"yes":"Proceed","no":"Stop"}}}"#;
-
-        let fixture = AppFixture::new();
-        write_coordinator_decision_stack_fixture(&fixture);
-        let socket_directory = tempfile::tempdir().unwrap();
-        fs::set_permissions(socket_directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        let listener =
-            UnixListener::bind(socket_directory.path().join("coordinator.sock")).unwrap();
-        fs::set_permissions(
-            socket_directory.path().join("coordinator.sock"),
-            fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
-        let mut settings = crate::settings::Settings::default();
-        settings.stack.coordinator_socket_dir = Some(socket_directory.path().display().to_string());
-        crate::settings::save_settings_in(fixture.data.path(), &settings).unwrap();
-
-        let (received_sender, received_receiver) = std::sync::mpsc::channel();
-        let (release_sender, release_receiver) = std::sync::mpsc::channel();
-        let server = thread::spawn(move || {
-            let mut stream = listener.accept().unwrap().0;
-            let ipc::IncomingRequest::Control(ClientRequest::Submit {
-                request_id,
-                timeout,
-                request,
-            }) = ipc::read_incoming_request(&mut stream).unwrap()
-            else {
-                panic!("native form should issue one Submit")
-            };
-            assert_eq!(request_id, REQUEST_ID);
-            assert_eq!(timeout.as_millis(), 30_000);
-            assert_eq!(request.profile().lane, Lane::Decisions);
-            assert_eq!(request.profile().profile_id.as_str(), "semif-fixture");
-            let crate::control::requests::InferenceRequest::Decision {
-                state, questions, ..
-            } = request
-            else {
-                panic!("form retains the native decision shape")
-            };
-            assert_eq!(state["private_state"], PRIVATE_STATE);
-            assert_eq!(questions["route"]["type"], "choice");
-            received_sender.send(()).unwrap();
-            release_receiver
-                .recv_timeout(Duration::from_secs(3))
-                .unwrap();
-            ipc::write_response(
-                &mut stream,
-                &ResponseEnvelope::v1(ResponseMessage::Accepted {
-                    request_id,
-                    operation: AcceptedOperation::Submit,
-                    state: RequestStatus::Queued,
-                }),
-            )
-            .unwrap();
-        });
-
-        let mut app = fixture.app();
-        app.handle_key(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE))
-            .unwrap();
-        let selected_language = app
-            .stack_catalog
-            .as_ref()
-            .unwrap()
-            .list()
-            .iter()
-            .position(|profile| profile.key.profile_id.as_str() == "semif-fixture")
-            .unwrap();
-        app.stack_catalog_state.select(Some(selected_language));
-        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
-            .unwrap();
-        for character in REQUEST_ID.chars() {
-            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
-                .unwrap();
-        }
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
-            .unwrap();
-        for character in "30000".chars() {
-            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
-                .unwrap();
-        }
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
-            .unwrap();
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
-            .unwrap();
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
-            .unwrap();
-        for character in format!(r#"{{"private_state":"{PRIVATE_STATE}"}}"#).chars() {
-            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
-                .unwrap();
-        }
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
-            .unwrap();
-        for character in QUESTIONS.chars() {
-            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
-                .unwrap();
-        }
-
-        // Even if the table's highlight changes while the form is open, its
-        // captured profile key remains the route being validated and sent.
-        let selected_media = app
-            .stack_catalog
-            .as_ref()
-            .unwrap()
-            .list()
-            .iter()
-            .position(|profile| profile.key.profile_id.as_str() == "breeze")
-            .unwrap();
-        app.stack_catalog_state.select(Some(selected_media));
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL))
-            .unwrap();
-        assert_eq!(app.coordinator_request_id.as_deref(), Some(REQUEST_ID));
-        assert_eq!(app.coordinator_request_lane, Some(Lane::Decisions));
-        assert_eq!(app.input_mode, InputMode::Normal);
-        assert!(app.task_form_editor.is_none());
-        received_receiver
-            .recv_timeout(Duration::from_secs(3))
-            .unwrap();
-        assert!(!app.status.contains(PRIVATE_STATE));
-        assert!(!app.log.iter().any(|line| line.contains(PRIVATE_STATE)));
-        release_sender.send(()).unwrap();
-
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while app.coordinator_action_pending && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(5));
-            app.drain_background_events();
-        }
-        assert!(!app.coordinator_action_pending);
-        assert_eq!(app.coordinator_request_id.as_deref(), Some(REQUEST_ID));
-        assert!(app.status.contains("Submit accepted"));
-        assert!(!app.status.contains(PRIVATE_STATE));
-        assert!(!app.log.iter().any(|line| line.contains(PRIVATE_STATE)));
-        server.join().unwrap();
-
-        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
-        terminal.draw(|frame| app.draw(frame)).unwrap();
-        assert!(!terminal_text(&terminal).contains(PRIVATE_STATE));
     }
 
     #[test]
@@ -13186,7 +12802,7 @@ mod tests {
             (Refusal::ChangedProfile, "profile changed"),
             (
                 Refusal::CoordinatorRequestPending,
-                "Caller ID remains ambiguous or nonterminal",
+                "A coordinator request is pending or nonterminal",
             ),
         ];
 

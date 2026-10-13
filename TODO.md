@@ -10,6 +10,18 @@ existing Linear migration issues rather than replacing their acceptance criteria
 
 ## Monorepo: next work
 
+Removed the branch-added coordinator task-form submission fallback, Submit
+workbench helpers/envelope builder and form caller IDs: **1,266 net source lines
+removed**. Supported forms use the native runner; unsupported profiles refuse.
+Observation/cancellation/paging/history remain, with a retained keyboard test.
+Root **803 pass, 100 socket failures, 1 ignored**; build/strict lint/fmt and native
+form checks pass. Fewer transport failures reflect retired Submit tests, not a
+transport fix. Actual cached Nagi CPU CLI still succeeds offline (1.714 s native
+latency); no downloads, provider calls or service changes. Reduction still unmet.
+Next implement truthful Blender headless/Python versus external GUI/MCP
+workflows, a small native service handoff/restoration path, and delete remaining
+managed platform callers inward. Live acceptance remains resource/access-gated.
+
 LTX-2.5 video/music now retains synchronized audio/video and image conditioning
 through the shared native script path. Prepared-only Python dispatch prevents
 implicit `uv` setup; default standalone behavior is unchanged. Four focused Rust

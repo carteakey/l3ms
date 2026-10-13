@@ -1708,13 +1708,8 @@ fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
             spec.output_dir,
         ),
     };
-    let draft = crate::control::task_form::TaskFormDraft::new(
-        profile,
-        task,
-        "direct".to_owned(),
-        spec.timeout_ms,
-        fields,
-    );
+    let draft =
+        crate::control::task_form::TaskFormDraft::new(profile, task, spec.timeout_ms, fields);
     let (request, timeout) = crate::control::task_form::build_direct_native(&catalog, draft)
         .map_err(|_| anyhow::anyhow!("native request is invalid"))?;
     let output_dir = comfy_output_directory.as_deref().or(output_dir);

@@ -17,9 +17,10 @@ Language (root L3MS) · Media (L2M2) · Decisions (L3DS)
 
 The root L3MS app continues to run its existing language-model workflows. The
 media and decision toolkits keep their native runtimes and configuration;
-shared catalog and direct CPU decision/speech paths are available. Native
-embedding dispatch is implemented with transport acceptance still pending;
-remaining media/GPU routing and the full port are unfinished.
+shared catalog and direct CPU decision/speech paths are available. CUDA Nagi/Laya,
+Breeze, HeartMuLa, H3 and LTX share an explicit idle-GPU native runner. Native
+embedding/Comfy transport and GPU acceptance remain pending; Blender, automatic
+GPU handoff/restoration and broader simplification keep the full port unfinished.
 
 Vision-capable LLMs, including Gemma vision, and embeddings remain in the
 language lane.
@@ -279,14 +280,16 @@ l3ms --request-output request-123 --request-lane decisions --coordinator-socket-
 
 These commands use a three-second IPC deadline and return compact JSON. They do
 not start a daemon or fall back to a direct engine. Generic envelope-file
-submission has been retired; remaining coordinator tasks use the typed Stack
-form (`f`) with a caller-owned ID. A lost reply means query that ID, not resubmit. A missing
+submission and the coordinator task-form fallback have been retired. Stack
+forms (`f`) run supported tasks directly; profiles without a native runner
+refuse instead of submitting through a second execution mode. A lost reply from
+an external coordinator means query the original ID, not resubmit. A missing
 coordinator fails explicitly. Cancellation acceptance is not proof that active
 work has finished; query the same request ID for its terminal status. Service
 installation and general GPU/media dispatch remain gated by migration acceptance.
 CPU-local decisions use `--run-profile` or the Stack Catalog typed form (`f`)
 directly, without a daemon; see [native CPU workflows](docs/cpu-native-workflows.md).
-Declared CUDA Nagi/Laya, Breeze and HeartMuLa music use the same runner with an
+Declared CUDA Nagi/Laya, Breeze, HeartMuLa, H3 and LTX use the same runner with an
 [explicit operator-managed idle GPU window](docs/native-gpu-workflows.md),
 not automatic takeover of a live service.
 Stack observe/output (`o`) and cancel (`c`) remain available for retained jobs.

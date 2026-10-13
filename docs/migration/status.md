@@ -9,6 +9,48 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
+## Caller-first coordinator submission retirement — 2026-10-13
+
+Stack forms now run only allowlisted foreground native workflows; the old
+external-coordinator submission fallback refuses explicitly. Chat-only profiles
+still hand off to the existing Chat owner. Active/uncertain native or coordinator
+work still blocks overlapping work. Removed Submit preparation/action/events,
+wire-envelope construction and form caller IDs; the native builder no longer
+depends on IPC. Field/aggregate bounds remain 512/900 KiB. Retained coordinator
+observation, cancellation, paging, history and original native tools remain.
+
+The keyboard regression now starts from an externally supplied request ID and
+retains status/results/display/cancel coverage. Its socket transport remains
+unverified here; a separate socket-free fixture proves unsupported forms refuse
+without creating a worker, job or request ID. Direct bounds/Chat refusal checks
+pass; a stale expected status string was updated without changing admission.
+Ten form checks, H3/Heart/LTX compatibility, build/strict lint/fmt pass.
+Root **803 pass, 100 socket failures, 1 ignored**. Two withdrawn submission-only
+transport tests explain the lower failure count; it is not a transport fix.
+Logs: `/tmp/l3ms-submit-retirement-{forms,ltx,h3,heart,tests,clippy,build}.log`.
+Standalone L3DS: two Rust, 21 runner and 17 maintenance Python checks pass.
+
+Actual branch `decisions:nagi-smol-cpu` succeeds offline again: public synthetic
+network/billing choice input, native infrastructure probability 0.6507265 and
+**1,714,118,821 ns** native latency. Fixture input:
+`/tmp/l3ms-native-retirement-qn1u3f/input.json`. Exact command:
+
+```sh
+env HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1 CUDA_VISIBLE_DEVICES= OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 target/debug/l3ms --run-profile decisions:nagi-smol-cpu --task decision --input /tmp/l3ms-native-retirement-qn1u3f/input.json --task-timeout-ms 120000
+```
+
+No simulation, download, provider call or service change. This confirms native
+execution after the interface cleanup, not decision accuracy or GPU acceptance.
+Net whole-source **−1,266**, cumulative **+5,313** versus `702b4cd`; control source
+**62,018** lines versus baseline 60,729. The half-reduction target remains unmet.
+
+Next: Blender's distinct headless/Python and interactive MCP contracts, the
+small native service handoff/restoration path and broader managed-platform
+retirement. The Blender wrapper's `--prompt` only prints MCP guidance, not
+inference; its undeclared device must not be relabeled CPU or CUDA. Preserve
+standalone/interactive ownership rather than inventing a fake result path.
+Live HTTP/GPU/service and final experience/publication gates remain open.
+
 ## LTX prepared native integration — 2026-10-13
 
 Declared LTX-2.5 `video`/`music` now shares the script-media CLI/UI owner and
