@@ -379,6 +379,7 @@ struct TaskFormEditor {
     direct_native_music: bool,
     direct_native_h3: bool,
     direct_native_ltx: bool,
+    direct_blender_headless: bool,
     direct_comfy_workflow: bool,
     direct_language_embeddings: bool,
     declared_tasks: Vec<String>,
@@ -401,6 +402,7 @@ impl TaskFormEditor {
         let direct_native_music = is_direct_cuda_music_profile(profile);
         let direct_native_h3 = is_direct_cuda_h3_profile(profile);
         let direct_native_ltx = is_direct_cuda_ltx_profile(profile);
+        let direct_blender_headless = is_direct_blender_headless_profile(profile);
         #[cfg(target_os = "linux")]
         let direct_comfy_workflow = is_direct_comfy_workflow_profile(profile);
         #[cfg(not(target_os = "linux"))]
@@ -428,6 +430,9 @@ impl TaskFormEditor {
         if direct_native_ltx {
             declared_tasks.retain(|task| matches!(task.as_str(), "music" | "video"));
         }
+        if direct_blender_headless {
+            declared_tasks.retain(|task| matches!(task.as_str(), "3d" | "render" | "image"));
+        }
         if profile.key.lane == Lane::Language
             && profile
                 .tasks
@@ -444,6 +449,7 @@ impl TaskFormEditor {
             direct_native_music,
             direct_native_h3,
             direct_native_ltx,
+            direct_blender_headless,
             direct_comfy_workflow,
             direct_language_embeddings,
             declared_tasks,
@@ -504,6 +510,14 @@ impl TaskFormEditor {
                 .or_else(|| (!editor.declared_tasks.is_empty()).then_some(0));
             editor.media_operation = Some(TaskFormMediaOperation::Script);
         }
+        if direct_blender_headless {
+            editor.selected_task = editor
+                .declared_tasks
+                .iter()
+                .position(|task| task == "3d")
+                .or_else(|| (!editor.declared_tasks.is_empty()).then_some(0));
+            editor.media_operation = Some(TaskFormMediaOperation::Script);
+        }
         if direct_comfy_workflow {
             editor.media_operation = Some(TaskFormMediaOperation::Workflow);
         }
@@ -526,7 +540,10 @@ impl TaskFormEditor {
     }
 
     fn is_direct_script_media(&self) -> bool {
-        self.direct_native_music || self.direct_native_h3 || self.direct_native_ltx
+        self.direct_native_music
+            || self.direct_native_h3
+            || self.direct_native_ltx
+            || self.direct_blender_headless
     }
 
     fn refresh_fields(&mut self) {
@@ -1085,6 +1102,7 @@ struct DirectNativeSummary {
     profile_id: String,
     task: String,
     cuda: bool,
+    requires_idle_gpu_window: bool,
     native_id: Option<String>,
     state: DirectNativeState,
     result: Option<DirectRunResult>,
@@ -4478,6 +4496,7 @@ impl App {
             || is_direct_breeze_speech_profile(&profile)
             || is_direct_cuda_music_profile(&profile)
             || is_direct_cuda_profile(&profile)
+            || is_direct_blender_headless_profile(&profile)
             || is_direct_comfy_workflow_profile(&profile)
             || direct_language_embeddings;
 
@@ -4527,7 +4546,9 @@ impl App {
                 direct_language_embeddings,
             ));
             self.input_mode = InputMode::TaskForm;
-            self.status = if is_direct_cuda_ltx_profile(&profile) {
+            self.status = if is_direct_blender_headless_profile(&profile) {
+                "Foreground Blender headless form open · Python runs with your user permissions and is not sandboxed · shared GPU must be idle; no service is stopped automatically · external GUI/MCP remains separate · run once with Ctrl+Enter".into()
+            } else if is_direct_cuda_ltx_profile(&profile) {
                 "Foreground CUDA LTX-2.5 form open · choose video or music; both generate synchronized MP4 · prompt/argv stay in memory · the selected GPU must be idle; no service is stopped automatically · run once with Ctrl+Enter".into()
             } else if is_direct_cuda_h3_profile(&profile) {
                 "Foreground CUDA MiniMax H3 form open · choose music, tts, or video; prompt/argv stay in memory · the selected GPU must be idle; no service is stopped automatically · run once with Ctrl+Enter".into()
@@ -4755,7 +4776,13 @@ impl App {
         let cuda_native = catalog
             .inspect(request.profile())
             .is_some_and(is_direct_cuda_profile);
-        let script_media_request = is_direct_cuda_script_request(&catalog, &request);
+        let requires_idle_gpu_window = catalog
+            .inspect(request.profile())
+            .is_some_and(direct_run::requires_operator_gpu_window);
+        let blender_headless = catalog
+            .inspect(request.profile())
+            .is_some_and(is_direct_blender_headless_profile);
+        let script_media_request = is_direct_native_script_request(&catalog, &request);
         let task_label = if comfy_request {
             "Comfy workflow"
         } else if script_media_request {
@@ -4863,7 +4890,11 @@ impl App {
                 if comfy_request {
                     "comfy-job"
                 } else if script_media_request {
-                    "cuda-script-job"
+                    if blender_headless {
+                        "blender-job"
+                    } else {
+                        "cuda-script-job"
+                    }
                 } else if cuda_native {
                     "cuda-job"
                 } else {
@@ -4923,6 +4954,7 @@ impl App {
                     profile_id,
                     task,
                     cuda: cuda_native,
+                    requires_idle_gpu_window,
                     native_id,
                     state: DirectNativeState::Failed,
                     result: None,
@@ -4942,6 +4974,7 @@ impl App {
             profile_id: profile_id.clone(),
             task: worker_task.clone(),
             cuda: cuda_native,
+            requires_idle_gpu_window,
             native_id: native_id.clone(),
             state: DirectNativeState::Running,
             result: None,
@@ -4955,15 +4988,22 @@ impl App {
         self.task_form_editor = None;
         self.input_mode = InputMode::Normal;
         self.status = if native_id.is_some() {
-            format!("{task_label} #{job_id} · Comfy ID {} saved before dispatch · press c to cancel and wait for terminal state", native_id.as_deref().unwrap_or_default())
-        } else if cuda_native {
             format!(
-                "{task_label} #{job_id} running · GPU remains operator-managed; press c to cancel"
+                "{task_label} #{job_id} · Comfy ID {} saved before dispatch · press c to cancel and wait for terminal state",
+                native_id.as_deref().unwrap_or_default()
+            )
+        } else if requires_idle_gpu_window {
+            format!(
+                "{task_label} #{job_id} running · shared GPU must remain idle; no service is stopped automatically; press c to cancel"
             )
         } else if lane == Lane::Language || hosted_jev_decision {
-            format!("{task_label} #{job_id} running · press c to cancel; remote completion may be uncertain")
+            format!(
+                "{task_label} #{job_id} running · press c to cancel; remote completion may be uncertain"
+            )
         } else if lane == Lane::Decisions {
-            format!("{task_label} #{job_id} running · press c to cancel and wait for the confirmed decision outcome")
+            format!(
+                "{task_label} #{job_id} running · press c to cancel and wait for the confirmed decision outcome"
+            )
         } else {
             format!("{task_label} #{job_id} running · press c to cancel")
         };
@@ -4984,14 +5024,18 @@ impl App {
             || self.chat_stream_cancellation.is_some()
             || self.chat_session_pending
         {
-            return Err("Wait for the current Chat connection, response, or session action before running embeddings");
+            return Err(
+                "Wait for the current Chat connection, response, or session action before running embeddings",
+            );
         }
         let client = self
             .chat_client
             .as_ref()
             .ok_or("Connect Chat before running native embeddings")?;
         if self.chat_endpoint_committed.as_deref() != Some(client.base_url()) {
-            return Err("The current Chat endpoint is not a confirmed connection; reconnect before running embeddings");
+            return Err(
+                "The current Chat endpoint is not a confirmed connection; reconnect before running embeddings",
+            );
         }
         let route = resolve_profile_route(catalog, request.profile())
             .map_err(|_| "The selected embeddings route could not be revalidated")?;
@@ -5003,7 +5047,9 @@ impl App {
             .iter()
             .find(|model| model.id == model_id.as_str())
         else {
-            return Err("The exact embeddings route model is not advertised by the connected Chat endpoint; refresh Chat models");
+            return Err(
+                "The exact embeddings route model is not advertised by the connected Chat endpoint; refresh Chat models",
+            );
         };
         if model.disabled {
             return Err("The exact embeddings route model is disabled in Chat");
@@ -5039,14 +5085,14 @@ impl App {
             Ok(endpoint) => endpoint,
             Err(env::VarError::NotPresent) => "http://127.0.0.1:8188".into(),
             Err(env::VarError::NotUnicode(_)) => {
-                return Err("The configured Comfy endpoint is invalid")
+                return Err("The configured Comfy endpoint is invalid");
             }
         };
         let api_key = match env::var("L3MS_COMFY_API_KEY") {
             Ok(api_key) => Some(api_key),
             Err(env::VarError::NotPresent) => None,
             Err(env::VarError::NotUnicode(_)) => {
-                return Err("The configured Comfy API key is invalid")
+                return Err("The configured Comfy API key is invalid");
             }
         };
         ComfyAdapter::new(
@@ -5135,14 +5181,18 @@ impl App {
                 .direct_native_summary
                 .as_ref()
                 .map_or("foreground native task", direct_native_summary_label);
-            let cuda = self
+            let requires_idle_gpu_window = self
                 .direct_native_summary
                 .as_ref()
-                .is_some_and(|summary| summary.cuda);
-            self.status = if cuda {
-                format!("{label} #{expected_job_id} interrupted without a confirmed worker result; GPU idle is unconfirmed, keep other clients quiesced and verify the device before retrying")
+                .is_some_and(|summary| summary.requires_idle_gpu_window);
+            self.status = if requires_idle_gpu_window {
+                format!(
+                    "{label} #{expected_job_id} interrupted without a confirmed worker result; shared GPU idle is unconfirmed, keep other clients quiesced and verify before retrying"
+                )
             } else {
-                format!("{label} #{expected_job_id} interrupted without a confirmed worker result; inspect Jobs and verify the backend before retrying")
+                format!(
+                    "{label} #{expected_job_id} interrupted without a confirmed worker result; inspect Jobs and verify the backend before retrying"
+                )
             };
             return;
         };
@@ -5195,16 +5245,22 @@ impl App {
                     .as_ref()
                     .map_or("foreground native task", direct_native_summary_label);
                 let remote = error.is_remote();
-                let cuda = self
+                let requires_idle_gpu_window = self
                     .direct_native_summary
                     .as_ref()
-                    .is_some_and(|summary| summary.cuda);
+                    .is_some_and(|summary| summary.requires_idle_gpu_window);
                 self.status = if remote {
-                    format!("{label} #{expected_job_id} interrupted: {error}; foreground admission is closed, inspect the backend before retrying")
-                } else if cuda {
-                    format!("{label} #{expected_job_id} interrupted: {error}; foreground admission is closed, keep other clients quiesced and verify the GPU is idle before retrying")
+                    format!(
+                        "{label} #{expected_job_id} interrupted: {error}; foreground admission is closed, inspect the backend before retrying"
+                    )
+                } else if requires_idle_gpu_window {
+                    format!(
+                        "{label} #{expected_job_id} interrupted: {error}; foreground admission is closed, keep other clients quiesced and verify the shared GPU is idle before retrying"
+                    )
                 } else {
-                    format!("{label} #{expected_job_id} interrupted: {error}; inspect Jobs and recover the runner before retrying")
+                    format!(
+                        "{label} #{expected_job_id} interrupted: {error}; inspect Jobs and recover the runner before retrying"
+                    )
                 };
                 self.push_log(if remote {
                     format!("{label} #{expected_job_id} remote completion unconfirmed")
@@ -5232,9 +5288,13 @@ impl App {
                     .as_ref()
                     .map_or("foreground native task", direct_native_summary_label);
                 self.status = if cancellation_confirmed {
-                    format!("{label} #{expected_job_id} cancelled · remote terminal cancellation confirmed")
+                    format!(
+                        "{label} #{expected_job_id} cancelled · remote terminal cancellation confirmed"
+                    )
                 } else {
-                    format!("{label} #{expected_job_id} reached a terminal remote state, but cancellation was not confirmed; no result was retained")
+                    format!(
+                        "{label} #{expected_job_id} reached a terminal remote state, but cancellation was not confirmed; no result was retained"
+                    )
                 };
                 self.push_log(if cancellation_confirmed {
                     format!("{label} #{expected_job_id} cancelled")
@@ -5266,9 +5326,11 @@ impl App {
                 } else if self
                     .direct_native_summary
                     .as_ref()
-                    .is_some_and(|summary| summary.cuda)
+                    .is_some_and(|summary| summary.requires_idle_gpu_window)
                 {
-                    format!("{label} #{expected_job_id} cancelled · runner cleanup and GPU idle verification confirmed")
+                    format!(
+                        "{label} #{expected_job_id} cancelled · runner cleanup and shared GPU idle verification confirmed"
+                    )
                 } else {
                     format!(
                         "{label} #{expected_job_id} cancelled · owned process cleanup confirmed"
@@ -5321,13 +5383,14 @@ impl App {
                 }
                 (_, DirectRunResult::ScriptMedia(native)) => {
                     summary.lane == Lane::Media
-                        && summary.cuda
-                        && !native.artifacts().is_empty()
                         && self.stack_catalog.as_ref().is_some_and(|catalog| {
                             catalog.list().iter().any(|profile| {
+                                let blender = is_direct_blender_headless_profile(profile);
                                 profile.key.lane == Lane::Media
                                     && profile.key.profile_id.as_str() == summary.profile_id
-                                    && direct_run::is_supported_direct_script_profile(profile)
+                                    && (summary.cuda
+                                        && direct_run::is_supported_direct_script_profile(profile)
+                                        || blender)
                                     && profile
                                         .tasks
                                         .iter()
@@ -5336,6 +5399,8 @@ impl App {
                                         &summary.profile_id,
                                         &summary.task,
                                     )
+                                    && (!native.artifacts().is_empty()
+                                        || (blender && summary.task == "3d"))
                             })
                         })
                 }
@@ -7313,12 +7378,14 @@ impl App {
         #[cfg(target_os = "linux")]
         let (action_text, action_title) = if show_direct_native {
             let text = self.direct_native_summary.as_ref().map_or_else(
-                || "Native decisions (CPU Nagi/Laya, hosted Jev, and explicitly selected CUDA Nagi/Laya), CPU/CUDA Breeze tts/clon/design, HeartMuLa CUDA music, connected embeddings, and Comfy workflows run in one foreground job. CUDA requires the selected GPU to be idle; no service is stopped automatically. Comfy uses an existing server; operator manages GPU availability. No caller ID or coordinator for these tasks.\nf open task · c cancels an active run".to_owned(),
+                || "Native decisions (CPU Nagi/Laya, hosted Jev, and explicitly selected CUDA Nagi/Laya), CPU/CUDA Breeze tts/clon/design, HeartMuLa CUDA music, Blender headless, connected embeddings, and Comfy workflows run in one foreground job. CUDA and Blender headless require an idle shared GPU window; no service is stopped automatically. Blender Python is not sandboxed; its GUI/MCP workflow remains external. Comfy uses an existing server; operator manages GPU availability. No caller ID or coordinator for these tasks.\nf open task · c cancels an active run".to_owned(),
                 |summary| {
                     let operator_note = if summary.native_id.is_some() {
                         "\nExisting Comfy server · operator manages GPU availability"
                     } else if summary.cuda {
                         "\nCUDA · selected GPU must remain idle; services are not changed automatically"
+                    } else if summary.requires_idle_gpu_window {
+                        "\nBlender headless · shared GPU must remain idle; no service is stopped automatically"
                     } else {
                         ""
                     };
@@ -7336,8 +7403,10 @@ impl App {
                         latency,
                         if self.direct_native_admission_closed && summary.native_id.is_some() {
                             "admission closed · Comfy completion unconfirmed; inspect endpoint before retrying"
-                        } else if self.direct_native_admission_closed && summary.cuda {
-                            "admission closed · GPU idle is unconfirmed; keep other clients quiesced and verify the device before retrying"
+                        } else if self.direct_native_admission_closed
+                            && summary.requires_idle_gpu_window
+                        {
+                            "admission closed · shared GPU idle is unconfirmed; keep other clients quiesced and verify before retrying"
                         } else if self.direct_native_admission_closed && summary.lane == Lane::Language {
                             "admission closed · remote completion unconfirmed; verify endpoint before retrying"
                         } else if self.direct_native_admission_closed && summary.lane == Lane::Decisions {
@@ -7346,8 +7415,10 @@ impl App {
                             "admission closed · inspect Jobs and recover runner before retrying"
                         } else if self.direct_native_job.is_some() && summary.native_id.is_some() {
                             "c cancel · waits for Comfy terminal state; server remains externally managed"
-                        } else if self.direct_native_job.is_some() && summary.cuda {
-                            "c cancel · waits for runner cleanup and GPU idle verification; no service is stopped automatically"
+                        } else if self.direct_native_job.is_some()
+                            && summary.requires_idle_gpu_window
+                        {
+                            "c cancel · waits for runner cleanup and shared GPU idle verification; no service is stopped automatically"
                         } else if self.direct_native_job.is_some() && summary.lane == Lane::Language {
                             "c cancel · dispatched remote work may continue"
                         } else if self.direct_native_job.is_some() && summary.lane == Lane::Decisions {
@@ -7489,7 +7560,9 @@ impl App {
                 Constraint::Length(3),
             ])
             .split(area);
-        let form_hint = if editor.direct_native_ltx {
+        let form_hint = if editor.direct_blender_headless {
+            "Blender headless · Python runs with your user permissions (no sandbox) · shared GPU must be idle; no service is stopped automatically · GUI/MCP is external and not launched here"
+        } else if editor.direct_native_ltx {
             "LTX-2.5 · video/music both generate synchronized MP4 · JSON argv only · prompt/settings stay in memory · GPU must be idle; no automatic service stop"
         } else if editor.direct_native_h3 {
             "MiniMax H3 · choose music/tts/video; JSON argv only · prompt stays in memory · GPU must be idle; no automatic service stop"
@@ -8200,6 +8273,20 @@ fn is_direct_cuda_profile(_profile: &CatalogProfile) -> bool {
 }
 
 #[cfg(target_os = "linux")]
+fn is_direct_blender_headless_profile(profile: &CatalogProfile) -> bool {
+    direct_run::is_supported_blender_headless_profile(profile)
+        && profile.tasks.len() == 3
+        && ["3d", "render", "image"]
+            .iter()
+            .all(|expected| profile.tasks.iter().any(|task| task.as_str() == *expected))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_direct_blender_headless_profile(_profile: &CatalogProfile) -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
 fn is_direct_cuda_music_profile(profile: &CatalogProfile) -> bool {
     direct_run::is_supported_direct_music_profile(profile)
 }
@@ -8285,6 +8372,7 @@ fn is_direct_native_profile(profile: &CatalogProfile, catalog: &Catalog) -> bool
         || is_direct_breeze_speech_profile(profile)
         || is_direct_cuda_music_profile(profile)
         || is_direct_cuda_profile(profile)
+        || is_direct_blender_headless_profile(profile)
         || is_direct_comfy_workflow_profile(profile)
         || is_direct_native_language_embeddings_profile(profile, catalog)
 }
@@ -8317,6 +8405,13 @@ fn direct_cuda_task_label(task: &str) -> &'static str {
 
 #[cfg(target_os = "linux")]
 fn direct_script_media_task_label(profile_id: &str, task: &str) -> &'static str {
+    if profile_id == "blender-3d" {
+        return match task {
+            "3d" => "Blender headless Python",
+            "render" | "image" => "Blender headless render",
+            _ => "Blender headless task",
+        };
+    }
     if profile_id == "minimax-h3" {
         return match task {
             "music" => "CUDA H3 music",
@@ -8342,7 +8437,9 @@ fn direct_script_media_task_label(profile_id: &str, task: &str) -> &'static str 
 fn direct_native_summary_label(summary: &DirectNativeSummary) -> &'static str {
     if summary.native_id.is_some() {
         "Comfy workflow"
-    } else if summary.cuda && matches!(summary.profile_id.as_str(), "minimax-h3" | "ltx-2.5") {
+    } else if summary.profile_id == "blender-3d"
+        || (summary.cuda && matches!(summary.profile_id.as_str(), "minimax-h3" | "ltx-2.5"))
+    {
         direct_script_media_task_label(&summary.profile_id, &summary.task)
     } else if summary.cuda {
         direct_cuda_task_label(&summary.task)
@@ -8374,7 +8471,7 @@ fn is_direct_breeze_speech_request(request: &crate::control::requests::Inference
 }
 
 #[cfg(target_os = "linux")]
-fn is_direct_cuda_script_request(
+fn is_direct_native_script_request(
     catalog: &Catalog,
     request: &crate::control::requests::InferenceRequest,
 ) -> bool {
@@ -8388,7 +8485,8 @@ fn is_direct_cuda_script_request(
     task.as_str() == request.task()
         && profile.lane == Lane::Media
         && catalog.inspect(profile).is_some_and(|profile| {
-            direct_run::is_supported_direct_script_profile(profile)
+            (direct_run::is_supported_direct_script_profile(profile)
+                || is_direct_blender_headless_profile(profile))
                 && profile
                     .tasks
                     .iter()
@@ -8404,6 +8502,7 @@ fn is_direct_script_media_task(profile_id: &str, task: &str) -> bool {
         "heartmula-music" => task == "music",
         "minimax-h3" => matches!(task, "music" | "tts" | "video"),
         "ltx-2.5" => matches!(task, "music" | "video"),
+        "blender-3d" => matches!(task, "3d" | "render" | "image"),
         _ => false,
     }
 }
@@ -8522,20 +8621,26 @@ fn direct_native_result_preview(result: &DirectRunResult) -> String {
             })
             .collect::<Vec<_>>()
             .join("\n"),
-        DirectRunResult::ScriptMedia(result) => result
-            .artifacts()
-            .iter()
-            .map(|artifact| {
-                format!(
-                    "Script media artifact: {}",
-                    result
-                        .output_root()
-                        .join(artifact.relative_path())
-                        .display()
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
+        DirectRunResult::ScriptMedia(result) => {
+            if result.artifacts().is_empty() {
+                "Script completed · no declared artifact".into()
+            } else {
+                result
+                    .artifacts()
+                    .iter()
+                    .map(|artifact| {
+                        format!(
+                            "Script media artifact: {}",
+                            result
+                                .output_root()
+                                .join(artifact.relative_path())
+                                .display()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        }
         DirectRunResult::Embeddings(payload) => {
             let dimensions = payload.vectors.first().map_or(0, Vec::len);
             let mut samples = payload
@@ -8703,8 +8808,10 @@ fn native_output_preview(
                 .unwrap_or_default();
             format!(
                 "Embeddings: {} vectors · {} dimensions\nNative tokens: {} prompt / {} total\nFirst vector, up to 32 components: {}\nUse explicit CLI native output for complete vectors.",
-                vectors.len(), vectors.first().map_or(0, Vec::len),
-                usage.prompt_tokens, usage.total_tokens,
+                vectors.len(),
+                vectors.first().map_or(0, Vec::len),
+                usage.prompt_tokens,
+                usage.total_tokens,
                 serde_json::to_string(&sample).unwrap_or_else(|_| "unavailable".into()),
             )
         }
@@ -10093,6 +10200,16 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    fn write_blender_headless_media_manifest(fixture: &AppFixture) {
+        write_stack_fixture(fixture);
+        fs::write(
+            fixture.root.join("toolkits/l2m2/media-runtimes.json"),
+            r#"{"schema_version":1,"profiles":[{"id":"blender-3d","name":"Blender fixture","runtime":"Blender 5.2 / blender-mcp","tasks":["3d","render","image"],"script":"media-models/generate-blender-3d.sh"}]}"#,
+        )
+        .unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
     fn write_comfy_stack_fixture(fixture: &AppFixture) {
         write_stack_fixture(fixture);
         fs::write(
@@ -10457,7 +10574,7 @@ mod tests {
             let draft = editor.to_draft().unwrap();
             assert!(!format!("{draft:?}").contains("private H3 input"));
             let (request, _) = build_direct_native(&catalog, draft).unwrap();
-            assert!(is_direct_cuda_script_request(&catalog, &request));
+            assert!(is_direct_native_script_request(&catalog, &request));
             let crate::control::requests::InferenceRequest::Media {
                 profile,
                 input:
@@ -10531,7 +10648,7 @@ mod tests {
             let draft = editor.to_draft().unwrap();
             assert!(!format!("{draft:?}").contains("private LTX prompt"));
             let (request, _) = build_direct_native(&catalog, draft).unwrap();
-            assert!(is_direct_cuda_script_request(&catalog, &request));
+            assert!(is_direct_native_script_request(&catalog, &request));
             let crate::control::requests::InferenceRequest::Media {
                 profile,
                 input:
@@ -10560,6 +10677,97 @@ mod tests {
         let persisted =
             fs::read_to_string(crate::state_store::jobs_path_in(&fixture.data)).unwrap_or_default();
         assert!(!persisted.contains("private LTX prompt"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn blender_headless_form_is_non_cuda_and_keeps_python_argv_private() {
+        let fixture = AppFixture::new();
+        write_blender_headless_media_manifest(&fixture);
+        let mut app = fixture.app();
+
+        focus_stack_profile_by_id(&mut app, "blender-3d");
+        let profile = app.selected_stack_profile().unwrap();
+        assert!(is_direct_blender_headless_profile(profile));
+        assert!(!is_direct_cuda_profile(profile));
+        assert!(direct_run::requires_operator_gpu_window(profile));
+        let summary = DirectNativeSummary {
+            job_id: 1,
+            lane: Lane::Media,
+            profile_id: "blender-3d".into(),
+            task: "3d".into(),
+            cuda: false,
+            requires_idle_gpu_window: true,
+            native_id: None,
+            state: DirectNativeState::Running,
+            result: None,
+        };
+        assert_eq!(
+            direct_native_summary_label(&summary),
+            "Blender headless Python"
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(app.status.contains("not sandboxed"));
+        assert!(app.status.contains("shared GPU must be idle"));
+        assert!(app.status.contains("GUI/MCP remains separate"));
+        assert!(!app.status.contains("CUDA"));
+        let catalog = app.stack_catalog.as_ref().unwrap().clone();
+        let editor = app.task_form_editor.as_mut().unwrap();
+        assert!(editor.direct_blender_headless);
+        assert!(editor.is_direct_native());
+        assert_eq!(editor.declared_tasks, ["3d", "render", "image"]);
+        assert_eq!(editor.selected_task, Some(0));
+        assert_eq!(editor.media_operation, Some(TaskFormMediaOperation::Script));
+        assert!(editor.fields.contains(&TaskFormField::DeclaredTask));
+        assert!(editor.fields.contains(&TaskFormField::MediaScriptArgv));
+        assert!(!editor.fields.contains(&TaskFormField::MediaWorkflowGraph));
+        assert!(!editor.fields.contains(&TaskFormField::SpeechText));
+
+        for (task, args) in [
+            (
+                "3d",
+                r#"["--code","import bpy; bpy.ops.mesh.primitive_cube_add()"]"#,
+            ),
+            ("render", r#"["--render","/tmp/private-scene.blend"]"#),
+            ("image", r#"["--render","/tmp/private-scene.blend"]"#),
+        ] {
+            select_task_form_declared_task(&mut app, task);
+            let editor = app.task_form_editor.as_mut().unwrap();
+            editor.values.script_argv = args.into();
+            let draft = editor.to_draft().unwrap();
+            assert!(!format!("{draft:?}").contains("private-scene"));
+            assert!(!format!("{draft:?}").contains("primitive_cube"));
+            let (request, _) = build_direct_native(&catalog, draft).unwrap();
+            assert!(is_direct_native_script_request(&catalog, &request));
+            let expected_args: Vec<String> = serde_json::from_str(args).unwrap();
+            let crate::control::requests::InferenceRequest::Media {
+                profile,
+                input:
+                    crate::control::requests::MediaInput::Script {
+                        task: built_task,
+                        args: built_args,
+                    },
+            } = request
+            else {
+                panic!("Blender form builds the typed native script request")
+            };
+            assert_eq!(profile.profile_id.as_str(), "blender-3d");
+            assert!(catalog.inspect(&profile).unwrap().device.is_none());
+            assert_eq!(built_task.as_str(), task);
+            assert_eq!(built_args, expected_args);
+        }
+
+        assert!(!app.status.contains("primitive_cube"));
+        assert!(app.log.iter().all(|line| !line.contains("primitive_cube")));
+        assert!(app.job_history.records().is_empty());
+        assert!(app.direct_native_job.is_none());
+        assert!(app.coordinator_workbench.is_none());
+        let persisted =
+            fs::read_to_string(crate::state_store::jobs_path_in(&fixture.data)).unwrap_or_default();
+        assert!(!persisted.contains("primitive_cube"));
+        assert!(!persisted.contains("private-scene"));
     }
 
     #[cfg(target_os = "linux")]
@@ -12876,6 +13084,7 @@ mod tests {
             profile_id: "jev-api".into(),
             task: "decision".into(),
             cuda: false,
+            requires_idle_gpu_window: false,
             native_id: None,
             state: DirectNativeState::Interrupted,
             result: None,
@@ -12896,6 +13105,7 @@ mod tests {
             profile_id: "nagi".into(),
             task: "decision".into(),
             cuda: false,
+            requires_idle_gpu_window: false,
             native_id: None,
             state: DirectNativeState::Running,
             result: None,

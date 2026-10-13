@@ -61,7 +61,7 @@ struct Cli {
     #[arg(long, value_name = "NAMESPACED_ID", requires_all = ["task", "input"])]
     run_profile: Option<String>,
 
-    /// Declared task name (decision, tts, clon, design, music, image, video, or embeddings) required by --run-profile.
+    /// Declared task name (decision, tts, clon, design, music, image, video, 3d, render, or embeddings) required by --run-profile.
     #[arg(long, value_name = "TASK", requires = "run_profile")]
     task: Option<String>,
 
@@ -360,10 +360,10 @@ fn direct_native_spec(cli: &Cli) -> Result<Option<DirectNativeSpec<'_>>> {
     match (direct_native_task_lane(task)?, output_dir) {
         (crate::control::catalog::Lane::Media, Some(_)) => {}
         (crate::control::catalog::Lane::Media, None) => {
-            bail!("--output-dir is required with speech, music and Comfy workflow tasks")
+            bail!("--output-dir is required with speech and media tasks")
         }
         (_, Some(_)) => {
-            bail!("--output-dir is only valid with speech, music or Comfy workflow tasks")
+            bail!("--output-dir is only valid with speech or media tasks")
         }
         (_, None) => {}
     }
@@ -387,7 +387,9 @@ fn direct_native_task_lane(task: &str) -> Result<crate::control::catalog::Lane> 
     match task {
         "decision" => Ok(Lane::Decisions),
         "embeddings" => Ok(Lane::Language),
-        "tts" | "clon" | "design" | "music" | "image" | "video" => Ok(Lane::Media),
+        "tts" | "clon" | "design" | "music" | "image" | "video" | "3d" | "render" => {
+            Ok(Lane::Media)
+        }
         _ => bail!("unsupported native task; see --help"),
     }
 }
@@ -1632,7 +1634,7 @@ fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
         .map_err(|_| anyhow::anyhow!("--task is invalid"))?;
     let script_media = matches!(
         profile.profile_id.as_str(),
-        "heartmula-music" | "minimax-h3" | "ltx-2.5"
+        "heartmula-music" | "minimax-h3" | "ltx-2.5" | "blender-3d"
     );
     let input = read_direct_native_input(spec.input, spec.task, script_media)?;
     let is_comfy_workflow = !script_media && matches!(spec.task, "image" | "video");
@@ -1878,7 +1880,7 @@ fn read_direct_native_input(
             .map(DirectNativeInput::Embeddings)
             .map_err(|error| anyhow::anyhow!(error.to_string())),
         _ => bail!(
-            "--run-profile supports only --task decision, --task tts, --task clon, --task design, --task music, --task image, --task video, or --task embeddings"
+            "--run-profile supports only decision, tts, clon, design, music, image, video, 3d, render, or embeddings tasks"
         ),
     }
 }
@@ -1950,6 +1952,7 @@ fn direct_wave_artifact_outputs(
                     "streaming_chunk"
                 }
                 crate::control::media_execution::MediaArtifactKind::Video => "video",
+                crate::control::media_execution::MediaArtifactKind::Image => "image",
                 crate::control::media_execution::MediaArtifactKind::RawRgb24Video => {
                     "raw_rgb24_video"
                 }

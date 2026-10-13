@@ -19,8 +19,9 @@ committed work.
 - [ ] Complete the full Blender contract: headless Python rendering and the
   distinct interactive external GUI/MCP workflow. The wrapper's `--prompt`
   currently prints MCP guidance only. The opt-in single-action headless wrapper
-  and four argv/preflight fixtures are implemented; root dispatch and real
-  rendering remain pending. Do not invent inference, output artifacts, or a
+  and four argv/preflight fixtures are implemented. Root headless dispatch now
+  shares the native runner/admission guard (six Rust checks); real rendering,
+  interactive handoff and device acceptance remain pending. Do not invent inference, output artifacts, or a
   CPU/CUDA device declaration.
 - [ ] Add the small operator-owned native service handoff/restoration path.
   Reuse native controls, perform bounded health/device checks, refuse unknown

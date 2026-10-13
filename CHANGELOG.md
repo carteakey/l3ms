@@ -32,6 +32,11 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Wire Blender headless Python/render/image tasks through the shared CLI/UI
+  foreground runner and idle-GPU admission. Keep scene-selected backends and
+  external GUI/MCP ownership; do not fabricate CUDA selection or code artifacts.
+  Render results have private bounded PNG-header checks. Real rendering remains
+  unverified; no installs, service changes or new worker/daemon.
 - Prepare Blender's existing wrapper for single-action headless integration
   without changing default standalone GUI/MCP commands. Keep Python failures
   nonzero and render targets predictable; shared root dispatch and real Blender

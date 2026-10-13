@@ -34,6 +34,9 @@ use super::routes::{resolve_profile_route, NativeRoute, ResolvedProfileRoute};
 const BREEZE_PROFILE_ID: &str = "breeze-tts-2";
 pub(crate) const CPU_BREEZE_PROFILE_ID: &str = "breeze-tts-2-cpu";
 const BREEZE_SCRIPT: &str = "media-models/generate-breeze-tts-2.sh";
+const BLENDER_PROFILE_ID: &str = "blender-3d";
+const BLENDER_RUNTIME: &str = "Blender 5.2 / blender-mcp";
+const BLENDER_SCRIPT: &str = "media-models/generate-blender-3d.sh";
 const DECISION_PYTHON: &str = ".venv/bin/python";
 const HOSTED_DECISION_PYTHON: &str = ".venv-hosted/bin/python";
 pub(crate) const HOSTED_DECISION_PYTHON_ENV: &str = "L3MS_HOSTED_DECISIONS_PYTHON";
@@ -690,6 +693,96 @@ pub(crate) fn is_supported_ltx_request_route(
         && is_supported_ltx_args(args, task.as_str())
 }
 
+/// Shape-only admission for the Blender headless wrapper's one-action CLI.
+/// Python code and script paths remain trusted native input; this is not a
+/// code sandbox or filesystem/network boundary.
+pub(crate) fn is_supported_blender_args(arguments: &[String], task: &str) -> bool {
+    let expected_action = match task {
+        "3d" => matches!(
+            arguments.first().map(String::as_str),
+            Some("--code" | "--script")
+        ),
+        "render" | "image" => arguments.first().is_some_and(|arg| arg == "--render"),
+        _ => return false,
+    };
+    arguments.len() == 2 && expected_action && valid_native_value(arguments.get(1))
+}
+
+/// Require the exact manifest-owned Blender engine before admitting a task.
+/// The route deliberately declares no device; this does not establish runtime
+/// readiness or permission to launch Blender.
+pub(crate) fn is_supported_blender_request_route(
+    request: &InferenceRequest,
+    route: &ResolvedProfileRoute,
+) -> bool {
+    let InferenceRequest::Media {
+        profile,
+        input: MediaInput::Script { task, args },
+    } = request
+    else {
+        return false;
+    };
+    let NativeRoute::MediaScript { path } = &route.native_route else {
+        return false;
+    };
+    const TASKS: [&str; 3] = ["3d", "render", "image"];
+    profile == &route.profile
+        && profile.lane == Lane::Media
+        && profile.profile_id.as_str() == BLENDER_PROFILE_ID
+        && route.runtime.lane == Lane::Media
+        && route.runtime.as_str() == BLENDER_RUNTIME
+        && route.device.is_none()
+        && route.tasks.len() == TASKS.len()
+        && TASKS.iter().all(|expected| {
+            route
+                .tasks
+                .iter()
+                .any(|declared| declared.as_str() == *expected)
+        })
+        && path.ends_with(std::path::Path::new(BLENDER_SCRIPT))
+        && is_supported_blender_args(args, task.as_str())
+}
+
+/// Prepare Blender headless work on the previously accepted manifest route.
+/// Only render/image actions receive the executor-owned output directory;
+/// code/script actions have no artifact-path promise.
+pub(crate) fn prepare_blender_recipe_for_route(
+    catalog: &Catalog,
+    request: &InferenceRequest,
+    accepted_route: &ResolvedProfileRoute,
+    output_directory: &std::path::Path,
+) -> Result<NativeCommandRecipe> {
+    ensure!(
+        is_supported_blender_request_route(request, accepted_route),
+        "request is not a supported Blender headless route"
+    );
+    let InferenceRequest::Media {
+        input: MediaInput::Script { task, .. },
+        ..
+    } = request
+    else {
+        unreachable!("supported Blender route requires script media")
+    };
+    let mut recipe = prepare_native_command_for_route(catalog, request, accepted_route)?;
+    ensure!(
+        matches!(
+            &recipe.expectation,
+            NativeOutputExpectation::MediaScript { task: expected } if expected == task.as_str()
+        ),
+        "Blender preparation did not resolve to the accepted task"
+    );
+    if matches!(task.as_str(), "render" | "image") {
+        ensure!(
+            output_directory.is_absolute(),
+            "Blender render output directory must be absolute"
+        );
+        recipe.argv.push(text_argument("--output")?);
+        recipe.argv.push(path_argument(output_directory)?);
+        ensure_argv_budget(&recipe.executable, &recipe.argv)?;
+    }
+    Ok(recipe)
+}
+
 fn valid_native_value(value: Option<&String>) -> bool {
     value
         .is_some_and(|value| !value.is_empty() && !value.contains('\0') && !value.starts_with("--"))
@@ -1293,6 +1386,108 @@ mod tests {
             .iter()
             .map(|arg| arg.as_os_str().to_string_lossy().into_owned())
             .collect()
+    }
+
+    #[test]
+    fn blender_argument_shape_is_one_task_specific_action() {
+        for (task, args) in [
+            ("3d", vec!["--code", "import bpy"]),
+            ("3d", vec!["--script", "model.py"]),
+            ("render", vec!["--render", "scene.blend"]),
+            ("image", vec!["--render", "scene.blend"]),
+        ] {
+            assert!(is_supported_blender_args(
+                &args.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+                task
+            ));
+        }
+        for (task, args) in [
+            ("3d", vec![]),
+            ("3d", vec!["--code"]),
+            ("3d", vec!["--code", "", "--script", "model.py"]),
+            ("3d", vec!["--code", "print(1)", "--code", "print(2)"]),
+            ("3d", vec!["--script", "model.py", "--output", "/tmp/out"]),
+            ("3d", vec!["--prompt", "make a model"]),
+            ("3d", vec!["--launch"]),
+            ("render", vec!["--code", "import bpy"]),
+            ("image", vec!["--render", "scene.blend", "--output", "/tmp"]),
+            ("video", vec!["--render", "scene.blend"]),
+        ] {
+            assert!(!is_supported_blender_args(
+                &args.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+                task
+            ));
+        }
+    }
+
+    #[test]
+    fn blender_recipe_pins_route_and_only_appends_render_output() {
+        let fixture = Fixture::new(
+            BLENDER_PROFILE_ID,
+            BLENDER_SCRIPT,
+            &["3d", "render", "image"],
+        );
+        fixture.write_media_script(BLENDER_SCRIPT);
+        let manifest_path = fixture.media_root.join("media-runtimes.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["profiles"][0]["runtime"] = Value::String(BLENDER_RUNTIME.into());
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let catalog = fixture.catalog();
+        let code_request = InferenceRequest::Media {
+            profile: key(Lane::Media, BLENDER_PROFILE_ID),
+            input: MediaInput::Script {
+                task: super::super::catalog::Task::new("3d").unwrap(),
+                args: vec!["--code".into(), "import bpy".into()],
+            },
+        };
+        let accepted = resolve_profile_route(&catalog, code_request.profile()).unwrap();
+        assert!(is_supported_blender_request_route(&code_request, &accepted));
+        let code_recipe = prepare_blender_recipe_for_route(
+            &catalog,
+            &code_request,
+            &accepted,
+            &fixture._parent.path().join("unused-output"),
+        )
+        .unwrap();
+        let code_argv = argv_strings(&code_recipe);
+        assert_eq!(&code_argv[1..], ["--code", "import bpy",]);
+        assert!(!code_argv.iter().any(|argument| argument == "--output"));
+
+        let render_request = InferenceRequest::Media {
+            profile: key(Lane::Media, BLENDER_PROFILE_ID),
+            input: MediaInput::Script {
+                task: super::super::catalog::Task::new("render").unwrap(),
+                args: vec!["--render".into(), "scene.blend".into()],
+            },
+        };
+        let output_directory = fixture._parent.path().join("private-output");
+        let render_recipe = prepare_blender_recipe_for_route(
+            &catalog,
+            &render_request,
+            &accepted,
+            &output_directory,
+        )
+        .unwrap();
+        let render_argv = argv_strings(&render_recipe);
+        assert_eq!(
+            &render_argv[render_argv.len() - 2..],
+            ["--output", output_directory.to_str().unwrap()]
+        );
+
+        let mut wrong_device = accepted;
+        wrong_device.device = Some(Device::Cpu);
+        assert!(!is_supported_blender_request_route(
+            &render_request,
+            &wrong_device
+        ));
+        assert!(prepare_blender_recipe_for_route(
+            &catalog,
+            &render_request,
+            &wrong_device,
+            &output_directory,
+        )
+        .is_err());
     }
 
     #[test]

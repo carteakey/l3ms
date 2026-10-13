@@ -95,10 +95,11 @@ In addition to interactive MCP sessions, L2M2 provides `media-models/generate-bl
 
 ---
 
-## Headless-only wrapper contract (root dispatch pending)
+## Headless-only wrapper and root foreground dispatch
 
 The opt-in `L3MS_BLENDER_HEADLESS_ONLY=1` mode prepares the existing script for
-foreground integration; it does not yet enable `l3ms --run-profile` for Blender.
+foreground integration. Root CLI and Stack forms now use this mode for Blender
+`3d` (one code/script action) and `render`/`image` (one scene render action).
 It accepts exactly one `--code`, `--script` or `--render` action. GUI/MCP,
 prompt/check/port/help and ambiguous action combinations refuse before launching
 Blender. Normal standalone commands above keep their original behavior.
@@ -115,8 +116,11 @@ Only use trusted Python/scripts/scenes: they run with the user's permissions,
 not in a filesystem or network sandbox, and Python may have arbitrary local
 effects. The scene's renderer backend is preserved; no CPU/CUDA fallback or GPU
 ownership is implied. Quiescence and device admission remain the operator's duty.
-The root integration must use the shared idle-GPU window without pretending the
-manifest declares CUDA. Interactive GUI/MCP work remains externally owned;
+The root integration uses the [shared idle-GPU window](../../../docs/native-gpu-workflows.md)
+without pretending the manifest declares CUDA or overriding its scene-selected
+backend. Code/script success claims no output artifact; root render references
+receive bounded PNG header sanity checks, not decoding/quality validation.
+Real Blender/device acceptance is still pending. Interactive GUI/MCP remains externally owned;
 `--prompt` only prints guidance, not a completed inference result.
 
 ## 5. Smoke Test Verification

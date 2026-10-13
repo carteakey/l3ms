@@ -18,9 +18,10 @@ Language (root L3MS) · Media (L2M2) · Decisions (L3DS)
 The root L3MS app continues to run its existing language-model workflows. The
 media and decision toolkits keep their native runtimes and configuration;
 shared catalog and direct CPU decision/speech paths are available. CUDA Nagi/Laya,
-Breeze, HeartMuLa, H3 and LTX share an explicit idle-GPU native runner. Native
-embedding/Comfy transport and GPU acceptance remain pending; Blender, automatic
-GPU handoff/restoration and broader simplification keep the full port unfinished.
+Breeze, HeartMuLa, H3 and LTX share an explicit idle-GPU native runner. Blender
+headless Python/rendering shares its admission guard without a CUDA device claim.
+Native embedding/Comfy transport, real Blender/GPU acceptance, automatic GPU
+handoff/restoration and broader simplification keep the full port unfinished.
 
 Vision-capable LLMs, including Gemma vision, and embeddings remain in the
 language lane.

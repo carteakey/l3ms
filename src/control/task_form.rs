@@ -169,8 +169,13 @@ pub fn build_direct_native(
         TaskFields::MediaScript { args } => {
             let supported = catalog.inspect(&selected_profile).is_some_and(|profile| {
                 selected_profile.lane == Lane::Media
-                    && matches!(profile.runtime.as_str(), "audio.cpp" | "LTX-2 Python")
-                    && profile.device.as_ref() == Some(&super::catalog::Device::Cuda)
+                    && if selected_profile.profile_id.as_str() == "blender-3d" {
+                        profile.runtime.as_str() == "Blender 5.2 / blender-mcp"
+                            && profile.device.is_none()
+                    } else {
+                        matches!(profile.runtime.as_str(), "audio.cpp" | "LTX-2 Python")
+                            && profile.device.as_ref() == Some(&super::catalog::Device::Cuda)
+                    }
             });
             let accepted_args = match selected_profile.profile_id.as_str() {
                 "heartmula-music" if declared_task.as_str() == "music" => {
@@ -182,10 +187,16 @@ pub fn build_direct_native(
                 "ltx-2.5" => {
                     super::native_commands::is_supported_ltx_args(&args, declared_task.as_str())
                 }
+                "blender-3d" => {
+                    super::native_commands::is_supported_blender_args(&args, declared_task.as_str())
+                }
                 _ => false,
             };
             if !supported || !accepted_args {
                 return Err(TaskFormError::InvalidNativeFields);
+            }
+            if bounded_json_len(&args)? > MAX_TASK_FORM_FIELD_BYTES {
+                return Err(TaskFormError::FrameTooLarge);
             }
             InferenceRequest::Media {
                 profile: selected_profile.clone(),

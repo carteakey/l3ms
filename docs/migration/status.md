@@ -9,6 +9,46 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
+## Blender shared foreground integration — 2026-10-13
+
+Root CLI and Stack forms now dispatch exact Blender `3d` code/script and
+`render`/`image` scene actions through the same foreground owner/process runner.
+The existing idle-GPU window applies, but GPU admission is separate from CUDA
+device selection: the manifest remains device-unspecified, the child keeps its
+scene backend, and no CUDA connection/visibility override is supplied. The raw
+runner is module-private so production callers enter through the shared guard.
+
+Code/script results mean command completion with no declared artifact; render
+publishes only fresh private `result_0001.png` after bounded regular-file/PNG-IHDR
+sanity checks. No image decoding/quality or sandbox claim. Native args/code stay
+out of logs/history, Python exceptions are nonzero, and no retry occurs. The UI
+tracks GPU-window recovery separately from CUDA labels. Blender image input is
+not parsed as Comfy graph input. Legacy Breeze receipts explicitly reject the
+new Image kind; no managed packet protocol, worker or daemon was expanded.
+
+Six Blender Rust checks pass, plus H3/Heart/LTX compatibility and strict lint,
+build/fmt. Root **809 pass, 100 unchanged socket failures, 1 ignored**; failure
+names match the preceding checkpoint. Toolkit **6 Rust/22 media Python/14
+downloader Python**, site **11 generator** and DOM checks pass.
+Logs: `/tmp/l3ms-blender-{focused,h3,heart,ltx,tests,clippy,build}.log`.
+A new test-only lock deadlock was corrected by holding the existing fixture
+write lock only around writes, not across the runner's own spawn lock. The hung
+owned test was interrupted; production guards and assertions were not weakened.
+This is not a fix claim for the separately recorded GPU-probe fixture flake.
+
+Actual CLI `3d`, `render` and `image` each reach missing-GPU-window configuration
+refusal (exit 1) before dispatch; fixture `/tmp/l3ms-blender-cli-uOAP6V`.
+No Blender process, GPU inference, service mutation, install or provider call
+was performed. External GUI/MCP commands remain original, externally owned
+workflows, not automatically adopted jobs or prompt-to-inference functionality.
+Real render/Python/backend and interactive acceptance remain open.
+
+Net whole-source **+827**, cumulative **+6,140** versus `702b4cd`; control source
+**62,632** lines. The half-reduction target is still unmet. Next implement the
+small configured native service handoff with exact restoration evidence, then
+retire the remaining branch-added managed-platform caller closure. Keep original
+tools/rollback and full live/client/experience/publication gates intact.
+
 ## Blender native headless contract preparation — 2026-10-13
 
 The existing Blender script now has opt-in `L3MS_BLENDER_HEADLESS_ONLY=1`:

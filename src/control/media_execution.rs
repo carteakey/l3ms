@@ -21,11 +21,12 @@ use serde::{Deserialize, Deserializer};
 use super::catalog::{Catalog, Device};
 use super::cuda_device::CudaDevice;
 use super::native_commands::{
-    is_supported_cpu_breeze_speech, is_supported_h3_request_route,
-    is_supported_heartmula_request_route, is_supported_ltx_request_route,
-    prepare_breeze_speech_recipe, prepare_breeze_speech_recipe_for_route,
-    prepare_h3_recipe_for_route, prepare_heartmula_music_recipe_for_route,
-    prepare_ltx_recipe_for_route, NativeOutputExpectation, CPU_BREEZE_PROFILE_ID,
+    is_supported_blender_request_route, is_supported_cpu_breeze_speech,
+    is_supported_h3_request_route, is_supported_heartmula_request_route,
+    is_supported_ltx_request_route, prepare_blender_recipe_for_route, prepare_breeze_speech_recipe,
+    prepare_breeze_speech_recipe_for_route, prepare_h3_recipe_for_route,
+    prepare_heartmula_music_recipe_for_route, prepare_ltx_recipe_for_route,
+    NativeOutputExpectation, CPU_BREEZE_PROFILE_ID,
 };
 use super::process::{self, ProcessFailureDisposition, ProcessFailureKind, ProcessLimits};
 use super::requests::{InferenceRequest, MediaInput, SpeechMode};
@@ -37,6 +38,7 @@ const CHUNKS_NAME: &str = "result.wav.chunks";
 const H3_RAW_VIDEO_NAME: &str = "minimax_h3_video_rgb24.json";
 const H3_VIDEO_NAME: &str = "result.mp4";
 const LTX_VIDEO_NAME: &str = H3_VIDEO_NAME;
+const BLENDER_IMAGE_NAME: &str = "result_0001.png";
 const MAX_CAPTURE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_STREAM_CHUNKS: usize = 63;
 const MAX_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
@@ -88,6 +90,7 @@ pub enum MediaArtifactKind {
     StreamingChunk,
     RawRgb24Video,
     Video,
+    Image,
 }
 
 /// A validated path relative to the in-memory output root. The root is not
@@ -249,7 +252,14 @@ pub(crate) fn execute_heartmula_music_on_device(
     )
     .map_err(|_| not_dispatched(MediaExecutionErrorKind::InvalidRequest))?;
 
-    execute_script_recipe(&recipe, &output_root, device, context, recovery, false)?;
+    execute_script_recipe(
+        &recipe,
+        &output_root,
+        Some(device),
+        context,
+        recovery,
+        ScriptMode::Default,
+    )?;
     // The shared validator's Standard mode means one final WAV and no chunks;
     // it does not imply that the HeartMuLa result is speech.
     let artifacts = discover_artifacts(&output_root, SpeechMode::Standard, context)?;
@@ -296,7 +306,14 @@ pub(crate) fn execute_h3_on_device(
         video_output.as_deref(),
     )
     .map_err(|_| not_dispatched(MediaExecutionErrorKind::InvalidRequest))?;
-    execute_script_recipe(&recipe, &output_root, device, context, recovery, false)?;
+    execute_script_recipe(
+        &recipe,
+        &output_root,
+        Some(device),
+        context,
+        recovery,
+        ScriptMode::Default,
+    )?;
 
     let artifacts = discover_h3_artifacts(&output_root, video_task, context)?;
     check_after_child(context)?;
@@ -328,7 +345,14 @@ pub(crate) fn execute_ltx_on_device(
     let recipe = prepare_ltx_recipe_for_route(catalog, request, accepted_route, &output_path)
         .map_err(|_| not_dispatched(MediaExecutionErrorKind::InvalidRequest))?;
 
-    execute_script_recipe(&recipe, &output_root, device, context, recovery, true)?;
+    execute_script_recipe(
+        &recipe,
+        &output_root,
+        Some(device),
+        context,
+        recovery,
+        ScriptMode::LtxPrepared,
+    )?;
     let artifacts = discover_ltx_artifacts(&output_root, context)?;
     check_after_child(context)?;
     Ok(MediaExecutionResult {
@@ -343,10 +367,10 @@ pub(crate) fn execute_ltx_on_device(
 fn execute_script_recipe(
     recipe: &super::native_commands::NativeCommandRecipe,
     output_root: &Path,
-    device: &CudaDevice,
+    device: Option<&CudaDevice>,
     context: &OperationContext<'_>,
     recovery: RecoveryPolicy,
-    prepared_ltx: bool,
+    mode: ScriptMode,
 ) -> Result<(), MediaExecutionFailure> {
     let mut command = Command::new(&recipe.executable);
     command
@@ -356,10 +380,18 @@ fn execute_script_recipe(
         // output and the H3 muxer's temporary raw stream in this private job.
         .env("L3MS_MEDIA_OUTPUT_DIR", output_root)
         .env("TMPDIR", output_root);
-    if prepared_ltx {
-        command.env("L3MS_LTX_PREPARED_ONLY", "1");
+    match mode {
+        ScriptMode::Default => {}
+        ScriptMode::LtxPrepared => {
+            command.env("L3MS_LTX_PREPARED_ONLY", "1");
+        }
+        ScriptMode::BlenderHeadless => {
+            command.env("L3MS_BLENDER_HEADLESS_ONLY", "1");
+        }
     }
-    device.apply_to(&mut command);
+    if let Some(device) = device {
+        device.apply_to(&mut command);
+    }
     let limits = ProcessLimits::new(0, MAX_CAPTURE_BYTES)
         .map_err(|error| process_failure(error.disposition(), error.kind()))?;
     let output = process::execute(command, None, limits, context, recovery)
@@ -367,6 +399,69 @@ fn execute_script_recipe(
     // Native output may contain prompts, paths, or result metadata.
     drop(output);
     check_after_child(context)
+}
+
+#[derive(Clone, Copy)]
+enum ScriptMode {
+    Default,
+    LtxPrepared,
+    BlenderHeadless,
+}
+
+/// Run one accepted Blender headless action. This executes trusted local
+/// Python without a filesystem or network sandbox; code/script actions return
+/// no artifact claim, while render/image actions validate only the fixed PNG.
+pub(crate) fn execute_blender_headless(
+    catalog: &Catalog,
+    request: &InferenceRequest,
+    accepted_route: &ResolvedProfileRoute,
+    job_directory: &Path,
+    context: &OperationContext<'_>,
+    recovery: RecoveryPolicy,
+) -> Result<MediaExecutionResult, MediaExecutionFailure> {
+    if !is_supported_blender_request_route(request, accepted_route) {
+        return Err(not_dispatched(MediaExecutionErrorKind::InvalidRequest));
+    }
+    let InferenceRequest::Media {
+        input: MediaInput::Script { task, .. },
+        ..
+    } = request
+    else {
+        return Err(not_dispatched(MediaExecutionErrorKind::InvalidRequest));
+    };
+    let render_task = matches!(task.as_str(), "render" | "image");
+    let output_root = validate_job_directory(job_directory)?;
+    if render_task {
+        ensure_absent(&output_root.join(BLENDER_IMAGE_NAME))?;
+    }
+    let recipe = prepare_blender_recipe_for_route(catalog, request, accepted_route, &output_root)
+        .map_err(|_| not_dispatched(MediaExecutionErrorKind::InvalidRequest))?;
+    execute_script_recipe(
+        &recipe,
+        &output_root,
+        None,
+        context,
+        recovery,
+        ScriptMode::BlenderHeadless,
+    )?;
+
+    let artifacts = if render_task {
+        validate_blender_png(&output_root.join(BLENDER_IMAGE_NAME), &output_root, context)?;
+        vec![MediaArtifact {
+            relative_path: PathBuf::from(BLENDER_IMAGE_NAME),
+            kind: MediaArtifactKind::Image,
+        }]
+    } else {
+        Vec::new()
+    };
+    check_after_child(context)?;
+    Ok(MediaExecutionResult {
+        output_root,
+        // This compatibility field predates non-speech media. Callers
+        // distinguish Blender results by their image artifact, if any.
+        mode: SpeechMode::Standard,
+        artifacts,
+    })
 }
 
 /// Execute an explicitly supported Breeze speech mode on a declared CPU route.
@@ -955,6 +1050,34 @@ fn validate_mp4(
     Ok(length)
 }
 
+fn validate_blender_png(
+    path: &Path,
+    root: &Path,
+    context: &OperationContext<'_>,
+) -> Result<(), MediaExecutionFailure> {
+    let (canonical, length) = validate_regular_media_file(path, root, context)?;
+    if length < 33 {
+        return Err(invalid_artifact());
+    }
+    let mut file = File::open(canonical).map_err(|_| invalid_artifact())?;
+    let mut header = [0u8; 33];
+    file.read_exact(&mut header)
+        .map_err(|_| invalid_artifact())?;
+    let width = u32::from_be_bytes(header[16..20].try_into().unwrap());
+    let height = u32::from_be_bytes(header[20..24].try_into().unwrap());
+    if header[..8] != [137, 80, 78, 71, 13, 10, 26, 10]
+        || header[8..12] != 13u32.to_be_bytes()
+        || &header[12..16] != b"IHDR"
+        || width == 0
+        || height == 0
+        || width > i32::MAX as u32
+        || height > i32::MAX as u32
+    {
+        return Err(invalid_artifact());
+    }
+    check_after_child(context)
+}
+
 fn validate_regular_media_file(
     path: &Path,
     root: &Path,
@@ -1347,6 +1470,32 @@ fi
 printf '\000\000\000\014ftypisom' > "$output"
 "#;
 
+    const BLENDER_FIXTURE_SCRIPT: &str = r#"#!/usr/bin/env bash
+set -euo pipefail
+printf x >> '__ATTEMPT_MARKER__'
+[[ "${L3MS_BLENDER_HEADLESS_ONLY-unset}" == "1" ]] || exit 81
+[[ "$L3MS_MEDIA_OUTPUT_DIR" == "$TMPDIR" ]] || exit 82
+case "$1" in
+  --code|--script)
+    [[ $# -eq 2 ]] || exit 83
+    if [[ "$2" == "failure" ]]; then
+      printf 'private blender log' >&2
+      exit 9
+    fi
+    ;;
+  --render)
+    [[ $# -eq 4 && "$3" == "--output" ]] || exit 84
+    [[ "$4" == "$L3MS_MEDIA_OUTPUT_DIR" ]] || exit 85
+    case "${2##*/}" in
+      missing.png) ;;
+      malformed.png) printf 'not a png' > "$4/result_0001.png" ;;
+      *) printf '\211PNG\015\012\032\012\000\000\000\015IHDR\000\000\000\002\000\000\000\003\010\002\000\000\000\000\000\000\000\000' > "$4/result_0001.png" ;;
+    esac
+    ;;
+  *) exit 86 ;;
+esac
+"#;
+
     struct Fixture {
         _parent: TempDir,
         language_root: PathBuf,
@@ -1403,6 +1552,13 @@ printf '\000\000\000\014ftypisom' > "$output"
                             "device": "cuda",
                             "tasks": ["video", "music"],
                             "script": "media-models/generate-ltx-2.5.sh"
+                        },
+                        {
+                            "id": "blender-3d",
+                            "name": "Fixture Blender",
+                            "runtime": "Blender 5.2 / blender-mcp",
+                            "tasks": ["3d", "render", "image"],
+                            "script": "media-models/generate-blender-3d.sh"
                         }
                     ]
                 })
@@ -1426,6 +1582,11 @@ printf '\000\000\000\014ftypisom' > "$output"
             .unwrap();
             fs::write(
                 media_root.join("media-models/generate-ltx-2.5.sh"),
+                "#!/usr/bin/env bash\nexit 97\n",
+            )
+            .unwrap();
+            fs::write(
+                media_root.join("media-models/generate-blender-3d.sh"),
                 "#!/usr/bin/env bash\nexit 97\n",
             )
             .unwrap();
@@ -1520,12 +1681,194 @@ printf '\000\000\000\014ftypisom' > "$output"
         }
     }
 
+    fn blender_request(task: &str, args: &[&str]) -> InferenceRequest {
+        InferenceRequest::Media {
+            profile: ProfileKey::new(Lane::Media, "blender-3d").unwrap(),
+            input: MediaInput::Script {
+                task: super::super::catalog::Task::new(task).unwrap(),
+                args: args.iter().map(|argument| (*argument).to_owned()).collect(),
+            },
+        }
+    }
+
+    fn install_blender_fixture(fixture: &Fixture, marker: &Path) {
+        let script =
+            BLENDER_FIXTURE_SCRIPT.replace("__ATTEMPT_MARKER__", &marker.display().to_string());
+        let _guard = process::executable_fixture_guard();
+        fs::write(
+            fixture
+                .media_root
+                .join("media-models/generate-blender-3d.sh"),
+            script,
+        )
+        .unwrap();
+    }
+
     fn context<'a>(cancel: &'a dyn Cancellation, duration: Duration) -> OperationContext<'a> {
         OperationContext::new(Instant::now() + duration, cancel)
     }
 
     fn recovery() -> RecoveryPolicy {
         RecoveryPolicy::new(Duration::from_secs(2)).unwrap()
+    }
+
+    #[test]
+    fn blender_code_and_script_actions_return_no_artifact_and_fail_once() {
+        let fixture = {
+            let _guard = process::executable_fixture_guard();
+            Fixture::new()
+        };
+        let marker = fixture._parent.path().join("blender-attempts");
+        install_blender_fixture(&fixture, &marker);
+        let catalog = fixture.catalog();
+        let request = blender_request("3d", &["--code", "print('fixture')"]);
+        let accepted =
+            crate::control::routes::resolve_profile_route(&catalog, request.profile()).unwrap();
+        let never = NeverCancel;
+        let operation = context(&never, Duration::from_secs(5));
+
+        let code_output = fixture.output_directory("blender-code-output");
+        let code_result = execute_blender_headless(
+            &catalog,
+            &request,
+            &accepted,
+            &code_output,
+            &operation,
+            recovery(),
+        )
+        .unwrap();
+        assert!(code_result.artifacts().is_empty());
+        assert_eq!(fs::read(&marker).unwrap(), b"x");
+
+        let script_path = fixture._parent.path().join("fixture.py");
+        fs::write(&script_path, "# fixture\n").unwrap();
+        let script_request = blender_request("3d", &["--script", script_path.to_str().unwrap()]);
+        let script_output = fixture.output_directory("blender-script-output");
+        let script_result = execute_blender_headless(
+            &catalog,
+            &script_request,
+            &accepted,
+            &script_output,
+            &operation,
+            recovery(),
+        )
+        .unwrap();
+        assert!(script_result.artifacts().is_empty());
+        assert_eq!(fs::read(&marker).unwrap(), b"xx");
+
+        let failing_request = blender_request("3d", &["--code", "failure"]);
+        let failing_output = fixture.output_directory("blender-failure-output");
+        let error = execute_blender_headless(
+            &catalog,
+            &failing_request,
+            &accepted,
+            &failing_output,
+            &operation,
+            recovery(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            MediaExecutionErrorKind::Process(ProcessFailureKind::ChildExitedUnsuccessfully {
+                code: Some(9)
+            })
+        ));
+        assert_eq!(
+            error.disposition(),
+            ProcessFailureDisposition::ChildGroupReaped
+        );
+        assert_eq!(fs::read(&marker).unwrap(), b"xxx");
+        assert!(!format!("{error:?}").contains("private blender log"));
+        assert!(!error.to_string().contains("private blender log"));
+    }
+
+    #[test]
+    fn blender_render_returns_only_a_private_png_and_rejects_bad_or_existing_targets() {
+        let fixture = {
+            let _guard = process::executable_fixture_guard();
+            Fixture::new()
+        };
+        let marker = fixture._parent.path().join("blender-render-attempts");
+        install_blender_fixture(&fixture, &marker);
+        let catalog = fixture.catalog();
+        let accepted = crate::control::routes::resolve_profile_route(
+            &catalog,
+            &ProfileKey::new(Lane::Media, "blender-3d").unwrap(),
+        )
+        .unwrap();
+        let never = NeverCancel;
+        let operation = context(&never, Duration::from_secs(5));
+
+        let valid_scene = fixture._parent.path().join("scene.blend");
+        fs::write(&valid_scene, b"fixture scene").unwrap();
+        let valid_scene = valid_scene.to_str().unwrap();
+        let valid_request = blender_request("render", &["--render", valid_scene]);
+        let valid_output = fixture.output_directory("blender-render-output");
+        let result = execute_blender_headless(
+            &catalog,
+            &valid_request,
+            &accepted,
+            &valid_output,
+            &operation,
+            recovery(),
+        )
+        .unwrap();
+        assert_eq!(result.artifacts().len(), 1);
+        assert_eq!(result.artifacts()[0].kind(), MediaArtifactKind::Image);
+        assert_eq!(
+            result.artifacts()[0].relative_path(),
+            Path::new(BLENDER_IMAGE_NAME)
+        );
+        assert_eq!(fs::read_dir(&valid_output).unwrap().count(), 1);
+        assert_eq!(fs::read(&marker).unwrap(), b"x");
+
+        let existing_output = fixture.output_directory("blender-existing-output");
+        fs::write(existing_output.join(BLENDER_IMAGE_NAME), b"already here").unwrap();
+        let error = execute_blender_headless(
+            &catalog,
+            &valid_request,
+            &accepted,
+            &existing_output,
+            &operation,
+            recovery(),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), MediaExecutionErrorKind::OutputAlreadyExists);
+        assert_eq!(
+            error.disposition(),
+            ProcessFailureDisposition::NoChildSpawned
+        );
+        assert_eq!(fs::read(&marker).unwrap(), b"x");
+
+        for (name, scene, expected_attempts) in [
+            (
+                "blender-malformed-output",
+                "malformed.png",
+                b"xx".as_slice(),
+            ),
+            ("blender-missing-output", "missing.png", b"xxx".as_slice()),
+        ] {
+            let scene_path = fixture._parent.path().join(scene);
+            fs::write(&scene_path, b"fixture scene").unwrap();
+            let scene_path = scene_path.to_str().unwrap();
+            let request = blender_request("image", &["--render", scene_path]);
+            let output = fixture.output_directory(name);
+            let error = execute_blender_headless(
+                &catalog,
+                &request,
+                &accepted,
+                &output,
+                &operation,
+                recovery(),
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), MediaExecutionErrorKind::InvalidArtifact);
+            assert_eq!(
+                error.disposition(),
+                ProcessFailureDisposition::ChildGroupReaped
+            );
+            assert_eq!(fs::read(&marker).unwrap(), expected_attempts);
+        }
     }
 
     fn pcm_wave() -> Vec<u8> {

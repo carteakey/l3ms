@@ -195,7 +195,7 @@ impl fmt::Display for DirectRunError {
             DirectRunErrorKind::RemoteCompletionUncertain => {
                 "remote completion is unconfirmed; stop before continuing"
             }
-            DirectRunErrorKind::GpuConfiguration => "CUDA work requires explicit L3MS_NATIVE_GPU configuration and quiesced clients",
+            DirectRunErrorKind::GpuConfiguration => "GPU-window work requires explicit L3MS_NATIVE_GPU configuration and quiesced clients",
             DirectRunErrorKind::GpuUnavailable => "configured GPU is not idle or the shared native lock is unavailable; no job started",
             DirectRunErrorKind::GpuReleaseUncertain => "GPU release is unconfirmed; stop before continuing",
             DirectRunErrorKind::GpuRecoveryRequired => "native-gpu-recovery-required marker exists; verify interrupted work and GPU release before manual recovery",
@@ -242,7 +242,9 @@ impl NativeGpuWindow {
     }
 }
 
-/// Shared CLI/UI entry: declared CUDA-native work requires explicit device
+/// Shared CLI/UI entry: CUDA-native and Blender headless work require explicit
+/// idle-GPU admission. Only declared CUDA profiles receive a CUDA device;
+/// Blender retains its native scene backend. Both require explicit device
 /// configuration, one advisory L3MS lock and idle observations before/after
 /// the existing native process runner. CPU/hosted/HTTP behavior is unchanged.
 /// A resident router must be paused by the operator first; this is deliberately
@@ -256,7 +258,7 @@ pub(crate) fn run_native_in_operator_window(
 ) -> Result<DirectRunResult, DirectRunError> {
     if !catalog
         .inspect(request.profile())
-        .is_some_and(is_supported_direct_cuda_profile)
+        .is_some_and(requires_operator_gpu_window)
     {
         return run_native(catalog, request, output_directory, connection, context);
     }
@@ -281,6 +283,9 @@ pub(crate) fn run_native_in_operator_window(
             )
         })?;
     let probe = NvidiaSmiGpuProbe::new(config);
+    let cuda_profile = catalog
+        .inspect(request.profile())
+        .is_some_and(is_supported_direct_cuda_profile);
     let recovery = RecoveryPolicy::new(PROCESS_RECOVERY_TIMEOUT).expect("fixed recovery timeout");
     with_idle_gpu(
         &window,
@@ -296,7 +301,7 @@ pub(crate) fn run_native_in_operator_window(
                 catalog,
                 request,
                 output_directory,
-                Some(DirectConnection::Cuda(device)),
+                cuda_profile.then_some(DirectConnection::Cuda(device)),
                 context,
             )
         },
@@ -398,7 +403,7 @@ fn with_idle_gpu<T>(
 /// restricts the child to one GPU; it does not provide reservation or release
 /// proof. The caller must hold exclusive GPU admission across dispatch and its
 /// cleanup/release checks.
-pub fn run_native(
+fn run_native(
     catalog: &Catalog,
     request: &InferenceRequest,
     output_directory: Option<&Path>,
@@ -556,6 +561,24 @@ pub fn run_native(
         let profile = catalog
             .inspect(request.profile())
             .expect("validated refreshed profile");
+        if is_supported_blender_headless_profile(profile) {
+            if cuda.is_some() {
+                return Err(DirectRunError::new(
+                    DirectRunErrorKind::UnsupportedRoute,
+                    ProcessFailureDisposition::NoChildSpawned,
+                ));
+            }
+            return super::media_execution::execute_blender_headless(
+                &catalog,
+                request,
+                &route,
+                output_directory.expect("validated script output directory"),
+                context,
+                recovery,
+            )
+            .map(DirectRunResult::ScriptMedia)
+            .map_err(|error| media_execution_error(error, context));
+        }
         if !is_supported_direct_script_profile(profile) || cuda.is_none() {
             return Err(DirectRunError::new(
                 DirectRunErrorKind::UnsupportedRoute,
@@ -911,6 +934,27 @@ pub(crate) fn is_supported_direct_script_profile(profile: &CatalogProfile) -> bo
         || is_supported_direct_ltx_profile(profile)
 }
 
+/// GPU admission is separate from selecting a CUDA inference device. Blender
+/// keeps its scene-configured backend, but must not overlap other GPU work.
+pub(crate) fn requires_operator_gpu_window(profile: &CatalogProfile) -> bool {
+    is_supported_direct_cuda_profile(profile) || is_supported_blender_headless_profile(profile)
+}
+
+pub(crate) fn is_supported_blender_headless_profile(profile: &CatalogProfile) -> bool {
+    !profile.disabled
+        && profile.key.lane == Lane::Media
+        && profile.key.profile_id.as_str() == "blender-3d"
+        && profile.runtime.lane == Lane::Media
+        && profile.runtime.as_str() == "Blender 5.2 / blender-mcp"
+        && profile.device.is_none()
+        && profile
+            .tasks
+            .iter()
+            .any(|task| matches!(task.as_str(), "3d" | "render" | "image"))
+        && matches!(&profile.native_source, NativeProfileSource::Media { script }
+            if script == "media-models/generate-blender-3d.sh")
+}
+
 pub(crate) fn is_supported_direct_ltx_profile(profile: &CatalogProfile) -> bool {
     !profile.disabled
         && profile.key.lane == Lane::Media
@@ -1216,6 +1260,24 @@ mod tests {
             assert!(!error.to_string().contains("/private"));
         }
         assert!(NativeGpuWindow::parse(&"x".repeat(4097)).is_err());
+    }
+
+    #[test]
+    fn blender_requires_idle_gpu_admission_without_a_cuda_profile() {
+        let catalog = Catalog::load(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let key = super::super::catalog::ProfileKey::new(Lane::Media, "blender-3d").unwrap();
+        let profile = catalog.inspect(&key).unwrap();
+        assert!(is_supported_blender_headless_profile(profile));
+        assert!(requires_operator_gpu_window(profile));
+        assert!(!is_supported_direct_cuda_profile(profile));
+        assert!(!is_supported_direct_script_profile(profile));
+        assert!(profile.device.is_none());
+        let mut changed = profile.clone();
+        changed.device = Some(Device::Cuda);
+        assert!(!is_supported_blender_headless_profile(&changed));
+        changed.device = None;
+        changed.disabled = true;
+        assert!(!is_supported_blender_headless_profile(&changed));
     }
 
     #[test]

@@ -4,6 +4,9 @@ CUDA-local Nagi/Laya decisions, `media:breeze-tts-2` speech, HeartMuLa, H3 and L
 foreground runner as CPU work. This is an **operator-managed idle window**, not
 automatic switching of a live router. No service is adopted, stopped, installed
 or restored automatically. Original standalone commands remain available.
+Blender headless work shares this admission/release guard but keeps its native
+scene-selected backend: its manifest does not declare CPU or CUDA, and no CUDA
+connection or visibility override is fabricated for it.
 
 Before running, the operator must quiesce other clients, make the selected GPU
 idle, and keep those clients quiesced through execution and release checks.
@@ -131,6 +134,37 @@ or automatic setup runs. MP4 checks are bounded header sanity, not proof of
 playable synchronized tracks or generation quality. Real model/GPU/codec and
 interactive acceptance remain open.
 
+### Blender headless Python and rendering
+
+Use `media:blender-3d` with `3d`, `render` or `image`, plus a private output
+directory and the same explicit GPU-window configuration. `3d` accepts exactly
+one `--code PYTHON` or `--script FILE`; `render`/`image` accept `--render FILE`.
+For example, the input file for `3d` is:
+
+```json
+{"args":["--code","import bpy; bpy.ops.mesh.primitive_monkey_add()"]}
+```
+
+These are trusted local commands with arbitrary user-level filesystem/network
+effects, not a sandbox or automatic prompt-to-code generator. Code/script success
+reports completed execution with no invented artifact (`artifacts: []`). Render
+returns fixed private `result_0001.png`, with regular-file, bounded PNG/IHDR
+header checks; these are not decoding, visual-quality or real-render acceptance.
+
+Only the native headless script mode runs. Caller output/help/prompt/GUI/check/
+port controls and mismatched actions/tasks refuse. Native Python exceptions exit
+nonzero, no logs/code are persisted, and inference is never retried. GPU admission
+is conservative even when the scene ultimately renders on CPU; the backend is
+not changed or labelled CUDA. An unknown claimant still refuses the shared window.
+For GPU-rendered scenes, configure the GPU the scene actually uses. This guard
+observes that one device; it does not constrain Blender's device settings or
+establish ownership/release of a multi-GPU scene.
+
+The existing GUI/MCP commands remain standalone and externally owned. They are
+not adopted, stopped, or counted as completed headless jobs; `--prompt` still only
+prints guidance. See [Blender workflow](../toolkits/l2m2/docs/blender-mcp-setup.md).
+Real headless/interactive/device acceptance remains pending.
+
 ## What the wrapper checks
 
 1. Acquire the existing advisory host/device locks. A competitor is refused,
@@ -138,7 +172,8 @@ interactive acceptance remain open.
 2. Observe exact GPU UUID/index, memory allowance and no compute claimants with
    the existing bounded NVIDIA probe. Unknown/occupied states refuse dispatch.
 3. Create one payload-free `native-gpu-recovery-required` marker and run the
-   existing native command once, bound to the selected physical UUID.
+   existing native command once. Declared CUDA profiles are bound to the selected
+   physical UUID; Blender retains its native backend/device configuration.
 4. After child cleanup, observe idle again with a fresh bounded recovery context,
    including after cancellation/timeout. Only then clear the unchanged marker
    and return native results. Uncertain child cleanup or release leaves it intact.
