@@ -24,12 +24,15 @@ committed work.
   interactive handoff and device acceptance remain pending. Do not invent inference, output artifacts, or a
   CPU/CUDA device declaration.
 - [ ] Add the small operator-owned native service handoff/restoration path.
-  Claimant preflight and a control-group stop unit template are prepared;
-  neither enables handoff or updates the live unit. Verify live KillMode and
-  the full unit cgroup, not just the router MainPID, before enabling a stop.
-  Reuse native controls, perform bounded health/device checks, refuse unknown
-  GPU claimants, and restore the exact prior service/runtime state. Use only an
-  approved maintenance window; an advisory lock does not fence outside clients.
+  The shared native owner now has an explicit resident llama-swap opt-in, bounded
+  fixed-unit/config/cgroup checks and one-shot ready-model restoration; default
+  behavior stays operator-managed idle admission. Eight unit checks and strict
+  lint/build pass; four new transport tests still cannot bind here. Finish the
+  unrestricted transport run and real approved language -> media/TTS -> language cycle. Live
+  KillMode remains unknown; the tracked control-group template has not been
+  installed. A persistent live-unit change requires separate authorization.
+  Endpoint identity/client/manager quiescence remain operator assertions, not
+  fences; uncertain work retains the manual-recovery marker.
 - [ ] Continue caller-first managed-platform deletion only after each real
   replacement passes. Count net source removal rather than relocation, preserve
   safety needed by surviving callers, and work toward the plan's half-control-

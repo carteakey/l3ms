@@ -1,6 +1,6 @@
 //! Shared native discovery and explicit CLI/UI execution primitives.
-//! CUDA-native execution requires an operator-managed idle window; automatic
-//! live-engine switching and general managed admission remain gated.
+//! CUDA-native execution requires an explicit operator-owned GPU window;
+//! resident llama-swap pause/restore is opt-in. Live acceptance remains gated.
 
 #[cfg(target_os = "linux")]
 pub(crate) mod artifact_store;
@@ -56,6 +56,8 @@ pub(crate) mod owned_job_store;
 pub mod ownership;
 pub mod process;
 pub mod requests;
+#[cfg(target_os = "linux")]
+pub(crate) mod resident_unit;
 pub mod result_buffer;
 pub mod result_consumer;
 pub mod routes;

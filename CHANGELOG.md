@@ -32,6 +32,12 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Add an explicit fixed resident llama-swap pause/restore opt-in to the shared
+  native GPU owner. Capture configured state and ready model IDs, stop/start at
+  most once, verify whole-cgroup/device release, restore ready models through
+  bounded native routes, and retain the recovery marker on uncertainty. Default
+  idle-window behavior is unchanged. No new daemon, unit installation, durable
+  crash journal or live GPU acceptance claim.
 - Prepare resident-service handoff safety: the shared NVIDIA probe can verify
   only caller-checked service claimants without claiming GPU idle, and the
   branch's llama-swap unit template stops its whole control group. No live unit

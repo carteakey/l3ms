@@ -2,9 +2,9 @@
 //!
 //! This module accepts explicitly selected CPU/CUDA-local Nagi/Laya and hosted
 //! Jev decisions, Breeze speech, embeddings and Comfy workflows through
-//! existing adapters. CUDA admission and release remain the caller's duty. It
-//! does not start services, install runtimes, select a fallback, or retry an
-//! attempted inference. Native input and output stay out of its errors.
+//! existing adapters. GPU windows optionally pause/restore one explicitly
+//! configured resident llama-swap unit. They never install runtimes, select a
+//! fallback, or retry inference. Native payloads stay out of errors.
 
 use std::error::Error;
 use std::fmt;
@@ -32,8 +32,10 @@ use super::process::{ProcessFailureDisposition, ProcessFailureKind};
 use super::requests::{
     EmbeddingPayload, InferenceRequest, InferenceResult, MediaInput, SpeechMode,
 };
+use super::resident_unit::ResidentUnit;
 use super::routes::{resolve_profile_route, NativeRoute, ResolvedProfileRoute};
 use super::runtime::{NeverCancel, OperationContext, RecoveryPolicy};
+use crate::llama_swap::SwapClient;
 
 const PROCESS_RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -76,6 +78,8 @@ pub enum DirectRunErrorKind {
     GpuUnavailable,
     GpuReleaseUncertain,
     GpuRecoveryRequired,
+    ResidentUnavailable,
+    ResidentRestoreUncertain,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -199,14 +203,16 @@ impl fmt::Display for DirectRunError {
             DirectRunErrorKind::GpuUnavailable => "configured GPU is not idle or the shared native lock is unavailable; no job started",
             DirectRunErrorKind::GpuReleaseUncertain => "GPU release is unconfirmed; stop before continuing",
             DirectRunErrorKind::GpuRecoveryRequired => "native-gpu-recovery-required marker exists; verify interrupted work and GPU release before manual recovery",
+            DirectRunErrorKind::ResidentUnavailable => "configured resident llama-swap state could not be verified; no job started",
+            DirectRunErrorKind::ResidentRestoreUncertain => "resident llama-swap handoff or restoration is unconfirmed; stop before continuing",
         })
     }
 }
 
 impl Error for DirectRunError {}
 
-/// One operator-managed idle GPU window. No services are adopted, stopped or
-/// restored here. All L3MS processes must use the same private lock directory;
+/// One operator-managed GPU window; resident handoff requires explicit opt-in.
+/// All L3MS processes must use the same private lock directory;
 /// its advisory locks do not fence unrelated clients. The operator explicitly
 /// keeps those clients quiesced for the whole operation.
 #[derive(serde::Deserialize)]
@@ -217,6 +223,153 @@ struct NativeGpuWindow {
     idle_mib: u64,
     lock_dir: PathBuf,
     clients_quiesced: bool,
+    #[serde(default)]
+    resident_llama_swap: Option<ResidentLlamaSwapConfig>,
+}
+
+/// Explicit permission for one fixed user unit, never an arbitrary service.
+/// Quiescence and endpoint identity are operator assertions, not ingress fences.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResidentLlamaSwapConfig {
+    router_config: PathBuf,
+    base_url: String,
+    api_key_env: Option<String>,
+    managers_quiesced: bool,
+    restore_timeout_ms: u64,
+}
+
+impl ResidentLlamaSwapConfig {
+    fn valid(&self) -> bool {
+        let endpoint = reqwest::Url::parse(&self.base_url);
+        self.router_config.is_absolute()
+            && self.managers_quiesced
+            && (1_000..=300_000).contains(&self.restore_timeout_ms)
+            && self.api_key_env.as_ref().is_none_or(|name| {
+                !name.is_empty()
+                    && name.len() <= 128
+                    && name.bytes().enumerate().all(|(index, byte)| {
+                        byte == b'_'
+                            || byte.is_ascii_alphabetic()
+                            || (index > 0 && byte.is_ascii_digit())
+                    })
+            })
+            && endpoint.is_ok_and(|url| {
+                matches!(url.scheme(), "http" | "https")
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.query().is_none()
+                    && url.fragment().is_none()
+                    && url.host_str().is_some_and(|host| {
+                        host == "localhost"
+                            || host
+                                .trim_matches(['[', ']'])
+                                .parse::<std::net::IpAddr>()
+                                .is_ok_and(|address| address.is_loopback())
+                    })
+            })
+    }
+}
+
+/// In-memory snapshot only. Interrupted handoff requires manual recovery; no
+/// durable model inventory, service adoption or automatic inference replay.
+struct ResidentHandoff {
+    unit: ResidentUnit,
+    client: SwapClient,
+    ready: Vec<String>,
+    restore_timeout: Duration,
+}
+
+impl ResidentHandoff {
+    fn capture(
+        config: &ResidentLlamaSwapConfig,
+        context: &OperationContext<'_>,
+    ) -> Result<Self, ()> {
+        let key = config
+            .api_key_env
+            .as_ref()
+            .map(std::env::var)
+            .transpose()
+            .map_err(|_| ())?;
+        if key.as_ref().is_some_and(|key| key.trim().is_empty()) {
+            return Err(());
+        }
+        let client =
+            SwapClient::local_resident(&config.base_url, key.as_deref()).map_err(|_| ())?;
+        let unit = ResidentUnit::capture(&config.router_config, context).map_err(|_| ())?;
+        let ready = if unit.was_active() {
+            client
+                .ready_model_ids(context.remaining().min(Duration::from_secs(5)))
+                .map_err(|_| ())?
+        } else {
+            Vec::new()
+        };
+        Ok(Self {
+            unit,
+            client,
+            ready,
+            restore_timeout: Duration::from_millis(config.restore_timeout_ms),
+        })
+    }
+
+    fn ready(&mut self, context: &OperationContext<'_>) -> Result<Vec<String>, ()> {
+        // Only read-only readiness is polled. Never repeat an ambiguous start,
+        // unload, activation or inference submission.
+        loop {
+            context.check_active("resident readiness").map_err(|_| ())?;
+            self.unit.verify_restored(context).map_err(|_| ())?;
+            if let Ok(ids) = self
+                .client
+                .ready_model_ids(context.remaining().min(Duration::from_secs(1)))
+            {
+                self.unit.verify_restored(context).map_err(|_| ())?;
+                return Ok(ids);
+            }
+            std::thread::sleep(context.remaining().min(Duration::from_millis(50)));
+        }
+    }
+
+    fn restore(&mut self, context: &OperationContext<'_>) -> Result<(), ()> {
+        self.unit.restore(context).map_err(|_| ())?;
+        if !self.unit.was_active() {
+            return self.unit.verify_restored(context).map_err(|_| ());
+        }
+        let current = self.ready(context)?;
+        let extras: Vec<_> = current
+            .into_iter()
+            .filter(|id| !self.ready.contains(id))
+            .collect();
+        for id in &extras {
+            self.unit.verify_restored(context).map_err(|_| ())?;
+            self.client
+                .deactivate_model_once(id, context.remaining())
+                .map_err(|_| ())?;
+            // The next activation must not race a pending unload.
+            loop {
+                if !self.ready(context)?.contains(id) {
+                    break;
+                }
+                std::thread::sleep(context.remaining().min(Duration::from_millis(50)));
+            }
+        }
+        for id in self.ready.clone() {
+            if !self.ready(context)?.contains(&id) {
+                self.client
+                    .activate_model_once(&id, context.remaining())
+                    .map_err(|_| ())?;
+                loop {
+                    if self.ready(context)?.contains(&id) {
+                        break;
+                    }
+                    std::thread::sleep(context.remaining().min(Duration::from_millis(50)));
+                }
+            }
+        }
+        if self.ready(context)? != self.ready {
+            return Err(());
+        }
+        self.unit.verify_restored(context).map_err(|_| ())
+    }
 }
 
 impl NativeGpuWindow {
@@ -235,6 +388,10 @@ impl NativeGpuWindow {
             || window.index > 1023
             || !window.lock_dir.is_absolute()
             || CudaDevice::new(&window.uuid).is_err()
+            || window
+                .resident_llama_swap
+                .as_ref()
+                .is_some_and(|config| !config.valid())
         {
             return Err(invalid());
         }
@@ -247,8 +404,7 @@ impl NativeGpuWindow {
 /// Blender retains its native scene backend. Both require explicit device
 /// configuration, one advisory L3MS lock and idle observations before/after
 /// the existing native process runner. CPU/hosted/HTTP behavior is unchanged.
-/// A resident router must be paused by the operator first; this is deliberately
-/// not automatic live-service takeover or external-client fencing.
+/// Resident pause/restore is opt-in, not service installation or client fencing.
 pub(crate) fn run_native_in_operator_window(
     catalog: &Catalog,
     request: &InferenceRequest,
@@ -290,11 +446,13 @@ pub(crate) fn run_native_in_operator_window(
     with_idle_gpu(
         &window,
         context,
-        |context| {
-            probe
-                .observe_idle(context, recovery)
-                .map(|_| ())
-                .map_err(|_| ())
+        |context, resident| {
+            match resident {
+                Some(unit) => probe
+                    .observe_only_claimants(context, recovery, |pid| unit.accepts_claimant(pid)),
+                None => probe.observe_idle(context, recovery).map(|_| ()),
+            }
+            .map_err(|_| ())
         },
         |device| {
             run_native(
@@ -311,7 +469,7 @@ pub(crate) fn run_native_in_operator_window(
 fn with_idle_gpu<T>(
     window: &NativeGpuWindow,
     context: &OperationContext<'_>,
-    mut observe: impl FnMut(&OperationContext<'_>) -> Result<(), ()>,
+    mut observe: impl FnMut(&OperationContext<'_>, Option<&ResidentUnit>) -> Result<(), ()>,
     execute: impl FnOnce(&CudaDevice) -> Result<T, DirectRunError>,
 ) -> Result<T, DirectRunError> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -342,7 +500,30 @@ fn with_idle_gpu<T>(
         Err(_) => return Err(unavailable()),
     }
     let device = CudaDevice::new(&window.uuid).map_err(|_| unavailable())?;
-    if observe(context).is_err() {
+    let mut resident = window
+        .resident_llama_swap
+        .as_ref()
+        .map(|config| ResidentHandoff::capture(config, context))
+        .transpose()
+        .map_err(|_| {
+            if context.check_active("resident capture").is_err() {
+                inactive_error(context)
+            } else {
+                DirectRunError::new(
+                    DirectRunErrorKind::ResidentUnavailable,
+                    ProcessFailureDisposition::NoChildSpawned,
+                )
+            }
+        })?;
+    if observe(
+        context,
+        resident
+            .as_ref()
+            .filter(|resident| resident.unit.was_active())
+            .map(|resident| &resident.unit),
+    )
+    .is_err()
+    {
         return Err(if context.check_active("native GPU window").is_err() {
             inactive_error(context)
         } else {
@@ -361,7 +542,31 @@ fn with_idle_gpu<T>(
         .open(&marker_path)
         .map_err(|_| unavailable())?;
     let marker_identity = marker.metadata().map_err(|_| unavailable())?;
-    let result = execute(&device);
+    let handoff_uncertain = || {
+        DirectRunError::new(
+            DirectRunErrorKind::ResidentRestoreUncertain,
+            ProcessFailureDisposition::OwnershipUncertain,
+        )
+    };
+    if let Some(resident) = resident.as_mut() {
+        resident
+            .unit
+            .pause(context)
+            .map_err(|_| handoff_uncertain())?;
+    }
+    // Once paused, no resident claimant is allowed through the idle check.
+    // Even cancelled pre-dispatch work must reach bounded restoration below.
+    let result = if resident.is_some() && observe(context, None).is_err() {
+        Err(if context.check_active("native GPU dispatch").is_err() {
+            inactive_error(context)
+        } else {
+            unavailable()
+        })
+    } else if context.check_active("native GPU dispatch").is_err() {
+        Err(inactive_error(context))
+    } else {
+        execute(&device)
+    };
     if result
         .as_ref()
         .is_err_and(|error| error.blocks_following_work())
@@ -374,11 +579,29 @@ fn with_idle_gpu<T>(
         std::time::Instant::now() + PROCESS_RECOVERY_TIMEOUT,
         &NeverCancel,
     );
-    if observe(&recovery_context).is_err() {
+    if observe(&recovery_context, None).is_err() {
         return Err(DirectRunError::new(
             DirectRunErrorKind::GpuReleaseUncertain,
             ProcessFailureDisposition::OwnershipUncertain,
         ));
+    }
+    if let Some(resident) = resident.as_mut() {
+        let restore_context = OperationContext::new(
+            std::time::Instant::now() + resident.restore_timeout,
+            &NeverCancel,
+        );
+        resident
+            .restore(&restore_context)
+            .map_err(|_| handoff_uncertain())?;
+        observe(
+            &restore_context,
+            resident.unit.was_active().then_some(&resident.unit),
+        )
+        .map_err(|_| handoff_uncertain())?;
+        resident
+            .unit
+            .verify_restored(&restore_context)
+            .map_err(|_| handoff_uncertain())?;
     }
     let retained = std::fs::symlink_metadata(&marker_path);
     if !retained.is_ok_and(|metadata| {
@@ -1263,6 +1486,46 @@ mod tests {
     }
 
     #[test]
+    fn resident_handoff_is_opt_in_local_and_bounded() {
+        let mut value = json!({"uuid":"GPU-12345678-1234-1234-1234-123456789abc",
+            "index":0,"idle_mib":512,"lock_dir":"/private/native-locks","clients_quiesced":true});
+        assert!(NativeGpuWindow::parse(&value.to_string())
+            .unwrap()
+            .resident_llama_swap
+            .is_none());
+        let resident = json!({"router_config":"/private/llama-swap.yaml",
+            "base_url":"http://127.0.0.1:8080", "managers_quiesced":true,
+            "restore_timeout_ms":120000,"api_key_env":"LLAMA_SWAP_API_KEY"});
+        value["resident_llama_swap"] = resident.clone();
+        assert!(NativeGpuWindow::parse(&value.to_string()).is_ok());
+        for (field, replacement) in [
+            ("router_config", json!("relative.yaml")),
+            ("base_url", json!("http://example.com")),
+            ("base_url", json!("http://key@127.0.0.1:8080")),
+            ("base_url", json!("http://127.0.0.1:8080?key=secret")),
+            ("base_url", json!("http://127.0.0.1:8080#fragment")),
+            ("managers_quiesced", json!(false)),
+            ("restore_timeout_ms", json!(999)),
+            ("restore_timeout_ms", json!(300001)),
+            ("api_key_env", json!("1_BAD")),
+            ("api_key_env", json!("KEY=secret")),
+            ("service", json!("unrelated.service")),
+        ] {
+            let mut invalid = value.clone();
+            invalid["resident_llama_swap"][field] = replacement;
+            let error = NativeGpuWindow::parse(&invalid.to_string()).err().unwrap();
+            assert_eq!(error.kind(), DirectRunErrorKind::GpuConfiguration);
+            assert!(!error.to_string().contains("secret"));
+        }
+        let error = DirectRunError::new(
+            DirectRunErrorKind::ResidentRestoreUncertain,
+            ProcessFailureDisposition::OwnershipUncertain,
+        );
+        assert!(error.blocks_following_work());
+        assert!(!error.cancellation_confirmed());
+    }
+
+    #[test]
     fn blender_requires_idle_gpu_admission_without_a_cuda_profile() {
         let catalog = Catalog::load(env!("CARGO_MANIFEST_DIR")).unwrap();
         let key = super::super::catalog::ProfileKey::new(Lane::Media, "blender-3d").unwrap();
@@ -1294,7 +1557,8 @@ mod tests {
             let result = with_idle_gpu(
                 &window,
                 &context,
-                |_| {
+                |_, resident| {
+                    assert!(resident.is_none());
                     calls.set(calls.get() + 1);
                     if calls.get() == failing_observation {
                         Err(())
@@ -1328,7 +1592,7 @@ mod tests {
                 let retry: Result<(), _> = with_idle_gpu(
                     &window,
                     &context,
-                    |_| Ok(()),
+                    |_, _| Ok(()),
                     |_| panic!("uncertain work must not be restarted"),
                 );
                 assert_eq!(
@@ -1359,7 +1623,8 @@ mod tests {
             let result: Result<(), _> = with_idle_gpu(
                 &window,
                 &context,
-                |observation_context| {
+                |observation_context, resident| {
+                    assert!(resident.is_none());
                     calls.set(calls.get() + 1);
                     assert!(!observation_context.is_cancelled());
                     assert!(!observation_context.remaining().is_zero());

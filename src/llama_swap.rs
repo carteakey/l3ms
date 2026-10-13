@@ -4,14 +4,14 @@
 //! public client is deliberately synchronous so both the launcher and the TUI
 //! can decide where blocking work should run.
 
-use std::env;
-use std::fmt;
 use std::time::Duration;
+use std::{collections::HashSet, env, fmt, io::Read};
 
 use anyhow::{bail, Context, Result};
 use reqwest::blocking::{Client, RequestBuilder};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use reqwest::Url;
+use serde::Deserialize;
 use serde_json::Value;
 /// Lifecycle state of a model as reported by llama-swap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -71,6 +71,10 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const LOAD_TIMEOUT: Duration = Duration::from_secs(60);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const RESPONSE_PREVIEW_CHARS: usize = 200;
+const MAX_RUNNING_RESPONSE_BYTES: usize = 256 * 1024;
+const MAX_RUNNING_MODELS: usize = 128;
+const MAX_LIFECYCLE_MODEL_ID_BYTES: usize = 256;
+const MAX_ACTIVATION_RESPONSE_BYTES: usize = 16 * 1024;
 
 /// A model advertised by llama-swap.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,12 +127,27 @@ impl SwapClient {
 
     /// Build a client with an explicit endpoint and optional bearer token.
     pub fn new(base_url: impl AsRef<str>, api_key: Option<&str>) -> Result<Self> {
-        let base_url = normalize_base_url(base_url.as_ref())?;
+        Self::build(base_url.as_ref(), api_key, false)
+    }
+
+    /// Resident handoff must contact its configured local router directly,
+    /// never an environment-selected HTTP proxy.
+    pub(crate) fn local_resident(base_url: &str, api_key: Option<&str>) -> Result<Self> {
+        Self::build(base_url, api_key, true)
+    }
+
+    fn build(base_url: &str, api_key: Option<&str>, direct_local: bool) -> Result<Self> {
+        let base_url = normalize_base_url(base_url)?;
         let headers = auth_headers(api_key)?;
-        let client = Client::builder()
+        let mut builder = Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .default_headers(headers)
             .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never());
+        if direct_local {
+            builder = builder.no_proxy();
+        }
+        let client = builder
             .build()
             .context("failed to build llama-swap HTTP client")?;
 
@@ -152,6 +171,85 @@ impl SwapClient {
             .text()
             .context("failed to read llama-swap model response")?;
         parse_models(&body).context("failed to parse llama-swap model response")
+    }
+
+    /// Return the IDs whose exact `/running` process state is `ready`.
+    ///
+    /// This is a bounded listing, not evidence that the model is request-idle
+    /// or that its GPU is quiescent. Empty listings are valid.
+    pub fn ready_model_ids(&self, timeout: Duration) -> Result<Vec<String>> {
+        if timeout.is_zero() {
+            bail!("llama-swap readiness timeout must be nonzero");
+        }
+        let response = self
+            .with_timeout(self.client.get(self.endpoint("/running")), timeout)
+            .send()
+            .map_err(|_| anyhow::anyhow!("llama-swap running request failed"))?;
+        if response.status().as_u16() != 200 {
+            bail!("llama-swap running request returned an unsuccessful status");
+        }
+        let body = read_limited_body(
+            response,
+            MAX_RUNNING_RESPONSE_BYTES,
+            "llama-swap running response is invalid or too large",
+        )?;
+        parse_ready_model_ids(&body)
+    }
+
+    /// Make one side-effectful routed health GET to request model activation.
+    ///
+    /// This operation is never retried. A 2xx response is only an
+    /// acknowledgment; it does not establish readiness or request-idle state.
+    pub fn activate_model_once(&self, model_id: &str, timeout: Duration) -> Result<()> {
+        if timeout.is_zero() {
+            bail!("llama-swap activation timeout must be nonzero");
+        }
+        if !valid_lifecycle_model_id(model_id) {
+            bail!("llama-swap activation model ID is invalid");
+        }
+        let url = model_endpoint(&self.base_url, "upstream", model_id, Some("health"))
+            .map_err(|_| anyhow::anyhow!("llama-swap activation route is invalid"))?;
+        let response = self
+            .with_timeout(self.client.get(url), timeout.min(LOAD_TIMEOUT))
+            .send()
+            .map_err(|_| anyhow::anyhow!("llama-swap activation request failed"))?;
+        if !response.status().is_success() {
+            bail!("llama-swap activation was not acknowledged");
+        }
+        read_limited_body(
+            response,
+            MAX_ACTIVATION_RESPONSE_BYTES,
+            "llama-swap activation response is invalid or too large",
+        )?;
+        Ok(())
+    }
+
+    /// Make one side-effectful request to unload exactly one selected model.
+    ///
+    /// This uses llama-swap's model-scoped route, never the unsuffixed route
+    /// that unloads every model. A 2xx response is only an acknowledgment.
+    pub fn deactivate_model_once(&self, model_id: &str, timeout: Duration) -> Result<()> {
+        if timeout.is_zero() {
+            bail!("llama-swap deactivation timeout must be nonzero");
+        }
+        if !valid_lifecycle_model_id(model_id) {
+            bail!("llama-swap deactivation model ID is invalid");
+        }
+        let url = model_endpoint(&self.base_url, "api/models/unload", model_id, None)
+            .map_err(|_| anyhow::anyhow!("llama-swap deactivation route is invalid"))?;
+        let response = self
+            .with_timeout(self.client.post(url), timeout.min(REQUEST_TIMEOUT))
+            .send()
+            .map_err(|_| anyhow::anyhow!("llama-swap deactivation request failed"))?;
+        if !response.status().is_success() {
+            bail!("llama-swap deactivation was not acknowledged");
+        }
+        read_limited_body(
+            response,
+            MAX_ACTIVATION_RESPONSE_BYTES,
+            "llama-swap deactivation response is invalid or too large",
+        )?;
+        Ok(())
     }
 
     /// Ask llama-swap to load `model_id` and return a compact HTTP summary.
@@ -229,6 +327,68 @@ fn model_endpoint(
     }
     drop(segments);
     Ok(url)
+}
+
+#[derive(Deserialize)]
+struct ReadyModelsResponse {
+    running: Vec<ReadyModel>,
+}
+
+#[derive(Deserialize)]
+struct ReadyModel {
+    model: String,
+    state: String,
+}
+
+fn parse_ready_model_ids(body: &[u8]) -> Result<Vec<String>> {
+    if body.len() > MAX_RUNNING_RESPONSE_BYTES {
+        bail!("llama-swap running response is invalid or too large");
+    }
+    let response: ReadyModelsResponse = serde_json::from_slice(body)
+        .map_err(|_| anyhow::anyhow!("llama-swap running response is malformed"))?;
+    if response.running.len() > MAX_RUNNING_MODELS {
+        bail!("llama-swap running response has too many models");
+    }
+
+    let mut ids = Vec::with_capacity(response.running.len());
+    let mut unique = HashSet::with_capacity(response.running.len());
+    for model in response.running {
+        if model.state != "ready" {
+            bail!("llama-swap model readiness is not confirmed");
+        }
+        if !valid_lifecycle_model_id(&model.model) {
+            bail!("llama-swap running response contains an invalid model ID");
+        }
+        if !unique.insert(model.model.clone()) {
+            bail!("llama-swap running response contains duplicate model IDs");
+        }
+        ids.push(model.model);
+    }
+    ids.sort();
+    Ok(ids)
+}
+
+fn valid_lifecycle_model_id(model_id: &str) -> bool {
+    model_id.len() <= MAX_LIFECYCLE_MODEL_ID_BYTES
+        && !model_id.trim().is_empty()
+        && model_id.trim() == model_id
+        && model_endpoint(DEFAULT_BASE_URL, "upstream", model_id, Some("health")).is_ok()
+}
+
+fn read_limited_body(
+    response: reqwest::blocking::Response,
+    maximum_bytes: usize,
+    failure_message: &'static str,
+) -> Result<Vec<u8>> {
+    let mut body = Vec::new();
+    response
+        .take(maximum_bytes as u64 + 1)
+        .read_to_end(&mut body)
+        .map_err(|_| anyhow::anyhow!("{}", failure_message))?;
+    if body.len() > maximum_bytes {
+        bail!("{}", failure_message);
+    }
+    Ok(body)
 }
 
 pub(crate) fn normalize_base_url(raw: &str) -> Result<String> {
@@ -367,6 +527,200 @@ fn action_result(status: u16, body: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use std::net::{TcpListener, TcpStream};
+    use std::thread::JoinHandle;
+
+    fn lifecycle_http_fixture(
+        status: &str,
+        headers: &[&str],
+        body: Vec<u8>,
+        watch_for_extra_request: bool,
+    ) -> (SwapClient, JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .expect("loopback TCP binding is required for lifecycle HTTP tests");
+        listener
+            .set_nonblocking(true)
+            .expect("set lifecycle listener nonblocking");
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let status = status.to_owned();
+        let headers = headers
+            .iter()
+            .map(|header| (*header).to_owned())
+            .collect::<Vec<_>>();
+        let worker = std::thread::spawn(move || {
+            let mut stream = accept_lifecycle_connection(&listener);
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set lifecycle request timeout");
+            let mut requests = vec![read_http_request(&mut stream)];
+
+            let mut response = format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n",
+                body.len()
+            );
+            for header in headers {
+                response.push_str(&header);
+                response.push_str("\r\n");
+            }
+            response.push_str("\r\n");
+            stream
+                .write_all(response.as_bytes())
+                .and_then(|()| stream.write_all(&body))
+                .expect("write lifecycle HTTP response");
+
+            if watch_for_extra_request {
+                listener
+                    .set_nonblocking(true)
+                    .expect("watch for retried lifecycle request");
+                let deadline = std::time::Instant::now() + Duration::from_millis(100);
+                while std::time::Instant::now() < deadline {
+                    match listener.accept() {
+                        Ok((mut retry, _)) => {
+                            retry
+                                .set_read_timeout(Some(Duration::from_secs(2)))
+                                .expect("set retried request timeout");
+                            requests.push(read_http_request(&mut retry));
+                        }
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                || error.kind() == std::io::ErrorKind::Interrupted =>
+                        {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("accept retried request: {error}"),
+                    }
+                }
+            }
+            requests
+        });
+        let client = SwapClient::local_resident(&endpoint, Some("fixture-token")).unwrap();
+        (client, worker)
+    }
+
+    fn accept_lifecycle_connection(listener: &TcpListener) -> TcpStream {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => return stream,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        || error.kind() == std::io::ErrorKind::Interrupted =>
+                {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "timed out waiting for lifecycle HTTP request"
+                    );
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("accept lifecycle HTTP request: {error}"),
+            }
+        }
+    }
+
+    fn read_http_request(stream: &mut TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = std::io::Read::read(stream, &mut chunk).expect("read HTTP request");
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..read]);
+        }
+        String::from_utf8_lossy(&request).into_owned()
+    }
+
+    fn request_line(request: &str) -> &str {
+        request.lines().next().expect("HTTP request line")
+    }
+
+    #[test]
+    fn lifecycle_readiness_uses_authenticated_running_route_and_sorts_ids() {
+        let body =
+            br#"{"running":[{"model":"zeta","state":"ready"},{"model":"alpha","state":"ready"}]}"#
+                .to_vec();
+        let (client, server) = lifecycle_http_fixture("200 OK", &[], body, false);
+
+        assert_eq!(
+            client.ready_model_ids(Duration::from_secs(1)).unwrap(),
+            ["alpha".to_owned(), "zeta".to_owned()]
+        );
+        let request = server.join().unwrap();
+        assert_eq!(request.len(), 1);
+        assert_eq!(request_line(&request[0]), "GET /running HTTP/1.1");
+        assert!(request[0]
+            .lines()
+            .any(|header| header.eq_ignore_ascii_case("authorization: Bearer fixture-token")));
+    }
+
+    #[test]
+    fn lifecycle_model_actions_use_encoded_scoped_routes_once() {
+        let id = "model/with?reserved%chars#";
+        let (client, server) = lifecycle_http_fixture("204 No Content", &[], Vec::new(), false);
+        client
+            .deactivate_model_once(id, Duration::from_secs(1))
+            .unwrap();
+        let request = server.join().unwrap();
+        assert_eq!(request.len(), 1);
+        assert_eq!(
+            request_line(&request[0]),
+            "POST /api/models/unload/model%2Fwith%3Freserved%25chars%23 HTTP/1.1"
+        );
+        assert_ne!(
+            request_line(&request[0]),
+            "POST /api/models/unload HTTP/1.1"
+        );
+
+        let (client, server) = lifecycle_http_fixture("200 OK", &[], Vec::new(), false);
+        client
+            .activate_model_once(id, Duration::from_secs(1))
+            .unwrap();
+        let request = server.join().unwrap();
+        assert_eq!(request.len(), 1);
+        assert_eq!(
+            request_line(&request[0]),
+            "GET /upstream/model%2Fwith%3Freserved%25chars%23/health HTTP/1.1"
+        );
+    }
+
+    #[test]
+    fn lifecycle_activation_does_not_retry_errors_or_follow_redirects() {
+        for (status, headers) in [
+            ("500 Internal Server Error", &[][..]),
+            ("302 Found", &["Location: /redirect-target"][..]),
+        ] {
+            let (client, server) =
+                lifecycle_http_fixture(status, headers, b"fixture response".to_vec(), true);
+            let error = client
+                .activate_model_once("model", Duration::from_secs(1))
+                .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "llama-swap activation was not acknowledged"
+            );
+            let requests = server.join().unwrap();
+            assert_eq!(requests.len(), 1, "status={status}");
+            assert_eq!(
+                request_line(&requests[0]),
+                "GET /upstream/model/health HTTP/1.1"
+            );
+        }
+    }
+
+    #[test]
+    fn lifecycle_activation_rejects_oversized_response_body() {
+        let body = vec![b'x'; MAX_ACTIVATION_RESPONSE_BYTES + 1];
+        let (client, server) = lifecycle_http_fixture("200 OK", &[], body, false);
+        let error = client
+            .activate_model_once("model", Duration::from_secs(1))
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "llama-swap activation response is invalid or too large"
+        );
+        assert_eq!(server.join().unwrap().len(), 1);
+    }
 
     #[test]
     fn native_model_routes_preserve_prefix_and_encode_selected_id() {
@@ -467,6 +821,117 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(parse_models("not json").is_err());
+    }
+
+    #[test]
+    fn ready_model_parser_requires_exact_ready_state_and_sorts_ids() {
+        let body = br#"{
+            "running": [
+                {"model":"zeta", "state":"ready", "cmd":"/private/path"},
+                {"model":"alpha", "state":"ready", "args":["--secret"]}
+            ],
+            "router_extra": true
+        }"#;
+        assert_eq!(
+            parse_ready_model_ids(body).unwrap(),
+            ["alpha".to_owned(), "zeta".to_owned()]
+        );
+        assert!(parse_ready_model_ids(br#"{"running":[]}"#)
+            .unwrap()
+            .is_empty());
+
+        for state in ["starting", "stopping", "unloaded", "unknown", "READY"] {
+            let body = format!(r#"{{"running":[{{"model":"model","state":"{state}"}}]}}"#);
+            assert!(
+                parse_ready_model_ids(body.as_bytes()).is_err(),
+                "state={state}"
+            );
+        }
+    }
+
+    #[test]
+    fn ready_model_parser_rejects_malformed_duplicate_and_unsafe_rows() {
+        for body in [
+            br#"{}"#.as_slice(),
+            br#"{"running":"not-an-array"}"#.as_slice(),
+            br#"{"running":[{"model":"missing-state"}]}"#.as_slice(),
+            br#"{"running":[{"model":"x","model":"y","state":"ready"}]}"#.as_slice(),
+            br#"{"running":[{"model":"x","state":"ready","state":"starting"}]}"#.as_slice(),
+            br#"{"running":[],"running":[]}"#.as_slice(),
+            b"not json".as_slice(),
+        ] {
+            assert!(parse_ready_model_ids(body).is_err());
+        }
+
+        assert!(parse_ready_model_ids(
+            br#"{"running":[{"model":"same","state":"ready"},{"model":"same","state":"ready"}]}"#
+        )
+        .is_err());
+        for id in ["", " ", ".", "..", " padded "] {
+            let body = format!(r#"{{"running":[{{"model":{id:?},"state":"ready"}}]}}"#);
+            assert!(parse_ready_model_ids(body.as_bytes()).is_err(), "id={id:?}");
+        }
+        let too_long = "m".repeat(MAX_LIFECYCLE_MODEL_ID_BYTES + 1);
+        let body = format!(r#"{{"running":[{{"model":{too_long:?},"state":"ready"}}]}}"#);
+        assert!(parse_ready_model_ids(body.as_bytes()).is_err());
+
+        let maximum = "m".repeat(MAX_LIFECYCLE_MODEL_ID_BYTES);
+        let body = format!(r#"{{"running":[{{"model":{maximum:?},"state":"ready"}}]}}"#);
+        assert_eq!(parse_ready_model_ids(body.as_bytes()).unwrap(), [maximum]);
+    }
+
+    #[test]
+    fn ready_model_parser_bounds_model_count_and_response_size() {
+        let rows = (0..=MAX_RUNNING_MODELS)
+            .map(|index| format!(r#"{{"model":"model-{index:03}","state":"ready"}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let body = format!(r#"{{"running":[{rows}]}}"#);
+        assert!(parse_ready_model_ids(body.as_bytes()).is_err());
+
+        let large_unknown = "x".repeat(MAX_RUNNING_RESPONSE_BYTES);
+        let body = format!(r#"{{"running":[],"extra":{large_unknown:?}}}"#);
+        assert!(parse_ready_model_ids(body.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn lifecycle_calls_reject_zero_timeout_and_invalid_ids_without_echoing_input() {
+        let client = SwapClient::new("http://127.0.0.1:1", None).unwrap();
+        let readiness = client.ready_model_ids(Duration::ZERO).unwrap_err();
+        assert_eq!(
+            readiness.to_string(),
+            "llama-swap readiness timeout must be nonzero"
+        );
+        let activation = client
+            .activate_model_once("private-model-id", Duration::ZERO)
+            .unwrap_err();
+        assert_eq!(
+            activation.to_string(),
+            "llama-swap activation timeout must be nonzero"
+        );
+        let deactivation = client
+            .deactivate_model_once("private-model-id", Duration::ZERO)
+            .unwrap_err();
+        assert_eq!(
+            deactivation.to_string(),
+            "llama-swap deactivation timeout must be nonzero"
+        );
+        let invalid_id = client
+            .activate_model_once("..", Duration::from_secs(1))
+            .unwrap_err();
+        assert_eq!(
+            invalid_id.to_string(),
+            "llama-swap activation model ID is invalid"
+        );
+        assert!(!invalid_id.to_string().contains(".."));
+        let invalid_deactivation = client
+            .deactivate_model_once("..", Duration::from_secs(1))
+            .unwrap_err();
+        assert_eq!(
+            invalid_deactivation.to_string(),
+            "llama-swap deactivation model ID is invalid"
+        );
+        assert!(!invalid_deactivation.to_string().contains(".."));
     }
 
     #[test]

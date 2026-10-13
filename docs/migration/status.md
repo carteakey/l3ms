@@ -9,6 +9,55 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
+## Explicit resident handoff checkpoint — 2026-10-13
+
+The existing CLI/UI native GPU owner now optionally pauses/restores the fixed
+user `llama-swap.service`. Default idle-window behavior is unchanged. Strict
+configuration opts in to the current router config and loopback endpoint, an
+auth environment-variable name, manager quiescence and a bounded restoration
+budget. No unit is installed/reloaded and no arbitrary service is adopted.
+
+The private fixed-unit module captures loaded state, enablement/effective
+definition, bounded regular files and current UID/cgroup/PID birth identities.
+It verifies the effective router root and unique actual router config argv
+inside the verified subtree, including a shell MainPID. It requires whole-unit
+stop settings, writes the existing empty marker before one stop attempt, proves
+the old subtree empty/gone and checks GPU idle before native execution. Known
+cleanup and idle release precede one start; inactive stays inactive. Restoration
+refreshes child identities and requires the exact captured ready model IDs,
+with model-scoped unload and one-shot routed health activation. Only read-only
+readiness polling repeats. HTTP proxies, redirects and client retries are disabled
+for resident calls. No second worker, daemon or durable Stop journal was added.
+
+Endpoint identity and client/manager/config quiescence remain explicit operator
+assertions; they are not machine-verified listener ownership or ingress fences.
+Restored state is operational state/ready IDs in a new generation, not old PIDs,
+requests, caches or TTL remainder. Uncertainty retains the marker and closes
+scheduling; conservative retention can also require inspection after a pre-stop
+verification failure. Interrupted handoff still needs manual recovery. See the
+[operator workflow](../native-gpu-workflows.md) for opt-in and recovery limits.
+
+Verification: **8 fixed-unit checks pass**, including fake-systemctl active
+stop/start, shell/router membership, later model-child refresh, inactive no-op,
+definition drift and failed-stop no-retry. The three focused idle/cancel/config
+checks and **12 socket-free router checks** pass. Strict Clippy, formatting,
+diff check and all-target build pass. Full run: **825 pass, 104 fail, 1 ignored**.
+The preceding 100 failure names are unchanged; four new lifecycle HTTP tests fail
+at loopback bind with EPERM, not at protocol assertions. They are not skipped or
+claimed accepted. The full command stops at failed library tests, so this is not
+a green all-target suite. Logs: `/tmp/l3ms-resident-handoff-{unit-tests,router-tests,
+idle-tests,cancel-tests,config-tests,clippy,build,full}.log`.
+
+Net root source **+2,504**, cumulative **+8,751** versus `702b4cd`; control source
+**64,778** lines versus the 60,729 baseline. This slice replaces the required
+manual resident pause/restoration inside the native operation, but does **not**
+retire the managed-session implementation yet. The reduction target remains
+unmet. Next gate: an unrestricted transport run and approved real language ->
+media/TTS -> language restoration cycle, then caller-first managed-platform
+deletion. Live user D-Bus/GPU access remain unavailable here; no live unit/config,
+original checkout, weights or provider were changed. Full lane/keyboard/site/
+compatibility and publication gates remain open; full-port goal stays active.
+
 ## Resident-service handoff prerequisites — 2026-10-13
 
 The existing NVIDIA probe now has claimant-only preflight for a verified resident
