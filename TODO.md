@@ -10,159 +10,41 @@ existing Linear migration issues rather than replacing their acceptance criteria
 
 ## Monorepo: next work
 
-Removed the branch-added coordinator task-form submission fallback, Submit
-workbench helpers/envelope builder and form caller IDs: **1,266 net source lines
-removed**. Supported forms use the native runner; unsupported profiles refuse.
-Observation/cancellation/paging/history remain, with a retained keyboard test.
-Root **803 pass, 100 socket failures, 1 ignored**; build/strict lint/fmt and native
-form checks pass. Fewer transport failures reflect retired Submit tests, not a
-transport fix. Actual cached Nagi CPU CLI still succeeds offline (1.714 s native
-latency); no downloads, provider calls or service changes. Reduction still unmet.
-Next implement truthful Blender headless/Python versus external GUI/MCP
-workflows, a small native service handoff/restoration path, and delete remaining
-managed platform callers inward. Live acceptance remains resource/access-gated.
+This is a forward index, not a second implementation log. See the dated
+[migration status](docs/migration/status.md) for evidence and checkpoint history;
+the [simplification plan](docs/migration/simplification-plan.md) defines scope,
+replacement order and acceptance gates. Linear remains authoritative for
+committed work.
 
-LTX-2.5 video/music now retains synchronized audio/video and image conditioning
-through the shared native script path. Prepared-only Python dispatch prevents
-implicit `uv` setup; default standalone behavior is unchanged. Four focused Rust
-and 18 toolkit media fixtures pass; root **809 pass, 102 unchanged socket
-failures, 1 ignored**, build/strict lint/fmt pass. Source grew **637 net lines**
-including tests; the reduction target remains unmet. Next retire branch-added
-coordinator UI submission fallback/helpers, preserve observe/cancel/history,
-then bounded Blender and live GPU/handoff/codec acceptance. Live service/GPU
-access and the default LTX runtime are unavailable in this session.
-
-H3 music/TTS/video now uses the shared native script-media path: private WAV,
-validated retained RGB24 JSON and optional MP4, no graph/speech reinterpretation.
-Seven H3 fixtures and HeartMuLa compatibility checks pass; root **805 pass,
-102 unchanged socket failures, 1 ignored**, build/strict lint/fmt pass. Real CUDA/
-native-codec/interactive acceptance remains open. Current read-only user-service
-query is denied by the sandbox; prior audio.cpp source path is absent. Remaining
-script ports: LTX and bounded Blender, then broader deletion and live acceptance.
-
-HeartMuLa music now uses the shared native foreground/GPU-window path with
-native argv, controlled private WAV outputs and payload-free history. Model-free
-execution/form/CLI fixtures pass; real music generation is not accepted yet.
-Remaining native script ports: LTX and bounded
-Blender workflows. Reuse their actual contracts, not a generic engine framework.
-Live GPU/HTTP acceptance, handoff/restoration and broader deletion remain open.
-
-Latest: CUDA Nagi/Laya and Breeze forms now share the foreground runner through
-an explicit idle-GPU operator window. Existing locks/probes plus one recovery
-marker, no new daemon/service takeover. Guard/form fixtures pass; cached-weight
-CPU Nagi still runs offline (1.757 s native latency, execution evidence only).
-Removed the unused CPU daemon dispatch/worker closure: **1,111 net source lines
-removed** for the whole slice. Build/strict lint/fmt pass; first root run **792 pass,
-102 socket failures, 1 ignored**; final repeat **791 pass, 103 failures, 1 ignored**
-also resurfaced the previously recorded GPU-probe error-category fixture flake.
-No assertion weakened or speculative fix. Six fewer transport failures are retired
-CPU daemon tests, not transport fixes. Remaining priority: native media scripts, live CUDA tests,
-explicit language→media/TTS→language handoff/restoration, then further platform
-deletion. See [operator GPU workflow](docs/native-gpu-workflows.md).
-
-Native load/unload client now matches pinned router routes: one routed health
-activation and scoped unload URL, encoded IDs and no redirects. Eight focused
-tests/build/strict lint/fmt pass; full suite **790 pass, 108 unchanged socket
-failures, 1 ignored**. No live service action. Next is the small operator-window
-GPU path and remaining native script callers—not new coordinator scaffolding.
-
-Latest simplification: retired the redundant branch-added CPU daemon launcher;
-CPU decisions use the existing direct CLI/UI runner. **300 net source lines
-removed**, no new module. Build/strict Clippy/fmt pass; root suite **788 pass,
-108 unchanged transport failures, 1 ignored**. Originals/services/history unchanged.
-Remaining GPU work must reuse native controls, not another daemon. Router loaded/
-ready state is not proof of request-idle; use an explicitly quiesced operator
-window, refuse unknown claimants, and verify native release/restoration. The
-standalone load/unload mismatch is now corrected above; live activation,
-release and restoration acceptance remain pending. See
-[current evidence](docs/migration/status.md).
-
-Hosted TypeSafe decisions now use the same native owner with explicit hosted
-Python, SDK retries/logging disabled and post-spawn remote uncertainty. Actual
-SDK/CLI offline success+503 checks each made one mock call, no paid/network call.
-Root **789 pass, 108 unchanged transport failures, 1 ignored**; build/lint/fmt,
-21 runner tests and site checks pass. Source **+411 net**, cumulative **+5,242**.
-No new module/worker; broad coordinator deletion is still pending.
-
-Next priority: small native GPU lifecycle plus remaining script/CUDA callers,
-not more provider or coordinator infrastructure. Fresh hosted runtime and an
-approved/budgeted provider test remain needed for live acceptance. An existing
-GPU-probe fixture assertion flake is logged but un-reproduced/unfixed; keep its
-assertions and recheck before any GPU acceptance.
-
-CPU Breeze cloning and completed streaming chunks now share the existing direct
-path with standard/design. Real cached-weight CPU runs pass (14.20/11.52 seconds,
-validated WAV/chunks and child release), no services/downloads. Streaming is not
-live playback. Build/lint/fmt, local UI/privacy, site and standalone media checks
-pass; root suite **784 pass, 108 unchanged transport failures, 1 ignored**.
-Source adds **409 net lines**, cumulative **+4,831**; broad reduction is unfinished.
-
-Hosted implementation gates above now pin the provider runtime, disable retries
-and preserve post-spawn uncertainty; fresh installation and paid/network
-acceptance have not run. Jev/SystemOne use TypeSafe, not an OpenRouter adapter.
-GPU lifecycle and remaining native media/decision callers still gate broad
-coordinator deletion; use existing recipes rather than another platform.
-
-Latest simplification cut: remove the branch-added HTTP gateway CLI/launcher/
-transport, **1,762 net source lines and two modules**. Build/lint/fmt and actual
-retired-flag rejection pass. Full suite: **781 pass, 108 socket/transport failures,
-1 ignored**; the 13 fewer failures are removed gateway tests, not repaired
-transport. Cumulative source delta is **+4,422**, so substantial deletion remains.
-Native GPU/hosted form replacement and simple GPU lifecycle still gate broader
-coordinator retirement. See [current evidence](docs/migration/status.md).
-
-Native Comfy implementation now reuses the adapter and foreground worker for
-declared graphs, scoped cancellation and private flat-file downloads. No services
-or GPU lifecycle are managed. Build/strict Clippy/fmt and local fixtures pass;
-**785 root tests pass, 121 transport tests fail under socket restrictions,
-1 is ignored**. Actual native HTTP/media acceptance remains pending. Source grows
-**1,591 net lines** in this slice; cumulative **+6,184**, no platform module removed.
-See [current evidence](docs/migration/status.md).
-
-The preceding embedding implementation is integrated: CLI strict `{"input":[...]}`
-and Stack batch forms share the native runner/language adapter, no coordinator socket/caller
-ID. UI uses the committed Chat endpoint and captured credentials; vectors stay
-out of history. Post-dispatch cancellation is remote completion uncertainty,
-not process/GPU release, and blocks overlapping Chat sends.
-
-Embedding checkpoint verification was **not fully green**: build/strict Clippy/fmt pass; 772 root tests
-pass, 121 fail at sandbox-restricted socket/transport operations, 1 is ignored.
-Builder/CLI validation and local cancellation guards pass. New loopback success,
-captured-auth and remote-cancel tests remain enabled but cannot execute here.
-No cached embedding weights were found; real-model acceptance is also pending.
-This slice adds **1,260 net root source lines** including tests; cumulative
-change against `702b4cd` is **+3,991**, not the target reduction.
-
-Next gates:
-
-- [x] Restore site metadata/generated payload for CPU Breeze/Nagi; preserve
-  language ranking and portable evidence labels. Python/DOM checks pass and
-  regeneration is deterministic. Publication and fresh browser acceptance remain gated.
-- [x] Extend CPU Breeze to offline voice design on the existing instruction/WAV
-  path. Final native CPU run passed with process release, no service changes;
-  this is execution evidence, not a voice-quality evaluation.
-- [x] Extend the same CPU path to clone and completed streaming chunks; require
-  clone transcript and keep hidden fields out of other modes. Native acceptance
-  and process release passed; no live playback or voice-quality claim.
-
-- [ ] Run `cargo test --all-targets --locked` in a session allowing local TCP/Unix
-  sockets; verify the new native embedding HTTP/UI cases before claiming acceptance.
-- [ ] Run a bounded real embedding batch with an explicitly prepared profile,
-  installed weights and configured endpoint. Do not silently enable/download models.
-- [ ] Replace remaining native media/GPU form callers, then delete their
-  coordinator dependency closure. Keep existing workflows until replacements pass;
-  do not expand the managed daemon.
-  Remaining declared routes: CUDA Nagi/Laya/OpenJev and hosted Jev/SystemOne;
-  MiniMax H3, LTX, HeartMuLa, CUDA Breeze including cloning/streaming, and Blender.
-  Use their existing scripts/recipes with the same foreground owner, not another
-  engine framework. Explicit GPU service switching and real acceptance remain
-  prerequisites for claiming integrated GPU operation.
-
-Keep this a thin wrapper: Comfy uses the existing adapter and foreground worker,
-opaque native workflow JSON and ordinary private output files. No new service,
-artifact registry, engine hierarchy or persistent execution authority. After
-transport acceptance, remove the displaced coordinator callers inward; do not
-add further platform features while the deletion target remains unmet.
+- [ ] Complete the full Blender contract: headless Python rendering and the
+  distinct interactive external GUI/MCP workflow. The wrapper's `--prompt`
+  currently prints MCP guidance only. The opt-in single-action headless wrapper
+  and four argv/preflight fixtures are implemented; root dispatch and real
+  rendering remain pending. Do not invent inference, output artifacts, or a
+  CPU/CUDA device declaration.
+- [ ] Add the small operator-owned native service handoff/restoration path.
+  Reuse native controls, perform bounded health/device checks, refuse unknown
+  GPU claimants, and restore the exact prior service/runtime state. Use only an
+  approved maintenance window; an advisory lock does not fence outside clients.
+- [ ] Continue caller-first managed-platform deletion only after each real
+  replacement passes. Count net source removal rather than relocation, preserve
+  safety needed by surviving callers, and work toward the plan's half-control-
+  source reduction target without adding a daemon or engine hierarchy. Keep local
+  SemIf unsupported while its native forward pass is absent; do not fake it.
+- [ ] Complete live acceptance across all lanes and supported tasks, including
+  local/hosted decisions, language/chat/embeddings, media, TTS modes, Comfy and
+  GPU workflows; verify cancellation, results, artifacts and exact handoff
+  restoration. Finish keyboard/visual/mobile review in the Signal / 03 direction,
+  site-manifest compatibility, standalone/import compatibility and CI checks.
+- [ ] Run `cargo test --all-targets --locked` where local TCP/Unix sockets are
+  permitted, then run a bounded real embedding batch with an explicitly prepared
+  profile, installed weights and configured endpoint. Do not silently enable or
+  download models.
+- [ ] Keep original repositories, configs, runtime state and history until
+  acceptance and rollback criteria are documented. Publication remains **NO-GO**
+  until the exact outgoing history/export, endpoints, host paths, secrets and large
+  files are audited; no push/history rewrite without authorization. No service
+  change, download or provider call without explicit approval.
 
 ## Previous Chat replacement checkpoint
 

@@ -32,6 +32,10 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Prepare Blender's existing wrapper for single-action headless integration
+  without changing default standalone GUI/MCP commands. Keep Python failures
+  nonzero and render targets predictable; shared root dispatch and real Blender
+  acceptance remain pending. Reconcile the next-work index without losing gates.
 - Run prepared LTX-2.5 video/music through the shared script-media owner and
   explicit idle-GPU window, retaining native synchronized audio/video and image
   conditioning. Pin its MP4 output and require its existing Python environment

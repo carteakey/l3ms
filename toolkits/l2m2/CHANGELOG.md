@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add opt-in Blender headless-only wrapper execution with a single explicit
+  code/script/render action, Python exception exit codes and a fresh fixed PNG
+  target. Preserve standalone GUI/MCP behavior and the scene's renderer backend;
+  this prepares root integration but does not establish GPU ownership or safety.
+
 - Declare LTX-2.5's CUDA requirement and add opt-in prepared-only generation
   using the existing `.venv/bin/python` offline, without `uv` syncing/downloads.
   Default standalone `uv run` and synchronized audio/video/image arguments stay

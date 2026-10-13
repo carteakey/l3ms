@@ -9,6 +9,39 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
+## Blender native headless contract preparation — 2026-10-13
+
+The existing Blender script now has opt-in `L3MS_BLENDER_HEADLESS_ONLY=1`:
+one explicit code/script/render action, native Python exception exit code,
+missing-input refusal and fresh fixed `result_0001.png` output for frame 1.
+GUI/MCP/prompt/check/port/help and conflicting actions refuse in this mode;
+normal standalone behavior stays unchanged. Render backend remains native,
+and arbitrary trusted Python is not sandboxed or given a fabricated artifact.
+Pre-edit script snapshot is in root `.toolkit/script_versions`.
+
+Four fake-executable checks pass; standalone media total **22 Python**, downloader
+**14 Python**, toolkit **6 Rust** and strict lint/fmt pass. No Blender process,
+GPU inference, service mutation, installation or provider call occurred. These
+checks prove argv/preflight/failure behavior, not real Blender rendering.
+The root's source is unchanged in this slice; its preceding **803/100/1** result
+remains historical evidence, not a newly run full suite. No root source reduction
+is claimed for trimming the duplicated TODO checkpoint narrative.
+
+Root CLI/UI dispatch is still pending. The concrete admission seam is the
+existing operator idle-GPU window, with a separate exact Blender predicate:
+do not add a CUDA manifest field or supply a fake CUDA connection. Keep CUDA
+device selection separate from GPU admission in UI labels/recovery state,
+exclude Blender image tasks from Comfy parsing, and validate render paths before
+publishing artifacts. All headless Python/render and external GUI/MCP workflows
+remain in scope. See [native wrapper contract](../../toolkits/l2m2/docs/blender-mcp-setup.md).
+
+The managed-service audit found no safe drop-in original-unit pause/restore:
+that module owns only transient services it created. A small configured native
+unit handoff must preserve exact pre-state and verify restoration; do not adopt
+or stop the live router through that transient ownership primitive. Live service
+access remains gated/unavailable in this session; broader platform retirement,
+real all-lane acceptance and publication/experience gates remain open.
+
 ## Caller-first coordinator submission retirement — 2026-10-13
 
 Stack forms now run only allowlisted foreground native workflows; the old
