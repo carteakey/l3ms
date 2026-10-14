@@ -42,12 +42,17 @@ existing language HTTP and Comfy endpoints do not silently acquire this device
 or fall back to another execution mode.
 
 On the supported KDE desktop, an explicit `"kde_desktop_baseline": true` member
-may be added to the same JSON. It permits only the captured native compositor
+may be added to the same JSON. It permits only the captured compositor child
 from the fixed `plasma-kwin_wayland.service`, with its root-owned packaged unit,
 wrapper command, invocation/main-process identity and exact cgroup member set
-verified before and after each GPU observation. The compositor itself is checked
-by UID, process birth, cgroup and native argv; its protected `/proc/exe` need not
-be readable. Changed generations/membership, custom drop-ins, unsupported unit
+verified before and after each GPU observation. The launcher's actual executable
+must match the installed root-owned, non-writable wrapper by path and inode.
+The selected child must have that captured launcher as its direct parent, the
+expected argv[0], UID, process birth and cgroup. Its protected `/proc/exe` is not
+attested: argv[0] is a selector, not executable proof. This trusts the local user
+manager and launcher environment (including executable lookup); it does not
+protect against hostile same-UID injection or a spoofed launch environment.
+Changed generations/membership, custom drop-ins, unsupported unit
 layouts and all other GPU claimants still refuse. This is not an arbitrary PID
 allowlist, an exemption for all graphics programs, or permission to stop KDE.
 The existing `idle_mib` limit still bounds total memory before dispatch and after
@@ -58,6 +63,8 @@ Read-only host probes are explicitly opt-in (they are skipped by ordinary CI):
 
 ```sh
 cargo test --lib real_kde_desktop_baseline_capture -- --ignored
+# Only while the device has no compute job beyond the desktop baseline:
+L3MS_LIVE_GPU_UUID=GPU-your-physical-uuid cargo test --lib real_kde_baseline_accepts_idle_desktop -- --ignored
 # Only while an unrelated compute claimant is known to be present:
 L3MS_LIVE_GPU_UUID=GPU-your-physical-uuid cargo test --lib real_kde_baseline_refuses_foreign_compute -- --ignored
 ```

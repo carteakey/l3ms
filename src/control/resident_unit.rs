@@ -191,7 +191,7 @@ struct ManagerSnapshot {
     exec_start: String,
 }
 
-/// Opaque, read-only snapshot of one verified native KDE compositor process.
+/// Opaque, read-only snapshot of the captured KDE launcher's compositor child.
 ///
 /// This baseline never changes the desktop unit. It accepts only the exact
 /// compositor PID captured from the fixed unit's verified cgroup. It is only
@@ -200,6 +200,9 @@ struct ManagerSnapshot {
 /// own service-cgroup cleanup, and exclude direct device bypass before
 /// switching workloads. It inspects only this unit, not all graphics
 /// processes; its bounded manager query is still a synchronous subprocess.
+/// This trusts the user manager and launcher environment, not hostile same-UID
+/// processes. The child's protected executable link is not attested; argv[0]
+/// only selects a direct child of the verified packaged launcher.
 pub(crate) struct DesktopGpuBaseline {
     systemctl: PathBuf,
     cgroup_root: PathBuf,
@@ -235,7 +238,7 @@ struct DesktopManagerSnapshot {
 }
 
 impl DesktopGpuBaseline {
-    /// Capture one verified, currently running native KDE compositor.
+    /// Capture the currently running packaged KDE launcher's compositor child.
     ///
     /// This is a point-in-time read only. It is not a GPU admission fence,
     /// lease, or proof that no process can begin using the device later.
@@ -280,7 +283,9 @@ impl DesktopGpuBaseline {
             .get(&manager.main_pid)
             .cloned()
             .ok_or(ResidentUnitError::ProcessIdentityUnavailable)?;
-        let compositor = find_desktop_compositor(&members, proc_root, uid, context)?;
+        verify_desktop_launcher(proc_root, manager.main_pid, test_paths)?;
+        let compositor =
+            find_desktop_compositor(&members, proc_root, uid, manager.main_pid, context)?;
         let baseline = Self {
             systemctl: systemctl.to_owned(),
             cgroup_root: cgroup_root.to_owned(),
@@ -332,6 +337,7 @@ impl DesktopGpuBaseline {
         if main_identity != self.generation.main_identity {
             return Err(ResidentUnitError::ProcessIdentityUnavailable);
         }
+        verify_desktop_launcher(&self.proc_root, manager.main_pid, test_paths)?;
         let definition = capture_desktop_definition(
             &manager,
             &self.fragment_path,
@@ -352,24 +358,32 @@ impl DesktopGpuBaseline {
         if members != self.members {
             return Err(ResidentUnitError::ProcessIdentityUnavailable);
         }
-        let compositor = find_desktop_compositor(&members, &self.proc_root, self.uid, context)?;
+        let compositor = find_desktop_compositor(
+            &members,
+            &self.proc_root,
+            self.uid,
+            manager.main_pid,
+            context,
+        )?;
         if compositor.0 != self.compositor_pid || compositor.1 != self.compositor_identity {
             return Err(ResidentUnitError::ProcessIdentityUnavailable);
         }
         check_context(context)
     }
 
-    /// Accept only the exact captured native compositor process, not other
+    /// Accept only the exact captured compositor child, not other
     /// members of the KDE unit. Call `verify` before relying on this snapshot.
     pub(crate) fn accepts_claimant(&self, pid: u32) -> bool {
         if pid != self.compositor_pid
+            || read_process_identity(&self.proc_root, self.generation.main_pid, self.uid).as_ref()
+                != Some(&self.generation.main_identity)
             || self.members.get(&pid) != Some(&self.compositor_identity)
             || read_process_identity(&self.proc_root, pid, self.uid).as_ref()
                 != Some(&self.compositor_identity)
         {
             return false;
         }
-        native_compositor_argv0(&self.proc_root, pid).unwrap_or(false)
+        desktop_child_matches(&self.proc_root, pid, self.generation.main_pid).unwrap_or(false)
     }
 }
 
@@ -915,6 +929,7 @@ fn find_desktop_compositor(
     members: &BTreeMap<u32, ProcessIdentity>,
     proc_root: &Path,
     uid: u32,
+    launcher_pid: u32,
     context: &OperationContext<'_>,
 ) -> Result<(u32, ProcessIdentity), ResidentUnitError> {
     let mut found = None;
@@ -925,7 +940,7 @@ fn find_desktop_compositor(
         if before != *identity {
             return Err(ResidentUnitError::ProcessIdentityUnavailable);
         }
-        let is_compositor = native_compositor_argv0(proc_root, pid)?;
+        let is_compositor = desktop_child_matches(proc_root, pid, launcher_pid)?;
         let after = read_process_identity(proc_root, pid, uid)
             .ok_or(ResidentUnitError::ProcessIdentityUnavailable)?;
         if after != before {
@@ -942,7 +957,37 @@ fn find_desktop_compositor(
     found.ok_or(ResidentUnitError::UnitNotSupported)
 }
 
-fn native_compositor_argv0(proc_root: &Path, pid: u32) -> Result<bool, ResidentUnitError> {
+fn verify_desktop_launcher(
+    proc_root: &Path,
+    pid: u32,
+    test_paths: bool,
+) -> Result<(), ResidentUnitError> {
+    let executable = proc_root.join(pid.to_string()).join("exe");
+    if fs::read_link(&executable).ok().as_deref() != Some(Path::new(DESKTOP_LAUNCHER)) {
+        return Err(ResidentUnitError::ProcessIdentityUnavailable);
+    }
+    if !test_paths {
+        let installed = fs::symlink_metadata(DESKTOP_LAUNCHER)
+            .map_err(|_| ResidentUnitError::ProcessIdentityUnavailable)?;
+        let running =
+            fs::metadata(executable).map_err(|_| ResidentUnitError::ProcessIdentityUnavailable)?;
+        if !installed.is_file()
+            || installed.uid() != 0
+            || installed.mode() & 0o022 != 0
+            || installed.mode() & 0o111 == 0
+            || (installed.dev(), installed.ino()) != (running.dev(), running.ino())
+        {
+            return Err(ResidentUnitError::ProcessIdentityUnavailable);
+        }
+    }
+    Ok(())
+}
+
+fn desktop_child_matches(
+    proc_root: &Path,
+    pid: u32,
+    launcher_pid: u32,
+) -> Result<bool, ResidentUnitError> {
     let bytes = read_bounded_regular(
         &proc_root.join(pid.to_string()).join("cmdline"),
         PROC_FILE_BYTES,
@@ -955,7 +1000,25 @@ fn native_compositor_argv0(proc_root: &Path, pid: u32) -> Result<bool, ResidentU
     if first.is_empty() || !bytes.contains(&0) {
         return Err(ResidentUnitError::ProcessIdentityUnavailable);
     }
-    Ok(first == DESKTOP_COMPOSITOR.as_bytes())
+    if first != DESKTOP_COMPOSITOR.as_bytes() {
+        return Ok(false);
+    }
+    let stat = read_bounded_regular(
+        &proc_root.join(pid.to_string()).join("stat"),
+        PROC_FILE_BYTES,
+    )
+    .map_err(|_| ResidentUnitError::ProcessIdentityUnavailable)?;
+    let text =
+        std::str::from_utf8(&stat).map_err(|_| ResidentUnitError::ProcessIdentityUnavailable)?;
+    let close = text
+        .rfind(')')
+        .ok_or(ResidentUnitError::ProcessIdentityUnavailable)?;
+    let parent = text[close + 1..]
+        .split_ascii_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u32>().ok())
+        .ok_or(ResidentUnitError::ProcessIdentityUnavailable)?;
+    Ok(parent == launcher_pid)
 }
 
 fn check_context(context: &OperationContext<'_>) -> Result<(), ResidentUnitError> {
@@ -1911,6 +1974,12 @@ mod tests {
                 102,
                 &[DESKTOP_COMPOSITOR.to_owned()],
             );
+            std::os::unix::fs::symlink(DESKTOP_LAUNCHER, proc_root.join("9001/exe")).unwrap();
+            let stat_path = proc_root.join("9002/stat");
+            let stat = fs::read_to_string(&stat_path)
+                .unwrap()
+                .replacen(") S 1 ", ") S 9001 ", 1);
+            fs::write(stat_path, stat).unwrap();
 
             let fragment = base.join("plasma-kwin_wayland.service");
             write_private_file(
@@ -2312,6 +2381,31 @@ mod tests {
     }
 
     #[test]
+    fn desktop_baseline_rejects_a_named_process_without_the_packaged_launcher() {
+        let fixture = DesktopFixture::new();
+        // A matching argv[0] in the right cgroup is not executable identity.
+        fs::remove_file(fixture.proc_root.join("9001/exe")).unwrap();
+        assert!(fixture.capture().is_err());
+
+        std::os::unix::fs::symlink("/usr/bin/false", fixture.proc_root.join("9001/exe")).unwrap();
+        assert!(fixture.capture().is_err());
+    }
+
+    #[test]
+    fn desktop_baseline_rejects_named_process_with_an_unrelated_parent() {
+        let fixture = DesktopFixture::new();
+        let baseline = fixture.capture().unwrap();
+        let stat_path = fixture.proc_root.join("9002/stat");
+        let stat = fs::read_to_string(&stat_path)
+            .unwrap()
+            .replacen(") S 9001 ", ") S 1 ", 1);
+        fs::write(stat_path, stat).unwrap();
+        assert!(!baseline.accepts_claimant(9002));
+        assert!(baseline.verify_at(&context(), true).is_err());
+        assert!(fixture.capture().is_err());
+    }
+
+    #[test]
     fn desktop_baseline_accepts_only_the_captured_native_compositor() {
         let fixture = DesktopFixture::new();
         let baseline = fixture.capture().unwrap();
@@ -2411,6 +2505,22 @@ mod tests {
         baseline.verify(&context()).unwrap();
         assert!(baseline.accepts_claimant(baseline.compositor_pid));
         assert!(!baseline.accepts_claimant(1));
+    }
+
+    #[test]
+    #[ignore = "requires explicit GPU UUID and an idle supported KDE session; read-only"]
+    fn real_kde_baseline_accepts_idle_desktop() {
+        use super::super::gpu_probe::{GpuProbeConfig, NvidiaSmiGpuProbe};
+        let uuid = std::env::var("L3MS_LIVE_GPU_UUID").expect("set the target physical GPU UUID");
+        let baseline = DesktopGpuBaseline::capture(&context()).unwrap();
+        let probe = NvidiaSmiGpuProbe::new(GpuProbeConfig::new(uuid, 0, 512).unwrap());
+        let observed = probe.observe_idle_with_baseline(
+            &context(),
+            RecoveryPolicy::new(MANAGER_RECOVERY).unwrap(),
+            |pid| baseline.accepts_claimant(pid),
+        );
+        baseline.verify(&context()).unwrap();
+        assert!(observed.unwrap().memory_used_mib() <= 512);
     }
 
     #[test]

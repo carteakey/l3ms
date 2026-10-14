@@ -36,6 +36,9 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Bind the opt-in KDE baseline to the actual packaged wrapper executable and
+  its direct compositor child, not argv[0] alone. Document the cooperative local
+  session trust assumption; no privilege escalation or desktop restart.
 - Add explicit verified-KDE desktop baseline support to the existing native GPU
   observation. Pin the fixed packaged unit and native compositor identity;
   preserve idle-memory bounds, unknown-claimant refusal and default-off behavior.

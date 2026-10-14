@@ -11,11 +11,41 @@ runtime check.
 
 ## Explicit verified desktop baseline — 2026-10-14
 
+Follow-up identity review caught an overclaim: argv[0] alone does not prove a
+native executable. A regression fixture first reproduced acceptance of a named
+process without a verified launcher. The baseline now requires the MainPID's
+actual `/proc/exe` to match the installed root-owned, non-writable packaged
+wrapper by path and inode, and the selected compositor must be its direct child.
+Both process generations remain pinned and checked around GPU observations.
+The compositor's protected executable link is **not attested**. This is a
+cooperative local-session contract trusting the user manager and launcher
+environment, not protection against malicious same-UID injection or environment
+spoofing. No privileged helper, PATH-verifier framework or desktop control was
+added.
+
+New missing/false-launcher and unrelated-parent regressions pass. The actual
+KDE capture/verify probe and a new real idle-GPU acceptance probe both pass:
+the device was at 44 MiB, with only the 10 MiB desktop claimant observed before
+testing. This performs read-only GPU queries, not model inference or switching.
+The foreign-claimant fixture still passes; the earlier real foreign-compute
+probe was not repeated because that unrelated job had finished. Full root tests
+now report **936 passed, 4 ignored**, with strict Clippy and format/diff checks
+passing. The additional ignore is the explicitly opt-in live idle-desktop probe,
+run separately and passed. This follow-up adds 110 net Rust lines including
+regression/live fixtures; control source totals **65,529 lines**. No LOC-reduction
+claim is made. The focused delegated audit found no safe uncalled implementation
+to delete; retained recovery callers remain in scope until replacement gates.
+
+External state changed again: llama-swap is now active with `KillMode=process`,
+and the foreign compute job is gone. Neither change was made by this work. No
+runtime override or service mutation has been performed; coordinate a quiet
+window and capture fresh state before the approved bounded switching test.
+
 The user approved support for KDE's small existing GPU context instead of
 stopping the desktop. `kde_desktop_baseline: true` is now an explicit default-off
 member of `L3MS_NATIVE_GPU`. It captures only the fixed packaged KDE user unit,
 its wrapper command/root-owned definition, main-process and invocation identity,
-exact cgroup member set and unique native compositor identity. Verification
+exact cgroup member set and unique compositor-child process identity. Verification
 surrounds every existing GPU observation; only that compositor PID may accompany
 the resident model before pause or remain under the idle-memory bound afterward.
 Changed/unknown claimants still refuse. No process list is trusted from input;

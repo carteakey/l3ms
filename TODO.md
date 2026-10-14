@@ -27,15 +27,18 @@ committed work.
   The shared native owner now has an explicit resident llama-swap opt-in, bounded
   fixed-unit/config/cgroup checks and one-shot ready-model restoration; default
   behavior stays operator-managed idle admission. Eight unit checks and strict
-  lint/build pass; four new transport tests still cannot bind here. Finish the
-  unrestricted transport run and real approved language -> media/TTS -> language cycle. Live
-  KillMode remains unknown; the tracked control-group template has not been
+  lint/build pass; the unrestricted transport suite now passes. Finish the
+  real approved language -> media/TTS -> language cycle. The live unit uses
+  KillMode=process; the tracked control-group template has not been
   installed. A persistent live-unit change requires separate authorization.
   Endpoint identity/client/manager quiescence remain operator assertions, not
   fences; uncertain work retains the manual-recovery marker.
-  Both runtime builds are ready, and the explicit verified KDE baseline passes
-  real read-only identity/foreign-claimant checks. The unrelated GPU worker must
-  be quiesced before any stop/test; no temporary override has been installed.
+  Both runtime builds are ready. The explicit KDE baseline now verifies the
+  packaged wrapper executable and direct-child relationship, not argv[0] alone;
+  it trusts the cooperating local session, not hostile same-UID processes.
+  Recheck current services/GPU workers and coordinate a quiet window before any
+  stop/test; external state has changed during work. No temporary override has
+  been installed.
 - [ ] Continue caller-first managed-platform deletion only after each real
   replacement passes. Count net source removal rather than relocation, preserve
   safety needed by surviving callers, and work toward the plan's half-control-
