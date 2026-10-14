@@ -56,6 +56,10 @@ committed work.
   GPU workflows; verify cancellation, results, artifacts and exact handoff
   restoration. Finish keyboard/visual/mobile review in the Signal / 03 direction,
   site-manifest compatibility, standalone/import compatibility and CI checks.
+  Preferred d3-flash and Clef-Flash profiles, shared CLI/UI router HTTP execution,
+  standalone L3DS bridge and site cards are now ported with synthetic endpoint
+  checks only. Their real model/quality tests, image-input UI and return-to-prior-
+  language-model orchestration remain open; do not dispatch against Pi's router.
   Current standalone checks pass (74 Python, 8 toolkit Rust, strict lint/build
   and list commands); cached Nagi CPU execution and narrow-terminal navigation
   were rechecked. These do not close GPU/transport/quality gates. The explicitly

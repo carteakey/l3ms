@@ -6,15 +6,20 @@ Supports:
   - Laya (ModernBERT-large) via laya
   - SemIf (OpenJev) via semif-phase1 direct logit extraction
   - Jev 1.13 via typesafe-sdk (or WAN emulation fallback)
+  - llama.cpp native System One via local llama-swap HTTP passthrough
 """
 
 import argparse
+import ipaddress
 import json
 import logging
 import os
+import re
 import sys
 import time
 from typing import Any, Dict, List, Tuple
+from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 
 class BaseDecisionEngine:
@@ -27,10 +32,162 @@ class InferenceUnavailable(RuntimeError):
 
 
 MAX_INPUT_BYTES = 1024 * 1024
+MAX_HTTP_RESPONSE_BYTES = 2 * 1024 * 1024
+LLAMACPP_TIMEOUT_SECONDS = 30
+LLAMACPP_DEFAULT_BASE_URL = "http://localhost:8080"
+_ROUTER_MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 
 def reject_nonfinite_json(_value):
     raise ValueError("non-finite JSON number")
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _llamacpp_endpoint(base_url: str, model: str) -> str:
+    """Build the llama-swap passthrough URL for one local decision model."""
+    if not isinstance(model, str) or not _ROUTER_MODEL_ID.fullmatch(model):
+        raise ValueError("invalid router model id")
+    if not isinstance(base_url, str):
+        raise ValueError("invalid endpoint")
+
+    parsed = urlsplit(base_url)
+    if parsed.scheme != "http" or not parsed.hostname:
+        raise ValueError("endpoint must be local HTTP")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("endpoint credentials are not allowed")
+    if parsed.query or parsed.fragment:
+        raise ValueError("endpoint cannot include a query or fragment")
+    try:
+        port = parsed.port
+        host = parsed.hostname.lower()
+        is_loopback = host == "localhost" or ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        is_loopback = False
+        port = None
+    if not is_loopback:
+        raise ValueError("endpoint must use a localhost address")
+
+    netloc = host if port is None else f"{host}:{port}"
+    if ":" in host:
+        netloc = f"[{host}]" if port is None else f"[{host}]:{port}"
+    base_path = parsed.path.rstrip("/")
+    model_segment = quote(model, safe="")
+    path = f"{base_path}/upstream/{model_segment}/v1/systemone"
+    return urlunsplit(("http", netloc, path, "", ""))
+
+
+class LlamaCppSystemOneEngine(BaseDecisionEngine):
+    """One-shot HTTP bridge to llama.cpp's native System One endpoint."""
+
+    def __init__(self, model: str, api_key: str = None, base_url: str = None):
+        self.model = model
+        self.api_key = api_key if api_key is not None else os.environ.get("LLAMA_SWAP_API_KEY")
+        configured_url = base_url if base_url is not None else os.environ.get("LLAMA_SWAP_URL")
+        if not configured_url:
+            configured_url = LLAMACPP_DEFAULT_BASE_URL
+        self.initialization_error = None
+        self.endpoint = None
+        self.opener = None
+        try:
+            self.endpoint = _llamacpp_endpoint(configured_url, model)
+            if self.api_key is not None and any(char in self.api_key for char in "\r\n"):
+                raise ValueError("invalid credential")
+            # Do not route local credentials through environment-configured proxies, and do not
+            # follow redirects that could send the bearer token or decision payload elsewhere.
+            self.opener = build_opener(ProxyHandler({}), _NoRedirect())
+        except (TypeError, ValueError):
+            self.initialization_error = "llama.cpp endpoint configuration is invalid"
+
+    def decide(self, state: Dict[str, Any], questions: Dict[str, Any]) -> Dict[str, Any]:
+        if self.initialization_error:
+            raise InferenceUnavailable(self.initialization_error) from None
+        try:
+            body = json.dumps(
+                {"state": state, "questions": questions},
+                allow_nan=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            if len(body) > MAX_INPUT_BYTES:
+                raise ValueError("request too large")
+            request = Request(
+                self.endpoint,
+                data=body,
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            if self.api_key:
+                request.add_header("Authorization", f"Bearer {self.api_key}")
+
+            started = time.perf_counter()
+            with self.opener.open(request, timeout=LLAMACPP_TIMEOUT_SECONDS) as response:
+                if response.getcode() != 200:
+                    raise ValueError("unexpected HTTP status")
+                response_body = response.read(MAX_HTTP_RESPONSE_BYTES + 1)
+            if len(response_body) > MAX_HTTP_RESPONSE_BYTES:
+                raise ValueError("response too large")
+            payload = json.loads(
+                response_body.decode("utf-8"),
+                parse_constant=reject_nonfinite_json,
+            )
+            if not isinstance(payload, dict) or "error" in payload:
+                raise ValueError("invalid response")
+            json.dumps(payload, allow_nan=False)
+
+            for result_field in ("choices", "scores", "nouls"):
+                if result_field in payload and not isinstance(payload[result_field], dict):
+                    raise ValueError("malformed native answers")
+
+            if "answers" in payload:
+                answers = payload["answers"]
+                if not isinstance(answers, dict) or not answers:
+                    raise ValueError("invalid native answers")
+            else:
+                answers = {}
+                for result_field in ("choices", "scores", "nouls"):
+                    field_answers = payload.get(result_field)
+                    if field_answers is not None:
+                        answers.update(field_answers)
+                if not answers:
+                    raise ValueError("missing native answers")
+                payload["answers"] = answers
+            if set(answers) != set(questions) or any(
+                not isinstance(answer, dict) or not answer for answer in answers.values()
+            ):
+                raise ValueError("malformed native answers")
+            for name, answer in answers.items():
+                kind = questions[name].get("type")
+                if kind in ("noul", "score"):
+                    value = answer.get(kind)
+                    if type(value) not in (int, float) or (kind == "noul" and not 0 <= value <= 1):
+                        raise ValueError("invalid typed answer")
+                if kind == "choice":
+                    allowed = questions[name].get("criteria", questions[name].get("options", []))
+                    if answer.get("choice") not in allowed:
+                        raise ValueError("undeclared choice")
+                probabilities = answer.get("probabilities", {})
+                if not isinstance(probabilities, dict):
+                    raise ValueError("invalid probabilities")
+                values = list(probabilities.values())
+                if "confidence" in answer:
+                    values.append(answer["confidence"])
+                if any(type(value) not in (int, float) or not 0 <= value <= 1 for value in values):
+                    raise ValueError("invalid probability")
+
+            payload.setdefault("model", self.model)
+            payload["client_latency_ms"] = (time.perf_counter() - started) * 1000
+            payload["engine"] = "llamacpp-native"
+            return payload
+        except Exception:
+            # Transport, HTTP, and parse errors may include headers, credentials, request data,
+            # or response bodies. Keep the failure fixed and do not synthesize an answer.
+            raise InferenceUnavailable("llama.cpp System One request failed") from None
 
 
 def one_shot_inputs(args):
@@ -351,6 +508,10 @@ def get_engine(engine_name: str, model: str, device: str, api_key: str = None, b
         return SemIfEngine(model, device, allow_simulation)
     elif engine_name == "jev":
         return MockOrApiJevEngine(model, api_key=api_key, base_url=base_url, allow_simulation=allow_simulation, single_attempt=single_attempt)
+    elif engine_name == "llamacpp":
+        if allow_simulation or single_attempt:
+            raise ValueError("llama.cpp System One does not support simulation or the Jev single-attempt flag")
+        return LlamaCppSystemOneEngine(model, api_key=api_key, base_url=base_url)
     else:
         raise ValueError(f"Unknown engine: {engine_name}")
 
@@ -417,7 +578,7 @@ def run_benchmark(engine: BaseDecisionEngine, suite_file: str, iterations: int):
 
 def main():
     parser = argparse.ArgumentParser(description="l3ds Decision Model Runner")
-    parser.add_argument("--engine", required=True, choices=["nagi", "laya", "semif", "jev"])
+    parser.add_argument("--engine", required=True, choices=["nagi", "laya", "semif", "jev", "llamacpp"])
     parser.add_argument("--model", required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--state", type=str, default=None)
@@ -433,6 +594,8 @@ def main():
     args = parser.parse_args()
     if args.single_attempt and (args.engine != "jev" or args.simulate or args.bench_suite):
         parser.error("--single-attempt requires one live Jev invocation without --simulate or --bench-suite")
+    if args.engine == "llamacpp" and args.simulate:
+        parser.error("--simulate is not available for llama.cpp System One")
     if args.input_stdin and (args.state is not None or args.question is not None or args.bench_suite is not None):
         parser.error("--input-stdin cannot be combined with --state, --question, or --bench-suite")
     if not args.bench_suite:

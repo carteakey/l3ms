@@ -36,6 +36,8 @@ macros:
   "qwen38_mtp_server":     "${env.L3MS_ROOT}/vendor/llama.cpp-exp-stack-v2/build/bin/llama-server"
   "qwen38_exp_server":     "${env.L3MS_ROOT}/vendor/llama.cpp-exp-latest/build/bin/llama-server"
   "qwen38_exp_mtp_server": "${env.L3MS_ROOT}/vendor/llama.cpp-pr-test-28023-28068-27941/build/bin/llama-server"
+  # Existing decision runtime: efe3626b1 (#30383), built separately from gold.
+  "d3_server":             "${env.L3MS_ROOT}/vendor/llama.cpp-d3/build/bin/llama-server"
   # strata tier: v0.1.40.2 dynamic expert cache + native MTP
   "strata_python":         "${env.L3MS_ROOT}/vendor/strata/.venv/bin/python"
   "strata_server":         "${env.L3MS_ROOT}/vendor/strata-latest/serve/server.py"
@@ -50,6 +52,39 @@ macros:
   "cpu_range": "0-11"
 
 models:
+
+  # Native typed decisions, not chat. Served through /upstream/<id>/v1/systemone.
+  "vllm-d3-flash":
+    name: "vLLM-SR d3-flash 9B Decision (Q8_0 + mmproj-BF16, text+image)"
+    description: "Native typed decisions via llama.cpp. Accuracy-priority local candidate; live branch acceptance pending."
+    metadata:
+      task: decision
+    cmd: |
+      taskset -c ${cpu_range} ${d3_server}
+      -m /home/kchauhan/models/ggml-org/vllm-d3-flash-GGUF/vllm-d3-flash-Q8_0.gguf
+      --mmproj /home/kchauhan/models/ggml-org/vllm-d3-flash-GGUF/mmproj-vllm-d3-flash-BF16.gguf
+      --alias vllm-d3-flash
+      -ngl 99 -fa on
+      -c 8192 --parallel 1
+      -b 8192 -ub 8192
+      -t 10 --threads-batch 12 --prio 2
+      --host 0.0.0.0 --port ${PORT}
+
+  "cloudflare-clef-flash":
+    name: "Cloudflare Clef-Flash 9B Decision (Q4_K_M + mmproj-BF16, text+image)"
+    description: "Native joint-question decisions via llama.cpp. Calibration/multi-question image candidate; live branch acceptance pending."
+    metadata:
+      task: decision
+    cmd: |
+      taskset -c ${cpu_range} ${d3_server}
+      -m /home/kchauhan/models/ggml-org/Clef-Flash-GGUF/Clef-Flash-Q4_K_M.gguf
+      --mmproj /home/kchauhan/models/ggml-org/Clef-Flash-GGUF/mmproj-Clef-Flash-BF16.gguf
+      --alias cloudflare-clef-flash
+      -ngl 99 -fa on
+      -c 8192 --parallel 1
+      -b 8192 -ub 8192
+      -t 10 --threads-batch 12 --prio 2
+      --host 0.0.0.0 --port ${PORT}
 
   # ===========================================================================
   # Embeddings

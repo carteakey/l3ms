@@ -28,8 +28,8 @@ pub struct SwapYamlEntry {
     /// Tasks inferred from active flags in the entry's `cmd` value.
     ///
     /// The current serving convention is `--embedding`/`--embeddings` for
-    /// embedding profiles and chat otherwise. This is intentionally based on
-    /// command flags, not model names or comments.
+    /// embedding profiles, explicit metadata.task for native decisions, and
+    /// chat otherwise. Model names and comments are not capability evidence.
     pub tasks: Vec<String>,
 }
 
@@ -103,6 +103,23 @@ pub fn parse_entries(text: &str) -> Vec<SwapYamlEntry> {
 }
 
 fn inferred_tasks(body: &[&str], entry_indent: usize) -> Vec<String> {
+    let mut metadata = false;
+    for line in body {
+        let text = strip_yaml_inline_comment(line.trim());
+        if text.is_empty() {
+            continue;
+        }
+        let indent = indentation(line);
+        if indent <= entry_indent + 2 {
+            metadata = indent == entry_indent + 2 && text == "metadata:";
+        } else if metadata && indent == entry_indent + 4 {
+            if let Some((key, value)) = text.split_once(':') {
+                if key == "task" && unquote_yaml_scalar(value.trim()) == "decision" {
+                    return vec!["decision".to_owned()];
+                }
+            }
+        }
+    }
     if cmd_has_embedding_flag(body, entry_indent) {
         vec!["embeddings".to_owned()]
     } else {
@@ -598,6 +615,26 @@ on_startup:
         let text = "models:\n  # \"old\":\n  #   cmd: x\nother: 1\n";
         assert!(parse_entries(text).is_empty());
         assert!(parse_entries("no models here").is_empty());
+    }
+
+    #[test]
+    fn explicit_native_decision_metadata_is_not_chat_or_comment_inference() {
+        let entries = parse_entries(
+            r#"models:
+  "decision":
+    metadata:
+      task: 'decision' # explicit capability
+    cmd: llama-server -m native.gguf
+  "chat":
+    description: "task: decision"
+    # metadata:
+    #   task: decision
+    cmd: |
+      llama-server --alias decision
+"#,
+        );
+        assert_eq!(entries[0].tasks, vec!["decision"]);
+        assert_eq!(entries[1].tasks, vec!["chat"]);
     }
 
     #[test]

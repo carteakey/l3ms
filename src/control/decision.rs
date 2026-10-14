@@ -1,9 +1,9 @@
-//! Strict local and hosted native decision execution and result decoding.
-//! Never substitutes demo decisions.
+//! Strict native decision execution and result decoding for local, hosted, and
+//! llama.cpp SystemOne HTTP operations. Never substitutes demo decisions.
 //!
-//! This only validates captured runner stdout; it does not execute a model or
-//! establish live acceptance. The supervised executor must separately require
-//! successful process exit and acknowledge cleanup before releasing its lease.
+//! Decoding validates native outputs; it does not establish live acceptance.
+//! The supervised executor must separately require successful completion and
+//! acknowledge cleanup before releasing its lease.
 
 use std::error::Error;
 use std::fmt;
@@ -45,6 +45,81 @@ pub struct NativeDecisionResult {
     pub native_latency: Option<Duration>,
     /// Provider-specific usage fields stay native, not mapped to chat tokens.
     pub native_usage: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// Decode the native llama.cpp SystemOne HTTP envelope. Unlike the existing
+/// runner stdout format, this response carries no trusted engine label and no
+/// adapter-measured latency, so neither is invented or inferred here.
+pub(crate) fn decode_systemone_response(
+    request: &InferenceRequest,
+    response: &[u8],
+) -> Result<NativeDecisionResult, DecisionDecodeError> {
+    if response.len() > MAX_RESULT_BYTES {
+        return Err(DecisionDecodeError::TooLarge);
+    }
+    if !matches!(request, InferenceRequest::Decision { .. }) {
+        return Err(DecisionDecodeError::InvalidRequest);
+    }
+    let payload: serde_json::Value =
+        serde_json::from_slice(response).map_err(|_| DecisionDecodeError::Malformed)?;
+    if payload.get("error").is_some()
+        || ["choices", "scores", "nouls"]
+            .iter()
+            .any(|field| payload.get(field).is_some_and(|value| !value.is_object()))
+    {
+        return Err(DecisionDecodeError::InvalidResult);
+    }
+    let decoded = decode_decision_payload(request, &payload, false, true)?;
+    let InferenceResult::Decision { answers } = &decoded.result else {
+        return Err(DecisionDecodeError::InvalidRequest);
+    };
+    validate_systemone_answer_types(request, answers)?;
+    Ok(decoded)
+}
+
+fn validate_systemone_answer_types(
+    request: &InferenceRequest,
+    answers: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), DecisionDecodeError> {
+    let InferenceRequest::Decision { questions, .. } = request else {
+        return Err(DecisionDecodeError::InvalidRequest);
+    };
+    let unit_interval = |value: &serde_json::Value| {
+        value
+            .as_f64()
+            .is_some_and(|number| number.is_finite() && (0.0..=1.0).contains(&number))
+    };
+    for (id, question) in questions {
+        let answer = answers.get(id).ok_or(DecisionDecodeError::InvalidResult)?;
+        match question.get("type").and_then(serde_json::Value::as_str) {
+            Some("score")
+                if !answer
+                    .as_object()
+                    .and_then(|fields| fields.get("score"))
+                    .and_then(serde_json::Value::as_f64)
+                    .is_some_and(f64::is_finite) =>
+            {
+                return Err(DecisionDecodeError::InvalidResult);
+            }
+            Some("noul")
+                if !answer
+                    .as_object()
+                    .and_then(|fields| fields.get("noul"))
+                    .is_some_and(unit_interval) =>
+            {
+                return Err(DecisionDecodeError::InvalidResult);
+            }
+            _ => {}
+        }
+        if answer.get("probabilities").is_some_and(|values| {
+            !values
+                .as_object()
+                .is_some_and(|values| values.values().all(unit_interval))
+        }) {
+            return Err(DecisionDecodeError::InvalidResult);
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -342,28 +417,56 @@ fn decode_decision_result_for_route(
     if payload.get("engine").and_then(serde_json::Value::as_str) != Some(expected_engine) {
         return Err(DecisionDecodeError::UnexpectedEngine);
     }
-    let answers = payload
-        .get("answers")
-        .and_then(serde_json::Value::as_object)
-        .ok_or(DecisionDecodeError::InvalidResult)?
-        .clone();
+    decode_decision_payload(request, &payload, true, false)
+}
+
+fn decode_decision_payload(
+    request: &InferenceRequest,
+    payload: &serde_json::Value,
+    parse_native_latency: bool,
+    accept_systemone_fields: bool,
+) -> Result<NativeDecisionResult, DecisionDecodeError> {
+    let answers = match payload.get("answers") {
+        Some(serde_json::Value::Object(answers)) if !answers.is_empty() => answers.clone(),
+        Some(_) => return Err(DecisionDecodeError::InvalidResult),
+        None if accept_systemone_fields => {
+            let mut answers = serde_json::Map::new();
+            for field in ["choices", "scores", "nouls"] {
+                if let Some(value) = payload.get(field) {
+                    let Some(values) = value.as_object() else {
+                        return Err(DecisionDecodeError::InvalidResult);
+                    };
+                    answers.extend(values.clone());
+                }
+            }
+            if answers.is_empty() {
+                return Err(DecisionDecodeError::InvalidResult);
+            }
+            answers
+        }
+        None => return Err(DecisionDecodeError::InvalidResult),
+    };
     let result = InferenceResult::Decision { answers };
     result
         .validate_for(request)
         .map_err(|_| DecisionDecodeError::InvalidResult)?;
-    let native_latency = payload
-        .get("latency_ms")
-        .map(|value| {
-            let milliseconds = value
-                .as_f64()
-                .filter(|value| {
-                    value.is_finite() && *value >= 0.0 && *value <= 24.0 * 60.0 * 60.0 * 1000.0
-                })
-                .ok_or(DecisionDecodeError::InvalidResult)?;
-            Duration::try_from_secs_f64(milliseconds / 1000.0)
-                .map_err(|_| DecisionDecodeError::InvalidResult)
-        })
-        .transpose()?;
+    let native_latency = if parse_native_latency {
+        payload
+            .get("latency_ms")
+            .map(|value| {
+                let milliseconds = value
+                    .as_f64()
+                    .filter(|value| {
+                        value.is_finite() && *value >= 0.0 && *value <= 24.0 * 60.0 * 60.0 * 1000.0
+                    })
+                    .ok_or(DecisionDecodeError::InvalidResult)?;
+                Duration::try_from_secs_f64(milliseconds / 1000.0)
+                    .map_err(|_| DecisionDecodeError::InvalidResult)
+            })
+            .transpose()?
+    } else {
+        None
+    };
     let native_usage = payload
         .get("usage")
         .map(|value| {
@@ -457,6 +560,16 @@ mod tests {
             questions:serde_json::json!({"route":{"type":"choice","criteria":{"yes":"Proceed","no":"Stop"}}}).as_object().unwrap().clone(),
         }
     }
+    fn typed_request(question_type: &str) -> InferenceRequest {
+        InferenceRequest::Decision {
+            profile: ProfileKey::new(Lane::Decisions, "nagi-smol").unwrap(),
+            state: serde_json::json!({}),
+            questions: serde_json::json!({"value":{"type":question_type,"range":[0,100]}})
+                .as_object()
+                .unwrap()
+                .clone(),
+        }
+    }
     fn catalog() -> Catalog {
         Catalog::load(env!("CARGO_MANIFEST_DIR")).unwrap()
     }
@@ -479,6 +592,112 @@ mod tests {
                 panic!("wrong lane")
             };
             assert_eq!(serde_json::Value::Object(actual), answers);
+        }
+    }
+
+    #[test]
+    fn systemone_envelope_keeps_usage_and_does_not_infer_engine_or_latency() {
+        let request = request("nagi-smol");
+        let payload = serde_json::json!({
+            "answers": {"route": {"choice":"yes", "confidence":0.8}},
+            "usage": {"total_tokens": 4},
+            "latency_ms": 19.5,
+            "engine": "untrusted-wrapper-label"
+        });
+        let decoded =
+            decode_systemone_response(&request, &serde_json::to_vec(&payload).unwrap()).unwrap();
+        assert_eq!(decoded.native_latency, None);
+        assert_eq!(
+            decoded.native_usage,
+            Some(
+                serde_json::json!({"total_tokens":4})
+                    .as_object()
+                    .unwrap()
+                    .clone()
+            )
+        );
+        let InferenceResult::Decision { answers } = decoded.result else {
+            panic!("wrong result lane")
+        };
+        assert_eq!(answers["route"]["choice"], "yes");
+
+        let fallback = serde_json::json!({
+            "choices": {"route": {"choice":"yes"}},
+            "usage": {"total_tokens": 0}
+        });
+        assert!(
+            decode_systemone_response(&request, &serde_json::to_vec(&fallback).unwrap()).is_ok()
+        );
+        let invalid = serde_json::json!({
+            "answers": {"route": {"choice":"undeclared"}}
+        });
+        assert_eq!(
+            decode_systemone_response(&request, &serde_json::to_vec(&invalid).unwrap())
+                .err()
+                .unwrap(),
+            DecisionDecodeError::InvalidResult
+        );
+        for invalid in [
+            serde_json::json!({
+                "answers": null,
+                "choices": {"route": {"choice":"yes"}}
+            }),
+            serde_json::json!({
+                "answers": {"route": {"choice":"yes"}},
+                "error": {"message":"native failure"}
+            }),
+            serde_json::json!({
+                "choices": "malformed",
+                "answers": {"route": {"choice":"yes"}}
+            }),
+        ] {
+            assert_eq!(
+                decode_systemone_response(&request, &serde_json::to_vec(&invalid).unwrap())
+                    .err()
+                    .unwrap(),
+                DecisionDecodeError::InvalidResult
+            );
+        }
+        assert_eq!(
+            decode_systemone_response(&request, &vec![b'x'; MAX_RESULT_BYTES + 1])
+                .err()
+                .unwrap(),
+            DecisionDecodeError::TooLarge
+        );
+    }
+
+    #[test]
+    fn systemone_score_noul_and_probabilities_have_native_numeric_types() {
+        for (question_type, answer, valid) in [
+            ("score", serde_json::json!({"score":75}), true),
+            ("score", serde_json::json!({"score":"75"}), false),
+            ("noul", serde_json::json!({"noul":0.75}), true),
+            ("noul", serde_json::json!({"noul":-0.01}), false),
+            ("noul", serde_json::json!({"noul":1.01}), false),
+            ("noul", serde_json::json!({"noul":"0.75"}), false),
+            (
+                "score",
+                serde_json::json!({"score":75,"probabilities":{"low":0.1,"high":1.0}}),
+                true,
+            ),
+            (
+                "score",
+                serde_json::json!({"score":75,"probabilities":{"high":1.01}}),
+                false,
+            ),
+            (
+                "noul",
+                serde_json::json!({"noul":0.5,"probabilities":[]}),
+                false,
+            ),
+        ] {
+            let request = typed_request(question_type);
+            let payload = serde_json::json!({"answers":{"value":answer}});
+            assert_eq!(
+                decode_systemone_response(&request, &serde_json::to_vec(&payload).unwrap()).is_ok(),
+                valid,
+                "question type {question_type} with answer {answer}"
+            );
         }
     }
 

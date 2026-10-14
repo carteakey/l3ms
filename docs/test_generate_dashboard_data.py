@@ -58,10 +58,14 @@ class DashboardDataTest(unittest.TestCase):
 
     def test_served_generation_profiles_match_dashboard_metadata(self):
         parsed = dashboard.parse_models((ROOT / "llama-swap.yaml").read_text())
+        decisions = json.loads((ROOT / "toolkits/l3ds/decision-runtimes.json").read_text())
+        native_ids = {p["model"] for p in decisions["profiles"] if p["engine"] == "llamacpp"}
+        self.assertTrue(native_ids <= set(parsed))
         active = {
             key for key, model in parsed.items()
             if model.get("cmd") and not model.get("unlisted", False)
             and "--embedding" not in model["cmd"]
+            and key not in native_ids
         }
         metadata = json.loads((ROOT / "docs" / "dashboard-meta.json").read_text())
         self.assertEqual(active, set(metadata["models"]))
@@ -120,7 +124,11 @@ class DashboardDataTest(unittest.TestCase):
             metadata["decisions"],
         )
         self.assertEqual(len(media), 8)
-        self.assertEqual(len(decisions), 7)
+        self.assertEqual(len(decisions), 9)
+        for profile_id in ("vllm-d3-flash", "cloudflare-clef-flash"):
+            native = next(profile for profile in decisions if profile["id"] == profile_id)
+            self.assertEqual(native["engine"], "llamacpp")
+            self.assertIsNone(native["experimentUrl"])
         breeze = next(profile for profile in media if profile["id"] == "breeze-tts-2")
         self.assertEqual(
             breeze["modes"],

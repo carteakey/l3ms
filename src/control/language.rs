@@ -13,7 +13,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::catalog::Catalog;
+use super::catalog::{Catalog, Lane, ProfileKey};
+use super::decision::{decode_systemone_response, NativeDecisionResult};
 use super::requests::{
     ChatRole, EmbeddingUsage, InferenceRequest, InferenceResult, MAX_EMBEDDING_INPUTS,
     MAX_EMBEDDING_JSON_BYTES,
@@ -295,6 +296,108 @@ impl LanguageAdapter {
         self.execute_embeddings_inner(catalog, request, Some(accepted_route), context)
     }
 
+    /// Run one bounded local llama.cpp SystemOne decision request. The caller
+    /// owns lifecycle admission; this method only revalidates the catalog,
+    /// posts once to the configured loopback llama-swap route, and validates
+    /// the native answer. A failed dispatched attempt is never retried.
+    pub fn execute_decisions(
+        &self,
+        catalog: &Catalog,
+        request: &InferenceRequest,
+        context: &OperationContext<'_>,
+    ) -> Result<NativeDecisionResult, LanguageFailure> {
+        check_context(context, DispatchDisposition::NoDispatch)?;
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return Err(failure(
+                DispatchDisposition::NoDispatch,
+                LanguageErrorKind::Configuration,
+            ));
+        }
+        let accepted_model_id = native_systemone_model(catalog, request)?;
+        let accepted_route = resolve_profile_route(catalog, request.profile()).map_err(|_| {
+            failure(
+                DispatchDisposition::NoDispatch,
+                LanguageErrorKind::InvalidRequest,
+            )
+        })?;
+        let catalog = catalog.refresh().map_err(|_| {
+            failure(
+                DispatchDisposition::NoDispatch,
+                LanguageErrorKind::InvalidRequest,
+            )
+        })?;
+        let model_id = native_systemone_model(&catalog, request)?;
+        let refreshed_route = resolve_profile_route(&catalog, request.profile()).map_err(|_| {
+            failure(
+                DispatchDisposition::NoDispatch,
+                LanguageErrorKind::InvalidRequest,
+            )
+        })?;
+        if accepted_route != refreshed_route || accepted_model_id != model_id {
+            return Err(failure(
+                DispatchDisposition::NoDispatch,
+                LanguageErrorKind::InvalidRequest,
+            ));
+        }
+        let url = self.systemone_url(&model_id)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| {
+                failure(
+                    DispatchDisposition::NoDispatch,
+                    LanguageErrorKind::Configuration,
+                )
+            })?;
+        runtime.block_on(self.execute_decisions_async(&url, request, context))
+    }
+
+    async fn execute_decisions_async(
+        &self,
+        url: &reqwest::Url,
+        request: &InferenceRequest,
+        context: &OperationContext<'_>,
+    ) -> Result<NativeDecisionResult, LanguageFailure> {
+        let InferenceRequest::Decision {
+            state, questions, ..
+        } = request
+        else {
+            return Err(failure(
+                DispatchDisposition::NoDispatch,
+                LanguageErrorKind::InvalidRequest,
+            ));
+        };
+        check_context(context, DispatchDisposition::NoDispatch)?;
+        let client = self.http_client_without_proxy(context)?;
+        let http = client
+            .post(url.clone())
+            .header(reqwest::header::ACCEPT, "application/json")
+            .json(&NativeSystemOneRequest { state, questions });
+        let body = send_json_body(http, context, MAX_OUTPUT_BYTES).await?;
+        decode_systemone_response(request, &body)
+            .map_err(|_| failure(DispatchDisposition::Uncertain, LanguageErrorKind::Protocol))
+    }
+
+    fn systemone_url(&self, model_id: &str) -> Result<reqwest::Url, LanguageFailure> {
+        let configuration = failure(
+            DispatchDisposition::NoDispatch,
+            LanguageErrorKind::Configuration,
+        );
+        let mut url = reqwest::Url::parse(&self.endpoint).map_err(|_| configuration)?;
+        if !is_loopback_url(&url) {
+            return Err(configuration);
+        }
+        let mut segments = url.path_segments_mut().map_err(|_| configuration)?;
+        segments
+            .pop_if_empty()
+            .push("upstream")
+            .push(model_id)
+            .push("v1")
+            .push("systemone");
+        drop(segments);
+        Ok(url)
+    }
+
     fn execute_embeddings_inner(
         &self,
         catalog: &Catalog,
@@ -340,74 +443,7 @@ impl LanguageAdapter {
             .post(format!("{}/v1/embeddings", self.endpoint))
             .header(reqwest::header::ACCEPT, "application/json")
             .json(native);
-        check_context(context, DispatchDisposition::NoDispatch)?;
-        let send = http.send();
-        tokio::pin!(send);
-        let response = loop {
-            check_context(context, DispatchDisposition::Uncertain)?;
-            match tokio::time::timeout(context.remaining().min(POLL_INTERVAL), &mut send).await {
-                Err(_) => continue,
-                Ok(result) => break result.map_err(transport_failure)?,
-            }
-        };
-        check_context(context, DispatchDisposition::Uncertain)?;
-        if !response.status().is_success() {
-            return Err(failure(
-                DispatchDisposition::Uncertain,
-                LanguageErrorKind::Rejected,
-            ));
-        }
-        if !response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| {
-                value
-                    .split(';')
-                    .next()
-                    .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("application/json"))
-            })
-        {
-            return Err(failure(
-                DispatchDisposition::Uncertain,
-                LanguageErrorKind::Protocol,
-            ));
-        }
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_EMBEDDING_WIRE_BYTES as u64)
-        {
-            return Err(failure(
-                DispatchDisposition::Uncertain,
-                LanguageErrorKind::TooLarge,
-            ));
-        }
-        let mut response = response;
-        let mut body = Vec::new();
-        loop {
-            check_context(context, DispatchDisposition::Uncertain)?;
-            let chunk = response.chunk();
-            tokio::pin!(chunk);
-            let bytes = loop {
-                check_context(context, DispatchDisposition::Uncertain)?;
-                match tokio::time::timeout(context.remaining().min(POLL_INTERVAL), &mut chunk).await
-                {
-                    Err(_) => continue,
-                    Ok(result) => break result.map_err(transport_failure)?,
-                }
-            };
-            let Some(bytes) = bytes else {
-                break;
-            };
-            if bytes.len() > MAX_EMBEDDING_WIRE_BYTES.saturating_sub(body.len()) {
-                return Err(failure(
-                    DispatchDisposition::Uncertain,
-                    LanguageErrorKind::TooLarge,
-                ));
-            }
-            body.extend_from_slice(&bytes);
-        }
-        check_context(context, DispatchDisposition::Uncertain)?;
+        let body = send_json_body(http, context, MAX_EMBEDDING_WIRE_BYTES).await?;
         let response: EmbeddingsResponse = serde_json::from_slice(&body)
             .map_err(|_| failure(DispatchDisposition::Uncertain, LanguageErrorKind::Protocol))?;
         let valid_data = response.object == "list"
@@ -544,6 +580,21 @@ impl LanguageAdapter {
         &self,
         context: &OperationContext<'_>,
     ) -> Result<reqwest::Client, LanguageFailure> {
+        self.build_http_client(context, false)
+    }
+
+    fn http_client_without_proxy(
+        &self,
+        context: &OperationContext<'_>,
+    ) -> Result<reqwest::Client, LanguageFailure> {
+        self.build_http_client(context, true)
+    }
+
+    fn build_http_client(
+        &self,
+        context: &OperationContext<'_>,
+        no_proxy: bool,
+    ) -> Result<reqwest::Client, LanguageFailure> {
         let builder = reqwest::Client::builder()
             .retry(reqwest::retry::never())
             .redirect(reqwest::redirect::Policy::none())
@@ -555,6 +606,11 @@ impl LanguageAdapter {
                     LanguageErrorKind::Configuration,
                 )
             })?);
+        let builder = if no_proxy {
+            builder.no_proxy()
+        } else {
+            builder
+        };
         #[cfg(target_os = "linux")]
         let builder = match &self.private_engine {
             Some(socket) => socket.configure(builder).map_err(|_| {
@@ -572,6 +628,140 @@ impl LanguageAdapter {
             )
         })
     }
+}
+
+async fn send_json_body(
+    http: reqwest::RequestBuilder,
+    context: &OperationContext<'_>,
+    maximum_bytes: usize,
+) -> Result<Vec<u8>, LanguageFailure> {
+    check_context(context, DispatchDisposition::NoDispatch)?;
+    let send = http.send();
+    tokio::pin!(send);
+    let response = loop {
+        check_context(context, DispatchDisposition::Uncertain)?;
+        match tokio::time::timeout(context.remaining().min(POLL_INTERVAL), &mut send).await {
+            Err(_) => continue,
+            Ok(result) => break result.map_err(transport_failure)?,
+        }
+    };
+    check_context(context, DispatchDisposition::Uncertain)?;
+    if !response.status().is_success() {
+        return Err(failure(
+            DispatchDisposition::Uncertain,
+            LanguageErrorKind::Rejected,
+        ));
+    }
+    if !response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(';')
+                .next()
+                .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("application/json"))
+        })
+    {
+        return Err(failure(
+            DispatchDisposition::Uncertain,
+            LanguageErrorKind::Protocol,
+        ));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > maximum_bytes as u64)
+    {
+        return Err(failure(
+            DispatchDisposition::Uncertain,
+            LanguageErrorKind::TooLarge,
+        ));
+    }
+    let mut response = response;
+    let mut body = Vec::new();
+    loop {
+        check_context(context, DispatchDisposition::Uncertain)?;
+        let chunk = response.chunk();
+        tokio::pin!(chunk);
+        let bytes = loop {
+            check_context(context, DispatchDisposition::Uncertain)?;
+            match tokio::time::timeout(context.remaining().min(POLL_INTERVAL), &mut chunk).await {
+                Err(_) => continue,
+                Ok(result) => break result.map_err(transport_failure)?,
+            }
+        };
+        let Some(bytes) = bytes else {
+            break;
+        };
+        if bytes.len() > maximum_bytes.saturating_sub(body.len()) {
+            return Err(failure(
+                DispatchDisposition::Uncertain,
+                LanguageErrorKind::TooLarge,
+            ));
+        }
+        body.extend_from_slice(&bytes);
+    }
+    check_context(context, DispatchDisposition::Uncertain)?;
+    Ok(body)
+}
+
+fn native_systemone_model(
+    catalog: &Catalog,
+    request: &InferenceRequest,
+) -> Result<String, LanguageFailure> {
+    let invalid = failure(
+        DispatchDisposition::NoDispatch,
+        LanguageErrorKind::InvalidRequest,
+    );
+    if !matches!(request, InferenceRequest::Decision { .. }) {
+        return Err(invalid);
+    }
+    request.validate(catalog).map_err(|_| invalid)?;
+    let route = resolve_profile_route(catalog, request.profile()).map_err(|_| invalid)?;
+    let NativeRoute::DecisionRunner {
+        model,
+        profile_type,
+        ..
+    } = &route.native_route
+    else {
+        return Err(invalid);
+    };
+    if route.profile.lane != Lane::Decisions
+        || route.runtime.lane != Lane::Decisions
+        || route.runtime.as_str() != "llamacpp"
+        || profile_type != "local"
+    {
+        return Err(invalid);
+    }
+    let language_key = ProfileKey::new(Lane::Language, model.clone()).map_err(|_| invalid)?;
+    let router_model = catalog
+        .inspect(&language_key)
+        .filter(|profile| {
+            !profile.disabled && profile.tasks.iter().any(|task| task.as_str() == "decision")
+        })
+        .ok_or(invalid)?;
+    let NativeRoute::LlamaSwapModel { model_id, .. } =
+        resolve_profile_route(catalog, &router_model.key)
+            .map_err(|_| invalid)?
+            .native_route
+    else {
+        return Err(invalid);
+    };
+    Ok(model_id.to_string())
+}
+
+fn is_loopback_url(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 fn failure(disposition: DispatchDisposition, kind: LanguageErrorKind) -> LanguageFailure {
@@ -701,6 +891,12 @@ struct NativeEmbeddingsRequest {
     model: String,
     input: Vec<String>,
     encoding_format: &'static str,
+}
+
+#[derive(Serialize)]
+struct NativeSystemOneRequest<'a> {
+    state: &'a Value,
+    questions: &'a serde_json::Map<String, Value>,
 }
 
 #[derive(Deserialize)]
@@ -907,6 +1103,41 @@ mod tests {
         )
         .unwrap();
         (language_root, catalog)
+    }
+
+    fn systemone_catalog() -> (tempfile::TempDir, Catalog, InferenceRequest) {
+        let root = tempfile::tempdir().unwrap();
+        let media = root.path().join("toolkits/l2m2");
+        let decisions = root.path().join("toolkits/l3ds");
+        fs::create_dir_all(&media).unwrap();
+        fs::create_dir_all(&decisions).unwrap();
+        fs::write(
+            root.path().join("llama-swap.yaml"),
+            "models:\n  router-decision_2.0:\n    cmd: llama-server\n    metadata:\n      task: decision\n",
+        )
+        .unwrap();
+        fs::write(
+            media.join("media-runtimes.json"),
+            r#"{"schema_version":1,"profiles":[]}"#,
+        )
+        .unwrap();
+        fs::write(
+            decisions.join("decision-runtimes.json"),
+            r#"{"version":"1.0","profiles":[{"id":"flash-local","name":"Flash fixture","engine":"llamacpp","type":"local","model":"router-decision_2.0","device":"cuda","entrypoint":"decision-models/runner.py"}]}"#,
+        )
+        .unwrap();
+        let catalog = Catalog::load(root.path()).unwrap();
+        let request = InferenceRequest::Decision {
+            profile: ProfileKey::new(Lane::Decisions, "flash-local").unwrap(),
+            state: serde_json::json!({"severity": "high"}),
+            questions: serde_json::json!({
+                "route": {"type": "choice", "criteria": {"proceed": "Proceed", "stop": "Stop"}}
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        };
+        (root, catalog, request)
     }
 
     fn embedding_request() -> InferenceRequest {
@@ -1298,6 +1529,7 @@ mod tests {
         for endpoint in [
             "https://user:password@example.com",
             "http://example.com?token=secret",
+            "http://127.0.0.1/base#secret",
             "secret-invalid-url",
         ] {
             let error = LanguageAdapter::new(endpoint, Some("sk-secret"))
@@ -1311,6 +1543,14 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(error.disposition, DispatchDisposition::NoDispatch);
+    }
+
+    #[test]
+    fn ipv6_loopback_preserves_base_path_without_network_access() {
+        let adapter = LanguageAdapter::new("http://[::1]:8080/base/path", None).unwrap();
+        let url = adapter.systemone_url("router-model").unwrap();
+        assert_eq!(url.path(), "/base/path/upstream/router-model/v1/systemone");
+        assert!(is_loopback_url(&url));
     }
 
     struct Flag(Arc<AtomicBool>);
@@ -1364,6 +1604,14 @@ mod tests {
     }
 
     fn read_http_json(stream: &mut impl Read, path: &str, max_bytes: usize) -> Value {
+        read_http_json_with_headers(stream, path, max_bytes).1
+    }
+
+    fn read_http_json_with_headers(
+        stream: &mut impl Read,
+        path: &str,
+        max_bytes: usize,
+    ) -> (String, Value) {
         let mut header = Vec::new();
         let mut byte = [0];
         while !header.ends_with(b"\r\n\r\n") {
@@ -1384,7 +1632,15 @@ mod tests {
         assert!(length <= max_bytes);
         let mut body = vec![0; length];
         stream.read_exact(&mut body).unwrap();
-        serde_json::from_slice(&body).unwrap()
+        (header, serde_json::from_slice(&body).unwrap())
+    }
+
+    fn read_systemone_request(stream: &mut impl Read) -> (String, Value) {
+        read_http_json_with_headers(
+            stream,
+            "/upstream/router-decision_2.0/v1/systemone",
+            MAX_OUTPUT_BYTES,
+        )
     }
 
     fn run_embedding_fixture(
@@ -1425,6 +1681,327 @@ mod tests {
             );
         server.join().unwrap();
         result
+    }
+
+    fn run_systemone_fixture(
+        body: String,
+        content_type: &str,
+        status: &str,
+    ) -> Result<super::NativeDecisionResult, LanguageFailure> {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let content_type = content_type.to_owned();
+        let status = status.to_owned();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let (_, payload) = read_systemone_request(&mut stream);
+            assert_eq!(payload["state"], serde_json::json!({"severity":"high"}));
+            assert_eq!(payload["questions"]["route"]["type"], "choice");
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nLocation: /redirect-target\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.flush();
+            listener.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_millis(100);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok(_) => panic!("SystemOne adapter retried or followed a redirect"),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(_) => panic!("fixture accept failed"),
+                }
+            }
+        });
+        let (_root, catalog, request) = systemone_catalog();
+        let result = LanguageAdapter::new(&endpoint, None)
+            .unwrap()
+            .execute_decisions(
+                &catalog,
+                &request,
+                &OperationContext::new(Instant::now() + Duration::from_secs(3), &NeverCancel),
+            );
+        server.join().unwrap();
+        result
+    }
+
+    #[test]
+    fn systemone_uses_one_exact_loopback_route_body_and_auth_header() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/base/path/", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let (headers, payload) = read_http_json_with_headers(
+                &mut stream,
+                "/base/path/upstream/router-decision_2.0/v1/systemone",
+                MAX_OUTPUT_BYTES,
+            );
+            assert!(headers
+                .lines()
+                .any(|line| { line.eq_ignore_ascii_case("authorization: Bearer fixture-secret") }));
+            assert!(headers
+                .lines()
+                .any(|line| { line.eq_ignore_ascii_case("accept: application/json") }));
+            assert_eq!(
+                payload,
+                serde_json::json!({
+                    "state": {"severity":"high"},
+                    "questions": {
+                        "route": {"type":"choice", "criteria":{"proceed":"Proceed", "stop":"Stop"}}
+                    }
+                })
+            );
+            let response = serde_json::json!({
+                "answers": {"route": {"choice":"proceed", "confidence":0.9}},
+                "usage": {"total_tokens": 12},
+                "latency_ms": 23.5,
+                "engine": "llama.cpp"
+            })
+            .to_string();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response.len(),
+                response
+            )
+            .unwrap();
+            stream.flush().unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_millis(100);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok(_) => panic!("SystemOne adapter issued more than one POST"),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(_) => panic!("fixture accept failed"),
+                }
+            }
+        });
+        let (_root, catalog, request) = systemone_catalog();
+        let result = LanguageAdapter::new(&endpoint, Some("fixture-secret"))
+            .unwrap()
+            .execute_decisions(
+                &catalog,
+                &request,
+                &OperationContext::new(Instant::now() + Duration::from_secs(3), &NeverCancel),
+            )
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(result.native_latency, None);
+        assert_eq!(
+            result.native_usage,
+            Some(
+                serde_json::json!({"total_tokens":12})
+                    .as_object()
+                    .unwrap()
+                    .clone()
+            )
+        );
+        let InferenceResult::Decision { answers } = result.result else {
+            panic!("wrong result lane")
+        };
+        assert_eq!(answers["route"]["choice"], "proceed");
+    }
+
+    #[test]
+    fn invalid_systemone_routes_and_non_loopback_endpoint_never_dispatch() {
+        let (root, catalog, request) = systemone_catalog();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let adapter = LanguageAdapter::new(&endpoint, None).unwrap();
+        let manifest_path = root.path().join("toolkits/l3ds/decision-runtimes.json");
+        let yaml_path = root.path().join("llama-swap.yaml");
+        let manifest = fs::read_to_string(&manifest_path).unwrap();
+        let yaml = fs::read_to_string(&yaml_path).unwrap();
+        let cases = [
+            (manifest.replace("llamacpp", "nagi"), yaml.clone()),
+            (
+                manifest.replace("\"type\":\"local\"", "\"type\":\"api\""),
+                yaml.clone(),
+            ),
+            (
+                manifest.replace("router-decision_2.0", "missing-router-model"),
+                yaml.clone(),
+            ),
+            (
+                manifest.clone(),
+                yaml.replace("      task: decision", "      task: chat"),
+            ),
+            (
+                manifest.clone(),
+                yaml.replace(
+                    "  router-decision_2.0:\n",
+                    "  router-decision_2.0:\n    disabled: true\n",
+                ),
+            ),
+        ];
+        for (bad_manifest, bad_yaml) in cases {
+            fs::write(&manifest_path, bad_manifest).unwrap();
+            fs::write(&yaml_path, bad_yaml).unwrap();
+            let error = adapter
+                .execute_decisions(
+                    &catalog,
+                    &request,
+                    &OperationContext::new(Instant::now() + Duration::from_secs(2), &NeverCancel),
+                )
+                .err()
+                .expect("changed or invalid route must fail before dispatch");
+            assert_eq!(
+                error,
+                failure(
+                    DispatchDisposition::NoDispatch,
+                    LanguageErrorKind::InvalidRequest,
+                )
+            );
+            assert_listener_has_no_connection(&listener);
+        }
+
+        fs::write(&manifest_path, manifest.clone()).unwrap();
+        fs::write(&yaml_path, yaml.clone()).unwrap();
+        let drifted_manifest = fs::read_to_string(&manifest_path)
+            .unwrap()
+            .replace("router-decision_2.0", "router-other_2.0");
+        let drifted_yaml = fs::read_to_string(&yaml_path)
+            .unwrap()
+            .replace(
+                "models:\n",
+                "models:\n  router-other_2.0:\n    cmd: llama-server\n    metadata:\n      task: decision\n",
+            );
+        fs::write(&manifest_path, drifted_manifest).unwrap();
+        fs::write(&yaml_path, drifted_yaml).unwrap();
+        let error = adapter
+            .execute_decisions(
+                &catalog,
+                &request,
+                &OperationContext::new(Instant::now() + Duration::from_secs(2), &NeverCancel),
+            )
+            .err()
+            .unwrap();
+        assert_eq!(
+            error,
+            failure(
+                DispatchDisposition::NoDispatch,
+                LanguageErrorKind::InvalidRequest,
+            )
+        );
+        assert_listener_has_no_connection(&listener);
+
+        fs::write(&manifest_path, manifest).unwrap();
+        fs::write(&yaml_path, yaml).unwrap();
+        let remote = LanguageAdapter::new("http://example.com/base", None).unwrap();
+        let error = remote
+            .execute_decisions(
+                &catalog,
+                &request,
+                &OperationContext::new(Instant::now() + Duration::from_secs(2), &NeverCancel),
+            )
+            .err()
+            .unwrap();
+        assert_eq!(
+            error,
+            failure(
+                DispatchDisposition::NoDispatch,
+                LanguageErrorKind::Configuration,
+            )
+        );
+        assert_listener_has_no_connection(&listener);
+    }
+
+    #[test]
+    fn systemone_protocol_rejection_question_validation_redirect_and_size_are_uncertain() {
+        for (body, content_type, status, kind) in [
+            (
+                "not-json".to_owned(),
+                "application/json",
+                "200 OK",
+                LanguageErrorKind::Protocol,
+            ),
+            (
+                r#"{"answers":{"route":{"choice":"undeclared"}}}"#.to_owned(),
+                "application/json",
+                "200 OK",
+                LanguageErrorKind::Protocol,
+            ),
+            (
+                r#"{"answers":{"route":{"choice":"proceed"}}}"#.to_owned(),
+                "text/plain",
+                "200 OK",
+                LanguageErrorKind::Protocol,
+            ),
+            (
+                r#"{"answers":{"route":{"choice":"proceed"}}}"#.to_owned(),
+                "application/json",
+                "302 Found",
+                LanguageErrorKind::Rejected,
+            ),
+            (
+                "x".repeat(MAX_OUTPUT_BYTES + 1),
+                "application/json",
+                "200 OK",
+                LanguageErrorKind::TooLarge,
+            ),
+        ] {
+            let error = run_systemone_fixture(body, content_type, status)
+                .err()
+                .expect("invalid response must fail");
+            assert_eq!(error.disposition, DispatchDisposition::Uncertain);
+            assert_eq!(error.kind, kind);
+        }
+    }
+
+    #[test]
+    fn cancellation_after_systemone_dispatch_is_uncertain_and_not_retried() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let flag = Arc::new(AtomicBool::new(false));
+        let server_flag = Arc::clone(&flag);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let _ = read_systemone_request(&mut stream);
+            server_flag.store(true, Ordering::Release);
+            std::thread::sleep(Duration::from_millis(150));
+            listener.set_nonblocking(true).unwrap();
+            assert!(matches!(
+                listener.accept(),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+            ));
+        });
+        let (_root, catalog, request) = systemone_catalog();
+        let cancellation = Flag(flag);
+        let error = LanguageAdapter::new(&endpoint, None)
+            .unwrap()
+            .execute_decisions(
+                &catalog,
+                &request,
+                &OperationContext::new(Instant::now() + Duration::from_secs(2), &cancellation),
+            )
+            .err()
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(
+            error,
+            failure(DispatchDisposition::Uncertain, LanguageErrorKind::Cancelled)
+        );
     }
 
     #[test]

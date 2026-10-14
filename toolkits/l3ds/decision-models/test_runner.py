@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import ModuleType
-from unittest.mock import Mock, call, patch
+from unittest.mock import MagicMock, Mock, call, patch
 
 
 RUNNER = Path(__file__).with_name("runner.py")
@@ -246,6 +246,241 @@ class RunnerSafetyTest(unittest.TestCase):
         with contextlib.redirect_stdout(output), self.assertRaises(runner.InferenceUnavailable):
             runner.run_benchmark(engine, str(RUNNER.parents[1] / "suites" / "routing-gate.json"), 1)
         self.assertNotIn("BENCH_RESULT:", output.getvalue())
+
+
+class LlamaCppSystemOneTest(unittest.TestCase):
+    def setUp(self):
+        self.answers = {
+            "route": {
+                "choice": "billing",
+                "confidence": 0.987,
+                "probabilities": {"billing": 0.987, "shipping": 0.013},
+            }
+        }
+
+    def _response(self, payload, status=200):
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.getcode.return_value = status
+        response.read.return_value = json.dumps(payload, allow_nan=False).encode("utf-8")
+        return response
+
+    def test_one_post_uses_passthrough_and_preserves_native_probabilities(self):
+        body = {"model": "vllm-d3-flash", "answers": self.answers, "usage": {"tokens": 84}}
+        response = self._response(body)
+        opener = MagicMock()
+        opener.open.return_value = response
+        with patch.object(runner, "build_opener", return_value=opener) as build_opener:
+            engine = runner.LlamaCppSystemOneEngine(
+                "vllm-d3-flash",
+                api_key="fixture-secret",
+                base_url="http://127.0.0.1:8080/custom/proxy/",
+            )
+            result = engine.decide(STATE, QUESTIONS)
+
+        build_opener.assert_called_once()
+        handlers = build_opener.call_args.args
+        self.assertEqual(handlers[0].proxies, {})
+        self.assertIsInstance(handlers[1], runner._NoRedirect)
+        opener.open.assert_called_once()
+        request = opener.open.call_args.args[0]
+        self.assertEqual(
+            request.full_url,
+            "http://127.0.0.1:8080/custom/proxy/upstream/vllm-d3-flash/v1/systemone",
+        )
+        self.assertEqual(request.get_method(), "POST")
+        self.assertEqual(json.loads(request.data), {"state": STATE, "questions": QUESTIONS})
+        self.assertEqual(request.get_header("Authorization"), "Bearer fixture-secret")
+        self.assertEqual(request.get_header("Content-type"), "application/json")
+        self.assertEqual(opener.open.call_args.kwargs, {"timeout": runner.LLAMACPP_TIMEOUT_SECONDS})
+        response.read.assert_called_once_with(runner.MAX_HTTP_RESPONSE_BYTES + 1)
+        self.assertEqual(result["answers"], self.answers)
+        self.assertEqual(result["model"], "vllm-d3-flash")
+        self.assertEqual(result["usage"], {"tokens": 84})
+        self.assertEqual(result["engine"], "llamacpp-native")
+        self.assertGreaterEqual(result["client_latency_ms"], 0)
+        self.assertNotIn("latency_ms", result)
+
+    def test_http_failure_is_one_attempt_redacted_and_never_simulated(self):
+        opener = MagicMock()
+        opener.open.side_effect = RuntimeError("fixture-secret request body: test alert")
+        with patch.object(runner, "build_opener", return_value=opener):
+            engine = runner.LlamaCppSystemOneEngine(
+                "cloudflare-clef-flash",
+                api_key="fixture-secret",
+                base_url="http://localhost:8080",
+            )
+            with self.assertRaises(runner.InferenceUnavailable) as failure:
+                engine.decide(STATE, QUESTIONS)
+
+        self.assertEqual(str(failure.exception), "llama.cpp System One request failed")
+        self.assertIsNone(failure.exception.__cause__)
+        self.assertNotIn("fixture-secret", str(failure.exception))
+        opener.open.assert_called_once()
+
+    def test_non_local_or_non_http_endpoints_fail_before_open(self):
+        for base_url in (
+            "https://localhost:8080",
+            "http://example.com:8080",
+            "http://user@localhost:8080",
+            "http://localhost:8080/prefix?token=hidden",
+        ):
+            with self.subTest(base_url=base_url):
+                opener = MagicMock()
+                with patch.object(runner, "build_opener", return_value=opener):
+                    engine = runner.LlamaCppSystemOneEngine("vllm-d3-flash", base_url=base_url)
+                    with self.assertRaisesRegex(
+                        runner.InferenceUnavailable,
+                        "^llama.cpp endpoint configuration is invalid$",
+                    ):
+                        engine.decide(STATE, QUESTIONS)
+                opener.open.assert_not_called()
+
+    def test_invalid_router_id_and_newline_credential_fail_closed(self):
+        for kwargs in (
+            {"model": "../v1/chat/completions"},
+            {"model": "vllm-d3-flash", "api_key": "secret\nInjected: yes"},
+        ):
+            opener = MagicMock()
+            with self.subTest(kwargs=kwargs), patch.object(runner, "build_opener", return_value=opener):
+                engine = runner.LlamaCppSystemOneEngine(**kwargs)
+                with self.assertRaises(runner.InferenceUnavailable):
+                    engine.decide(STATE, QUESTIONS)
+                opener.open.assert_not_called()
+
+    def test_engine_uses_llama_swap_environment_connection(self):
+        opener = MagicMock()
+        with patch.dict(
+            "os.environ",
+            {
+                "LLAMA_SWAP_URL": "http://localhost:8080/router-prefix",
+                "LLAMA_SWAP_API_KEY": "environment-secret",
+            },
+        ), patch.object(runner, "build_opener", return_value=opener):
+            engine = runner.get_engine("llamacpp", "cloudflare-clef-flash", "cuda")
+
+        self.assertEqual(
+            engine.endpoint,
+            "http://localhost:8080/router-prefix/upstream/cloudflare-clef-flash/v1/systemone",
+        )
+        self.assertEqual(engine.api_key, "environment-secret")
+        self.assertIs(engine.opener, opener)
+
+    def test_redirect_handler_refuses_redirect_targets(self):
+        request = runner.Request("http://localhost:8080")
+        self.assertIsNone(
+            runner._NoRedirect().redirect_request(
+                request, None, 302, "Found", {}, "http://localhost:8081"
+            )
+        )
+
+    def test_oversized_request_or_response_is_rejected_without_retry(self):
+        opener = MagicMock()
+        with patch.object(runner, "build_opener", return_value=opener):
+            engine = runner.LlamaCppSystemOneEngine("vllm-d3-flash")
+            with self.assertRaises(runner.InferenceUnavailable):
+                engine.decide({"large": "x" * runner.MAX_INPUT_BYTES}, QUESTIONS)
+            opener.open.assert_not_called()
+
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.getcode.return_value = 200
+        response.read.return_value = b"x" * (runner.MAX_HTTP_RESPONSE_BYTES + 1)
+        opener = MagicMock()
+        opener.open.return_value = response
+        with patch.object(runner, "build_opener", return_value=opener):
+            engine = runner.LlamaCppSystemOneEngine("vllm-d3-flash")
+            with self.assertRaises(runner.InferenceUnavailable):
+                engine.decide(STATE, QUESTIONS)
+        opener.open.assert_called_once()
+        response.read.assert_called_once_with(runner.MAX_HTTP_RESPONSE_BYTES + 1)
+
+    def test_malformed_answers_and_nonfinite_json_fail_closed(self):
+        invalid_responses = (
+            b'{"answers":"invalid"}',
+            b'{"answers":{}}',
+            b'{"answers":{"other":{"choice":"billing"}}}',
+            b'{"answers":{"route":"invalid"}}',
+            b'{"choices":"invalid","scores":{"route":{"score":1}}}',
+            b'{"answers":{"route":{"choice":"billing"}},"extra":NaN}',
+            b'{"answers":{"route":{"choice":"billing"}},"extra":1e999}',
+        )
+        for body in invalid_responses:
+            with self.subTest(response=body):
+                response = MagicMock()
+                response.__enter__.return_value = response
+                response.getcode.return_value = 200
+                response.read.return_value = body
+                opener = MagicMock()
+                opener.open.return_value = response
+                with patch.object(runner, "build_opener", return_value=opener):
+                    engine = runner.LlamaCppSystemOneEngine("vllm-d3-flash")
+                    with self.assertRaisesRegex(
+                        runner.InferenceUnavailable,
+                        "^llama.cpp System One request failed$",
+                    ):
+                        engine.decide(STATE, QUESTIONS)
+                opener.open.assert_called_once()
+
+    def test_typed_native_answers_reject_wrong_values_without_retry(self):
+        cases = [
+            ("noul", {"noul": True}), ("noul", {"noul": 1.5}),
+            ("score", {"score": "high"}),
+            ("choice", {"choice": "undeclared"}),
+            ("noul", {"noul": 0.5, "confidence": -1}),
+            ("noul", {"noul": 0.5, "probabilities": {"yes": 2}}),
+        ]
+        for kind, answer in cases:
+            with self.subTest(kind=kind, answer=answer):
+                opener = MagicMock()
+                opener.open.return_value = self._response({"answers": {"q": answer}})
+                with patch.object(runner, "build_opener", return_value=opener):
+                    engine = runner.LlamaCppSystemOneEngine("vllm-d3-flash")
+                    with self.assertRaises(runner.InferenceUnavailable):
+                        engine.decide(STATE, {"q": {"type": kind, "criteria": {"yes": "Yes"}}})
+                opener.open.assert_called_once()
+
+    def test_cli_accepts_llamacpp_and_forwards_explicit_connection_values(self):
+        engine = Mock()
+        engine.decide.return_value = {"answers": self.answers, "engine": "llamacpp-native"}
+        output = io.StringIO()
+        with patch(
+            "sys.argv",
+            [
+                str(RUNNER),
+                "--engine",
+                "llamacpp",
+                "--model",
+                "vllm-d3-flash",
+                "--base-url",
+                "http://localhost:8080",
+                "--api-key",
+                "fixture-secret",
+            ],
+        ), patch.object(runner, "one_shot_inputs", return_value=(STATE, QUESTIONS)), patch.object(
+            runner, "get_engine", return_value=engine
+        ) as build_engine, contextlib.redirect_stdout(output):
+            self.assertEqual(runner.main(), 0)
+
+        build_engine.assert_called_once_with(
+            "llamacpp",
+            "vllm-d3-flash",
+            "cuda",
+            api_key="fixture-secret",
+            base_url="http://localhost:8080",
+            allow_simulation=False,
+            single_attempt=False,
+        )
+        self.assertEqual(json.loads(output.getvalue()), engine.decide.return_value)
+
+    def test_cli_rejects_simulation_for_local_http_engine(self):
+        with patch(
+            "sys.argv",
+            [str(RUNNER), "--engine", "llamacpp", "--model", "vllm-d3-flash", "--simulate"],
+        ), patch.object(runner, "get_engine") as build_engine, contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+            runner.main()
+        self.assertEqual(error.exception.code, 2)
+        build_engine.assert_not_called()
 
 
 class NagiRepositoryTest(unittest.TestCase):

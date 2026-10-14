@@ -1715,7 +1715,11 @@ fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
     let (request, timeout) = crate::control::task_form::build_direct_native(&catalog, draft)
         .map_err(|_| anyhow::anyhow!("native request is invalid"))?;
     let output_dir = comfy_output_directory.as_deref().or(output_dir);
-    let language = if spec.task == "embeddings" {
+    let uses_router = spec.task == "embeddings"
+        || catalog
+            .inspect(request.profile())
+            .is_some_and(crate::control::direct_run::is_llamacpp_decision_profile);
+    let language = if uses_router {
         let endpoint = env::var("LLAMA_SWAP_URL")
             .unwrap_or_else(|_| crate::llama_swap::DEFAULT_BASE_URL.to_owned());
         let api_key = env::var("LLAMA_SWAP_API_KEY").ok();
@@ -1763,7 +1767,7 @@ fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
         &catalog, &request, output_dir, connection, &context,
     )
     .map_err(|error| {
-        if spec.task == "embeddings" && error.blocks_following_work() {
+        if uses_router && error.blocks_following_work() {
             anyhow::anyhow!("remote completion is unconfirmed; do not retry automatically")
         } else if is_comfy_workflow && error.blocks_following_work() {
             anyhow::anyhow!(

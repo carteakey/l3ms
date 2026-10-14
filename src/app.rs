@@ -1316,6 +1316,19 @@ impl App {
     }
 
     fn new_in(root: PathBuf, data_root: PathBuf) -> Result<Self> {
+        Self::new_in_with_model_refresh(root, data_root, true)
+    }
+
+    #[cfg(test)]
+    fn new_in_without_model_refresh(root: PathBuf, data_root: PathBuf) -> Result<Self> {
+        Self::new_in_with_model_refresh(root, data_root, false)
+    }
+
+    fn new_in_with_model_refresh(
+        root: PathBuf,
+        data_root: PathBuf,
+        refresh_models_on_start: bool,
+    ) -> Result<Self> {
         let (sender, receiver) = mpsc::sync_channel(BACKGROUND_QUEUE_CAPACITY);
         let bench_editor =
             ScriptEditorState::for_repository(&root).context("initialize bench script editor")?;
@@ -1491,7 +1504,9 @@ impl App {
         app.sync_download_table_state();
         app.refresh_download_disk_space();
         app.refresh_local_inventories();
-        app.refresh_models();
+        if refresh_models_on_start {
+            app.refresh_models();
+        }
         Ok(app)
     }
 
@@ -4567,7 +4582,11 @@ impl App {
             } else if is_direct_cuda_profile(&profile) {
                 "Foreground CUDA native form open · the selected GPU must be idle before starting · resident pause/restore is opt-in · run once with Ctrl+Enter".into()
             } else if is_direct_native_decision_profile(&profile) {
-                "Foreground native decision form open · request stays in memory; run once with Ctrl+Enter".into()
+                if profile.runtime.as_str() == "llamacpp" {
+                    "Router decision may evict the loaded language model · quiet window required · Ctrl+Enter runs once".into()
+                } else {
+                    "Foreground native decision form open · request stays in memory; run once with Ctrl+Enter".into()
+                }
             } else if is_direct_breeze_speech_profile(&profile) {
                 "Foreground CPU task form open · request stays in memory; run once with Ctrl+Enter"
                     .into()
@@ -4783,6 +4802,11 @@ impl App {
             && catalog
                 .inspect(request.profile())
                 .is_some_and(is_hosted_direct_decision_profile);
+        let llamacpp_decision = lane == Lane::Decisions
+            && catalog
+                .inspect(request.profile())
+                .is_some_and(direct_run::is_llamacpp_decision_profile);
+        let remote_decision = hosted_jev_decision || llamacpp_decision;
         let cuda_native = catalog
             .inspect(request.profile())
             .is_some_and(is_direct_cuda_profile);
@@ -4806,7 +4830,15 @@ impl App {
             match self.prepare_direct_embedding_adapter(&catalog, &request) {
                 Ok(adapter) => Some(adapter),
                 Err(message) => {
-                    self.status = message.into();
+                    self.status = message;
+                    return;
+                }
+            }
+        } else if llamacpp_decision {
+            match self.prepare_direct_llamacpp_decision_adapter(&catalog, &request) {
+                Ok(adapter) => Some(adapter),
+                Err(message) => {
+                    self.status = message;
                     return;
                 }
             }
@@ -5006,7 +5038,7 @@ impl App {
             format!(
                 "{task_label} #{job_id} running · GPU release is checked after runner cleanup; resident pause/restore is opt-in; press c to cancel"
             )
-        } else if lane == Lane::Language || hosted_jev_decision {
+        } else if lane == Lane::Language || remote_decision {
             format!(
                 "{task_label} #{job_id} running · press c to cancel; remote completion may be uncertain"
             )
@@ -5025,48 +5057,85 @@ impl App {
         &self,
         catalog: &Catalog,
         request: &crate::control::requests::InferenceRequest,
-    ) -> Result<LanguageAdapter, &'static str> {
+    ) -> Result<LanguageAdapter, String> {
         if request.lane() != Lane::Language || request.task() != "embeddings" {
-            return Err("Direct language work is limited to the declared embeddings task");
+            return Err("Direct language work is limited to the declared embeddings task".into());
         }
+        let route = resolve_profile_route(catalog, request.profile())
+            .map_err(|_| "The selected embeddings route could not be revalidated".to_owned())?;
+        let NativeRoute::LlamaSwapModel { model_id, .. } = route.native_route else {
+            return Err("The selected embeddings task has no native llama-swap model route".into());
+        };
+        self.prepare_confirmed_chat_adapter(model_id.as_str(), "embeddings")
+    }
+
+    #[cfg(target_os = "linux")]
+    fn prepare_direct_llamacpp_decision_adapter(
+        &self,
+        catalog: &Catalog,
+        request: &crate::control::requests::InferenceRequest,
+    ) -> Result<LanguageAdapter, String> {
+        if request.lane() != Lane::Decisions
+            || request.task() != "decision"
+            || !catalog
+                .inspect(request.profile())
+                .is_some_and(direct_run::is_llamacpp_decision_profile)
+        {
+            return Err(
+                "Direct HTTP work is limited to the declared llama.cpp decision task".into(),
+            );
+        }
+        let route = resolve_profile_route(catalog, request.profile()).map_err(|_| {
+            "The selected llama.cpp decision route could not be revalidated".to_owned()
+        })?;
+        let NativeRoute::DecisionRunner { model, .. } = route.native_route else {
+            return Err("The selected llama.cpp decision task has no router model ID".into());
+        };
+        self.prepare_confirmed_chat_adapter(&model, "decision")
+    }
+
+    #[cfg(target_os = "linux")]
+    fn prepare_confirmed_chat_adapter(
+        &self,
+        model_id: &str,
+        task_label: &str,
+    ) -> Result<LanguageAdapter, String> {
         if self.chat_connection_pending
             || self.chat_pending
             || self.chat_stream_cancellation.is_some()
             || self.chat_session_pending
         {
-            return Err(
-                "Wait for the current Chat connection, response, or session action before running embeddings",
-            );
+            return Err(format!(
+                "Wait for the current Chat connection, response, or session action before running {task_label}"
+            ));
+        }
+        if self.model_action_pending {
+            return Err(format!(
+                "Wait for the active model action to finish before running {task_label}"
+            ));
         }
         let client = self
             .chat_client
             .as_ref()
-            .ok_or("Connect Chat before running native embeddings")?;
+            .ok_or_else(|| format!("Connect Chat before running native {task_label}"))?;
         if self.chat_endpoint_committed.as_deref() != Some(client.base_url()) {
-            return Err(
-                "The current Chat endpoint is not a confirmed connection; reconnect before running embeddings",
-            );
+            return Err(format!(
+                "The current Chat endpoint is not a confirmed connection; reconnect before running {task_label}"
+            ));
         }
-        let route = resolve_profile_route(catalog, request.profile())
-            .map_err(|_| "The selected embeddings route could not be revalidated")?;
-        let NativeRoute::LlamaSwapModel { model_id, .. } = route.native_route else {
-            return Err("The selected embeddings task has no native llama-swap model route");
-        };
-        let Some(model) = self
-            .chat_models
-            .iter()
-            .find(|model| model.id == model_id.as_str())
-        else {
-            return Err(
-                "The exact embeddings route model is not advertised by the connected Chat endpoint; refresh Chat models",
-            );
+        let Some(model) = self.chat_models.iter().find(|model| model.id == model_id) else {
+            return Err(format!(
+                "The exact {task_label} route model is not advertised by the connected Chat endpoint; refresh Chat models"
+            ));
         };
         if model.disabled {
-            return Err("The exact embeddings route model is disabled in Chat");
+            return Err(format!(
+                "The exact {task_label} route model is disabled in Chat"
+            ));
         }
-        client
-            .embedding_adapter()
-            .map_err(|_| "Could not configure the confirmed Chat endpoint for embeddings")
+        client.embedding_adapter().map_err(|_| {
+            format!("Could not configure the confirmed Chat endpoint for {task_label}")
+        })
     }
 
     #[cfg(target_os = "linux")]
@@ -7618,7 +7687,9 @@ impl App {
         } else if editor.direct_breeze_speech {
             "CPU Breeze · tts standard/streaming, clon reference, design instruction · no caller ID or coordinator"
         } else if editor.direct_native_decision {
-            if is_direct_cuda_profile(&editor.profile_snapshot) {
+            if editor.profile_snapshot.runtime.as_str() == "llamacpp" {
+                "Router-owned CUDA decision · normal router swapping may evict the language model · use a quiet window · no automatic restoration"
+            } else if is_direct_cuda_profile(&editor.profile_snapshot) {
                 "CUDA decision · GPU must be idle before starting · resident pause/restore is opt-in · no caller ID or coordinator"
             } else {
                 "Native decision · local CPU or hosted route · no caller ID or coordinator"
@@ -7635,7 +7706,15 @@ impl App {
                 .style(theme::text())
                 .block(
                     theme::block()
-                        .title("Native task form · in memory only")
+                        .title(
+                            if editor.direct_native_decision
+                                && editor.profile_snapshot.runtime.as_str() == "llamacpp"
+                            {
+                                "Router swap: may evict language model · quiet window"
+                            } else {
+                                "Native task form · in memory only"
+                            },
+                        )
                         .borders(Borders::ALL),
                 )
                 .wrap(Wrap { trim: false }),
@@ -10118,6 +10197,11 @@ mod tests {
         fn app(&self) -> App {
             App::new_in(self.root.clone(), self.data.path().to_path_buf()).unwrap()
         }
+
+        fn app_without_model_refresh(&self) -> App {
+            App::new_in_without_model_refresh(self.root.clone(), self.data.path().to_path_buf())
+                .unwrap()
+        }
     }
 
     fn wait_for_download(app: &mut App) {
@@ -10178,6 +10262,25 @@ mod tests {
         fs::write(
             fixture.root.join("toolkits/l3ds/decision-runtimes.json"),
             r#"{"version":"1.0","profiles":[{"id":"jev-api","name":"Hosted Jev SystemOne fixture","engine":"jev","tier":"hosted","type":"api","model":"typesafe/jev-latest","device":"remote","entrypoint":"decision-models/runner.py"}]}"#,
+        )
+        .unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn write_llamacpp_decision_stack_fixture(fixture: &AppFixture, model_id: &str) {
+        write_stack_fixture(fixture);
+        fs::write(
+            fixture.root.join("llama-swap.yaml"),
+            format!(
+                "models:\n  {model_id}:\n    metadata:\n      task: decision\n    cmd: server\n"
+            ),
+        )
+        .unwrap();
+        fs::write(
+            fixture.root.join("toolkits/l3ds/decision-runtimes.json"),
+            format!(
+                r#"{{"version":"1.0","profiles":[{{"id":"{model_id}","name":"llama.cpp decision fixture","engine":"llamacpp","type":"local","model":"{model_id}","device":"cuda","tasks":["decision"],"entrypoint":"decision-models/runner.py"}}]}}"#
+            ),
         )
         .unwrap();
     }
@@ -10902,7 +11005,9 @@ mod tests {
             .unwrap()
             .list()
             .iter()
-            .position(|profile| profile.key.profile_id.as_str() == profile_id)
+            .position(|profile| {
+                profile.key.lane == Lane::Decisions && profile.key.profile_id.as_str() == profile_id
+            })
             .unwrap();
         app.stack_catalog_state.select(Some(index));
         assert!(app.stack_coordinator_socket_dir.is_none());
@@ -11128,6 +11233,77 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    fn serve_llamacpp_decision(
+        listener: std::net::TcpListener,
+        model_id: &'static str,
+        expected_state: serde_json::Value,
+        expected_questions: serde_json::Value,
+        expected_authorization: Option<&'static str>,
+        release: Option<mpsc::Receiver<()>>,
+        request_received: Option<mpsc::Sender<()>>,
+    ) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            use std::io::Write;
+
+            listener.set_nonblocking(true).unwrap();
+            let accept_deadline = Instant::now() + Duration::from_secs(3);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && Instant::now() < accept_deadline =>
+                    {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("decision endpoint did not receive request: {error}"),
+                }
+            };
+            stream
+                .set_write_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let request = read_http_request(&mut stream);
+            assert!(
+                request.starts_with(&format!("POST /gateway/upstream/{model_id}/v1/systemone "))
+            );
+            let (headers, body) = request.split_once("\r\n\r\n").unwrap();
+            if let Some(expected) = expected_authorization {
+                assert!(headers.lines().any(|line| {
+                    line.to_ascii_lowercase()
+                        .starts_with(&format!("authorization: bearer {expected}"))
+                }));
+            }
+            let request: serde_json::Value = serde_json::from_str(body).unwrap();
+            assert_eq!(
+                request,
+                serde_json::json!({
+                    "state": expected_state,
+                    "questions": expected_questions
+                })
+            );
+            if let Some(request_received) = request_received {
+                request_received.send(()).unwrap();
+            }
+            if let Some(release) = release {
+                release.recv_timeout(Duration::from_secs(3)).unwrap();
+            }
+            let body = serde_json::json!({
+                "answers": {
+                    "route": {"choice": "yes", "confidence": 0.9}
+                },
+                "usage": {"fixture_units": 1}
+            })
+            .to_string();
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+        })
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn connected_embedding_batch_reuses_committed_auth_and_keeps_results_ephemeral() {
         let fixture = AppFixture::new();
@@ -11186,6 +11362,162 @@ mod tests {
         assert!(rendered.contains("Foreground native result"));
         assert!(!rendered.contains("results are shown here only after pressing o"));
         assert!(!rendered.contains("embedding-private-secret"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn llamacpp_decision_form_posts_once_through_committed_chat_and_keeps_results_ephemeral() {
+        let fixture = AppFixture::new();
+        let router_model = "vllm-d3-flash";
+        write_llamacpp_decision_stack_fixture(&fixture, router_model);
+        let state = serde_json::json!({"private_prompt": "decision-private-secret"});
+        let questions = serde_json::json!({
+            "route": {
+                "type": "choice",
+                "criteria": {"yes": "Proceed", "no": "Stop"}
+            }
+        });
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/gateway", listener.local_addr().unwrap());
+        let (request_received_tx, request_received_rx) = mpsc::channel();
+        let server = serve_llamacpp_decision(
+            listener,
+            router_model,
+            state,
+            questions,
+            Some("fixture-key"),
+            None,
+            Some(request_received_tx),
+        );
+        let mut app = fixture.app_without_model_refresh();
+        connect_test_chat_at(
+            &mut app,
+            &endpoint,
+            Some("fixture-key"),
+            vec![
+                test_chat_model("another-model", "loaded", false),
+                test_chat_model(router_model, "unloaded", false),
+            ],
+        );
+        open_direct_decision_form_for_profile(&mut app, router_model);
+        assert!(app.status.contains("may evict the loaded language model"));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(terminal_text(&terminal).contains("quiet window"));
+        app.run_task_form();
+        request_received_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("decision request did not reach the local fixture endpoint");
+        wait_for_direct_native(&mut app);
+        server.join().unwrap();
+
+        let summary = app.direct_native_summary.as_ref().unwrap();
+        assert!(matches!(summary.state, DirectNativeState::Succeeded));
+        assert!(!summary.cuda);
+        assert!(!summary.requires_idle_gpu_window);
+        assert!(!app.direct_native_admission_closed);
+        let Some(DirectRunResult::Decision(native)) = summary.result.as_ref() else {
+            panic!("llama.cpp decision answer was not retained in memory");
+        };
+        let crate::control::requests::InferenceResult::Decision { answers } = &native.result else {
+            panic!("llama.cpp decision returned a non-decision result");
+        };
+        assert_eq!(answers["route"]["choice"], "yes");
+        assert_eq!(native.native_usage.as_ref().unwrap()["fixture_units"], 1);
+        assert!(app.status.contains("succeeded"));
+        assert!(!app.status.contains("decision-private-secret"));
+        assert!(app.log.iter().all(|line| {
+            !line.contains("decision-private-secret") && !line.contains("fixture-key")
+        }));
+
+        let job = &app.job_history.records()[0];
+        assert!(job.command.is_empty());
+        assert_eq!(job.metadata.toolkit.as_deref(), Some("l3ds"));
+        assert_eq!(job.metadata.profile.as_deref(), Some(router_model));
+        assert_eq!(job.metadata.task.as_deref(), Some("decision"));
+        assert!(job.metadata.request_id.is_none());
+        assert_eq!(job.metadata.result_state.as_deref(), Some("succeeded"));
+        let persisted =
+            fs::read_to_string(crate::state_store::jobs_path_in(&fixture.data)).unwrap();
+        assert!(!persisted.contains("decision-private-secret"));
+        assert!(!persisted.contains("fixture-key"));
+        assert!(!persisted.contains("fixture_units"));
+        assert!(!persisted.contains("\"answers\""));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cancelling_dispatched_llamacpp_decision_closes_chat_and_foreground_admission() {
+        let fixture = AppFixture::new();
+        let router_model = "cloudflare-clef-flash";
+        write_llamacpp_decision_stack_fixture(&fixture, router_model);
+        let state = serde_json::json!({"private_prompt": "decision-cancel-secret"});
+        let questions = serde_json::json!({
+            "route": {
+                "type": "choice",
+                "criteria": {"yes": "Proceed", "no": "Stop"}
+            }
+        });
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/gateway", listener.local_addr().unwrap());
+        let (request_received_tx, request_received_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let server = serve_llamacpp_decision(
+            listener,
+            router_model,
+            state,
+            questions,
+            Some("fixture-key"),
+            Some(release_rx),
+            Some(request_received_tx),
+        );
+        let mut app = fixture.app_without_model_refresh();
+        connect_test_chat_at(
+            &mut app,
+            &endpoint,
+            Some("fixture-key"),
+            vec![test_chat_model(router_model, "unloaded", false)],
+        );
+        open_direct_decision_form_for_profile(&mut app, router_model);
+        app.task_form_editor.as_mut().unwrap().values.decision_state =
+            r#"{"private_prompt":"decision-cancel-secret"}"#.into();
+        app.run_task_form();
+        request_received_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("decision request did not reach the local fixture endpoint");
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.status.contains("cancellation requested"));
+        wait_for_direct_native(&mut app);
+        release_tx.send(()).unwrap();
+        server.join().unwrap();
+
+        let summary = app.direct_native_summary.as_ref().unwrap();
+        assert!(matches!(summary.state, DirectNativeState::Interrupted));
+        assert!(summary.result.is_none());
+        assert!(app.direct_native_admission_closed);
+        assert!(app.status.contains("remote completion is unconfirmed"));
+        assert!(app.status.contains("verify the endpoint before retrying"));
+        assert_eq!(
+            app.job_history.records()[0]
+                .metadata
+                .result_state
+                .as_deref(),
+            Some("interrupted")
+        );
+
+        app.chat_input = "unsent chat draft".into();
+        app.send_chat_message();
+        assert!(app
+            .status
+            .contains("resolve its outcome before sending Chat"));
+        assert_eq!(app.chat_input, "unsent chat draft");
+        assert!(!app.chat_pending);
+        let persisted =
+            fs::read_to_string(crate::state_store::jobs_path_in(&fixture.data)).unwrap();
+        assert!(!persisted.contains("decision-cancel-secret"));
+        assert!(!persisted.contains("fixture-key"));
     }
 
     #[cfg(target_os = "linux")]

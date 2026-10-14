@@ -36,6 +36,11 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Port d3-flash and Clef-Flash decision recipes and standalone profiles. Shared
+  CLI/UI decisions reuse the configured authenticated llama-swap connection,
+  native typed responses and remote-uncertainty handling without a new worker.
+  The site lists them under Decisions, not token-generation rankings. No live
+  model, service, installation or download is changed; live acceptance is pending.
 - Show speech artifact filenames before long absolute paths so completed WAVs
   remain identifiable in narrow terminals; retain the full path and metadata-only
   history behavior.

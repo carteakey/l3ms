@@ -3,6 +3,36 @@
   "version": "1.0",
   "profiles": [
     {
+      "id": "vllm-d3-flash",
+      "name": "vLLM-SR d3-flash 9B (llama.cpp)",
+      "engine": "llamacpp",
+      "tier": "mid",
+      "type": "local",
+      "model": "vllm-d3-flash",
+      "backbone": "Qwen3.5-9B; Q8_0 + mmproj BF16",
+      "device": "cuda",
+      "fallback_device": "cuda",
+      "vram_gb": 11.5,
+      "expected_latency_ms": 110,
+      "description": "Native System One request through local llama-swap passthrough; historical warm text estimate (~110 ms), no latency guarantee",
+      "entrypoint": "decision-models/runner.py"
+    },
+    {
+      "id": "cloudflare-clef-flash",
+      "name": "Cloudflare Clef-Flash 9B (llama.cpp)",
+      "engine": "llamacpp",
+      "tier": "mid",
+      "type": "local",
+      "model": "cloudflare-clef-flash",
+      "backbone": "Qwen3.5-9B; Q4_K_M + mmproj BF16",
+      "device": "cuda",
+      "fallback_device": "cuda",
+      "vram_gb": 8.9,
+      "expected_latency_ms": 65,
+      "description": "Native System One request through local llama-swap passthrough; historical warm routed text estimate (~65 ms), no latency guarantee",
+      "entrypoint": "decision-models/runner.py"
+    },
+    {
       "id": "nagi-smol",
       "name": "Nagi-Smol v0 (480M)",
       "engine": "nagi",

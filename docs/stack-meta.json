@@ -36,6 +36,8 @@
     }
   },
   "decisions": {
+    "vllm-d3-flash": {"guide": "docs/decision-models.md", "experiment": null},
+    "cloudflare-clef-flash": {"guide": "docs/decision-models.md", "experiment": null},
     "nagi-smol": {"guide": "toolkits/l3ds/README.md", "experiment": null},
     "nagi-smol-cpu": {"guide": "docs/cpu-native-workflows.md", "experiment": "docs/cpu-native-workflows.md"},
     "nagi-big": {"guide": "toolkits/l3ds/README.md", "experiment": null},

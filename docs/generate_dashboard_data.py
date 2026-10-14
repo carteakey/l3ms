@@ -347,9 +347,14 @@ def main() -> None:
     community_runs = validate_community_runs(json.loads(COMMUNITY_RUNS.read_text()))
     stack_meta = json.loads(STACK_META.read_text())
     media = media_public_profiles(json.loads(MEDIA_MANIFEST.read_text()), stack_meta["media"])
-    decisions = decision_public_profiles(
-        json.loads(DECISION_MANIFEST.read_text()), stack_meta["decisions"]
-    )
+    decision_manifest = json.loads(DECISION_MANIFEST.read_text())
+    decisions = decision_public_profiles(decision_manifest, stack_meta["decisions"])
+    # Router declarations for native decisions belong in the Decisions view,
+    # never in the token-generation ranking.
+    native_decision_ids = {
+        profile["model"] for profile in decision_manifest["profiles"]
+        if profile.get("engine") == "llamacpp"
+    }
     public_models = []
     active_ids = {
         model_id
@@ -359,6 +364,7 @@ def main() -> None:
         # The public leaderboard measures token generation. Utility embedding
         # profiles remain discoverable through llama-swap but do not have TPS.
         and "--embedding" not in model.get("cmd", "")
+        and model_id not in native_decision_ids
     }
     metadata_ids = set(meta["models"])
     if active_ids != metadata_ids:

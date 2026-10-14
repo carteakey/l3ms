@@ -189,6 +189,16 @@ Terminal job state does **not** unload GPU models or fence other engine clients.
 You remain responsible for server setup and GPU availability; no services are
 started or stopped. Live transport/media acceptance remains pending.
 
+### Router-native decisions (Linux, live acceptance pending)
+
+The preferred new local candidates are `decisions:vllm-d3-flash` and
+`decisions:cloudflare-clef-flash`. They use the existing authenticated llama-swap
+connection, not a separate decision environment or daemon. See
+[native decision routing](docs/decision-models.md) for CLI/form usage. These calls
+can evict a loaded language model; use a quiet window. Automatic restoration,
+LLM tool continuation and UI image inputs remain unfinished. Nagi CPU stays
+available as a separate option below.
+
 ### Direct CPU decisions (Linux)
 
 Run a prepared local Nagi/Laya CPU profile without a daemon or socket:

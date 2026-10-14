@@ -23,6 +23,12 @@ and decisions. Shared discovery, settings, jobs, logs and sensible GPU switching
 Keep the existing engines, scripts, model directories and standalone commands.
 Keep the distinctive visual direction and expanded L3MS branding.
 
+The newer preferred decision candidates, d3-flash and Clef-Flash, already use
+llama.cpp behind llama-swap. Dispatch them through the existing typed HTTP
+endpoint, not the external-media service-stop path or a new Python model stack.
+Nagi CPU remains optional. Ported HTTP fixtures are not live-model acceptance or
+automatic restoration of the prior language model; those gates remain open.
+
 The default path is an operator-launched application with in-process dispatch,
 not a new always-on daemon. CLI and TUI call the same operational functions.
 An optional API or daemon is not required to complete this wrapper.

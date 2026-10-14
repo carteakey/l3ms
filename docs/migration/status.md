@@ -9,6 +9,54 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
+## Router-native d3/Clef decision port — 2026-10-14
+
+Ported the original checkout's uncommitted d3-flash and Clef-Flash serving
+recipes, preserving unrelated original and branch changes. The standalone L3DS
+manifest now prioritizes these local `llamacpp` profiles; old Nagi/Laya/Jev
+profiles remain. The branch's serving entries explicitly declare
+`metadata.task: decision`, so native decisions are not mistaken for chat.
+No original checkout, live config/unit, model or installed environment was changed.
+
+The root CLI and Stack form reuse the existing authenticated router connection
+and bounded JSON transport. They send one typed request to
+`/upstream/<router-id>/v1/systemone`, without launching a Python model, stopping
+the router or entering the external-media GPU window. Before dispatch, profile
+and target decision capability are revalidated; the UI requires the exact enabled
+model on its confirmed Chat endpoint and no active local Chat/model action.
+The form visibly warns at 80×24 that this router swap can evict the language model
+and requires a quiet window. There is no automatic restoration or LLM tool loop.
+
+The standalone stdlib bridge uses the same environment/route, with bounded
+requests/responses, no proxy, redirect, retry or simulated fallback. Native answer
+types/probabilities and usage are validated; client HTTP time is not mislabeled
+as native forward-pass latency. Root failures after dispatch remain uncertain,
+closing foreground/Chat admission rather than pretending cancellation succeeded.
+History retains metadata only, never state/questions, answers or credentials.
+
+Verification: **947 root Rust tests passed, 4 existing ignores**; strict root
+Clippy/format/build and diff checks pass. L3DS has **32 runner Python tests,
+17 maintenance tests and 2 Rust tests** passing, with strict lint/format/build.
+Both actual CLI binaries each executed both model routes against a synthetic
+loopback-only endpoint with authentication and a URL prefix; exactly one POST
+per invocation returned the expected answers/usage and owned processes exited.
+The deliberately invalid GPU-window configuration was never used. Exact probe
+and receipts are private in `.toolkit/decision-port-P4piZw/`. This is HTTP/CLI
+integration evidence, not model inference or a live-router smoke test.
+
+The site now shows the two preferred models first among **9 decision cards**,
+excluded from the language TPS ranking. All 11 generator tests and DOM fixtures
+pass. Actual Firefox pointer/keyboard/focus, 1440/390px layout, zero dashboard
+exceptions and owned-browser cleanup pass; screenshots are retained in
+`.toolkit/dashboard-probe-TBQLXj/`. No public deployment was performed.
+
+Independent review's form-warning finding was fixed and rechecked. This slice
+adds **843 net control-source lines including fixtures**, to **66,372** in the
+same measurement scope. It reuses the existing transport instead of adding a
+daemon, framework or dependency; it does not satisfy the source-reduction gate.
+Live hardware/quality acceptance, top-level image inputs in the shared UI/CLI,
+and prior-language restoration remain open. GPU switching stays parked for Pi.
+
 ## Fresh tracked-source compatibility — 2026-10-14
 
 Live GPU switching is parked at the user's request while Pi uses Strata. No

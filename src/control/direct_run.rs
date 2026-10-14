@@ -668,7 +668,12 @@ fn run_native(
         && catalog
             .inspect(request.profile())
             .is_some_and(is_jev_api_decision_profile);
-    let is_remote_operation = is_embeddings || is_comfy_workflow || is_hosted_jev_decision;
+    let is_llamacpp_decision = is_decision
+        && catalog
+            .inspect(request.profile())
+            .is_some_and(is_llamacpp_decision_profile);
+    let is_remote_operation =
+        is_embeddings || is_comfy_workflow || is_hosted_jev_decision || is_llamacpp_decision;
     let is_breeze_speech = matches!(
         request,
         InferenceRequest::Media {
@@ -699,7 +704,10 @@ fn run_native(
     };
     let valid_lane_arguments = match request {
         InferenceRequest::Decision { .. } => {
-            output_directory.is_none() && language.is_none() && comfy.is_none()
+            output_directory.is_none()
+                && language.is_some() == is_llamacpp_decision
+                && comfy.is_none()
+                && (!is_llamacpp_decision || cuda.is_none())
         }
         InferenceRequest::Media { .. } if is_breeze_speech || is_script_media => {
             output_directory.is_some() && language.is_none() && comfy.is_none()
@@ -768,6 +776,13 @@ fn run_native(
         let profile = catalog
             .inspect(request.profile())
             .expect("validated request profile exists in refreshed catalog");
+        if is_llamacpp_decision_profile(profile) {
+            return language
+                .expect("validated decision connection")
+                .execute_decisions(&catalog, request, context)
+                .map(DirectRunResult::Decision)
+                .map_err(remote_language_error);
+        }
         if is_supported_cuda_direct_decision_profile(profile) {
             let Some(device) = cuda else {
                 return Err(DirectRunError::new(
@@ -1097,9 +1112,12 @@ fn remote_completion_uncertain() -> DirectRunError {
     )
 }
 
-/// Profile-level CPU and hosted decision routes exposed to the UI. CUDA stays
-/// a separate explicit selection and is not advertised by this predicate.
+/// CPU, hosted and router-owned HTTP decision routes exposed to the UI.
+/// Child-owned CUDA remains a separate explicit selection.
 pub(crate) fn is_supported_direct_decision_profile(profile: &CatalogProfile) -> bool {
+    if is_llamacpp_decision_profile(profile) {
+        return true;
+    }
     if profile.disabled
         || profile.key.lane != Lane::Decisions
         || profile.runtime.lane != Lane::Decisions
@@ -1118,6 +1136,18 @@ pub(crate) fn is_supported_direct_decision_profile(profile: &CatalogProfile) -> 
         ),
         ("nagi" | "laya", Some(Device::Cpu), "local") | ("jev", Some(Device::Remote), "api")
     )
+}
+
+/// The router owns this GPU model. HTTP dispatch must not stop its service or
+/// launch a Python/CUDA child, despite the model's declared CUDA device.
+pub(crate) fn is_llamacpp_decision_profile(profile: &CatalogProfile) -> bool {
+    !profile.disabled
+        && profile.key.lane == Lane::Decisions
+        && profile.runtime.lane == Lane::Decisions
+        && profile.runtime.as_str() == "llamacpp"
+        && profile.device == Some(Device::Cuda)
+        && profile.tasks.iter().any(|task| task.as_str() == "decision")
+        && matches!(&profile.native_source, NativeProfileSource::Decisions {profile_type, ..} if profile_type == "local")
 }
 
 /// Profile-level CUDA-local Nagi/Laya decision routes. Callers still need an
@@ -2332,6 +2362,23 @@ fi
         assert!(!error.blocks_following_work());
         assert_eq!(fs::read(launch_marker).unwrap(), b"x");
         assert!(!error.to_string().contains("wrong"));
+    }
+
+    #[test]
+    fn router_decisions_do_not_stop_the_router_or_launch_a_native_child() {
+        let (_root, catalog, request, marker) = fixture("llamacpp", "local", "cuda", "unused");
+        let profile = catalog.inspect(request.profile()).unwrap();
+        assert!(is_llamacpp_decision_profile(profile));
+        assert!(is_supported_direct_decision_profile(profile));
+        assert!(!requires_operator_gpu_window(profile));
+        let error =
+            run_native_in_operator_window(&catalog, &request, None, None, &context(&NeverCancel))
+                .err()
+                .expect("HTTP connection is required before dispatch");
+        assert_eq!(error.kind(), DirectRunErrorKind::InvalidRequest);
+        assert!(error.is_remote());
+        assert!(!error.blocks_following_work());
+        assert!(!marker.exists());
     }
 
     #[test]
