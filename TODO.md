@@ -65,8 +65,9 @@ committed work.
   Host access now permits transport tests: the complete root suite passes
   (930 passed, 1 ignored). A private prepared CPU embedding profile and cached
   model returned 2×768 vectors over real HTTP with verified cleanup; see
-  [evidence](docs/migration/direct-embedding-acceptance.md). Live-router embedding
-  profile and real embedding keyboard-UI acceptance remain part of all-lane work.
+  [evidence](docs/migration/direct-embedding-acceptance.md). A separate real
+  embedding keyboard-UI submission/result/history check also passes. Live-router
+  embedding profile acceptance remains part of all-lane work.
 - [ ] Keep original repositories, configs, runtime state and history until
   acceptance and rollback criteria are documented. Publication remains **NO-GO**
   until the exact outgoing history/export, endpoints, host paths, secrets and large

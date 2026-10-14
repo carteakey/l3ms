@@ -17,8 +17,11 @@ The cached model ran on a temporary loopback-only llama-server with zero GPU
 layers; both client and server cleanup were verified. Tracked disabled profiles,
 the live router and its model were untouched. The private setup failure refused
 before dispatch and was corrected, not treated as ambiguous inference to replay.
-See [exact embedding evidence](direct-embedding-acceptance.md); this is not a
-live-router, quality, GPU or real keyboard embedding-UI claim.
+See [exact embedding evidence](direct-embedding-acceptance.md). A deliberately
+separate real 80×24 embedding UI run now also passes: confirmed endpoint/model,
+typed batch submission, visible vector/dimension/usage result, metadata-only
+history, and UI/native server exit 0. This is not live-router, quality or GPU
+acceptance, or comprehensive UI acceptance.
 
 After full host access was granted, both local TCP/Unix socket creation, the
 user systemd bus and NVIDIA queries succeeded. The first full suite had only

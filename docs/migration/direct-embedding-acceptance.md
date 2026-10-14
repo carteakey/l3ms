@@ -34,7 +34,23 @@ succeeded. The original failed probe/log remain retained. A subsequent fixture
 directory-creation refusal was also before server launch. No inference was
 automatically retried after uncertain remote completion.
 
-Native vectors remain in the private result artifact, not ordinary job history.
-Existing UI fixtures cover batch rendering, committed endpoint/authentication,
-exact model gating and uncertain-cancellation admission closure. A real embedding
-keyboard-UI run and live-router embedding-profile acceptance are separate gates.
+## Real keyboard UI follow-up
+
+A deliberately separate real batch used another temporary CPU server at the
+same model/alias and a fresh `ui-state` within this private fixture. In the actual
+80×24 terminal UI, F3/Ctrl+G committed the loopback endpoint and advertised model;
+F8/`f` opened the native embedding form. Tab/text entry/Enter on Run once submitted
+the two public synthetic sentences. The visible result showed **2 × 768** and
+native usage **17 / 17**, then succeeded. No Chat message was sent.
+
+The metadata-only `ui-state/jobs.json` records one succeeded embeddings task;
+neither text nor vectors nor usage are persisted there. The UI exited 0 and its
+owned native server exited 0 after Ctrl+C; its native output confirmed the two
+completed inputs (8 and 9 tokens). The private fixture deliberately lacks normal
+downloader configuration, so its unrelated strict-load warning is not evidence
+of production downloader failure or complete UI acceptance.
+
+Native vectors remain in the private CLI result artifact/in-memory panel, not
+ordinary job history. Existing fixtures additionally cover authentication, exact
+model gating and uncertain-cancellation admission closure. Live-router embedding
+profile acceptance and GPU serving remain separate gates.
