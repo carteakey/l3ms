@@ -3,6 +3,45 @@
 Partial replacement evidence under the [simplification plan](simplification-plan.md).
 This does not complete GPU switching, other media tasks or the full port.
 
+## Rebuilt runtime and real CPU/UI recheck — 2026-10-14
+
+With explicit user approval, rebuilt the exact documented audio.cpp baseline
+`955c8725c611d511774e6be132aff6609163b2d2` in ignored branch-local
+`.toolkit/audio-runtime-20261014-SL4yZN/`. Both CPU-only CLI and CUDA+native-CPU
+CLI/server builds succeeded; non-generating loader checks list Breeze, HeartMuLa
+and H3. This is not a claim that every compiled model was executed. Existing
+broken vendor aliases/original paths were not changed; no weights were downloaded.
+
+Four separate real shared-CLI CPU requests reused the existing Q8_0 weights,
+seed 0, two threads, empty CUDA visibility and offline environment. Explicit
+`L3MS_AUDIO_CPP_ROOT` selects that fixture's `source/`; `L3MS_AUDIO_CPP_CLI`
+selects `build-cpu-only/bin/audiocpp_cli`. All outputs are nonzero mono PCM16
+at 24 kHz, and the bounded process-identity probe verifies child cleanup.
+
+| Mode | Whole CLI seconds | Final frames | Peak PCM16 |
+| --- | ---: | ---: | ---: |
+| Standard | 16.411 | 46,080 | 17,890 |
+| Design | 18.218 | 53,760 | 16,469 |
+| Clone | 19.722 | 59,520 | 15,691 |
+| Streaming | 15.358 | 46,080 | 17,890 |
+
+Streaming returns two completed chunks (7,680 and 38,400 frames), not live
+playback. Cloning uses only the synthetic standard WAV and its exact public
+transcript. This is execution/artifact evidence, not voice quality, similarity or
+a performance guarantee. Exact executed probes, wrapper/spec copies, inputs,
+invocations, WAVs and receipts are retained in private ignored
+`.toolkit/speech-acceptance-ckT3Wc/{standard,design,clon,streaming}/`.
+
+The real 80×24 keyboard UI also submitted standard CPU speech (`Hello.`),
+returned a valid 9,600-frame WAV (peak 9,295), and retained only metadata/relative
+artifact reference. A separate running speech job was cancelled with `c`:
+waiting appeared before owned cleanup was confirmed, history records cancelled,
+and `f` reopened only afterward. The empty new draft was discarded and the UI
+exited 0. History and WAV are retained under that fixture's `ui-state/`; no text,
+instruction, reference transcript or argv is stored in job history. The short
+panel shows only the beginning of a long output path; this is not complete
+artifact-navigation/visual acceptance. Live GPU execution/restoration remains open.
+
 ## Real execution
 
 The final branch debug CLI ran:

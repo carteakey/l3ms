@@ -45,9 +45,11 @@ committed work.
   site-manifest compatibility, standalone/import compatibility and CI checks.
   Current standalone checks pass (74 Python, 8 toolkit Rust, strict lint/build
   and list commands); cached Nagi CPU execution and narrow-terminal navigation
-  were rechecked. These do not close GPU/transport/quality gates. Locate the
-  missing audio.cpp runtime before repeating Breeze acceptance; existing weights
-  remain and no new download/rebuild is authorized by a missing-path guess.
+  were rechecked. These do not close GPU/transport/quality gates. The explicitly
+  approved branch-local audio.cpp rebuild now passes all four real CPU speech
+  modes and actual keyboard success/cancellation with existing weights. Original
+  aliases remain untouched; use explicit runtime overrides from the speech
+  acceptance record. GPU switching still needs an exclusive quiet window.
   Comfy's clean setup pin has been source-checked for native scoped jobs and its
   generated snapshots parser-tested; real endpoint, cancellation and artifact
   acceptance still remain. Do not add a custom server or global interrupt fallback.

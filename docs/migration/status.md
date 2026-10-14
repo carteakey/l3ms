@@ -11,6 +11,15 @@ runtime check.
 
 ## Host transport acceptance and retained-result fixes — 2026-10-14
 
+The approved branch-local audio.cpp rebuild is complete at the exact known
+Breeze baseline; no existing aliases or models were replaced. All four real CPU
+speech CLI modes pass again with process cleanup, and the actual keyboard UI
+passes standard speech plus cancellation, metadata-only history and reopening
+after cleanup. See [current speech evidence](direct-speech-acceptance.md#rebuilt-runtime-and-real-cpuui-recheck--2026-10-14).
+The live router later became inactive and an unrelated GPU claimant appeared
+without any service mutation by this work. Do not restore a stale captured state
+or preempt that process; live switching awaits a quiet window.
+
 Real CPU embedding acceptance now also passes through the shared CLI adapter:
 two distinct finite/nonzero 768-dimensional vectors and native usage 17/17.
 The cached model ran on a temporary loopback-only llama-server with zero GPU
