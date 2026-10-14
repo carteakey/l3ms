@@ -3,6 +3,40 @@
 This is the first replacement slice under the [simplification plan](simplification-plan.md),
 not full media/TTS/GPU or monorepo acceptance.
 
+## Real keyboard UI execution and cancellation — 2026-10-14
+
+Built the current branch and opened the real 80×24 terminal UI with an isolated
+mode-0700 `L3MS_DATA_DIR`. Using only F8, profile selection, `f`, Tab/text entry
+and Enter on Run once, submitted the same public synthetic infrastructure/billing
+question to the declared `decisions:nagi-smol-cpu` profile. Offline/cache flags,
+empty CUDA visibility and two CPU threads matched the CLI acceptance below.
+
+The first run succeeded with native latency **1,661.75 ms**, but exposed a short-
+terminal rendering issue: pretty-printed decision JSON began with brackets and
+hid the answer. The existing result preview now uses compact JSON, without the
+unnecessary singleton array. A repeated real run succeeded at **1,669.94 ms**;
+the visible panel showed infrastructure with confidence approximately **0.6507**.
+Switching away hid the result and returning restored it. Native probabilities
+remain in the in-memory preview; clipping still depends on terminal dimensions.
+The existing socket-free CPU form regression now asserts that the question and
+choice are actually visible at 80×24; it and strict lint/format/build checks pass.
+
+A third independently submitted UI run was cancelled with `c` while shown as
+running. The UI first showed cancellation requested/waiting, then cancelled with
+owned process cleanup confirmed. History recorded `cancelled`, not success.
+Opening `f` afterward succeeded, proving admission reopened after the reported
+cleanup; the new empty draft was discarded without another submission. All
+three UI sessions exited with code 0.
+
+Retained private history snapshot: ignored
+`.toolkit/native-ui-acceptance-gXuMWl/jobs.json` (inside a mode-0700 directory).
+It contains two succeeded records and one cancelled record with only safe job
+metadata, no graph/state/questions/answers/confidence/probabilities or argv.
+No GPU/provider/model download, service control or original-history mutation
+occurred. Initial llama-swap refresh failed because sockets are prohibited; the
+CPU task remained usable. This proves this CPU task's keyboard submission,
+result display and cancellation path, not full task/UI/quality acceptance.
+
 ## Real native CLI evidence
 
 Built the branch debug CLI and invoked `--run-profile --task decision --input`

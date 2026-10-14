@@ -36,6 +36,8 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Compact native decision JSON in the Stack result panel so a short terminal
+  shows the answer immediately instead of only opening array/object brackets.
 - Verify Comfy job snapshots against the toolkit's exact native setup pin rather
   than only synthetic terminal envelopes. Clarify that its scoped job contract
   requires no custom server patch; pending cancellation can still be unconfirmed

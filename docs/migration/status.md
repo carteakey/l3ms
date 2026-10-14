@@ -9,6 +9,25 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
+## Real CPU decision keyboard acceptance — 2026-10-14
+
+The real 80×24 UI completed two offline cached Nagi CPU decisions and cancelled
+a third through its keyboard form. This exposed and fixed a result-preview
+issue: pretty-printed singleton-array JSON showed only brackets in the short
+panel. Compact answer JSON now starts with the question/choice; no new form,
+worker, protocol or persistence was added. The existing form regression checks
+visible question/choice at 80×24 and still verifies metadata-only history.
+Strict lint/format/build and the focused regression pass. Root source changes
+are **+7 lines**, including the regression; the source-reduction target remains
+unmet. See [exact UI evidence](direct-decision-acceptance.md#real-keyboard-ui-execution-and-cancellation--2026-10-14).
+
+Cancellation reported owned cleanup, recorded a cancelled job and reopened the
+form only afterward; all three sessions exited 0. Safe history is retained in
+ignored `.toolkit/native-ui-acceptance-gXuMWl/`. No service/provider/download/GPU
+or original-history changes. This closes the narrow CPU keyboard success/result/
+cancel check, not all-lane or visual/quality acceptance. Live transport/GPU gates
+still require host access; the missing audio.cpp path remains unresolved.
+
 ## Pinned native Comfy contract verification — 2026-10-14
 
 Rechecked the clean vendored ComfyUI checkout against the toolkit setup pin,

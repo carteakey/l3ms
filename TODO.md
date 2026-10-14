@@ -51,6 +51,9 @@ committed work.
   Comfy's clean setup pin has been source-checked for native scoped jobs and its
   generated snapshots parser-tested; real endpoint, cancellation and artifact
   acceptance still remain. Do not add a custom server or global interrupt fallback.
+  Real 80×24 Nagi CPU keyboard submission/result/cancellation now pass, including
+  metadata-only history and reopening admission after cleanup. This is one task,
+  not all UI tasks or comprehensive visual/accessibility acceptance.
 - [ ] Run `cargo test --all-targets --locked` where local TCP/Unix sockets are
   permitted, then run a bounded real embedding batch with an explicitly prepared
   profile, installed weights and configured endpoint. Do not silently enable or

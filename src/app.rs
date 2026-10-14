@@ -8646,7 +8646,7 @@ fn direct_native_result_preview(result: &DirectRunResult) -> String {
     let rendered = match result {
         DirectRunResult::Decision(result) => match &result.result {
             crate::control::requests::InferenceResult::Decision { answers } => {
-                serde_json::to_string_pretty(std::slice::from_ref(answers))
+                serde_json::to_string(answers)
                     .unwrap_or_else(|_| "Decision output could not be rendered".into())
             }
             _ => "Unexpected native result lane".into(),
@@ -11379,6 +11379,13 @@ mod tests {
         assert!(!persisted.contains("decision-private-secret"));
         assert!(!persisted.contains("argv"));
         assert!(marker.exists());
+
+        // A short terminal must show the answer, not only JSON opening brackets.
+        let mut narrow = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        narrow.draw(|frame| app.draw(frame)).unwrap();
+        let visible = terminal_text(&narrow);
+        assert!(visible.contains("\"choice\":\"yes\""));
+        assert!(visible.contains("\"route\""));
 
         let language_index = app
             .stack_catalog
