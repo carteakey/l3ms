@@ -1,10 +1,10 @@
-//! Linux control-loop owner for control-only and explicit managed sessions.
+//! Linux control-loop owner for explicit managed sessions.
 //!
 //! Binding acquires listener/host/device ownership before history is loaded or
-//! reconciled. Control-only and managed loops keep admission closed except for
-//! their explicit startup paths, and neither loop exposes its core for mutation.
-//! Each invocation consumes the owner and releases its endpoint and locks on
-//! every return path.
+//! reconciled. Managed sessions keep admission closed except for their explicit
+//! startup paths, and the loop does not expose its core for mutation. Each
+//! invocation consumes the owner and releases its endpoint and locks on every
+//! return path.
 //!
 //! One authenticated peer is served at a time, one exchange per connection.
 //! Peer time and accepted/denied connection attempts are bounded. Same-user
@@ -136,52 +136,6 @@ impl ControlDaemon {
             peer_timeout: config.peer_timeout,
             max_connections: config.max_connections,
         })
-    }
-
-    /// Consuming, bounded session. A failed exchange is never retried. The
-    /// overall deadline also limits a peer arriving just before shutdown.
-    /// Cancellation/deadline stops intake; no backend was started to clean up.
-    pub fn run(mut self, context: &OperationContext<'_>) -> Result<RunReport, DaemonError> {
-        let mut report = RunReport {
-            completed_exchanges: 0,
-            failed_connections: 0,
-            stopped: StopReason::ConnectionLimit,
-        };
-        for _ in 0..self.max_connections {
-            if let Some(reason) = stop_reason(context) {
-                report.stopped = reason;
-                return Ok(report);
-            }
-            let mut peer = match self.listener.accept(context) {
-                Ok(peer) => peer,
-                Err(LocalIpcError::Cancelled) => {
-                    report.stopped = StopReason::Cancelled;
-                    return Ok(report);
-                }
-                Err(LocalIpcError::Deadline) => {
-                    report.stopped = StopReason::Deadline;
-                    return Ok(report);
-                }
-                Err(LocalIpcError::PeerDenied) => {
-                    report.failed_connections += 1;
-                    continue;
-                }
-                Err(error) => return Err(DaemonError::Transport(error)),
-            };
-            let deadline = (Instant::now() + self.peer_timeout).min(context.deadline());
-            let cancellation = ForwardCancellation(context);
-            let peer_context = OperationContext::new(deadline, &cancellation);
-            if self.serve_connection(&mut peer, &peer_context).is_ok() {
-                report.completed_exchanges += 1;
-            } else {
-                report.failed_connections += 1;
-            }
-            if let Some(reason) = stop_reason(context) {
-                report.stopped = reason;
-                return Ok(report);
-            }
-        }
-        Ok(report)
     }
 
     /// Opt in to the concrete, single-supervisor llama-swap language path.
@@ -653,64 +607,6 @@ impl ControlDaemon {
             }
         })
     }
-
-    fn serve_connection(
-        &mut self,
-        connection: &mut super::local_ipc::LocalConnection,
-        context: &OperationContext<'_>,
-    ) -> Result<(), LocalIpcError> {
-        let request = connection.read_incoming_request(context)?;
-        if context.is_cancelled() {
-            return Err(LocalIpcError::Cancelled);
-        }
-        if context.remaining().is_zero() {
-            return Err(LocalIpcError::Deadline);
-        }
-        let response = match request {
-            IncomingRequest::Control(request) => {
-                self.core.handle_client_request(request, Instant::now())
-            }
-            IncomingRequest::Results(query) => self.handle_results_query(query),
-            IncomingRequest::Artifact(query) => managed_artifact_query(
-                &self.core,
-                &self.results,
-                &mut self.artifacts,
-                query,
-                context,
-            ),
-        };
-        connection.write_response(&response, context)
-    }
-
-    fn handle_results_query(&self, query: ResultsQuery) -> ResponseEnvelope {
-        let Some(state) = self.core.authoritative_request_status(&query.request_id) else {
-            return results_error(query.request_id, ResponseErrorCode::Internal);
-        };
-        let page = match self.results.page(
-            &query.request_id,
-            query.after_cursor,
-            query.byte_budget as usize,
-        ) {
-            Ok(page) => page,
-            Err(error) => {
-                let code = match error {
-                    ResultBufferError::InvalidRequestId
-                    | ResultBufferError::InvalidCursor
-                    | ResultBufferError::InvalidPageBudget
-                    | ResultBufferError::PageBudgetTooSmall => ResponseErrorCode::InvalidRequest,
-                    _ => ResponseErrorCode::Internal,
-                };
-                return results_error(query.request_id, code);
-            }
-        };
-        ResponseEnvelope::v2_results(ResponseMessage::Results {
-            request_id: query.request_id,
-            after_cursor: query.after_cursor,
-            byte_budget: query.byte_budget,
-            state,
-            page,
-        })
-    }
 }
 
 fn serve_managed_connection(
@@ -1180,11 +1076,10 @@ mod tests {
     use crate::control::result_buffer::{
         Availability, ResultEvent, ResultTerminal, MIN_PAGE_BYTES,
     };
-    use crate::control::runtime::{Cancellation, NeverCancel};
+    use crate::control::runtime::NeverCancel;
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixStream;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::TempDir;
 
     #[test]
@@ -1364,10 +1259,28 @@ mod tests {
         peer.read_response(&context).unwrap()
     }
 
+    /// Exercise one accepted exchange through the production managed request
+    /// handler without recreating its session/report loop in a test harness.
+    fn serve_managed_once(
+        daemon: &mut ControlDaemon,
+        context: &OperationContext<'_>,
+        accepted_result_ids: &mut BTreeSet<String>,
+    ) -> Result<(), LocalIpcError> {
+        let mut peer = daemon.listener.accept(context)?;
+        serve_managed_connection(
+            &mut daemon.core,
+            &mut daemon.results,
+            &mut daemon.artifacts,
+            &mut peer,
+            context,
+            accepted_result_ids,
+        )
+    }
+
     #[test]
     fn status_is_served_but_submission_stays_closed_and_owner_is_released() {
         let fixture = Fixture::new();
-        let daemon = fixture.bind(fixture.config(2)).unwrap();
+        let mut daemon = fixture.bind(fixture.config(2)).unwrap();
         let directory = fixture.socket.path().to_owned();
         let client = std::thread::spawn(move || {
             assert_eq!(
@@ -1405,17 +1318,12 @@ mod tests {
             );
         });
         let ctx = OperationContext::new(Instant::now() + Duration::from_secs(3), &NeverCancel);
-        let report = daemon.run(&ctx).unwrap();
+        let mut accepted_result_ids = BTreeSet::new();
+        serve_managed_once(&mut daemon, &ctx, &mut accepted_result_ids).unwrap();
+        serve_managed_once(&mut daemon, &ctx, &mut accepted_result_ids).unwrap();
         client.join().unwrap();
-        assert_eq!(
-            report,
-            RunReport {
-                completed_exchanges: 2,
-                failed_connections: 0,
-                stopped: StopReason::ConnectionLimit
-            }
-        );
         assert!(!fixture.data.path().join("jobs.json").exists());
+        drop(daemon);
         fixture.released();
     }
 
@@ -1442,9 +1350,10 @@ mod tests {
             (queued, missing)
         });
         let context = OperationContext::new(Instant::now() + Duration::from_secs(3), &NeverCancel);
-        let report = daemon.run(&context).unwrap();
+        let mut accepted_result_ids = BTreeSet::new();
+        serve_managed_once(&mut daemon, &context, &mut accepted_result_ids).unwrap();
+        serve_managed_once(&mut daemon, &context, &mut accepted_result_ids).unwrap();
         let (queued, missing) = client.join().unwrap();
-        assert_eq!(report.completed_exchanges, 2);
         assert!(matches!(
             queued.message,
             ResponseMessage::Results {
@@ -1462,6 +1371,7 @@ mod tests {
                 ..
             } if page.availability == Availability::Unknown
         ));
+        drop(daemon);
         fixture.released();
     }
 
@@ -1620,9 +1530,12 @@ mod tests {
             .unwrap();
             assert_eq!(wrong_kind.availability, Availability::Unknown);
         });
-        let report = daemon.run(&context).unwrap();
+        let mut accepted_result_ids = BTreeSet::new();
+        for _ in 0..4 {
+            serve_managed_once(&mut daemon, &context, &mut accepted_result_ids).unwrap();
+        }
         client.join().unwrap();
-        assert_eq!(report.completed_exchanges, 4);
+        drop(daemon);
         fixture.released();
     }
 
@@ -1745,9 +1658,12 @@ mod tests {
             )
         });
         let context = OperationContext::new(Instant::now() + Duration::from_secs(3), &NeverCancel);
-        let report = daemon.run(&context).unwrap();
+        let mut accepted_result_ids = BTreeSet::new();
+        // The first reply is deliberately abandoned by the client; serving it
+        // once must not change the retained page used by the second query.
+        let _ = serve_managed_once(&mut daemon, &context, &mut accepted_result_ids);
+        serve_managed_once(&mut daemon, &context, &mut accepted_result_ids).unwrap();
         let response = client.join().unwrap();
-        assert_eq!(report.completed_exchanges + report.failed_connections, 2);
         assert!(matches!(
             response.message,
             ResponseMessage::Results {
@@ -1762,6 +1678,7 @@ mod tests {
                 && page.next_cursor == 1
                 && serde_json::to_vec(&page).unwrap().len() <= byte_budget as usize
         ));
+        drop(daemon);
         fixture.released();
     }
 
@@ -1790,7 +1707,7 @@ mod tests {
             .unwrap();
         drop(first);
 
-        let restarted = fixture.bind(fixture.config(1)).unwrap();
+        let mut restarted = fixture.bind(fixture.config(1)).unwrap();
         assert_eq!(
             restarted.core.request_state("restart-results"),
             Some("succeeded")
@@ -1805,9 +1722,9 @@ mod tests {
             )
         });
         let context = OperationContext::new(Instant::now() + Duration::from_secs(3), &NeverCancel);
-        let report = restarted.run(&context).unwrap();
+        let mut accepted_result_ids = BTreeSet::new();
+        serve_managed_once(&mut restarted, &context, &mut accepted_result_ids).unwrap();
         let response = client.join().unwrap();
-        assert_eq!(report.completed_exchanges, 1);
         assert!(matches!(
             response.message,
             ResponseMessage::Results {
@@ -1818,13 +1735,14 @@ mod tests {
                 && page.events.is_empty()
                 && page.terminal.is_none()
         ));
+        drop(restarted);
         fixture.released();
     }
 
     #[test]
-    fn malformed_and_stalled_peers_do_not_block_next_peer() {
+    fn managed_handler_continues_after_malformed_and_stalled_peers() {
         let fixture = Fixture::new();
-        let daemon = fixture.bind(fixture.config(3)).unwrap();
+        let mut daemon = fixture.bind(fixture.config(3)).unwrap();
         let directory = fixture.socket.path().to_owned();
         // Fill two connections before the good peer. First frame is invalid,
         // second holds an incomplete length prefix beyond the peer deadline.
@@ -1840,8 +1758,21 @@ mod tests {
                 },
             )
         });
-        let ctx = OperationContext::new(Instant::now() + Duration::from_secs(3), &NeverCancel);
-        let report = daemon.run(&ctx).unwrap();
+        let mut accepted_result_ids = BTreeSet::new();
+        let malformed_context =
+            OperationContext::new(Instant::now() + Duration::from_secs(1), &NeverCancel);
+        assert!(
+            serve_managed_once(&mut daemon, &malformed_context, &mut accepted_result_ids).is_err()
+        );
+        let stalled_context =
+            OperationContext::new(Instant::now() + Duration::from_millis(100), &NeverCancel);
+        assert!(matches!(
+            serve_managed_once(&mut daemon, &stalled_context, &mut accepted_result_ids),
+            Err(LocalIpcError::Deadline)
+        ));
+        let good_context =
+            OperationContext::new(Instant::now() + Duration::from_secs(3), &NeverCancel);
+        serve_managed_once(&mut daemon, &good_context, &mut accepted_result_ids).unwrap();
         assert!(matches!(
             client.join().unwrap(),
             ResponseMessage::Status {
@@ -1849,55 +1780,8 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(
-            report,
-            RunReport {
-                completed_exchanges: 1,
-                failed_connections: 2,
-                stopped: StopReason::ConnectionLimit
-            }
-        );
+        drop(daemon);
         fixture.released();
-    }
-
-    struct Flag(AtomicBool);
-    impl Cancellation for Flag {
-        fn is_cancelled(&self) -> bool {
-            self.0.load(Ordering::Acquire)
-        }
-    }
-    #[test]
-    fn cancellation_interrupts_stalled_peer_and_releases_ownership() {
-        let fixture = Fixture::new();
-        let mut config = fixture.config(10);
-        config.peer_timeout = Duration::from_secs(30);
-        let daemon = fixture.bind(config).unwrap();
-        let _stalled = UnixStream::connect(fixture.socket.path().join("coordinator.sock")).unwrap();
-        let cancelled = Flag(AtomicBool::new(false));
-        std::thread::scope(|scope| {
-            scope.spawn(|| {
-                std::thread::sleep(Duration::from_millis(50));
-                cancelled.0.store(true, Ordering::Release);
-            });
-            let ctx = OperationContext::new(Instant::now() + Duration::from_secs(3), &cancelled);
-            assert_eq!(daemon.run(&ctx).unwrap().stopped, StopReason::Cancelled);
-        });
-        fixture.released();
-    }
-
-    #[test]
-    fn overall_deadline_limits_idle_listener_and_stalled_peer() {
-        for stalled in [false, true] {
-            let fixture = Fixture::new();
-            let daemon = fixture.bind(fixture.config(10)).unwrap();
-            let _peer = stalled.then(|| {
-                UnixStream::connect(fixture.socket.path().join("coordinator.sock")).unwrap()
-            });
-            let ctx =
-                OperationContext::new(Instant::now() + Duration::from_millis(40), &NeverCancel);
-            assert_eq!(daemon.run(&ctx).unwrap().stopped, StopReason::Deadline);
-            fixture.released();
-        }
     }
 
     #[test]
@@ -2044,7 +1928,7 @@ mod tests {
             .unwrap();
         history.persist_in(fixture.data.path()).unwrap();
         drop(history);
-        let daemon = fixture.bind(fixture.config(1)).unwrap();
+        let mut daemon = fixture.bind(fixture.config(1)).unwrap();
         assert_eq!(daemon.core.queued_count(), 0);
         assert_eq!(daemon.core.active_count(), 0);
         let directory = fixture.socket.path().to_owned();
@@ -2057,7 +1941,8 @@ mod tests {
             )
         });
         let ctx = OperationContext::new(Instant::now() + Duration::from_secs(3), &NeverCancel);
-        daemon.run(&ctx).unwrap();
+        let mut accepted_result_ids = BTreeSet::new();
+        serve_managed_once(&mut daemon, &ctx, &mut accepted_result_ids).unwrap();
         assert_eq!(
             client.join().unwrap(),
             ResponseMessage::Status {
@@ -2065,6 +1950,7 @@ mod tests {
                 state: RequestStatus::Interrupted,
             }
         );
+        drop(daemon);
         fixture.released();
     }
 

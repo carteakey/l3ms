@@ -101,6 +101,16 @@ const TAB_NAMES: [&str; 8] = [
     "Maintenance",
     "Stack Catalog",
 ];
+const TAB_SHORT_NAMES: [&str; 8] = [
+    "Work",
+    "Model Ops",
+    "Chat",
+    "Browse",
+    "Download",
+    "Jobs",
+    "Maint",
+    "Stack",
+];
 const BACKGROUND_QUEUE_CAPACITY: usize = 512;
 const EVENTS_PER_TICK: usize = 128;
 const MAX_PROCESS_LINE_BYTES: usize = 16 * 1024;
@@ -6407,7 +6417,12 @@ impl App {
     }
 
     fn draw_tabs(&self, frame: &mut Frame, area: Rect) {
-        let titles = TAB_NAMES
+        let names = if area.width >= 112 {
+            &TAB_NAMES
+        } else {
+            &TAB_SHORT_NAMES
+        };
+        let titles = names
             .iter()
             .map(|name| Line::from(*name))
             .collect::<Vec<_>>();
@@ -7350,15 +7365,28 @@ impl App {
                 .wrap(Wrap { trim: false }),
             info[0],
         );
+        let explicit_coordinator_observer = self.coordinator_request_id.is_some()
+            || self.coordinator_action_pending
+            || self.input_mode == InputMode::CoordinatorInput;
+        let coordinator_configured = self.stack_coordinator_socket_dir.is_some();
         #[cfg(target_os = "linux")]
-        let show_direct_native = self.direct_native_job.is_some()
-            || self.direct_native_admission_closed
-            || self.direct_native_summary.is_some()
-            || self.selected_stack_profile().is_some_and(|profile| {
-                self.stack_catalog
-                    .as_ref()
-                    .is_some_and(|catalog| is_direct_native_profile(profile, catalog))
-            });
+        let show_direct_native = {
+            let native_busy_or_uncertain =
+                self.direct_native_job.is_some() || self.direct_native_admission_closed;
+            // A previous retained ID must not hide the newer native result.
+            // Beginning a new observation overrides it; enqueue then clears it.
+            let retained_native_summary = self.direct_native_summary.is_some()
+                && !self.coordinator_action_pending
+                && self.input_mode != InputMode::CoordinatorInput;
+            let selected_native_profile = !coordinator_configured
+                && !explicit_coordinator_observer
+                && self.selected_stack_profile().is_some_and(|profile| {
+                    self.stack_catalog
+                        .as_ref()
+                        .is_some_and(|catalog| is_direct_native_profile(profile, catalog))
+                });
+            native_busy_or_uncertain || retained_native_summary || selected_native_profile
+        };
         #[cfg(not(target_os = "linux"))]
         let show_direct_native = false;
         #[cfg(target_os = "linux")]
@@ -7375,6 +7403,13 @@ impl App {
         });
         #[cfg(not(target_os = "linux"))]
         let direct_result_visible = false;
+        let show_coordinator_observer =
+            !show_direct_native && (coordinator_configured || explicit_coordinator_observer);
+        let show_native_guidance = !show_direct_native && !show_coordinator_observer;
+        #[cfg(target_os = "linux")]
+        let native_chat_guidance = "f opens Chat/task\nChat handoff uses the existing Chat tab.\nSupported native tasks run foreground; unsupported profiles are refused.";
+        #[cfg(not(target_os = "linux"))]
+        let native_chat_guidance = "f opens Chat\nChat handoff uses the existing Chat tab.\nNative task forms are unavailable here; unsupported profiles are refused.";
         #[cfg(target_os = "linux")]
         let (action_text, action_title) = if show_direct_native {
             let text = self.direct_native_summary.as_ref().map_or_else(
@@ -7433,6 +7468,8 @@ impl App {
                 },
             );
             (text, "Foreground native task")
+        } else if show_native_guidance {
+            (native_chat_guidance.to_owned(), "Native / Chat guidance")
         } else {
             let retained = self.coordinator_request_id.as_deref().unwrap_or("none");
             let lane = self.coordinator_request_lane.map_or("—", Lane::as_str);
@@ -7482,10 +7519,14 @@ impl App {
             } else {
                 "no explicit socket configured"
             };
-            (
-                format!("{socket}\nretained ID: {retained}\nlane: {lane}\n{lifecycle}"),
-                "Coordinator · observation/cancel only",
-            )
+            if show_native_guidance {
+                (native_chat_guidance.to_owned(), "Native / Chat guidance")
+            } else {
+                (
+                    format!("{socket}\nretained ID: {retained}\nlane: {lane}\n{lifecycle}"),
+                    "Coordinator · observation/cancel only",
+                )
+            }
         };
         frame.render_widget(
             Paragraph::new(action_text)
@@ -7513,6 +7554,8 @@ impl App {
             } else {
                 "Foreground native result is hidden until its completed profile is selected.".into()
             }
+        } else if show_native_guidance {
+            "Foreground native results appear here after a supported task completes. Coordinator results require a retained request ID and explicit observation.".to_owned()
         } else {
             self.coordinator_output.as_ref().map_or_else(
             || {
@@ -7536,6 +7579,8 @@ impl App {
                     theme::block()
                         .title(if show_direct_native {
                             "Foreground native result"
+                        } else if show_native_guidance {
+                            "Native task results"
                         } else {
                             "Private native result panel · explicit observation only"
                         })
@@ -10233,6 +10278,34 @@ mod tests {
         app.stack_catalog_state.select(Some(index));
     }
 
+    #[test]
+    fn narrow_tab_bar_keeps_all_eight_tabs_and_selected_stack_visible() {
+        let fixture = AppFixture::new();
+        let mut app = fixture.app();
+        app.tab = Tab::StackCatalog;
+
+        let mut narrow = Terminal::new(TestBackend::new(80, 3)).unwrap();
+        narrow
+            .draw(|frame| app.draw_tabs(frame, Rect::new(0, 0, 80, 3)))
+            .unwrap();
+        let narrow_row = terminal_row(&narrow, 1);
+        for label in TAB_SHORT_NAMES {
+            assert!(narrow_row.contains(label), "missing narrow tab {label:?}");
+        }
+        assert!(
+            narrow_row.contains("Stack"),
+            "selected Stack tab was clipped"
+        );
+
+        let mut wide = Terminal::new(TestBackend::new(120, 3)).unwrap();
+        wide.draw(|frame| app.draw_tabs(frame, Rect::new(0, 0, 120, 3)))
+            .unwrap();
+        let wide_row = terminal_row(&wide, 1);
+        for label in TAB_NAMES {
+            assert!(wide_row.contains(label), "missing full-width tab {label:?}");
+        }
+    }
+
     fn connect_test_chat_at(
         app: &mut App,
         endpoint: &str,
@@ -11106,6 +11179,8 @@ mod tests {
         assert!(rendered.contains("Embedding batch"));
         assert!(rendered.contains("vector[0]"));
         assert!(rendered.contains("prompt_tokens=5"));
+        assert!(rendered.contains("Foreground native result"));
+        assert!(!rendered.contains("results are shown here only after pressing o"));
         assert!(!rendered.contains("embedding-private-secret"));
     }
 
@@ -11930,6 +12005,105 @@ mod tests {
         assert!(app.running_process.is_none());
         assert!(!app.model_action_pending);
         assert!(!app.chat_connection_pending);
+    }
+
+    #[test]
+    fn stack_catalog_without_coordinator_shows_native_chat_guidance() {
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        let mut app = fixture.app();
+        focus_stack_profile_by_id(&mut app, "local-chat");
+        assert!(app.stack_coordinator_socket_dir.is_none());
+        assert!(app.coordinator_request_id.is_none());
+
+        let mut narrow = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        narrow.draw(|frame| app.draw(frame)).unwrap();
+        let narrow_text = (0..24)
+            .map(|row| terminal_row(&narrow, row))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(narrow_text.contains("Native / Chat guidance"));
+        assert!(narrow_text.contains("f opens Chat/task"));
+        assert!(narrow_text.contains("Native task results"));
+        assert!(!narrow_text.contains("Coordinator · observation/cancel only"));
+        assert!(!narrow_text.contains("results are shown here only after pressing o"));
+
+        let mut wide = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        wide.draw(|frame| app.draw(frame)).unwrap();
+        let wide_text = terminal_text(&wide);
+        assert!(wide_text.contains("existing Chat tab"));
+        assert!(wide_text.contains("f opens Chat/task"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn explicit_coordinator_observer_overrides_selected_native_profile() {
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        let mut settings = crate::settings::Settings::default();
+        settings.stack.coordinator_socket_dir = Some(
+            fixture
+                .data
+                .path()
+                .join("configured-but-no-listener")
+                .display()
+                .to_string(),
+        );
+        crate::settings::save_settings_in(fixture.data.path(), &settings).unwrap();
+
+        let mut app = fixture.app();
+        focus_stack_profile_by_id(&mut app, "nagi");
+        assert!(app
+            .selected_stack_profile()
+            .is_some_and(is_direct_native_decision_profile));
+        app.direct_native_summary = Some(DirectNativeSummary {
+            job_id: 7,
+            lane: Lane::Decisions,
+            profile_id: "nagi".into(),
+            task: "decision".into(),
+            cuda: false,
+            requires_idle_gpu_window: false,
+            native_id: None,
+            state: DirectNativeState::Succeeded,
+            result: None,
+        });
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        app.coordinator_request_id = Some("caller:previous".into());
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(terminal_text(&terminal).contains("Foreground native task"));
+
+        app.coordinator_request_id = None;
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.input_mode, InputMode::CoordinatorInput);
+        app.coordinator_input = "caller:render-only".into();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let prompt = terminal_text(&terminal);
+        assert!(prompt.contains("Caller request ID to observe"));
+        assert!(prompt.contains("caller:render-only"));
+        assert!(!prompt.contains("Foreground native task"));
+
+        app.clear_direct_native_result_display();
+        app.input_mode = InputMode::Normal;
+        app.coordinator_input_action = None;
+        app.coordinator_request_id = Some("caller:retained".into());
+        app.coordinator_request_lane = Some(Lane::Decisions);
+        app.coordinator_request_terminal = true;
+        app.coordinator_results_available = true;
+        app.coordinator_output_complete = true;
+        app.coordinator_output = Some(NativeOutput::Decisions {
+            answers: vec![serde_json::json!({"answer": "retained observer result"})
+                .as_object()
+                .unwrap()
+                .clone()],
+        });
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let retained = terminal_text(&terminal);
+        assert!(retained.contains("Coordinator · observation/cancel only"));
+        assert!(retained.contains("retained ID: caller:retained"));
+        assert!(retained.contains("Private native result panel · explicit observation only"));
+        assert!(retained.contains("retained observer result"));
     }
 
     #[cfg(target_os = "linux")]

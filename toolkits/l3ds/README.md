@@ -3,19 +3,28 @@
 A keyboard-first, script-first terminal toolkit and benchmark harness for local **Decision Models** ("System 1" models). 
 Companion to **[`l3ms`](https://github.com/carteakey/l3ms)** (Language Models) and **[`l2m2`](https://github.com/carteakey/l2m2)** (Latent Media Models).
 
-Unlike autoregressive LLMs (System 2) that generate token-by-token JSON, decision models map a state and a closed option set into typed outputs (`choice`, `score`, `noul`). The latency figures below are manifest expectations, not verified local benchmark results.
+Unlike autoregressive LLMs (System 2) that generate token-by-token JSON, decision models map a state and a closed option set into typed outputs (`choice`, `score`, `noul`). The table lists declared profiles and their current readiness; manifest latency values are targets, not general performance guarantees. An offline Nagi CPU execution has been recorded, but CUDA performance and model quality remain unverified.
 
 ---
 
-## Supported Decision Engines
+## Declared Decision Profiles and Readiness
 
-| Profile | Engine | Architecture | Tier | Deployment | Expected Latency |
-|---|---|---|---|---|---|
-| `nagi-smol` | Nagi | ModernBERT-large / M2' | Smol (~480M) | Local (CPU/CUDA) | ~17ms |
-| `nagi-big` | Nagi | Qwen3.5-4B + Adapter | Big (4B) | Local (CUDA 8.5GB) | ~70ms |
-| `laya-en` | Laya | ModernBERT-large | Smol (~350M) | Local (CPU/CUDA) | ~13ms |
-| `semif-openjev` | SemIf | Causal Logit Extraction | Mid (~3B) | Local (CUDA 7.0GB) | ~51ms |
-| `jev-api` | Jev | Proprietary Hosted | Cloud API | Remote API | ~250–500ms (WAN) |
+| Profile | Engine | Architecture / tier | Declared deployment | Manifest expected latency | Readiness |
+|---|---|---|---|---:|---|
+| `nagi-smol` | Nagi | ModernBERT-large / M2', Smol (~480M) | Local (CUDA; CPU fallback) | ~17ms | CUDA target is unverified; CPU evidence is for the separate explicit CPU profile. |
+| `nagi-smol-cpu` | Nagi | ModernBERT-large / M2', Smol (~480M) | Local (CPU only) | ~1,600ms | Offline native execution used the installed environment and cached weights; this is not a quality or clean-install claim. |
+| `nagi-big` | Nagi | Qwen3.5-4B + Adapter, Big (4B) | Local (CUDA, 8.5GB) | ~70ms | Declared profile; native execution, latency and quality are unverified. |
+| `laya-en` | Laya | ModernBERT-large, Smol (~350M) | Local (CUDA; CPU fallback) | ~13ms | Declared profile; native execution, latency and quality are unverified. |
+| `semif-openjev` | SemIf | Causal Logit Extraction, Mid (~3B) | Local (CUDA, 7.0GB) | ~51ms | No native forward pass: standalone execution refuses unless `--simulate` is explicit; simulated output is demo-only, not native acceptance. |
+| `jev-api` | Jev | Proprietary hosted | Remote API | ~250–500ms (WAN) | No paid live-provider acceptance is recorded. |
+
+The Nagi CPU profile is explicitly named `nagi-smol-cpu`; current direct-CPU
+acceptance details are in [Direct CPU decision acceptance](../../docs/migration/direct-decision-acceptance.md).
+The earlier [Nagi preparation and acceptance record](../../docs/migration/nagi-acceptance.md)
+documents pinned environment inputs and hash-verified model acquisition. The
+latest direct CPU run reused the installed environment and offline cache; it
+did not repeat a clean-machine installation. Neither record verifies CUDA
+latency, CUDA execution quality, or decision accuracy.
 
 ---
 
@@ -67,21 +76,19 @@ fails.
 
 This setup may download multi-gigabyte CUDA wheels. It installs Python packages
 only; it does not fetch model weights, run inference, or contact a hosted model
-API. The pins are reproducible environment inputs, not evidence that Nagi
-inference or the manifest's expected latency has been validated. They target
-CPython 3.12.13 on Linux x86_64 with CUDA 12.4 wheels; other platforms need a
-separately validated lock. The shared Hugging Face cache had no model snapshots
-at the latest migration audit, so a real smoke run still needs a separately
-approved Nagi-Smol model acquisition. No model weights have been acquired by
-this setup work, and the model artifact revision/checksum remain unrecorded;
-capture them during that authorized acquisition before calling inference
-reproducible.
+API. The pins target CPython 3.12.13 on Linux x86_64 with CUDA 12.4 wheels;
+other platforms need a separately validated lock. The Nagi artifact revision
+and hashes were recorded during the separate acquisition documented in the
+acceptance record above. The CPU evidence used that already-installed
+environment and cached weights in offline mode; it does not show a clean
+machine can install and run without separate environment/model preparation.
+The declared CUDA target and model quality remain unverified.
 
-After the weights are available, use the Hub's offline mode for a cache-only
-smoke test; this prevents the test from silently initiating model acquisition:
+To repeat a cache-only smoke test, use the Hub's offline mode; this prevents
+the test from silently initiating model acquisition:
 
 ```bash
-HF_HUB_OFFLINE=1 ./target/release/l3ds --profile nagi-smol \
+HF_HUB_OFFLINE=1 ./target/release/l3ds --profile nagi-smol-cpu \
   --state '{"alert":"test"}' \
   --question '{"route":{"type":"choice","criteria":{"infra":"Infrastructure","billing":"Billing"}}}'
 ```
@@ -91,7 +98,7 @@ For Phase 3 evidence, require a successful native result labeled
 and retain its P50/P95 and option-flip results:
 
 ```bash
-./target/release/l3ds --bench --profile nagi-smol \
+./target/release/l3ds --bench --profile nagi-smol-cpu \
   --suite routing-gate --iterations 10
 ```
 
@@ -150,9 +157,9 @@ No paid provider acceptance has been run. Official contracts:
 Normal profile and benchmark commands fail if the native model is unavailable;
 they never substitute fabricated decisions. Use `--simulate` only for an
 explicit synthetic demo, not performance or migration acceptance. The SemIf
-bridge currently has no native forward pass and therefore requires that demo
-flag until its adapter is implemented. Hosted profiles require a configured API
-credential for real requests.
+bridge currently has no native forward pass: standalone SemIf requests refuse
+without `--simulate`, and a simulated answer is not native acceptance. Hosted
+profiles require a configured API credential for real requests.
 
 The native Python runner also accepts `--input-stdin` for coordinator or script
 callers. Feed a UTF-8 JSON object with exactly `state` and `questions` (at most
@@ -185,8 +192,8 @@ Test competitors under real-time clock deadlines (e.g. 100ms ticks):
 
 Under a real-time game clock (such as Snake, Drone Swarm, or Bomber Arena):
 1. **Clock Deadlines:** The simulation advances every 100ms.
-2. **Local vs Remote WAN:** The manifest targets **~17ms (Smol)** and **~70ms (Big)** on the intended host, versus a longer expected remote roundtrip. These are design targets until a native, reproducible run is recorded.
-3. **Accuracy vs Pure Speed:** The smaller Laya/Nagi-Smol and larger Nagi-Big profiles explore this tradeoff. Actual quality and deadline performance require real model measurements; `--simulate` output is not evidence.
+2. **Local vs Remote WAN:** The manifest's **~17ms (Smol)** and **~70ms (Big)** figures are CUDA design targets, not accepted measurements. The explicit Nagi CPU profile has an offline native run around **1.6 seconds per forward pass**; it is not a 100ms-tick CPU target. See the acceptance records above.
+3. **Accuracy vs Pure Speed:** The smaller Laya/Nagi-Smol and larger Nagi-Big profiles explore this tradeoff. The recorded CPU run verifies execution and typed output only, not semantic accuracy; CUDA quality and deadline performance still need real measurements. `--simulate` output is not evidence.
 
 ---
 

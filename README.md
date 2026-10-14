@@ -20,8 +20,9 @@ media and decision toolkits keep their native runtimes and configuration;
 shared catalog and direct CPU decision/speech paths are available. CUDA Nagi/Laya,
 Breeze, HeartMuLa, H3 and LTX share an explicit idle-GPU native runner. Blender
 headless Python/rendering shares its admission guard without a CUDA device claim.
-Native embedding/Comfy transport, real Blender/GPU acceptance, automatic GPU
-handoff/restoration and broader simplification keep the full port unfinished.
+Resident llama-swap pause/restore is explicitly opt-in; the default remains an
+operator-managed idle window. Native embedding/Comfy transport, real Blender/GPU
+and handoff acceptance, and broader simplification keep the full port unfinished.
 
 Vision-capable LLMs, including Gemma vision, and embeddings remain in the
 language lane.
@@ -202,7 +203,11 @@ first; this command does not download them, start services, or fall back from
 CUDA to CPU. It returns native `answers` and optional `native_latency_ns` and
 `native_usage`. Input files are bounded to 1 MiB; Ctrl-C and the task timeout
 cancel the owned process group. Results are sensitive: stdout is intentional
-output, not a shared log. GPU and other media tasks still await direct-path replacement.
+output, not a shared log. Declared CUDA decisions, speech and supported native
+media scripts use the same foreground owner with an
+[explicit GPU window](docs/native-gpu-workflows.md); prepared engines and real
+GPU/handoff acceptance are still required. Unsupported tasks refuse, never fall
+back or simulate answers.
 
 In the TUI, open Stack Catalog (`F8`), select a supported CPU decision profile,
 press `f`, choose `decision`, fill the native fields and press `Ctrl+Enter`.

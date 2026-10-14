@@ -9,6 +9,59 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
+## Control-only retirement, native UI and compatibility — 2026-10-13
+
+Removed the branch-added `ControlDaemon::run` control-only loop and its duplicate
+request/results handlers. Repository callers were test-only; production continues
+through the unchanged managed-session loop. Status, results, artifacts, repeatable
+pages, restart/interruption and malformed/stalled-peer tests now cross the same
+production managed handler through one accepted exchange. The two tests specific
+to retired loop reporting were removed; shared transport and worker cancellation/
+deadline coverage remains. This does not add or claim full managed-loop acceptance.
+
+A real isolated 80×24 PTY check found the Stack tab clipped and an unconfigured
+coordinator panel shown by default. Narrow tab labels now expose all eight tabs;
+Stack starts with native/Chat guidance and completion-driven native results.
+Explicit retained-ID observation/input remains available, while active/uncertain
+native work retains precedence. A previous ID no longer hides a newer native
+result. Three buffer-render checks pass; the rebuilt real TUI showed the selected
+Stack tab and native guidance after F8 and exited with `q`/code 0. Its fresh
+`L3MS_DATA_DIR` was inside the private acceptance directory; original history was
+not touched. This is navigation/render evidence, not full task execution or color/
+accessibility certification. No model was started from that TUI check.
+
+Root strict lint, formatting, diff check and all-target build pass. Full run:
+**828 pass, 102 socket failures, 1 ignored**, stopping at failed library tests.
+The two-failure drop is retired tests, not a transport fix; one preserved handler
+test was renamed. Logs: `/tmp/l3ms-port-{retired-loop,ui}-{clippy,build,full}.log`
+and `/tmp/l3ms-port-ui-{tabs,observer,guidance}-test.log`.
+
+Standalone checks: **74 Python tests** pass (14 downloader, 22 media wrappers,
+21 decision runner/setup, 17 decision maintenance). Both toolkit Rust suites pass
+(L2M2 **6**, L3DS **2**), as do offline strict lint/build and listing from `/tmp`
+using separate temporary targets. Downloader manual network smoke functions were
+not run. Dashboard data **11 tests**, DOM keyboard/render fixtures and exact
+generated-payload freshness pass; no site was published or comprehensive browser
+acceptance newly claimed. Logs: `/tmp/l3ms-port-compat-itiXcf/`,
+`/tmp/l3ms-port-{l2m2,l3ds}-*.log`, `/tmp/l3ms-port-dashboard-*.log`.
+
+The rebuilt branch also completed a real cached offline Nagi CPU decision;
+see [current CPU evidence](direct-decision-acceptance.md). The decision README
+now separates declared profiles from proven readiness and marks SemIf demo
+simulation as non-native. Root documentation no longer describes already-wired
+GPU script paths as awaiting their first direct replacement.
+
+Control source **−114**, now **64,664** lines; whole root slice **+60** including
+UI tests, cumulative **+8,811** versus `702b4cd`. No source relocation is counted.
+The half-control-source target remains unmet. Real GPU/service checks still fail:
+user D-Bus returns EPERM and NVIDIA driver access is unavailable. Breeze weights
+remain, but its prior audio.cpp checkout and original toolkit aliases are absent/
+broken; no executable was found in the scoped repo/model inventory or migration
+archives. A new runtime location has been requested; no rebuild/download or
+original-link repair was inferred. Live restoration, fresh TTS/media/hosted
+acceptance and broader platform deletion remain open. Goal stays active and
+publication stays NO-GO.
+
 ## Explicit resident handoff checkpoint — 2026-10-13
 
 The existing CLI/UI native GPU owner now optionally pauses/restores the fixed

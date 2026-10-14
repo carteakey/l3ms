@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Breaking changes
+- Retire the branch-added, unused control-only `ControlDaemon::run` Rust method
+  and its duplicate request/results handlers. CLI managed sessions still use
+  their existing managed loop; shared handler and transport coverage is retained.
+  No original standalone command, live engine or stored history is removed.
 - Retire the branch-added Stack coordinator task-form submission fallback and
   its envelope builder. Supported forms use the foreground native runner;
   unsupported profiles refuse without dispatch. Keep retained-ID observation,
@@ -32,6 +36,11 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Keep all eight tab labels visible in narrow terminals and show native/Chat
+  guidance by default in Stack, with retained-ID observation still explicitly
+  configured. No new worker, dispatch mode or daemon is introduced.
+- Refresh Nagi readiness documentation to distinguish cached offline CPU
+  execution from clean installation, CUDA, accuracy and explicit SemIf demos.
 - Add an explicit fixed resident llama-swap pause/restore opt-in to the shared
   native GPU owner. Capture configured state and ready model IDs, stop/start at
   most once, verify whole-cgroup/device release, restore ready models through

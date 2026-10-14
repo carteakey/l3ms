@@ -47,3 +47,18 @@ profile gating. Existing process-runner tests cover deadline and process-group
 cleanup. The shutdown join avoids detaching a child; its process cleanup has a
 five-second recovery budget, but that is not a wall-time guarantee for local
 catalog/filesystem preflight I/O.
+
+## Current offline recheck — 2026-10-13
+
+After rebuilding the current branch, `decisions:nagi-smol-cpu` again completed
+one public synthetic infrastructure/billing choice through the real native CLI.
+The installed environment/cache were reused, all three offline flags were set,
+CUDA visibility was empty, and OMP/MKL threads were limited to two. Exit was 0;
+native latency was **1,649,996,419 ns**, with infrastructure probability
+approximately **0.6507**. This verifies execution, not general decision accuracy,
+a clean installation, GPU readiness or a latency guarantee.
+
+Private retained input/result: ignored `.toolkit/native-port-acceptance-00Aabx/`.
+No service, provider, model download or original checkout was changed. Other
+native task paths and some platform deletions have since landed; the earlier
+scope notes above describe the first slice, not the complete current branch.

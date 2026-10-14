@@ -43,6 +43,11 @@ committed work.
   GPU workflows; verify cancellation, results, artifacts and exact handoff
   restoration. Finish keyboard/visual/mobile review in the Signal / 03 direction,
   site-manifest compatibility, standalone/import compatibility and CI checks.
+  Current standalone checks pass (74 Python, 8 toolkit Rust, strict lint/build
+  and list commands); cached Nagi CPU execution and narrow-terminal navigation
+  were rechecked. These do not close GPU/transport/quality gates. Locate the
+  missing audio.cpp runtime before repeating Breeze acceptance; existing weights
+  remain and no new download/rebuild is authorized by a missing-path guess.
 - [ ] Run `cargo test --all-targets --locked` where local TCP/Unix sockets are
   permitted, then run a bounded real embedding batch with an explicitly prepared
   profile, installed weights and configured endpoint. Do not silently enable or
