@@ -36,6 +36,9 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Show speech artifact filenames before long absolute paths so completed WAVs
+  remain identifiable in narrow terminals; retain the full path and metadata-only
+  history behavior.
 - Bind the opt-in KDE baseline to the actual packaged wrapper executable and
   its direct compositor child, not argv[0] alone. Document the cooperative local
   session trust assumption; no privilege escalation or desktop restart.

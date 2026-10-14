@@ -8655,13 +8655,16 @@ fn direct_native_result_preview(result: &DirectRunResult) -> String {
             .artifacts()
             .iter()
             .map(|artifact| {
+                let path = result.output_root().join(artifact.relative_path());
+                let filename = artifact
+                    .relative_path()
+                    .file_name()
+                    .unwrap_or(artifact.relative_path().as_os_str());
                 format!(
-                    "{:?}: {}",
+                    "{:?}: {} · {}",
                     artifact.kind(),
-                    result
-                        .output_root()
-                        .join(artifact.relative_path())
-                        .display()
+                    filename.to_string_lossy(),
+                    path.display()
                 )
             })
             .collect::<Vec<_>>()
@@ -11524,6 +11527,13 @@ mod tests {
             .join("result.wav")
             .to_string_lossy()
             .into_owned();
+        let preview = direct_native_result_preview(summary.result.as_ref().unwrap());
+        assert!(preview.find("result.wav").unwrap() < preview.find(&displayed_path).unwrap());
+
+        let mut compact_terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        compact_terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(terminal_text(&compact_terminal).contains("result.wav"));
+
         let mut terminal = Terminal::new(TestBackend::new(140, 45)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
         assert!(terminal_text(&terminal).contains(&displayed_path));

@@ -9,6 +9,25 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
+## Narrow speech artifact preview — 2026-10-14
+
+Speech result previews now put the filename before the full path. The existing
+real-CPU-speech UI fixture additionally verifies `result.wav` is visible at
+80×24, precedes the long path, and the full path remains visible at 140×45.
+History, artifact storage and process ownership are unchanged. Root reran the
+focused test, complete suite (**936 passed, 4 ignored**), strict Clippy, format
+and diff checks successfully. This is a small presentation fix, not a new
+artifact browser or complete visual acceptance.
+
+The bounded GPU speech handoff harness is prepared in private ignored
+`.toolkit/gpu-handoff-euUr1H/`, using existing cached weights and the rebuilt CUDA
+runtime. Fresh checks found the current router loading Strata, then ready with
+native `loaded: true`, but `/v1/status` reports an in-flight request. No Stop,
+runtime override, model activation or inference was performed by this work.
+Service switching must wait for that work to finish and clients to remain paused;
+do not treat the captured ready-ID snapshot as a reservation. The shared private
+native GPU lock directory was prepared; no recovery marker was created.
+
 ## Explicit verified desktop baseline — 2026-10-14
 
 Follow-up identity review caught an overclaim: argv[0] alone does not prove a
