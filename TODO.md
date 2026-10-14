@@ -54,6 +54,10 @@ committed work.
   Real 80×24 Nagi CPU keyboard submission/result/cancellation now pass, including
   metadata-only history and reopening admission after cleanup. This is one task,
   not all UI tasks or comprehensive visual/accessibility acceptance.
+  Tracked-source relocation/listing and 74 toolkit/14 root downloader Python
+  fixtures pass without ignored vendors/venvs; missing decision setup refuses
+  without installation. CI now includes root stack listing and toolkit runs on
+  root toolchain changes; actual remote CI and fresh runtime installation remain.
 - [ ] Run `cargo test --all-targets --locked` where local TCP/Unix sockets are
   permitted, then run a bounded real embedding batch with an explicitly prepared
   profile, installed weights and configured endpoint. Do not silently enable or

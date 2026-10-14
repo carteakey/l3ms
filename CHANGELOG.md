@@ -36,6 +36,8 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Run toolkit CI on root Rust toolchain changes and smoke-test the documented
+  root stack listing without starting models or services.
 - Compact native decision JSON in the Stack result panel so a short terminal
   shows the answer immediately instead of only opening array/object brackets.
 - Verify Comfy job snapshots against the toolkit's exact native setup pin rather

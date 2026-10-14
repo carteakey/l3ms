@@ -4,12 +4,14 @@ on:
   pull_request:
     paths:
       - ".github/workflows/toolkits.yml"
+      - "rust-toolchain.toml"
       - "toolkits/l2m2/**"
       - "toolkits/l3ds/**"
   push:
     branches: [main]
     paths:
       - ".github/workflows/toolkits.yml"
+      - "rust-toolchain.toml"
       - "toolkits/l2m2/**"
       - "toolkits/l3ds/**"
 

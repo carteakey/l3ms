@@ -24,6 +24,8 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --all-targets --locked
+      - name: List the imported stack without starting a runtime
+        run: cargo run --offline --locked -- --list stack
       - name: Check Python downloader syntax
         run: python3 -m compileall -q model_downloader
       - name: Test Python downloader boundary

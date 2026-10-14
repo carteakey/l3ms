@@ -9,6 +9,31 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
+## CI and tracked-source import checks — 2026-10-14
+
+Added root `rust-toolchain.toml` to both toolkit workflow path filters (L3DS
+inherits it), and an offline root `--list stack` smoke step after Rust tests.
+The exact smoke command succeeds with 30 profiles. Both changed workflow YAML
+files parse, and their trigger/step values were checked using the existing
+decision environment's PyYAML; no validator dependency was installed. Remote
+GitHub CI was not dispatched or claimed green. No production Rust lines added.
+
+A private tracked-source archive of `f4f5c37`, without ignored vendors/venvs,
+was extracted to `/tmp/l3ms-clean-source-dYhrm7/`. The existing branch binary
+with explicit `L3MS_ROOT` discovers all 30 profiles from that archive, not original
+checkouts. Running its CPU decision with absent environment refuses (exit 1,
+no result, no environment/model installation). This verifies relocated source
+discovery and fail-closed missing setup, not a fresh binary build or full install.
+All 74 toolkit Python fixtures and 14 root downloader fixtures pass from that
+archive; manual network download helpers were not run. Its 11 dashboard data
+checks, Node DOM fixtures and byte-identical regenerated payload pass too.
+
+The deletion review found CLI cancellation still serves retained external
+requests. Removing only that front end would preserve its implementation and
+make recovery less convenient, so it remains until the real transition gate.
+No new replacement layer or blanket deletion was introduced. Live all-lane,
+GPU/transport, clean-runtime installation and source-reduction gates stay open.
+
 ## Real CPU decision keyboard acceptance — 2026-10-14
 
 The real 80×24 UI completed two offline cached Nagi CPU decisions and cancelled
