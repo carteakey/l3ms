@@ -185,7 +185,18 @@ impl NvidiaSmiGpuProbe {
         context: &OperationContext<'_>,
         recovery_policy: RecoveryPolicy,
     ) -> Result<IdleGpuObservation, GpuProbeFailure> {
-        self.observe_with_claimants(context, recovery_policy, true, |_| false)
+        self.observe_idle_with_baseline(context, recovery_policy, |_| false)
+    }
+
+    /// Keep the idle-memory bound while allowing only caller-verified desktop
+    /// identities. This is not an exemption for arbitrary compute clients.
+    pub(crate) fn observe_idle_with_baseline(
+        &self,
+        context: &OperationContext<'_>,
+        recovery_policy: RecoveryPolicy,
+        allowed: impl FnMut(u32) -> bool,
+    ) -> Result<IdleGpuObservation, GpuProbeFailure> {
+        self.observe_with_claimants(context, recovery_policy, true, allowed)
             .map(|after| IdleGpuObservation {
                 gpu_uuid: self.config.gpu_uuid.clone(),
                 index: after.index,
@@ -645,6 +656,46 @@ mod tests {
             fs::read_to_string(fixture.directory.path().join("gpu-count")).unwrap(),
             "2\n"
         );
+    }
+
+    #[test]
+    fn desktop_baseline_preserves_idle_memory_and_unknown_claimant_refusal() {
+        for (before, after, apps, expected) in [
+            (32, 32, format!("{UUID},123\n"), None),
+            (
+                32,
+                32,
+                format!("{UUID},123\n{UUID},456\n"),
+                Some(GpuProbeFailureKind::ClaimantPresent),
+            ),
+            (
+                65,
+                32,
+                format!("{UUID},123\n"),
+                Some(GpuProbeFailureKind::MemoryBusy),
+            ),
+            (
+                32,
+                65,
+                format!("{UUID},123\n"),
+                Some(GpuProbeFailureKind::MemoryBusy),
+            ),
+        ] {
+            let fixture = fake_probe(
+                &snapshot(0, UUID, before, 8192),
+                &apps,
+                &snapshot(0, UUID, after, 8192),
+            );
+            let observed = fixture.probe.observe_idle_with_baseline(
+                &context(Duration::from_secs(3), &NeverCancel),
+                recovery(),
+                |pid| pid == 123,
+            );
+            match expected {
+                Some(kind) => assert_kind(observed.unwrap_err(), kind),
+                None => assert_eq!(observed.unwrap().memory_used_mib(), 32),
+            }
+        }
     }
 
     #[test]

@@ -33,6 +33,9 @@ committed work.
   installed. A persistent live-unit change requires separate authorization.
   Endpoint identity/client/manager quiescence remain operator assertions, not
   fences; uncertain work retains the manual-recovery marker.
+  Both runtime builds are ready, and the explicit verified KDE baseline passes
+  real read-only identity/foreign-claimant checks. The unrelated GPU worker must
+  be quiesced before any stop/test; no temporary override has been installed.
 - [ ] Continue caller-first managed-platform deletion only after each real
   replacement passes. Count net source removal rather than relocation, preserve
   safety needed by surviving callers, and work toward the plan's half-control-

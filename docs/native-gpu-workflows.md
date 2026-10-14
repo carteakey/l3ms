@@ -41,6 +41,30 @@ fence. Missing/invalid configuration refuses CUDA work. CPU, hosted decisions,
 existing language HTTP and Comfy endpoints do not silently acquire this device
 or fall back to another execution mode.
 
+On the supported KDE desktop, an explicit `"kde_desktop_baseline": true` member
+may be added to the same JSON. It permits only the captured native compositor
+from the fixed `plasma-kwin_wayland.service`, with its root-owned packaged unit,
+wrapper command, invocation/main-process identity and exact cgroup member set
+verified before and after each GPU observation. The compositor itself is checked
+by UID, process birth, cgroup and native argv; its protected `/proc/exe` need not
+be readable. Changed generations/membership, custom drop-ins, unsupported unit
+layouts and all other GPU claimants still refuse. This is not an arbitrary PID
+allowlist, an exemption for all graphics programs, or permission to stop KDE.
+The existing `idle_mib` limit still bounds total memory before dispatch and after
+release; desktop memory is not subtracted or automatically learned. Default is
+off. This remains point-in-time evidence, not a fence against new GPU clients.
+
+Read-only host probes are explicitly opt-in (they are skipped by ordinary CI):
+
+```sh
+cargo test --lib real_kde_desktop_baseline_capture -- --ignored
+# Only while an unrelated compute claimant is known to be present:
+L3MS_LIVE_GPU_UUID=GPU-your-physical-uuid cargo test --lib real_kde_baseline_refuses_foreign_compute -- --ignored
+```
+
+These inspect manager/process/GPU state only; neither starts inference nor
+changes a service. A rejection test is not a successful switching test.
+
 Use the existing native CLI shapes, selecting the declared CUDA profile:
 
 ```sh

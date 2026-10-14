@@ -9,6 +9,36 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
+## Explicit verified desktop baseline — 2026-10-14
+
+The user approved support for KDE's small existing GPU context instead of
+stopping the desktop. `kde_desktop_baseline: true` is now an explicit default-off
+member of `L3MS_NATIVE_GPU`. It captures only the fixed packaged KDE user unit,
+its wrapper command/root-owned definition, main-process and invocation identity,
+exact cgroup member set and unique native compositor identity. Verification
+surrounds every existing GPU observation; only that compositor PID may accompany
+the resident model before pause or remain under the idle-memory bound afterward.
+Changed/unknown claimants still refuse. No process list is trusted from input;
+no desktop-control operation, daemon or generic service framework was added.
+
+Four focused fixtures pass. The real read-only KDE capture/verify probe passes,
+as does the actual NVIDIA probe proving that the separate foreign compute
+claimant is still rejected. Neither starts inference or changes services. A
+live systemd formatting difference was caught: runtime fields are normalized
+only for snapshot comparison, after checking the full raw launcher declaration.
+Fixture coverage now includes realistic runtime fields/timestamp-only changes.
+
+Full `cargo test --all-targets --locked --quiet`: **934 passed, 3 ignored**;
+strict Clippy/format/build and diff checks pass. Two new ignores are explicit
+host-dependent read-only probes, each run separately and passed; the pre-existing
+ignore was not changed. This is not live switching/restoration acceptance.
+The separate GPU job and current inactive router state remain untouched, and
+no temporary override has yet been installed. A quiet-window question is pending.
+
+This support adds **746 net Rust source lines**, including fixtures, and control
+source is now **65,419 lines** under the same measurement scope. The half-source
+reduction goal is still unmet; no relocation or fake reduction is claimed.
+
 ## Host transport acceptance and retained-result fixes — 2026-10-14
 
 The approved branch-local audio.cpp rebuild is complete at the exact known

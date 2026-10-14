@@ -1,9 +1,9 @@
-//! Narrow, in-memory ownership checks for the pre-existing user llama-swap unit.
+//! Narrow, in-memory checks for the fixed user services used by local GPU control.
 //!
-//! This adapter is deliberately bound to one unit and one caller-owned router
-//! configuration. It is not a generic service manager or a crash-recovery
-//! journal. Its checks assume that other same-user systemd clients and router
-//! configuration writers are quiesced for the complete operation.
+//! The llama-swap adapter is bound to one unit and caller-owned router config;
+//! the desktop baseline only observes one fixed KDE compositor unit. Neither is
+//! a generic service manager or a crash-recovery journal. The llama-swap checks
+//! assume same-user systemd clients and config writers are quiesced throughout.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -31,6 +31,23 @@ const MAX_CGROUP_PIDS: usize = 4096;
 const MAX_CGROUP_PROCS_BYTES: usize = 64 * 1024;
 const PROC_FILE_BYTES: usize = 16 * 1024;
 const MANAGER_RECOVERY: std::time::Duration = std::time::Duration::from_secs(5);
+const DESKTOP_UNIT: &str = "plasma-kwin_wayland.service";
+const DESKTOP_COMPOSITOR: &str = "/usr/bin/kwin_wayland";
+const DESKTOP_LAUNCHER: &str = "/usr/bin/kwin_wayland_wrapper";
+const DESKTOP_FRAGMENT: &str = "/usr/lib/systemd/user/plasma-kwin_wayland.service";
+
+const DESKTOP_PROPERTIES: [&str; 10] = [
+    "Id",
+    "LoadState",
+    "ActiveState",
+    "SubState",
+    "MainPID",
+    "InvocationID",
+    "ControlGroup",
+    "FragmentPath",
+    "DropInPaths",
+    "ExecStart",
+];
 
 const PROPERTIES: [&str; 14] = [
     "Id",
@@ -172,6 +189,188 @@ struct ManagerSnapshot {
     fragment_path: PathBuf,
     drop_in_paths: Vec<PathBuf>,
     exec_start: String,
+}
+
+/// Opaque, read-only snapshot of one verified native KDE compositor process.
+///
+/// This baseline never changes the desktop unit. It accepts only the exact
+/// compositor PID captured from the fixed unit's verified cgroup. It is only
+/// a point-in-time observation, not a GPU admission fence, lease, or ownership
+/// proof. Callers must verify the original generation and full member set,
+/// own service-cgroup cleanup, and exclude direct device bypass before
+/// switching workloads. It inspects only this unit, not all graphics
+/// processes; its bounded manager query is still a synchronous subprocess.
+pub(crate) struct DesktopGpuBaseline {
+    systemctl: PathBuf,
+    cgroup_root: PathBuf,
+    proc_root: PathBuf,
+    fragment_path: PathBuf,
+    uid: u32,
+    generation: DesktopGeneration,
+    definition: DesktopUnitDefinition,
+    members: BTreeMap<u32, ProcessIdentity>,
+    compositor_pid: u32,
+    compositor_identity: ProcessIdentity,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+struct DesktopGeneration {
+    invocation_id: String,
+    main_pid: u32,
+    main_identity: ProcessIdentity,
+    cgroup: String,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+struct DesktopUnitDefinition {
+    exec_start: String,
+    files: Vec<FileSnapshot>,
+}
+
+struct DesktopManagerSnapshot {
+    main_pid: u32,
+    invocation_id: String,
+    cgroup: String,
+    exec_start: String,
+}
+
+impl DesktopGpuBaseline {
+    /// Capture one verified, currently running native KDE compositor.
+    ///
+    /// This is a point-in-time read only. It is not a GPU admission fence,
+    /// lease, or proof that no process can begin using the device later.
+    pub(crate) fn capture(context: &OperationContext<'_>) -> Result<Self, ResidentUnitError> {
+        Self::capture_at(
+            Path::new(SYSTEMCTL),
+            Path::new(CGROUP_ROOT),
+            Path::new("/proc"),
+            Path::new(DESKTOP_FRAGMENT),
+            context,
+            false,
+        )
+    }
+
+    #[cfg(test)]
+    fn capture_with_paths(
+        systemctl: &Path,
+        cgroup_root: &Path,
+        proc_root: &Path,
+        fragment: &Path,
+        context: &OperationContext<'_>,
+    ) -> Result<Self, ResidentUnitError> {
+        Self::capture_at(systemctl, cgroup_root, proc_root, fragment, context, true)
+    }
+
+    fn capture_at(
+        systemctl: &Path,
+        cgroup_root: &Path,
+        proc_root: &Path,
+        fragment: &Path,
+        context: &OperationContext<'_>,
+        test_paths: bool,
+    ) -> Result<Self, ResidentUnitError> {
+        check_context(context)?;
+        let uid = unsafe { libc::geteuid() };
+        validate_cgroup_root(cgroup_root, !test_paths)?;
+
+        let manager = show_desktop(systemctl, fragment, uid, test_paths, context)?;
+        let definition = capture_desktop_definition(&manager, fragment, uid, test_paths, context)?;
+        let members = scan_members(cgroup_root, &manager.cgroup, proc_root, uid, context)?;
+        let main_identity = members
+            .get(&manager.main_pid)
+            .cloned()
+            .ok_or(ResidentUnitError::ProcessIdentityUnavailable)?;
+        let compositor = find_desktop_compositor(&members, proc_root, uid, context)?;
+        let baseline = Self {
+            systemctl: systemctl.to_owned(),
+            cgroup_root: cgroup_root.to_owned(),
+            proc_root: proc_root.to_owned(),
+            fragment_path: fragment.to_owned(),
+            uid,
+            generation: DesktopGeneration {
+                invocation_id: manager.invocation_id,
+                main_pid: manager.main_pid,
+                main_identity,
+                cgroup: manager.cgroup,
+            },
+            definition,
+            members,
+            compositor_pid: compositor.0,
+            compositor_identity: compositor.1,
+        };
+        baseline.verify_at(context, test_paths)?;
+        Ok(baseline)
+    }
+
+    /// Recheck that the captured desktop generation, files, and exact full
+    /// cgroup membership set have not changed.
+    pub(crate) fn verify(&self, context: &OperationContext<'_>) -> Result<(), ResidentUnitError> {
+        self.verify_at(context, false)
+    }
+
+    fn verify_at(
+        &self,
+        context: &OperationContext<'_>,
+        test_paths: bool,
+    ) -> Result<(), ResidentUnitError> {
+        check_context(context)?;
+        let manager = show_desktop(
+            &self.systemctl,
+            &self.fragment_path,
+            self.uid,
+            test_paths,
+            context,
+        )?;
+        if manager.main_pid != self.generation.main_pid
+            || manager.invocation_id != self.generation.invocation_id
+            || manager.cgroup != self.generation.cgroup
+        {
+            return Err(ResidentUnitError::DefinitionChanged);
+        }
+        let main_identity = read_process_identity(&self.proc_root, manager.main_pid, self.uid)
+            .ok_or(ResidentUnitError::ProcessIdentityUnavailable)?;
+        if main_identity != self.generation.main_identity {
+            return Err(ResidentUnitError::ProcessIdentityUnavailable);
+        }
+        let definition = capture_desktop_definition(
+            &manager,
+            &self.fragment_path,
+            self.uid,
+            test_paths,
+            context,
+        )?;
+        if definition != self.definition {
+            return Err(ResidentUnitError::DefinitionChanged);
+        }
+        let members = scan_members(
+            &self.cgroup_root,
+            &manager.cgroup,
+            &self.proc_root,
+            self.uid,
+            context,
+        )?;
+        if members != self.members {
+            return Err(ResidentUnitError::ProcessIdentityUnavailable);
+        }
+        let compositor = find_desktop_compositor(&members, &self.proc_root, self.uid, context)?;
+        if compositor.0 != self.compositor_pid || compositor.1 != self.compositor_identity {
+            return Err(ResidentUnitError::ProcessIdentityUnavailable);
+        }
+        check_context(context)
+    }
+
+    /// Accept only the exact captured native compositor process, not other
+    /// members of the KDE unit. Call `verify` before relying on this snapshot.
+    pub(crate) fn accepts_claimant(&self, pid: u32) -> bool {
+        if pid != self.compositor_pid
+            || self.members.get(&pid) != Some(&self.compositor_identity)
+            || read_process_identity(&self.proc_root, pid, self.uid).as_ref()
+                != Some(&self.compositor_identity)
+        {
+            return false;
+        }
+        native_compositor_argv0(&self.proc_root, pid).unwrap_or(false)
+    }
 }
 
 impl ResidentUnit {
@@ -531,6 +730,232 @@ impl ResidentUnit {
         }
         Ok(current)
     }
+}
+
+fn show_desktop(
+    systemctl: &Path,
+    fragment: &Path,
+    uid: u32,
+    test_paths: bool,
+    context: &OperationContext<'_>,
+) -> Result<DesktopManagerSnapshot, ResidentUnitError> {
+    check_context(context)?;
+    validate_executable(systemctl, test_paths)?;
+    let mut command = Command::new(systemctl);
+    command
+        .arg("--user")
+        .arg("--no-pager")
+        .arg("--no-ask-password")
+        .arg("show")
+        .arg("--all");
+    for property in DESKTOP_PROPERTIES {
+        command.arg(format!("--property={property}"));
+    }
+    command.arg(DESKTOP_UNIT);
+    let limits = ProcessLimits::new(0, MAX_MANAGER_BYTES)
+        .map_err(|_| ResidentUnitError::ManagerUnavailable)?;
+    let recovery =
+        RecoveryPolicy::new(MANAGER_RECOVERY).map_err(|_| ResidentUnitError::ManagerUnavailable)?;
+    let output = process::execute(command, None, limits, context, recovery)
+        .map_err(|_| ResidentUnitError::ManagerUnavailable)?;
+    if !output.stderr().iter().all(u8::is_ascii_whitespace) {
+        return Err(ResidentUnitError::InvalidManagerReply);
+    }
+    let snapshot = parse_desktop_snapshot(output.stdout(), fragment, uid)?;
+    drop(output);
+    check_context(context)?;
+    Ok(snapshot)
+}
+
+fn parse_desktop_snapshot(
+    bytes: &[u8],
+    expected_fragment: &Path,
+    uid: u32,
+) -> Result<DesktopManagerSnapshot, ResidentUnitError> {
+    if bytes.len() > MAX_MANAGER_BYTES {
+        return Err(ResidentUnitError::InvalidManagerReply);
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| ResidentUnitError::InvalidManagerReply)?;
+    let mut values = BTreeMap::new();
+    for line in text.lines() {
+        let (key, value) = line
+            .split_once('=')
+            .ok_or(ResidentUnitError::InvalidManagerReply)?;
+        if !DESKTOP_PROPERTIES.contains(&key) || values.insert(key, value).is_some() {
+            return Err(ResidentUnitError::InvalidManagerReply);
+        }
+    }
+    if values.len() != DESKTOP_PROPERTIES.len() {
+        return Err(ResidentUnitError::InvalidManagerReply);
+    }
+    let get = |key: &str| {
+        values
+            .get(key)
+            .copied()
+            .ok_or(ResidentUnitError::InvalidManagerReply)
+    };
+    let main_pid = get("MainPID")?
+        .parse::<u32>()
+        .map_err(|_| ResidentUnitError::InvalidManagerReply)?;
+    let invocation_id = get("InvocationID")?.to_owned();
+    let cgroup = get("ControlGroup")?.to_owned();
+    let fragment_path = PathBuf::from(get("FragmentPath")?);
+    let raw_exec_start = get("ExecStart")?;
+    let exec_start = normalize_exec_start(raw_exec_start)?;
+    if get("Id")? != DESKTOP_UNIT
+        || get("LoadState")? != "loaded"
+        || get("ActiveState")? != "active"
+        || get("SubState")? != "running"
+        || main_pid <= 1
+        || !valid_invocation_id(&invocation_id)
+        || !valid_cgroup_text(&cgroup)
+        || !valid_desktop_cgroup(&cgroup, uid)
+        || !safe_plain_path(&fragment_path, false)
+        || fragment_path != expected_fragment
+        || !get("DropInPaths")?.is_empty()
+        || !desktop_exec_start_matches(raw_exec_start)
+    {
+        return Err(ResidentUnitError::UnitNotSupported);
+    }
+    Ok(DesktopManagerSnapshot {
+        main_pid,
+        invocation_id,
+        cgroup,
+        exec_start,
+    })
+}
+
+fn valid_desktop_cgroup(path: &str, uid: u32) -> bool {
+    let prefix = format!("/user.slice/user-{uid}.slice/user@{uid}.service/");
+    valid_cgroup_text(path)
+        && path.starts_with(&prefix)
+        && path.ends_with("/session.slice/plasma-kwin_wayland.service")
+}
+
+fn desktop_exec_start_matches(raw: &str) -> bool {
+    let Some(body) = raw
+        .strip_prefix("{ ")
+        .and_then(|value| value.strip_suffix(" }"))
+    else {
+        return false;
+    };
+    let mut path_count = 0;
+    let mut argv_count = 0;
+    for field in body.split(';') {
+        let field = field.trim();
+        if let Some(path) = field.strip_prefix("path=") {
+            path_count += 1;
+            if path != DESKTOP_LAUNCHER {
+                return false;
+            }
+        } else if let Some(argv) = field.strip_prefix("argv[]=") {
+            argv_count += 1;
+            if argv.split_ascii_whitespace().next() != Some(DESKTOP_LAUNCHER) {
+                return false;
+            }
+        }
+    }
+    path_count == 1 && argv_count == 1
+}
+
+fn capture_desktop_definition(
+    manager: &DesktopManagerSnapshot,
+    fragment: &Path,
+    uid: u32,
+    test_paths: bool,
+    context: &OperationContext<'_>,
+) -> Result<DesktopUnitDefinition, ResidentUnitError> {
+    let file = read_file_snapshot(fragment, uid, false, context)?;
+    if !test_paths && file.uid != 0 {
+        return Err(ResidentUnitError::UnsafeFile);
+    }
+    if !unit_file_exec_start_matches(&file.bytes) {
+        return Err(ResidentUnitError::UnitNotSupported);
+    }
+    Ok(DesktopUnitDefinition {
+        exec_start: manager.exec_start.clone(),
+        files: vec![file],
+    })
+}
+
+fn unit_file_exec_start_matches(bytes: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    let mut in_service = false;
+    let mut count = 0;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            in_service = &line[1..line.len() - 1] == "Service";
+            continue;
+        }
+        if !in_service {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.starts_with("ExecStart") {
+            if key != "ExecStart" || value.split_ascii_whitespace().next() != Some(DESKTOP_LAUNCHER)
+            {
+                return false;
+            }
+            count += 1;
+        }
+    }
+    count == 1
+}
+
+fn find_desktop_compositor(
+    members: &BTreeMap<u32, ProcessIdentity>,
+    proc_root: &Path,
+    uid: u32,
+    context: &OperationContext<'_>,
+) -> Result<(u32, ProcessIdentity), ResidentUnitError> {
+    let mut found = None;
+    for (&pid, identity) in members {
+        check_context(context)?;
+        let before = read_process_identity(proc_root, pid, uid)
+            .ok_or(ResidentUnitError::ProcessIdentityUnavailable)?;
+        if before != *identity {
+            return Err(ResidentUnitError::ProcessIdentityUnavailable);
+        }
+        let is_compositor = native_compositor_argv0(proc_root, pid)?;
+        let after = read_process_identity(proc_root, pid, uid)
+            .ok_or(ResidentUnitError::ProcessIdentityUnavailable)?;
+        if after != before {
+            return Err(ResidentUnitError::ProcessIdentityUnavailable);
+        }
+        if is_compositor {
+            if found.is_some() {
+                return Err(ResidentUnitError::UnitNotSupported);
+            }
+            found = Some((pid, after));
+        }
+    }
+    check_context(context)?;
+    found.ok_or(ResidentUnitError::UnitNotSupported)
+}
+
+fn native_compositor_argv0(proc_root: &Path, pid: u32) -> Result<bool, ResidentUnitError> {
+    let bytes = read_bounded_regular(
+        &proc_root.join(pid.to_string()).join("cmdline"),
+        PROC_FILE_BYTES,
+    )
+    .map_err(|_| ResidentUnitError::ProcessIdentityUnavailable)?;
+    let first = bytes
+        .split(|byte| *byte == 0)
+        .next()
+        .ok_or(ResidentUnitError::ProcessIdentityUnavailable)?;
+    if first.is_empty() || !bytes.contains(&0) {
+        return Err(ResidentUnitError::ProcessIdentityUnavailable);
+    }
+    Ok(first == DESKTOP_COMPOSITOR.as_bytes())
 }
 
 fn check_context(context: &OperationContext<'_>) -> Result<(), ResidentUnitError> {
@@ -1447,6 +1872,122 @@ mod tests {
         cgroup: String,
     }
 
+    struct DesktopFixture {
+        _directory: TempDir,
+        systemctl: PathBuf,
+        cgroup_root: PathBuf,
+        proc_root: PathBuf,
+        fragment: PathBuf,
+        manager_state: PathBuf,
+        cgroup: String,
+    }
+
+    impl DesktopFixture {
+        fn new() -> Self {
+            let directory = tempdir().unwrap();
+            let base = directory.path().canonicalize().unwrap();
+            let uid = unsafe { libc::geteuid() };
+            let cgroup = format!(
+                "/user.slice/user-{uid}.slice/user@{uid}.service/session.slice/{DESKTOP_UNIT}"
+            );
+            let cgroup_root = base.join("cgroups");
+            let cgroup_directory = cgroup_root.join(cgroup.trim_start_matches('/'));
+            fs::create_dir_all(&cgroup_directory).unwrap();
+            fs::write(cgroup_directory.join("cgroup.procs"), b"9001\n9002\n").unwrap();
+
+            let proc_root = base.join("proc");
+            fs::create_dir_all(&proc_root).unwrap();
+            write_process(
+                &proc_root,
+                &cgroup,
+                9001,
+                101,
+                &["/usr/bin/systemd".to_owned()],
+            );
+            write_process(
+                &proc_root,
+                &cgroup,
+                9002,
+                102,
+                &[DESKTOP_COMPOSITOR.to_owned()],
+            );
+
+            let fragment = base.join("plasma-kwin_wayland.service");
+            write_private_file(
+                &fragment,
+                format!(
+                    "[Unit]\nDescription=KDE Wayland compositor\n[Service]\nExecStart={DESKTOP_LAUNCHER}\n"
+                )
+                .as_bytes(),
+            );
+            let manager_state = base.join("manager-state");
+            write_private_file(
+                &manager_state,
+                &desktop_fixture_properties(
+                    9001,
+                    "cccccccccccccccccccccccccccccccc",
+                    &cgroup,
+                    &fragment,
+                ),
+            );
+            let systemctl = base.join("systemctl-fixture");
+            write_executable(
+                &systemctl,
+                format!("#!/bin/sh\nexec /bin/cat '{}'\n", manager_state.display()).as_bytes(),
+            );
+
+            Self {
+                _directory: directory,
+                systemctl,
+                cgroup_root,
+                proc_root,
+                fragment,
+                manager_state,
+                cgroup,
+            }
+        }
+
+        fn capture(&self) -> Result<DesktopGpuBaseline, ResidentUnitError> {
+            DesktopGpuBaseline::capture_with_paths(
+                &self.systemctl,
+                &self.cgroup_root,
+                &self.proc_root,
+                &self.fragment,
+                &context(),
+            )
+        }
+    }
+
+    fn desktop_fixture_properties(
+        main_pid: u32,
+        invocation: &str,
+        cgroup: &str,
+        fragment: &Path,
+    ) -> Vec<u8> {
+        let values = BTreeMap::from([
+            ("Id", DESKTOP_UNIT.to_owned()),
+            ("LoadState", "loaded".to_owned()),
+            ("ActiveState", "active".to_owned()),
+            ("SubState", "running".to_owned()),
+            ("MainPID", main_pid.to_string()),
+            ("InvocationID", invocation.to_owned()),
+            ("ControlGroup", cgroup.to_owned()),
+            ("FragmentPath", fragment.display().to_string()),
+            ("DropInPaths", String::new()),
+            (
+                "ExecStart",
+                format!(
+                    "{{ path={DESKTOP_LAUNCHER} ; argv[]={DESKTOP_LAUNCHER} ; ignore_errors=no ; start_time=[Mon 2026-10-12 11:12:13 EDT]; stop_time=[n/a]; pid={main_pid}; code=(null); status=0/0 }}"
+                ),
+            ),
+        ]);
+        DESKTOP_PROPERTIES
+            .iter()
+            .map(|key| format!("{key}={}\n", values[key]))
+            .collect::<String>()
+            .into_bytes()
+    }
+
     impl UnitFixture {
         fn new(active: bool, fail_stop: bool) -> Self {
             let directory = tempdir().unwrap();
@@ -1768,5 +2309,124 @@ mod tests {
             Err(ResidentUnitError::DefinitionChanged)
         );
         assert!(fixture.actions().is_empty());
+    }
+
+    #[test]
+    fn desktop_baseline_accepts_only_the_captured_native_compositor() {
+        let fixture = DesktopFixture::new();
+        let baseline = fixture.capture().unwrap();
+        assert!(baseline.accepts_claimant(9002));
+        assert!(!baseline.accepts_claimant(9001));
+        assert!(!baseline.accepts_claimant(9003));
+
+        let changed_time = fs::read_to_string(&fixture.manager_state)
+            .unwrap()
+            .replace("Mon 2026-10-12 11:12:13 EDT", "Tue 2026-10-13 12:13:14 EDT");
+        write_private_file(&fixture.manager_state, changed_time.as_bytes());
+        baseline.verify_at(&context(), true).unwrap();
+    }
+
+    #[test]
+    fn desktop_baseline_rejects_changed_generation_or_process_identity() {
+        let fixture = DesktopFixture::new();
+        let baseline = fixture.capture().unwrap();
+        write_private_file(
+            &fixture.manager_state,
+            &desktop_fixture_properties(
+                9001,
+                "dddddddddddddddddddddddddddddddd",
+                &fixture.cgroup,
+                &fixture.fragment,
+            ),
+        );
+        assert_eq!(
+            baseline.verify_at(&context(), true),
+            Err(ResidentUnitError::DefinitionChanged)
+        );
+
+        write_private_file(
+            &fixture.manager_state,
+            &desktop_fixture_properties(
+                9001,
+                "cccccccccccccccccccccccccccccccc",
+                &fixture.cgroup,
+                &fixture.fragment,
+            ),
+        );
+        write_process(
+            &fixture.proc_root,
+            &fixture.cgroup,
+            9002,
+            999,
+            &[DESKTOP_COMPOSITOR.to_owned()],
+        );
+        assert_eq!(
+            baseline.verify_at(&context(), true),
+            Err(ResidentUnitError::ProcessIdentityUnavailable)
+        );
+    }
+
+    #[test]
+    fn desktop_baseline_rejects_untrusted_exec_start_or_missing_compositor() {
+        let fixture = DesktopFixture::new();
+        fs::write(
+            &fixture.fragment,
+            format!("[Service]\nExecStart={DESKTOP_LAUNCHER}\nExecStartPost=/bin/false\n")
+                .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            fixture.capture().err(),
+            Some(ResidentUnitError::UnitNotSupported)
+        );
+
+        let fixture = DesktopFixture::new();
+        let invalid_exec = fs::read_to_string(&fixture.manager_state)
+            .unwrap()
+            .replace(DESKTOP_LAUNCHER, "/usr/bin/kwin_launcher_unknown");
+        write_private_file(&fixture.manager_state, invalid_exec.as_bytes());
+        assert_eq!(
+            fixture.capture().err(),
+            Some(ResidentUnitError::UnitNotSupported)
+        );
+
+        let fixture = DesktopFixture::new();
+        write_process(
+            &fixture.proc_root,
+            &fixture.cgroup,
+            9002,
+            102,
+            &["/usr/bin/kwin_wayland_helper".to_owned()],
+        );
+        assert_eq!(
+            fixture.capture().err(),
+            Some(ResidentUnitError::UnitNotSupported)
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a live supported KDE user session; read-only"]
+    fn real_kde_desktop_baseline_capture() {
+        let baseline = DesktopGpuBaseline::capture(&context()).unwrap();
+        baseline.verify(&context()).unwrap();
+        assert!(baseline.accepts_claimant(baseline.compositor_pid));
+        assert!(!baseline.accepts_claimant(1));
+    }
+
+    #[test]
+    #[ignore = "requires explicit GPU UUID, KDE and a foreign compute claimant; read-only"]
+    fn real_kde_baseline_refuses_foreign_compute() {
+        use super::super::gpu_probe::{GpuProbeConfig, GpuProbeFailureKind, NvidiaSmiGpuProbe};
+        let uuid = std::env::var("L3MS_LIVE_GPU_UUID").expect("set the target physical GPU UUID");
+        let baseline = DesktopGpuBaseline::capture(&context()).unwrap();
+        let probe = NvidiaSmiGpuProbe::new(GpuProbeConfig::new(uuid, 0, 512).unwrap());
+        let recovery = RecoveryPolicy::new(MANAGER_RECOVERY).unwrap();
+        let observed = probe
+            .observe_idle_with_baseline(&context(), recovery, |pid| baseline.accepts_claimant(pid));
+        baseline.verify(&context()).unwrap();
+        assert_eq!(
+            observed.unwrap_err().kind(),
+            GpuProbeFailureKind::ClaimantPresent
+        );
     }
 }

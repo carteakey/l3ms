@@ -32,7 +32,7 @@ use super::process::{ProcessFailureDisposition, ProcessFailureKind};
 use super::requests::{
     EmbeddingPayload, InferenceRequest, InferenceResult, MediaInput, SpeechMode,
 };
-use super::resident_unit::ResidentUnit;
+use super::resident_unit::{DesktopGpuBaseline, ResidentUnit};
 use super::routes::{resolve_profile_route, NativeRoute, ResolvedProfileRoute};
 use super::runtime::{NeverCancel, OperationContext, RecoveryPolicy};
 use crate::llama_swap::SwapClient;
@@ -223,6 +223,8 @@ struct NativeGpuWindow {
     idle_mib: u64,
     lock_dir: PathBuf,
     clients_quiesced: bool,
+    #[serde(default)]
+    kde_desktop_baseline: bool,
     #[serde(default)]
     resident_llama_swap: Option<ResidentLlamaSwapConfig>,
 }
@@ -439,6 +441,16 @@ pub(crate) fn run_native_in_operator_window(
             )
         })?;
     let probe = NvidiaSmiGpuProbe::new(config);
+    let desktop = window
+        .kde_desktop_baseline
+        .then(|| DesktopGpuBaseline::capture(context))
+        .transpose()
+        .map_err(|_| {
+            DirectRunError::new(
+                DirectRunErrorKind::GpuUnavailable,
+                ProcessFailureDisposition::NoChildSpawned,
+            )
+        })?;
     let cuda_profile = catalog
         .inspect(request.profile())
         .is_some_and(is_supported_direct_cuda_profile);
@@ -447,12 +459,22 @@ pub(crate) fn run_native_in_operator_window(
         &window,
         context,
         |context, resident| {
-            match resident {
-                Some(unit) => probe
-                    .observe_only_claimants(context, recovery, |pid| unit.accepts_claimant(pid)),
-                None => probe.observe_idle(context, recovery).map(|_| ()),
+            if let Some(desktop) = &desktop {
+                desktop.verify(context).map_err(|_| ())?;
             }
-            .map_err(|_| ())
+            let is_desktop = |pid| desktop.as_ref().is_some_and(|d| d.accepts_claimant(pid));
+            let observation = match resident {
+                Some(unit) => probe.observe_only_claimants(context, recovery, |pid| {
+                    unit.accepts_claimant(pid) || is_desktop(pid)
+                }),
+                None => probe
+                    .observe_idle_with_baseline(context, recovery, is_desktop)
+                    .map(|_| ()),
+            };
+            if let Some(desktop) = &desktop {
+                desktop.verify(context).map_err(|_| ())?;
+            }
+            observation.map_err(|_| ())
         },
         |device| {
             run_native(
@@ -1469,11 +1491,24 @@ mod tests {
     fn operator_gpu_configuration_is_explicit_and_redacted() {
         let valid = json!({"uuid":"GPU-12345678-1234-1234-1234-123456789abc",
             "index":0,"idle_mib":512,"lock_dir":"/private/native-locks","clients_quiesced":true});
+        assert!(
+            !NativeGpuWindow::parse(&valid.to_string())
+                .unwrap()
+                .kde_desktop_baseline
+        );
+        let mut desktop = valid.clone();
+        desktop["kde_desktop_baseline"] = json!(true);
+        assert!(
+            NativeGpuWindow::parse(&desktop.to_string())
+                .unwrap()
+                .kde_desktop_baseline
+        );
         for (field, value) in [
             ("uuid", json!("0")),
             ("index", json!(1024)),
             ("lock_dir", json!("relative")),
             ("clients_quiesced", json!(false)),
+            ("kde_desktop_baseline", json!("unverified")),
             ("extra", json!(true)),
         ] {
             let mut invalid = valid.clone();

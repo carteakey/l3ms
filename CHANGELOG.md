@@ -36,6 +36,10 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Add explicit verified-KDE desktop baseline support to the existing native GPU
+  observation. Pin the fixed packaged unit and native compositor identity;
+  preserve idle-memory bounds, unknown-claimant refusal and default-off behavior.
+  No desktop stop/restart, arbitrary PID exemption or automatic service change.
 - Show retained decision answers before optional native metadata in bounded
   result panels, and explicitly direct uncertain remote completions to endpoint
   verification before retrying. Admission safety and observer precedence stay
