@@ -36,6 +36,10 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Show retained decision answers before optional native metadata in bounded
+  result panels, and explicitly direct uncertain remote completions to endpoint
+  verification before retrying. Admission safety and observer precedence stay
+  unchanged.
 - Run toolkit CI on root Rust toolchain changes and smoke-test the documented
   root stack listing without starting models or services.
 - Compact native decision JSON in the Stack result panel so a short terminal

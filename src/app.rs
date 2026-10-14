@@ -5261,7 +5261,7 @@ impl App {
                     .is_some_and(|summary| summary.requires_idle_gpu_window);
                 self.status = if remote {
                     format!(
-                        "{label} #{expected_job_id} interrupted: {error}; foreground admission is closed, inspect the backend before retrying"
+                        "{label} #{expected_job_id} interrupted: {error}; foreground admission is closed; verify the endpoint before retrying"
                     )
                 } else if requires_idle_gpu_window {
                     format!(
@@ -8863,10 +8863,11 @@ fn native_output_preview(
         NativeOutput::Decisions { answers } => {
             let answers = serde_json::to_string_pretty(answers)
                 .unwrap_or_else(|_| "Decision output could not be rendered".into());
+            let answers = format!("Answers:\n{answers}");
             match metadata {
                 None => answers,
                 Some(metadata) => format!(
-                    "Native decision metadata (not coordinator timing):\n{}\n\nAnswers:\n{answers}",
+                    "{answers}\n\nNative decision metadata (not coordinator timing):\n{}",
                     serde_json::to_string_pretty(metadata)
                         .unwrap_or_else(|_| "Metadata unavailable".into()),
                 ),

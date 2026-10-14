@@ -9,6 +9,33 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
+## Host transport acceptance and retained-result fixes — 2026-10-14
+
+After full host access was granted, both local TCP/Unix socket creation, the
+user systemd bus and NVIDIA queries succeeded. The first full suite had only
+two failures (928 passed, 2 failed, 1 ignored), both reproduced independently:
+remote cancellation feedback omitted the expected endpoint recovery wording,
+and optional pretty-printed decision metadata pushed retained answers below the
+visible result pane. The small fixes keep admission closure and native/observer
+precedence unchanged. Answers now precede optional metadata, and remote-uncertain
+status explicitly instructs endpoint verification before retrying. Both original
+isolated repros pass, followed by **930 passed, 0 failed, 1 ignored** from
+`cargo test --all-targets --locked --quiet`. No test was skipped to obtain this.
+
+The real Firefox probe also passes on the current source: all 8 media and 7
+decision cards, real pointer/keyboard/focus, desktop 1440px/mobile 390px without
+horizontal overflow, verified console-error detection followed by zero dashboard
+exceptions, and verified browser process-group cleanup. Root visually inspected
+all four retained screenshots in ignored `.toolkit/dashboard-probe-TXcoaH/`.
+No original browser profile or public deployment was changed.
+
+The live llama-swap unit is active/running but has `KillMode=process`; the
+resident guard correctly refuses it. The user approved a temporary runtime-only
+override with removal/exact restoration, and a branch-local audio.cpp rebuild
+using existing weights only. These approvals do not authorize persistent unit
+installation, new weights or publication. Neither service change nor live GPU
+switching has occurred at this checkpoint; prepare both before bounded testing.
+
 ## CI and tracked-source import checks — 2026-10-14
 
 Added root `rust-toolchain.toml` to both toolkit workflow path filters (L3DS
