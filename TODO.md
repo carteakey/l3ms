@@ -24,6 +24,9 @@ committed work.
   interactive handoff and device acceptance remain pending. Do not invent inference, output artifacts, or a
   CPU/CUDA device declaration.
 - [ ] Add the small operator-owned native service handoff/restoration path.
+  **Parked at the user's request while Pi uses Strata.** Do not preempt Pi or
+  resume the live switching test without arranging the quiet window. The private
+  bounded test harness is prepared; capture fresh state when returning to it.
   The shared native owner now has an explicit resident llama-swap opt-in, bounded
   fixed-unit/config/cgroup checks and one-shot ready-model restoration; default
   behavior stays operator-managed idle admission. Eight unit checks and strict
@@ -44,6 +47,10 @@ committed work.
   safety needed by surviving callers, and work toward the plan's half-control-
   source reduction target without adding a daemon or engine hierarchy. Keep local
   SemIf unsupported while its native forward pass is absent; do not fake it.
+- [ ] Polish read-only CLI list output when a downstream pipe closes early.
+  `l3ms --list stack | head` currently triggers a Rust stdout BrokenPipe panic;
+  the complete relocated listing exits 0. Handle this locally in output code,
+  not by changing process-wide SIGPIPE or masking unrelated execution failures.
 - [ ] Complete live acceptance across all lanes and supported tasks, including
   local/hosted decisions, language/chat/embeddings, media, TTS modes, Comfy and
   GPU workflows; verify cancellation, results, artifacts and exact handoff
@@ -65,7 +72,10 @@ committed work.
   Tracked-source relocation/listing and 74 toolkit/14 root downloader Python
   fixtures pass without ignored vendors/venvs; missing decision setup refuses
   without installation. CI now includes root stack listing and toolkit runs on
-  root toolchain changes; actual remote CI and fresh runtime installation remain.
+  root toolchain changes. Fresh tracked-source debug builds/tests now pass outside
+  any original checkout, including both standalone toolkit CLIs; see the current
+  source-only evidence in migration status. Actual remote CI, fresh dependency
+  acquisition/runtime installation and release-profile validation remain.
 - [x] Run `cargo test --all-targets --locked` where local TCP/Unix sockets are
   permitted, then run a bounded real embedding batch with an explicitly prepared
   profile, installed weights and configured endpoint. Do not silently enable or

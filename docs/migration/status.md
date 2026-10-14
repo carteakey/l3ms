@@ -9,6 +9,43 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
+## Fresh tracked-source compatibility — 2026-10-14
+
+Live GPU switching is parked at the user's request while Pi uses Strata. No
+additional service/GPU/provider operations were performed in this slice.
+
+Exported `f64d15b` with `git archive` to `/tmp/l3ms-standalone-source-N87poS`,
+outside any parent Git checkout, with no ignored vendors, `.venv`, models or old
+build outputs. A new target directory under ignored
+`.toolkit/clean-source-318nde/target` was initially empty. Dependencies were
+compiled from the existing local Cargo cache, using `--locked --offline`, one
+build worker and `nice -n 19`. The root crate was recompiled at the external
+source path; no original application's binary was used for the final check.
+
+- Root `cargo test --all-targets --locked --offline --quiet -- --test-threads=2`:
+  **936 passed, 4 ignored**. Debug build succeeds.
+- Standalone L2M2/L3DS `cargo test --all-targets --locked --offline --quiet`:
+  **6 and 2 passed** respectively. Both debug builds and profile listings pass.
+- All three packages also pass strict offline Clippy and formatting checks.
+- A copied root binary launched from `/tmp`, without `L3MS_ROOT`, lists all
+  **30 profiles with source paths in the external archive**. Its first listing
+  from the shared target location selected the nearer intermediate source
+  archive by executable ancestry, so that was not counted as external-root
+  discovery proof. The complete relocated listing exits 0.
+- All **74 toolkit Python tests**, **14 root downloader tests**, **11 dashboard
+  generator tests**, DOM fixtures and toolkit shell syntax checks pass from the
+  external source. The separate Breeze harness's **17 offline fixtures** pass.
+- Explicit external-root Nagi CPU execution with a public input and missing
+  `.venv` refuses with exit 1 and no result/environment installation; the missing
+  runtime remains absent. This is a negative preflight, not model execution.
+
+This strengthens source portability/build evidence, not clean-machine package
+acquisition, fresh model/runtime installation, release/LTO builds, remote CI,
+model quality, publication or live GPU restoration. No new application code,
+runtime dependency, daemon or framework was introduced. A focused delegated
+review found no contradictory default native/coordinator claims in the operator
+docs, so no speculative rewrite was made.
+
 ## Narrow speech artifact preview — 2026-10-14
 
 Speech result previews now put the filename before the full path. The existing
