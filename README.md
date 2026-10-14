@@ -163,6 +163,12 @@ server, explicitly set `L3MS_COMFY_SCOPED_JOBS=1`; this asserts compatibility,
 not GPU ownership. `L2M2_COMFY_URL` defaults to `http://127.0.0.1:8188` and
 `L3MS_COMFY_API_KEY` optionally supplies authentication.
 
+The toolkit setup pin (`6bfaacc`) implements this contract natively; no custom
+server patch is required. Its generated job snapshots pass the adapter parser
+checks. This does not verify the version or behavior of a running endpoint.
+A cancelled pending job is removed without terminal history, so it can remain
+unconfirmed here even when the server acknowledges cancellation.
+
 ```bash
 L3MS_COMFY_SCOPED_JOBS=1 l3ms --run-profile media:your-comfy-profile --task image --input /path/to/workflow.json --output-dir /path/to/private-empty-directory
 ```

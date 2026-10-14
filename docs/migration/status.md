@@ -9,6 +9,36 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
+## Pinned native Comfy contract verification — 2026-10-14
+
+Rechecked the clean vendored ComfyUI checkout against the toolkit setup pin,
+`6bfaacc67c2103481e5f0c84d75257cd0581d86a`. Its native server accepts canonical
+caller prompt IDs, exposes `/api/jobs/{id}` and scoped cancellation, and checks
+the exact running ID under the queue mutex before signalling interruption. No
+custom server patch, new adapter or global `/interrupt` fallback is needed.
+
+Generated five snapshots by importing that checkout's `comfy_execution.jobs`
+and calling `get_job` on synthetic history/queue entries. The checked-in fixture
+uses priority 0, create time 1, end time 2, empty graph, one `run/out.png` output,
+and success/error/interruption events; it contains no real request or credential.
+The existing terminal/artifact validation regression now parses these actual
+native envelopes for completed, failed, cancelled, running and pending states,
+while retaining its malformed and unsafe-path checks. Focused test, strict
+all-target Clippy, formatting and diff checks pass. Production behavior unchanged.
+
+A queued job removed by cancellation has no terminal history. Its subsequent
+404 remains Unknown, not proof of cancellation; bounded recovery conservatively
+keeps admission closed. The collector still supports image/audio/video artifacts,
+not all arbitrary native text/3D files. This is source/schema compatibility, not
+running-endpoint, model, cancellation or GPU-release acceptance.
+
+The current session still refuses loopback and Unix socket creation with EPERM,
+refuses the user systemd bus, and cannot access the NVIDIA driver. No approved
+maintenance action was attempted through a bypass. Remaining live gates in
+[TODO](../../TODO.md#monorepo-next-work) require a host-capable session, and the
+missing audio.cpp checkout path is still unresolved. No model download, service
+change, publication or original-checkout mutation occurred.
+
 ## Control-only retirement, native UI and compatibility — 2026-10-13
 
 Removed the branch-added `ControlDaemon::run` control-only loop and its duplicate

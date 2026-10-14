@@ -2897,15 +2897,24 @@ mod tests {
 
     #[test]
     fn terminal_history_and_artifact_validation_fail_closed() {
-        for (label, state) in [
-            ("completed", ComfyJobState::Completed),
-            ("failed", ComfyJobState::Failed),
-            ("cancelled", ComfyJobState::Cancelled),
-        ] {
-            assert_eq!(snapshot(&terminal(label)).unwrap().state, state);
-        }
-        for label in ["pending", "in_progress"] {
-            assert!(snapshot(&serde_json::json!({"id":ID,"status":label})).is_ok());
+        // Generated with get_job from the clean toolkit setup pin (6bfaacc),
+        // not a hand-written approximation of the native terminal envelope.
+        let native: Vec<Value> =
+            serde_json::from_str(include_str!("fixtures/comfy-jobs-6bfaacc.json")).unwrap();
+        assert_eq!(native.len(), 5);
+        for (body, state) in native.iter().zip([
+            ComfyJobState::Completed,
+            ComfyJobState::Failed,
+            ComfyJobState::Cancelled,
+            ComfyJobState::Running,
+            ComfyJobState::Pending,
+        ]) {
+            let parsed = snapshot(body).unwrap();
+            assert_eq!(parsed.state, state);
+            assert_eq!(
+                parsed.artifacts.len(),
+                usize::from(body.get("outputs").is_some())
+            );
         }
         assert!(snapshot(&serde_json::json!({"id":ID,"status":"completed"})).is_err());
         let mut bad = terminal("completed");

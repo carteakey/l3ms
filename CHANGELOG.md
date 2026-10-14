@@ -36,6 +36,10 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Verify Comfy job snapshots against the toolkit's exact native setup pin rather
+  than only synthetic terminal envelopes. Clarify that its scoped job contract
+  requires no custom server patch; pending cancellation can still be unconfirmed
+  because dequeued jobs leave no terminal history. No endpoint or service change.
 - Keep all eight tab labels visible in narrow terminals and show native/Chat
   guidance by default in Stack, with retained-ID observation still explicitly
   configured. No new worker, dispatch mode or daemon is introduced.
