@@ -11,6 +11,15 @@ runtime check.
 
 ## Host transport acceptance and retained-result fixes — 2026-10-14
 
+Real CPU embedding acceptance now also passes through the shared CLI adapter:
+two distinct finite/nonzero 768-dimensional vectors and native usage 17/17.
+The cached model ran on a temporary loopback-only llama-server with zero GPU
+layers; both client and server cleanup were verified. Tracked disabled profiles,
+the live router and its model were untouched. The private setup failure refused
+before dispatch and was corrected, not treated as ambiguous inference to replay.
+See [exact embedding evidence](direct-embedding-acceptance.md); this is not a
+live-router, quality, GPU or real keyboard embedding-UI claim.
+
 After full host access was granted, both local TCP/Unix socket creation, the
 user systemd bus and NVIDIA queries succeeded. The first full suite had only
 two failures (928 passed, 2 failed, 1 ignored), both reproduced independently:

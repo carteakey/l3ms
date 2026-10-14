@@ -58,12 +58,15 @@ committed work.
   fixtures pass without ignored vendors/venvs; missing decision setup refuses
   without installation. CI now includes root stack listing and toolkit runs on
   root toolchain changes; actual remote CI and fresh runtime installation remain.
-- [ ] Run `cargo test --all-targets --locked` where local TCP/Unix sockets are
+- [x] Run `cargo test --all-targets --locked` where local TCP/Unix sockets are
   permitted, then run a bounded real embedding batch with an explicitly prepared
   profile, installed weights and configured endpoint. Do not silently enable or
   download models.
   Host access now permits transport tests: the complete root suite passes
-  (930 passed, 1 ignored). The real embedding batch remains outstanding.
+  (930 passed, 1 ignored). A private prepared CPU embedding profile and cached
+  model returned 2×768 vectors over real HTTP with verified cleanup; see
+  [evidence](docs/migration/direct-embedding-acceptance.md). Live-router embedding
+  profile and real embedding keyboard-UI acceptance remain part of all-lane work.
 - [ ] Keep original repositories, configs, runtime state and history until
   acceptance and rollback criteria are documented. Publication remains **NO-GO**
   until the exact outgoing history/export, endpoints, host paths, secrets and large
