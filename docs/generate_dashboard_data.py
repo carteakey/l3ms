@@ -380,13 +380,16 @@ def main() -> None:
         source = parsed[model_id]
         if source.get("unlisted"):
             raise SystemExit(f"Dashboard model is marked unlisted: {model_id}")
+        context = context_from_command(source.get("cmd", ""))
+        if context == "Custom" and display.get("testedContext"):
+            context = display["testedContext"]
         public_models.append(
             {
                 **display,
                 "id": model_id,
                 "name": display.get("displayName", source.get("name", model_id)),
                 "description": display.get("summary", source.get("description", "")),
-                "context": context_from_command(source.get("cmd", "")),
+                "context": context,
                 "evidence": profile_evidence(display),
                 "command": portable_command(source),
                 "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/llama-swap.yaml",
@@ -403,6 +406,7 @@ def main() -> None:
         "media": media,
         "decisions": decisions,
         "benchmarks": meta["benchmarks"],
+        "progression": meta.get("progression", []),
         # Deliberately separate from models: community hardware must never
         # enter the local RTX 4070 ranking or its sort order.
         "communityRuns": community_runs,

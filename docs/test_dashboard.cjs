@@ -78,8 +78,8 @@ vm.runInContext(scripts[0], context, { filename: "dashboard-inline.js", timeout:
 
 const tabs = queryAll(".tab");
 const panels = queryAll(".tab-panel");
-assert.equal(tabs.length, 6);
-assert.equal(panels.length, 6);
+assert.equal(tabs.length, 7);
+assert.equal(panels.length, 7);
 function assertSelected(index) {
   tabs.forEach((tab, position) => {
     assert.equal(tab.classList.contains("active"), position === index);
@@ -107,16 +107,16 @@ assert.equal(document.activeElement, tabs[2]);
 key("Home");
 assertSelected(0);
 key("ArrowLeft");
-assertSelected(5);
+assertSelected(6);
 key("ArrowRight");
 assertSelected(0);
 key("End");
-assertSelected(5);
+assertSelected(6);
 key("a", false);
-assertSelected(5);
-panels[5].focus();
+assertSelected(6);
+panels[6].focus();
 key("ArrowLeft", false);
-assertSelected(5);
+assertSelected(6);
 
 assert.equal((byId.get("media-list").innerHTML.match(/<article\b/g) || []).length,
   context.window.L3MS_DASHBOARD.media.length);

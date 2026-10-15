@@ -36,14 +36,18 @@ macros:
   "qwen38_mtp_server":     "${env.L3MS_ROOT}/vendor/llama.cpp-exp-stack-v2/build/bin/llama-server"
   "qwen38_exp_server":     "${env.L3MS_ROOT}/vendor/llama.cpp-exp-latest/build/bin/llama-server"
   "qwen38_exp_mtp_server": "${env.L3MS_ROOT}/vendor/llama.cpp-pr-test-28023-28068-27941/build/bin/llama-server"
-  # Existing decision runtime: efe3626b1 (#30383), built separately from gold.
+  # decision models: master @ efe3626b1 (#30383 vllm-d3 support), worktree of llama.cpp-master
   "d3_server":             "${env.L3MS_ROOT}/vendor/llama.cpp-d3/build/bin/llama-server"
-  # strata tier: v0.1.40.2 dynamic expert cache + native MTP
+  # strata tier: v0.1.44.1 dynamic expert cache + native MTP
   "strata_python":         "${env.L3MS_ROOT}/vendor/strata/.venv/bin/python"
-  "strata_server":         "${env.L3MS_ROOT}/vendor/strata-latest/serve/server.py"
-  "strata_iq3_config":     "${env.L3MS_ROOT}/vendor/strata-latest/strata-iq3_xxs.json"
-  "strata_vision_config":  "${env.L3MS_ROOT}/vendor/strata-latest/strata-vision.json"
+  "strata_server":         "${env.L3MS_ROOT}/vendor/strata-v0.1.44.1/serve/server.py"
+  "strata_iq3_config":     "${env.L3MS_ROOT}/vendor/strata-v0.1.44.1/strata-iq3_xxs.json"
+  "strata_abliterated_config": "${env.L3MS_ROOT}/vendor/strata-v0.1.44.1/strata-sc117-iq3_xxs.json"
+  "strata_vision_config":  "${env.L3MS_ROOT}/vendor/strata-v0.1.44.1/strata-vision.json"
+  "strata_abliterated_vision_config": "${env.L3MS_ROOT}/vendor/strata-v0.1.44.1/strata-sc117-vision.json"
   "strata_iq3s_config":    "${env.L3MS_ROOT}/vendor/strata/strata-iq3_s.json"
+  # humanizer: master binary with full Gemma 4 support & jinja chat template
+  "humanizer_server":      "${env.L3MS_ROOT}/vendor/llama.cpp-master/build/bin/llama-server"
 
   # --- shared paths ---
   "chat_template": "${env.L3MS_ROOT}/chat-template.jinja"
@@ -56,7 +60,7 @@ models:
   # Native typed decisions, not chat. POST /v1/systemone with model (swap v262+).
   "vllm-d3-flash":
     name: "vLLM-SR d3-flash 9B Decision (Q8_0 + mmproj-BF16, text+image)"
-    description: "Native typed decisions via llama.cpp. Accuracy-priority local candidate; live branch acceptance pending."
+    description: "Native decision model: choice / noul (yes-no) / score questions answered with probabilities via POST /v1/systemone (TypeSafe System One API). Image input via `images` data URLs (up to 1.6 MP each). Non-causal: whole prompt (images + state + question) must fit one ubatch, so ub = ctx = 8192 (~4 full-size images). 11.5 GB VRAM. Warm: ~0.11 s text (3 questions), ~1.7 s with one 1024x768 image + 4 questions (each question re-reads the image: 3.4k tokens)."
     metadata:
       task: decision
     cmd: |
@@ -72,7 +76,7 @@ models:
 
   "cloudflare-clef-flash":
     name: "Cloudflare Clef-Flash 9B Decision (Q4_K_M + mmproj-BF16, text+image)"
-    description: "Native joint-question decisions via llama.cpp. Calibration/multi-question image candidate; live branch acceptance pending."
+    description: "Native decision model (clef): all questions of a request decided jointly in one pass, so images are read once. POST /v1/systemone with the model in the JSON body. Clef server is decision-only (no text generation). Whole prompt must fit one ubatch: ub = ctx = 8192. 8.9 GB VRAM. Warm: ~0.09 s text (3 questions), ~0.5 s with one 1024x768 image + 4 questions (1.1k tokens)."
     metadata:
       task: decision
     cmd: |
@@ -114,6 +118,29 @@ models:
   #    --threads 10 --threads-batch 12
   #    --host 0.0.0.0 --port ${PORT}
   #    --no-warmup
+
+  "embeddinggemma-2":
+    name: "EmbeddingGemma 2 (Q8_0, CPU, 768 dimensions)"
+    description: "OpenAI-compatible embeddings for Lytte search by meaning. CPU-only so it never evicts a chat model from VRAM; unloads after 5 minutes idle."
+    ttl: 300
+    metadata:
+      task: embeddings
+      dimensions: 768
+      context_length: 2048
+      query_prefix: "task: search result | query: "
+      document_prefix: "title: none | text: "
+    cmd: |
+      env CUDA_VISIBLE_DEVICES= ${qwen38_master_server}
+      -m /home/kchauhan/models/ggml-org/embeddinggemma-2-GGUF/embeddinggemma-2-Q8_0.gguf
+      --alias embeddinggemma-2
+      --embedding
+      --ctx-size 2048
+      --batch-size 2048 --ubatch-size 2048
+      --n-gpu-layers 0
+      --parallel 2
+      --threads 4
+      --host 0.0.0.0 --port ${PORT}
+      --no-warmup
 
   ## ===========================================================================
   ## gpt-oss family
@@ -266,82 +293,145 @@ models:
   #    --host 0.0.0.0 --port ${PORT}
 
   ## ===========================================================================
-  ## Qwen3.8 Flash Next Plat (Strata v0.1.40.2, ISTA-DASLab IQ3_XXS, 128k ctx)
+  ## Qwen3.8 Flash Next Plat (Strata v0.1.44.1, ISTA-DASLab IQ3_XXS, 128k ctx)
   ## ===========================================================================
 
   "qwen38-flash-next-plat":
-    name: "Qwen3.8-Flash-Next Plat (Strata v0.1.40.2, ISTA-DASLab IQ3_XXS, 128k ctx, 56-90 t/s)"
-    description: "Platinum: Strata v0.1.40.2 with dynamic expert VRAM caching (3,086 hot experts in VRAM) + native MTP speculative decoding (Q2_0 draft head) + K8V4 KV cache + 128k context with dynamic KV streaming. 56.1 t/s steady decode on real code, 90.2 t/s peak, pp=952-1,999 t/s @ 8k. See docs/strata-evaluation-internal.md."
+    name: "Qwen3.8-Flash-Next Plat (Strata v0.1.44.1, ISTA-DASLab IQ3_XXS, 128k ctx, 60-90 t/s)"
+    description: "Platinum: Strata v0.1.44.1 with dynamic expert VRAM caching (3,086 hot experts in VRAM) + native MTP speculative decoding (Q2_0 draft head) + K8V4 KV cache + 128k context with dynamic KV streaming. 59.6 t/s steady decode on real code, 90.2 t/s peak, pp=952-1,985 t/s @ 8k. See docs/strata-evaluation-internal.md."
+    ttl: 3600
     cmd: |
       taskset -c ${cpu_range} ${strata_python}
       ${strata_server}
       --engine strata
       --config ${strata_iq3_config}
+      --fit-max-tokens
       --port ${PORT}
 
   "strata":
-    name: "Strata (Qwen3.8-Flash-Next Plat, ISTA-DASLab IQ3_XXS, 128k ctx, 56-90 t/s)"
-    description: "Alias for qwen38-flash-next-plat. High-throughput 56+ t/s coding and reasoning tier."
+    name: "Strata (Qwen3.8-Flash-Next Plat, ISTA-DASLab IQ3_XXS, 128k ctx, 60-90 t/s)"
+    description: "Alias for qwen38-flash-next-plat. High-throughput 60+ t/s coding and reasoning tier."
     unlisted: true
+    ttl: 3600
     cmd: |
       taskset -c ${cpu_range} ${strata_python}
       ${strata_server}
       --engine strata
       --config ${strata_iq3_config}
+      --fit-max-tokens
       --port ${PORT}
 
   "plat":
     name: "Plat (Qwen3.8-Flash-Next Plat Alias)"
-    description: "Alias for qwen38-flash-next-plat. High-throughput 56+ t/s coding and reasoning tier."
+    description: "Alias for qwen38-flash-next-plat. High-throughput 60+ t/s coding and reasoning tier."
     unlisted: true
+    ttl: 3600
     cmd: |
       taskset -c ${cpu_range} ${strata_python}
       ${strata_server}
       --engine strata
       --config ${strata_iq3_config}
+      --fit-max-tokens
+      --port ${PORT}
+
+  "qwen38-flash-next-plat-abliterated":
+    name: "Qwen3.8-Flash-Next Plat Abliterated (Strata v0.1.44.1, SC117 IQ3_XXS, 128k ctx)"
+    description: "Platinum Abliterated: Strata v0.1.44.1 with SC117 unaligned/uncensored weights + dynamic expert VRAM caching (3,086 hot experts in VRAM) + native MTP speculative decoding + K8V4 KV cache + 128k ctx. 60-90 t/s decode."
+    ttl: 3600
+    cmd: |
+      taskset -c ${cpu_range} ${strata_python}
+      ${strata_server}
+      --engine strata
+      --config ${strata_abliterated_config}
+      --fit-max-tokens
+      --port ${PORT}
+
+  "abliterated":
+    name: "Abliterated (Qwen3.8-Flash-Next Plat Abliterated Alias)"
+    description: "Alias for qwen38-flash-next-plat-abliterated. Uncensored/unaligned high-throughput tier."
+    unlisted: true
+    ttl: 3600
+    cmd: |
+      taskset -c ${cpu_range} ${strata_python}
+      ${strata_server}
+      --engine strata
+      --config ${strata_abliterated_config}
+      --fit-max-tokens
       --port ${PORT}
 
   "qwen38-flash-next-plat-vision":
-    name: "Qwen3.8-Flash-Next Plat Vision (Strata v0.1.40.2 + strata-vision, mmproj-F16, 128k ctx)"
-    description: "Platinum Vision: Strata v0.1.40.2 with native CPU-offloaded strata-vision image encoder (mmproj-F16) preserving 100% VRAM expert cache. 53-60 t/s decode, multimodal image understanding via OpenAI / Anthropic API."
+    name: "Qwen3.8-Flash-Next Plat Vision (Strata v0.1.44.1 + strata-vision, mmproj-F16, 128k ctx)"
+    description: "Platinum Vision: Strata v0.1.44.1 with native CPU-offloaded strata-vision image encoder (mmproj-F16) preserving 100% VRAM expert cache. 53-60 t/s decode, multimodal image understanding via OpenAI / Anthropic API."
+    ttl: 3600
     cmd: |
       taskset -c ${cpu_range} ${strata_python}
       ${strata_server}
       --engine strata
       --config ${strata_vision_config}
+      --fit-max-tokens
       --port ${PORT}
 
   "strata-vision":
     name: "Strata Vision (Qwen3.8-Flash-Next Plat + strata-vision, mmproj-F16)"
     description: "Alias for qwen38-flash-next-plat-vision. High-throughput multimodal tier."
     unlisted: true
+    ttl: 3600
     cmd: |
       taskset -c ${cpu_range} ${strata_python}
       ${strata_server}
       --engine strata
       --config ${strata_vision_config}
+      --fit-max-tokens
       --port ${PORT}
 
   "plat-vision":
     name: "Plat Vision (Qwen3.8-Flash-Next Plat Vision Alias)"
     description: "Alias for qwen38-flash-next-plat-vision. High-throughput multimodal tier."
     unlisted: true
+    ttl: 3600
     cmd: |
       taskset -c ${cpu_range} ${strata_python}
       ${strata_server}
       --engine strata
       --config ${strata_vision_config}
+      --fit-max-tokens
+      --port ${PORT}
+
+  "qwen38-flash-next-plat-abliterated-vision":
+    name: "Qwen3.8-Flash-Next Plat Abliterated Vision (Strata v0.1.44.1 + strata-vision, mmproj-F16, SC117, 128k ctx)"
+    description: "Platinum Abliterated Vision: Strata v0.1.44.1 uncensored/unaligned SC117 weights with native CPU-offloaded strata-vision image encoder (mmproj-F16) preserving 100% VRAM expert cache. Multimodal image understanding."
+    ttl: 3600
+    cmd: |
+      taskset -c ${cpu_range} ${strata_python}
+      ${strata_server}
+      --engine strata
+      --config ${strata_abliterated_vision_config}
+      --fit-max-tokens
+      --port ${PORT}
+
+  "abliterated-vision":
+    name: "Abliterated Vision (Qwen3.8-Flash-Next Plat Abliterated Vision Alias)"
+    description: "Alias for qwen38-flash-next-plat-abliterated-vision. High-throughput uncensored multimodal tier."
+    unlisted: true
+    ttl: 3600
+    cmd: |
+      taskset -c ${cpu_range} ${strata_python}
+      ${strata_server}
+      --engine strata
+      --config ${strata_abliterated_vision_config}
+      --fit-max-tokens
       --port ${PORT}
 
   "qwen38-flash-next-plat-iq3s":
-    name: "Qwen3.8-Flash-Next Plat IQ3_S (Strata v0.1.40.2, ISTA-DASLab IQ3_S, 128k ctx, 46-75 t/s)"
-    description: "Platinum Full-Fidelity: Strata v0.1.40.2 with ISTA-DASLab IQ3_S (highest precision quant, matching full 16-bit model performance) + dynamic expert VRAM caching + native MTP speculative decoding + K8V4 KV cache + 128k context. See docs/strata-evaluation-internal.md."
+    name: "Qwen3.8-Flash-Next Plat IQ3_S (Strata v0.1.44.1, ISTA-DASLab IQ3_S, 128k ctx, 46-75 t/s)"
+    description: "Platinum Full-Fidelity: Strata v0.1.44.1 with ISTA-DASLab IQ3_S (highest precision quant, matching full 16-bit model performance) + dynamic expert VRAM caching + native MTP speculative decoding + K8V4 KV cache + 128k context. See docs/strata-evaluation-internal.md."
     unlisted: true
     cmd: |
       taskset -c ${cpu_range} ${strata_python}
       ${strata_server}
       --engine strata
       --config ${strata_iq3s_config}
+      --fit-max-tokens
       --port ${PORT}
 
   ## ===========================================================================
@@ -350,8 +440,8 @@ models:
 # [retired 2026-08-31 — model files deleted from disk, see docs/bench-results.md archive]
 
   "qwen38-flash-next":
-    name: "Qwen3.8-Flash-Next (master b11475 7e8324f5f, ISTA-DASLab IQ3_XXS, 96k ctx)"
-    description: "Gold: plain upstream master b11475 (7e8324f5f). 17.34 t/s steady decode, pp=463-587 t/s @ 8k, 96k ctx, q8 KV, ngram-mod spec. Natively includes PR #29761, #29824, #29825. Reasoning: effort=xhigh, budget=4000. See docs/qwen38-flash-next-internal.md."
+    name: "Qwen3.8-Flash-Next (master b11619 683bbc0dc, ISTA-DASLab IQ3_XXS, 96k ctx)"
+    description: "Gold: plain upstream master b11619 (683bbc0dc). 12.8-17.3 t/s steady decode, pp=475-577 t/s @ 8k, 96k ctx, q8 KV, ngram-mod spec. Natively includes PR #29761, #29824, #29825, #30480. Reasoning: effort=xhigh, budget=4000. See docs/qwen38-flash-next-internal.md."
     env:
       - "GGML_CUDA_GRAPH_OPT=1"
     cmd: |
@@ -429,8 +519,8 @@ models:
   # ===========================================================================
 
   "qwen38-flash-next-vision":
-    name: "Qwen3.8-Flash-Next Vision (master b11475, mmproj-F16, 32k ctx, ncmoe 45)"
-    description: "Multimodal tier: plain upstream master b11475 with mmproj-F16 vision projector. Offloads 3 MoE layers to GPU (-ncmoe 45), 18.2-18.6 t/s @ 32k ctx, ub 1024, 10.8 GB VRAM (1.32 GB headroom for image activations/KV). See docs/qwen38-flash-next-internal.md."
+    name: "Qwen3.8-Flash-Next Vision (master b11619, mmproj-F16, 32k ctx, ncmoe 45)"
+    description: "Multimodal tier: plain upstream master b11619 with mmproj-F16 vision projector. Offloads 3 MoE layers to GPU (-ncmoe 45), 18.2-18.6 t/s @ 32k ctx, ub 1024, 10.8 GB VRAM (1.32 GB headroom for image activations/KV). See docs/qwen38-flash-next-internal.md."
     env:
       - "GGML_CUDA_GRAPH_OPT=1"
     cmd: |
@@ -521,7 +611,7 @@ models:
       --ctx-size 131072 --n-predict 32768
       --fit on --fit-ctx 131072 --fit-target 1536
       -ctk q8_0 -ctv q8_0
-      --no-mmap --mlock
+      --load-mode mlock
       --threads 10 --threads-batch 12
       --flash-attn on
       --spec-type draft-mtp --spec-draft-n-max 2
@@ -545,7 +635,7 @@ models:
       --ctx-size 262144 --n-predict 32768
       --fit on --fit-ctx 262144 --fit-target 128
       -ctk q5_0 -ctv q4_1
-      --no-mmap
+      --load-mode none
       --threads 10 --threads-batch 12
       --flash-attn on
       --parallel 1
@@ -710,7 +800,7 @@ models:
       --fit on --fit-ctx 131072 --fit-target 512
       --parallel 1
       -ctk q8_0 -ctv q8_0
-      --no-mmap --mlock
+      --load-mode mlock
       --threads 10 --threads-batch 12 --flash-attn on
       --batch-size 1024 --ubatch-size 512
       --prio 2 --no-warmup
@@ -732,13 +822,52 @@ models:
       --ctx-size 131072 --n-predict 32768
       --fit on --fit-ctx 131072 --fit-target 1536
       -ctk f16 -ctv f16
-      --no-mmap --mlock
+      --load-mode mlock
       --threads 10 --threads-batch 12
       --flash-attn on
       --spec-type draft-mtp --spec-draft-n-max 2
       --parallel 1
       --batch-size 1024 --ubatch-size 512
       --prio 2 --no-warmup
+
+  # ===========================================================================
+  # Humanizer (jialinyyzz/humanizer)
+  # ===========================================================================
+
+  "humanizer-12b":
+    name: "Humanizer 12B (Q6_K, Gemma 4 text rewriting)"
+    description: "Fine-tuned Gemma-4-12B text-completion rewrite model. Rewrites AI drafts to natural human voice preserving all facts, numbers, dates and names."
+    cmd: |
+      taskset -c ${cpu_range} ${humanizer_server}
+      -m /home/kchauhan/models/jialinyyzz/humanizer/humanizer-12b-Q6_K.gguf
+      --alias humanizer-12b
+      -c 8192 --parallel 1
+      -ngl 99
+      --flash-attn on
+      --jinja
+      --temp 1.0 --top-p 0.95 --top-k 0 --min-p 0.0 --repeat-penalty 1.0
+      --threads 10 --threads-batch 12 --prio 2
+      --batch-size 2048 --ubatch-size 512
+      --no-warmup
+      --host 0.0.0.0 --port ${PORT}
+
+  "humanizer":
+    name: "Humanizer 12B Alias"
+    description: "Alias for humanizer-12b."
+    unlisted: true
+    cmd: |
+      taskset -c ${cpu_range} ${humanizer_server}
+      -m /home/kchauhan/models/jialinyyzz/humanizer/humanizer-12b-Q6_K.gguf
+      --alias humanizer
+      -c 8192 --parallel 1
+      -ngl 99
+      --flash-attn on
+      --jinja
+      --temp 1.0 --top-p 0.95 --top-k 0 --min-p 0.0 --repeat-penalty 1.0
+      --threads 10 --threads-batch 12 --prio 2
+      --batch-size 2048 --ubatch-size 512
+      --no-warmup
+      --host 0.0.0.0 --port ${PORT}
 
   #"gemma-4-26b-qat-mtp-vision":
   #  name: "Gemma 4 26B QAT + MTP (UD-Q4_K_XL + Assistant, vision, Mainline)"
@@ -785,12 +914,21 @@ models:
   #    --jinja --no-mmap --mlock --prio 2
 # [retired 2026-08-31 — model files deleted from disk, see docs/bench-results.md archive]
 
+# Run the CPU-only embedder alongside whatever chat model is loaded instead of
+# swapping it out (llama-swap otherwise unloads every other model on a request).
+groups:
+  embeddings:
+    swap: false
+    exclusive: false
+    members:
+      - "embeddinggemma-2"
+
 # ===========================================================================
 # Startup: preload the default so the first request is instant.
-# gemma-4-26b-qat-mtp is the default — optimized for speed with
-# QAT UD-Q4_K_XL base and MTP Assistant draft model, giving 100.6 tok/s.
+# qwen38-flash-next-plat is the default — Platinum Strata tier with
+# dynamic expert VRAM cache, native MTP, K8V4 KV, and 62-90 tok/s.
 # ===========================================================================
 hooks:
   on_startup:
     preload:
-      - "gemma-4-26b-qat-mtp"
+      - "qwen38-flash-next-plat"
