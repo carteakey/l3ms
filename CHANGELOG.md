@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Changed
+- The Activity log pane fits its content (3 to 5 rows) instead of always taking 5,
+  returning working space to every tab while the log is short.
 - Maintenance tab: the script list and editor now end on the same row (the editor's
   hint line no longer misaligns them). Chat's header shows `system: —` for an empty
   system prompt, matching `model: —`.

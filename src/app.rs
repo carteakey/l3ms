@@ -6107,13 +6107,16 @@ impl App {
 
     fn draw(&mut self, frame: &mut Frame) {
         frame.render_widget(Block::default().style(theme::surface()), frame.area());
+        // Activity fits its content (one to three lines plus borders) so an empty
+        // log does not take working space from every tab.
+        let activity_height = (self.log.len() as u16).saturating_add(2).clamp(3, 5);
         let areas = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1),
                 Constraint::Length(3),
                 Constraint::Min(8),
-                Constraint::Length(5),
+                Constraint::Length(activity_height),
                 Constraint::Length(1),
             ])
             .split(frame.area());
@@ -12184,17 +12187,21 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
         let buffer = terminal.backend().buffer();
-        // Bottom-left corner glyphs of the two boxes must share a row.
-        let corners: Vec<(u16, u16)> = (0..buffer.area.height)
-            .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
-            .filter(|&(x, y)| buffer[(x, y)].symbol() == "└" && (4..18).contains(&y))
-            .collect();
-        let rows: std::collections::BTreeSet<u16> = corners.iter().map(|&(_, y)| y).collect();
-        assert!(
-            corners.len() >= 2,
-            "expected list and editor boxes: {corners:?}"
+        // The first box bottom below the tab bar must close both panes at once:
+        // the list's and the editor's bottom-left corners share a row.
+        let corners_in_row = |y: u16| {
+            (0..buffer.area.width)
+                .filter(|&x| buffer[(x, y)].symbol() == "└")
+                .count()
+        };
+        let first_bottom = (4..buffer.area.height)
+            .find(|&y| corners_in_row(y) > 0)
+            .expect("a pane bottom exists");
+        assert_eq!(
+            corners_in_row(first_bottom),
+            2,
+            "list and editor boxes end on different rows"
         );
-        assert_eq!(rows.len(), 1, "boxes end on different rows: {corners:?}");
 
         app.tab = Tab::Chat;
         app.chat_system_prompt.clear();

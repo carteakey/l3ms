@@ -43,6 +43,10 @@ for scope and evidence.
   Do not call the full port complete until these advertised paths pass.
 
 Optional follow-ups:
+- [x] Decision (2026-10-15): keep the idle-GPU guard for Blender headless work.
+  The wrapper runs arbitrary user Python, so the scene, not L3MS, picks the render
+  backend; the guard is what keeps that from colliding with the router's VRAM. Revisit
+  only if Blender is pinned to CPU in the wrapper itself.
 - [ ] Blender headless acceptance (the only profile still using the idle-GPU
   window) remains separate from the shared-engine workbench. Do not expand direct-script orchestration to fill
   unsupported model gaps by default; narrow the supported scope instead.
