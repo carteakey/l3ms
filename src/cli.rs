@@ -18,9 +18,7 @@ use crate::{
     llama_swap::{SwapClient, SwapModel},
     prompt_store::list_prompts,
     script_store::{collect_scripts_in, ScriptMode},
-    settings::{
-        export_profile_in, import_profile_in, load_current_stack_settings_in, load_settings_in,
-    },
+    settings::{export_profile_in, import_profile_in, load_settings_in},
 };
 
 #[cfg(target_os = "linux")]
@@ -514,13 +512,7 @@ fn list(mode: ListMode) -> Result<u8> {
 
 fn print_stack_list() -> Result<()> {
     let root = repository_root()?;
-    let user_data_root = crate::state_store::data_root()?;
-    let resolved = load_current_stack_settings_in(&root, &user_data_root)?;
-    let catalog = Catalog::load_from_roots(
-        &root,
-        &resolved.media_toolkit_root,
-        &resolved.decisions_toolkit_root,
-    )?;
+    let catalog = Catalog::load(&root)?;
     write_stack_list(&mut io::stdout().lock(), catalog.list())
         .context("failed to write stack listing")
 }
@@ -1028,16 +1020,8 @@ fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
 
     let repository_root =
         repository_root().map_err(|_| anyhow::anyhow!("repository location is unavailable"))?;
-    let data_root = crate::state_store::data_root()
-        .map_err(|_| anyhow::anyhow!("stack settings are unavailable"))?;
-    let settings = load_current_stack_settings_in(&repository_root, &data_root)
-        .map_err(|_| anyhow::anyhow!("stack settings are unavailable"))?;
-    let catalog = Catalog::load_from_roots(
-        &repository_root,
-        &settings.media_toolkit_root,
-        &settings.decisions_toolkit_root,
-    )
-    .map_err(|_| anyhow::anyhow!("stack catalog is unavailable"))?;
+    let catalog = Catalog::load(&repository_root)
+        .map_err(|_| anyhow::anyhow!("stack catalog is unavailable"))?;
 
     let (fields, output_dir) = match input {
         DirectNativeInput::Decision(input) => (

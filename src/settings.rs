@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::{config_store, control::catalog::ProfileKey, script_store};
+use crate::{config_store, script_store};
 
 const SETTINGS_FILE: &str = "settings.json";
 const PROFILE_MANIFEST: &str = "profile.json";
@@ -28,8 +28,6 @@ pub struct Settings {
     pub base_models_dir: String,
     pub binary_path: String,
     pub theme: String,
-    #[serde(skip_serializing_if = "StackPreferences::is_empty")]
-    pub stack: StackPreferences,
 }
 
 impl Default for Settings {
@@ -39,7 +37,6 @@ impl Default for Settings {
             base_models_dir: String::new(),
             binary_path: String::new(),
             theme: "default".to_owned(),
-            stack: StackPreferences::default(),
         }
     }
 }
@@ -59,313 +56,7 @@ impl Settings {
         if self.theme.trim().is_empty() || self.theme.len() > 64 {
             errors.push("theme must be 1-64 bytes".to_owned());
         }
-        errors.extend(self.stack.validate());
         errors
-    }
-}
-
-/// Cross-toolkit preferences kept in the existing settings.json store. Empty
-/// preferences are omitted, so a legacy settings file keeps its original shape.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct StackPreferences {
-    pub schema_version: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub media_toolkit_root: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub decisions_toolkit_root: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub artifact_root: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub gpu_policy: Option<GpuPolicy>,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub task_defaults: BTreeMap<String, String>,
-}
-
-impl Default for StackPreferences {
-    fn default() -> Self {
-        Self {
-            schema_version: 1,
-            media_toolkit_root: None,
-            decisions_toolkit_root: None,
-            artifact_root: None,
-            gpu_policy: None,
-            task_defaults: BTreeMap::new(),
-        }
-    }
-}
-
-impl StackPreferences {
-    fn is_empty(&self) -> bool {
-        self.schema_version == 1
-            && self.media_toolkit_root.is_none()
-            && self.decisions_toolkit_root.is_none()
-            && self.artifact_root.is_none()
-            && self.gpu_policy.is_none()
-            && self.task_defaults.is_empty()
-    }
-
-    fn validate(&self) -> Vec<String> {
-        let mut errors = Vec::new();
-        if self.schema_version != 1 {
-            errors.push(format!(
-                "unsupported stack settings schema {} (expected 1)",
-                self.schema_version
-            ));
-        }
-        for (name, value) in [
-            ("media_toolkit_root", &self.media_toolkit_root),
-            ("decisions_toolkit_root", &self.decisions_toolkit_root),
-            ("artifact_root", &self.artifact_root),
-        ] {
-            if value
-                .as_ref()
-                .is_some_and(|value| value.trim().is_empty() || value.contains('\0'))
-            {
-                errors.push(format!("{name} must be a non-empty path without NUL"));
-            }
-        }
-        for (task, profile) in &self.task_defaults {
-            if task.is_empty()
-                || task.len() > 64
-                || !task
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-                || !valid_profile_key(profile)
-            {
-                errors.push(format!("invalid task default {task:?} = {profile:?}"));
-            }
-        }
-        errors
-    }
-}
-
-fn valid_profile_key(value: &str) -> bool {
-    value.parse::<ProfileKey>().is_ok()
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GpuPolicy {
-    Manual,
-    Exclusive,
-}
-
-/// Effective paths and defaults after the declared precedence is applied.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedStackSettings {
-    pub media_toolkit_root: PathBuf,
-    pub decisions_toolkit_root: PathBuf,
-    pub artifact_root: Option<PathBuf>,
-    pub gpu_policy: GpuPolicy,
-    pub task_defaults: BTreeMap<String, String>,
-}
-
-/// CLI-only overrides; relative paths are interpreted from `invocation_dir`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct StackOverrides {
-    pub media_toolkit_root: Option<PathBuf>,
-    pub decisions_toolkit_root: Option<PathBuf>,
-    pub artifact_root: Option<PathBuf>,
-    pub gpu_policy: Option<GpuPolicy>,
-    pub task_defaults: BTreeMap<String, String>,
-}
-
-/// Resolve built-ins, selected host settings, user settings, supported
-/// environment overrides, then explicit CLI values. Stored relative paths are
-/// anchored to their settings-file directory, never the process CWD.
-pub fn resolve_stack_settings(
-    repo_root: &Path,
-    host: Option<(&Settings, &Path)>,
-    user: Option<(&Settings, &Path)>,
-    environment: &BTreeMap<String, String>,
-    cli: &StackOverrides,
-    invocation_dir: &Path,
-) -> Result<ResolvedStackSettings> {
-    let mut resolved = ResolvedStackSettings {
-        media_toolkit_root: repo_root.to_path_buf(),
-        decisions_toolkit_root: repo_root.to_path_buf(),
-        artifact_root: None,
-        gpu_policy: GpuPolicy::Manual,
-        task_defaults: BTreeMap::new(),
-    };
-    for (settings, declaring_dir) in [host, user].into_iter().flatten() {
-        let errors = settings.validate();
-        if !errors.is_empty() {
-            return Err(anyhow!(errors.join("; ")));
-        }
-        let layer = &settings.stack;
-        if let Some(root) = &layer.media_toolkit_root {
-            resolved.media_toolkit_root = resolve_declared_path(declaring_dir, Path::new(root));
-        }
-        if let Some(root) = &layer.decisions_toolkit_root {
-            resolved.decisions_toolkit_root = resolve_declared_path(declaring_dir, Path::new(root));
-        }
-        if let Some(path) = &layer.artifact_root {
-            resolved.artifact_root = Some(resolve_declared_path(declaring_dir, Path::new(path)));
-        }
-        if let Some(policy) = layer.gpu_policy {
-            resolved.gpu_policy = policy;
-        }
-        resolved.task_defaults.extend(layer.task_defaults.clone());
-    }
-    for (key, target) in [
-        ("L3MS_MEDIA_TOOLKIT_ROOT", &mut resolved.media_toolkit_root),
-        (
-            "L3MS_DECISIONS_TOOLKIT_ROOT",
-            &mut resolved.decisions_toolkit_root,
-        ),
-    ] {
-        if let Some(value) = environment.get(key) {
-            if value.trim().is_empty() || value.contains('\0') {
-                return Err(anyhow!("{key} must be a non-empty path without NUL"));
-            }
-            *target = resolve_declared_path(invocation_dir, Path::new(value));
-        }
-    }
-    if let Some(value) = environment.get("L3MS_GPU_POLICY") {
-        resolved.gpu_policy = parse_gpu_policy(value)?;
-    }
-    for (key, target) in [("L3MS_ARTIFACT_ROOT", &mut resolved.artifact_root)] {
-        if let Some(value) = environment.get(key) {
-            if value.trim().is_empty() || value.contains('\0') {
-                return Err(anyhow!("{key} must be a non-empty path without NUL"));
-            }
-            *target = Some(resolve_declared_path(invocation_dir, Path::new(value)));
-        }
-    }
-    for (key, profile) in environment {
-        if let Some(task) = key.strip_prefix("L3MS_TASK_DEFAULT_") {
-            let task = task.to_ascii_lowercase();
-            if task.is_empty()
-                || task.len() > 64
-                || !task
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-                || !valid_profile_key(profile)
-            {
-                return Err(anyhow!("invalid {key} task default"));
-            }
-            resolved.task_defaults.insert(task, profile.clone());
-        }
-    }
-    for (task, profile) in &cli.task_defaults {
-        if !valid_profile_key(profile)
-            || task.is_empty()
-            || task.len() > 64
-            || !task
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        {
-            return Err(anyhow!("invalid CLI task default {task:?} = {profile:?}"));
-        }
-        resolved.task_defaults.insert(task.clone(), profile.clone());
-    }
-    for (value, target) in [
-        (&cli.media_toolkit_root, &mut resolved.media_toolkit_root),
-        (
-            &cli.decisions_toolkit_root,
-            &mut resolved.decisions_toolkit_root,
-        ),
-    ] {
-        if let Some(path) = value {
-            if path.as_os_str().is_empty() {
-                return Err(anyhow!("CLI toolkit root must not be empty"));
-            }
-            *target = resolve_declared_path(invocation_dir, path);
-        }
-    }
-    if let Some(policy) = cli.gpu_policy {
-        resolved.gpu_policy = policy;
-    }
-    for (value, target) in [(&cli.artifact_root, &mut resolved.artifact_root)] {
-        if let Some(path) = value {
-            if path.as_os_str().is_empty() || path.to_string_lossy().contains('\0') {
-                return Err(anyhow!("CLI control path must not be empty or contain NUL"));
-            }
-            *target = Some(resolve_declared_path(invocation_dir, path));
-        }
-    }
-    Ok(resolved)
-}
-
-/// Load both optional host and user layers through the existing settings
-/// store, then apply the remaining overrides. No config file is written.
-pub fn load_resolved_stack_settings_in(
-    repo_root: &Path,
-    host_data_root: Option<&Path>,
-    user_data_root: &Path,
-    environment: &BTreeMap<String, String>,
-    cli: &StackOverrides,
-    invocation_dir: &Path,
-) -> Result<ResolvedStackSettings> {
-    let host_settings = host_data_root.map(load_settings_in).transpose()?;
-    let user_settings = load_settings_in(user_data_root)?;
-    resolve_stack_settings(
-        repo_root,
-        host_settings.as_ref().zip(host_data_root),
-        Some((&user_settings, user_data_root)),
-        environment,
-        cli,
-        invocation_dir,
-    )
-}
-
-/// Resolve the current operator's stack roots without changing settings.
-pub fn load_current_stack_settings_in(
-    repo_root: &Path,
-    user_data_root: &Path,
-) -> Result<ResolvedStackSettings> {
-    let host_data_root = std::env::var_os("L3MS_HOST_SETTINGS_DIR")
-        .map(|value| {
-            anyhow::ensure!(
-                !value.is_empty(),
-                "L3MS_HOST_SETTINGS_DIR must not be empty"
-            );
-            Ok(PathBuf::from(value))
-        })
-        .transpose()?;
-    let mut environment = BTreeMap::new();
-    for (key, value) in std::env::vars_os() {
-        let Some(key) = key.to_str() else { continue };
-        if !matches!(
-            key,
-            "L3MS_MEDIA_TOOLKIT_ROOT"
-                | "L3MS_DECISIONS_TOOLKIT_ROOT"
-                | "L3MS_GPU_POLICY"
-                | "L3MS_ARTIFACT_ROOT"
-        ) && !key.starts_with("L3MS_TASK_DEFAULT_")
-        {
-            continue;
-        }
-        let value = value
-            .into_string()
-            .map_err(|_| anyhow!("{key} must be UTF-8 for stack settings resolution"))?;
-        environment.insert(key.to_owned(), value);
-    }
-    load_resolved_stack_settings_in(
-        repo_root,
-        host_data_root.as_deref(),
-        user_data_root,
-        &environment,
-        &StackOverrides::default(),
-        &std::env::current_dir().context("resolve current directory")?,
-    )
-}
-
-fn resolve_declared_path(base: &Path, path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        base.join(path)
-    }
-}
-
-fn parse_gpu_policy(value: &str) -> Result<GpuPolicy> {
-    match value {
-        "manual" => Ok(GpuPolicy::Manual),
-        "exclusive" => Ok(GpuPolicy::Exclusive),
-        _ => Err(anyhow!("L3MS_GPU_POLICY must be manual or exclusive")),
     }
 }
 
@@ -460,13 +151,7 @@ pub fn export_profile_in(
     data_root: &Path,
     target: &Path,
 ) -> Result<ProfileManifest> {
-    let mut settings = load_settings_in(data_root)?;
-    // Profile bundles are portable: keep namespaced task choices, but do not
-    // export machine-local toolkit/control paths or host GPU policy.
-    settings.stack.media_toolkit_root = None;
-    settings.stack.decisions_toolkit_root = None;
-    settings.stack.artifact_root = None;
-    settings.stack.gpu_policy = None;
+    let settings = load_settings_in(data_root)?;
     let config_path = repo_root.join("model_downloader/models_config.json");
     let config = config_store::load_config_strict(&config_path)
         .with_context(|| format!("load profile config {}", config_path.display()))?;
@@ -683,22 +368,21 @@ mod tests {
             base_models_dir: "models".into(),
             binary_path: "llama-server".into(),
             theme: "dark".into(),
-            stack: StackPreferences::default(),
         };
         save_settings_in(temp.path(), &settings).unwrap();
         assert_eq!(load_settings_in(temp.path()).unwrap(), settings);
     }
 
     #[test]
-    fn legacy_settings_keep_their_shape_and_gain_empty_stack_defaults() {
+    fn legacy_settings_with_a_stack_key_still_load_and_drop_it_on_save() {
         let temp = TempDir::new().unwrap();
         fs::write(
             settings_path(temp.path()),
-            r#"{"default_port":8001,"base_models_dir":"","binary_path":"","theme":"default"}"#,
+            r#"{"default_port":8001,"base_models_dir":"","binary_path":"","theme":"default","stack":{"media_toolkit_root":"/old/media","gpu_policy":"exclusive"}}"#,
         )
         .unwrap();
         let settings = load_settings_in(temp.path()).unwrap();
-        assert!(settings.stack.is_empty());
+        assert_eq!(settings.default_port, 8001);
         save_settings_in(temp.path(), &settings).unwrap();
         let saved = fs::read_to_string(settings_path(temp.path())).unwrap();
         assert!(!saved.contains("\"stack\""));
@@ -711,197 +395,8 @@ mod tests {
                     .to_string_lossy()
                     .starts_with("settings.json.bak-")
             })
-            .collect::<Vec<_>>();
-        assert_eq!(snapshots.len(), 1);
-        assert!(fs::read_to_string(snapshots[0].path())
-            .unwrap()
-            .contains("\"default_port\":8001"));
-    }
-
-    #[test]
-    fn stack_resolution_obeys_precedence_and_declaring_paths() {
-        let temp = TempDir::new().unwrap();
-        let repo = temp.path().join("repo");
-        let host_dir = temp.path().join("host");
-        let user_dir = temp.path().join("user");
-        let invocation_dir = temp.path().join("some-other-working-directory");
-        let mut host = Settings::default();
-        host.stack.media_toolkit_root = Some("host-media".into());
-        host.stack.gpu_policy = Some(GpuPolicy::Exclusive);
-        host.stack
-            .task_defaults
-            .insert("tts".into(), "media:host-voice".into());
-        let mut user = Settings::default();
-        user.stack.decisions_toolkit_root = Some("user-decisions".into());
-        user.stack
-            .task_defaults
-            .insert("tts".into(), "media:user-voice".into());
-        let environment = BTreeMap::from([
-            ("L3MS_MEDIA_TOOLKIT_ROOT".into(), "env-media".into()),
-            ("L3MS_TASK_DEFAULT_TTS".into(), "media:env-voice".into()),
-        ]);
-        let cli = StackOverrides {
-            media_toolkit_root: Some(PathBuf::from("cli-media")),
-            task_defaults: BTreeMap::from([("tts".into(), "media:cli-voice".into())]),
-            ..StackOverrides::default()
-        };
-        let resolved = resolve_stack_settings(
-            &repo,
-            Some((&host, &host_dir)),
-            Some((&user, &user_dir)),
-            &environment,
-            &cli,
-            &invocation_dir,
-        )
-        .unwrap();
-        assert_eq!(
-            resolved.media_toolkit_root,
-            invocation_dir.join("cli-media")
-        );
-        assert_eq!(
-            resolved.decisions_toolkit_root,
-            user_dir.join("user-decisions")
-        );
-        assert_eq!(resolved.gpu_policy, GpuPolicy::Exclusive);
-        assert_eq!(resolved.task_defaults["tts"], "media:cli-voice");
-    }
-
-    #[test]
-    fn control_paths_are_opt_in_and_share_layered_resolution_without_creating_directories() {
-        let temp = TempDir::new().unwrap();
-        let repo = temp.path().join("repo");
-        let host_dir = temp.path().join("host");
-        let user_dir = temp.path().join("user");
-        let invocation = temp.path().join("invocation");
-        let empty = resolve_stack_settings(
-            &repo,
-            None,
-            None,
-            &BTreeMap::new(),
-            &StackOverrides::default(),
-            &invocation,
-        )
-        .unwrap();
-        assert!(empty.artifact_root.is_none());
-        let mut host = Settings::default();
-        host.stack.artifact_root = Some("host-artifacts".into());
-        let mut user = Settings::default();
-        user.stack.artifact_root = Some("user-artifacts".into());
-        let layered = resolve_stack_settings(
-            &repo,
-            Some((&host, &host_dir)),
-            Some((&user, &user_dir)),
-            &BTreeMap::new(),
-            &StackOverrides::default(),
-            &invocation,
-        )
-        .unwrap();
-        assert_eq!(layered.artifact_root, Some(user_dir.join("user-artifacts")));
-        let environment = BTreeMap::from([("L3MS_ARTIFACT_ROOT".into(), "env-artifacts".into())]);
-        let cli = StackOverrides::default();
-        let overridden = resolve_stack_settings(
-            &repo,
-            Some((&host, &host_dir)),
-            Some((&user, &user_dir)),
-            &environment,
-            &cli,
-            &invocation,
-        )
-        .unwrap();
-        assert_eq!(
-            overridden.artifact_root,
-            Some(invocation.join("env-artifacts"))
-        );
-        assert!(!host_dir.exists() && !user_dir.exists() && !invocation.exists());
-    }
-
-    #[test]
-    fn invalid_control_paths_fail_before_settings_writes_or_resolution() {
-        let temp = TempDir::new().unwrap();
-        for invalid in ["", "\0", "  "] {
-            let mut settings = Settings::default();
-            settings.stack.artifact_root = Some(invalid.into());
-            assert!(save_settings_in(temp.path(), &settings).is_err());
-            assert!(resolve_stack_settings(
-                temp.path(),
-                None,
-                None,
-                &BTreeMap::from([("L3MS_ARTIFACT_ROOT".into(), invalid.into())]),
-                &StackOverrides::default(),
-                temp.path()
-            )
-            .is_err());
-        }
-        assert!(!settings_path(temp.path()).exists());
-    }
-
-    #[test]
-    fn current_control_settings_read_environment_in_an_isolated_process() {
-        const MARKER: &str = "L3MS_TEST_CONTROL_PATH_ROOT";
-        if let Some(root) = std::env::var_os(MARKER) {
-            let root = PathBuf::from(root);
-            let resolved = load_current_stack_settings_in(&root, &root.join("user")).unwrap();
-            assert_eq!(resolved.artifact_root, Some(root.join("artifacts")));
-            assert!(!root.join("user").exists());
-            return;
-        }
-        let temp = TempDir::new().unwrap();
-        let output = {
-            let _fixture_guard = crate::control::process::executable_fixture_guard();
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "settings::tests::current_control_settings_read_environment_in_an_isolated_process",
-                ])
-                .env(MARKER, temp.path())
-                .env("L3MS_ARTIFACT_ROOT", temp.path().join("artifacts"))
-                .env_remove("L3MS_HOST_SETTINGS_DIR")
-                .output()
-                .unwrap()
-        };
-        assert!(
-            output.status.success(),
-            "isolated settings test failed: {}",
-            String::from_utf8_lossy(&output.stdout)
-        );
-    }
-
-    #[test]
-    fn stack_settings_reject_unknown_schema_and_bad_defaults() {
-        let mut settings = Settings::default();
-        settings.stack.schema_version = 2;
-        settings
-            .stack
-            .task_defaults
-            .insert("tts".into(), "unknown:voice".into());
-        assert_eq!(settings.validate().len(), 2);
-        let temp = TempDir::new().unwrap();
-        assert!(save_settings_in(temp.path(), &settings).is_err());
-        assert!(!settings_path(temp.path()).exists());
-    }
-
-    #[test]
-    fn stack_loader_reads_existing_host_and_user_settings_stores() {
-        let temp = TempDir::new().unwrap();
-        let host_dir = temp.path().join("host");
-        let user_dir = temp.path().join("user");
-        let mut host = Settings::default();
-        host.stack.media_toolkit_root = Some("media".into());
-        save_settings_in(&host_dir, &host).unwrap();
-        let mut user = Settings::default();
-        user.stack.decisions_toolkit_root = Some("decisions".into());
-        save_settings_in(&user_dir, &user).unwrap();
-        let resolved = load_resolved_stack_settings_in(
-            &temp.path().join("repo"),
-            Some(&host_dir),
-            &user_dir,
-            &BTreeMap::new(),
-            &StackOverrides::default(),
-            temp.path(),
-        )
-        .unwrap();
-        assert_eq!(resolved.media_toolkit_root, host_dir.join("media"));
-        assert_eq!(resolved.decisions_toolkit_root, user_dir.join("decisions"));
+            .count();
+        assert_eq!(snapshots, 1);
     }
 
     #[test]
@@ -949,7 +444,6 @@ mod tests {
             base_models_dir: "models".into(),
             binary_path: "llama-server".into(),
             theme: "dark".into(),
-            stack: StackPreferences::default(),
         };
         save_settings_in(data.path(), &settings).unwrap();
 
@@ -993,44 +487,5 @@ mod tests {
         )
         .unwrap()
         .contains("org/model"));
-    }
-
-    #[test]
-    fn profile_export_strips_machine_local_stack_roots() {
-        let repository = TempDir::new().unwrap();
-        let data = TempDir::new().unwrap();
-        fs::create_dir_all(repository.path().join("model_downloader")).unwrap();
-        fs::create_dir_all(repository.path().join("bench-models")).unwrap();
-        fs::create_dir_all(repository.path().join("run-models")).unwrap();
-        fs::write(
-            repository.path().join("model_downloader/models_config.json"),
-            r#"{"base_models_dir":"models","models":[{"repo_id":"org/model","description":"demo"}]}"#,
-        )
-        .unwrap();
-        let mut settings = Settings::default();
-        settings.stack.media_toolkit_root = Some("/private/media".into());
-        settings.stack.decisions_toolkit_root = Some("/private/decisions".into());
-        settings.stack.artifact_root = Some("/private/artifacts".into());
-        settings.stack.gpu_policy = Some(GpuPolicy::Exclusive);
-        settings
-            .stack
-            .task_defaults
-            .insert("tts".into(), "media:breeze-tts-2".into());
-        save_settings_in(data.path(), &settings).unwrap();
-
-        let bundle = repository.path().join("bundle");
-        let exported = export_profile_in(repository.path(), data.path(), &bundle).unwrap();
-        assert_eq!(exported.settings.stack.media_toolkit_root, None);
-        assert_eq!(exported.settings.stack.decisions_toolkit_root, None);
-        assert_eq!(exported.settings.stack.artifact_root, None);
-        assert_eq!(exported.settings.stack.gpu_policy, None);
-        assert_eq!(
-            exported.settings.stack.task_defaults["tts"],
-            "media:breeze-tts-2"
-        );
-        assert!(!fs::read_to_string(bundle.join("profile.json"))
-            .unwrap()
-            .contains("/private/"));
-        assert_eq!(load_settings_in(data.path()).unwrap(), settings);
     }
 }

@@ -111,11 +111,7 @@ l3ms --list stack
 
 This reports `language:`, `media:`, and `decisions:` profile IDs. Its
 `manifest-only` label means a profile is declared, not that its weights,
-dependencies, or service are ready. Both manifests default to the repository root; layered settings can override
-them with
-`L3MS_MEDIA_TOOLKIT_ROOT` and `L3MS_DECISIONS_TOOLKIT_ROOT`. An optional
-`L3MS_HOST_SETTINGS_DIR` selects a host settings directory before user
-settings are applied.
+dependencies, or service are ready. Both manifests live at the repository root.
 
 ### Stack language chat
 

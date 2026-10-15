@@ -4358,16 +4358,7 @@ impl App {
     }
 
     fn refresh_stack_catalog(&mut self) {
-        let settings = crate::settings::load_current_stack_settings_in(&self.root, &self.data_root);
-        let catalog = match settings {
-            Ok(settings) => Catalog::load_from_roots(
-                &self.root,
-                settings.media_toolkit_root,
-                settings.decisions_toolkit_root,
-            ),
-            Err(error) => Err(error),
-        };
-        match catalog {
+        match Catalog::load(&self.root) {
             Ok(catalog) => {
                 let count = catalog.list().len();
                 self.stack_catalog = Some(catalog);
@@ -12004,38 +11995,6 @@ mod tests {
         assert_eq!(editor.values.total_bytes(), MAX_TASK_FORM_TOTAL_BYTES);
         editor.sync_cursor();
         assert!(!editor.insert_char('x'));
-    }
-
-    #[test]
-    fn stack_catalog_uses_configured_roots_and_reports_refresh_errors() {
-        let fixture = AppFixture::new();
-        write_stack_fixture(&fixture);
-        let external_media = fixture.data.path().join("media");
-        fs::create_dir_all(&external_media).unwrap();
-        fs::write(external_media.join("media-runtimes.json"), r#"{"schema_version":1,"profiles":[{"id":"external","name":"Configured media","runtime":"audio.cpp","tasks":["tts"],"script":"speech.sh"}]}"#).unwrap();
-        let mut settings = crate::settings::Settings::default();
-        settings.stack.media_toolkit_root = Some("media".into());
-        crate::settings::save_settings_in(fixture.data.path(), &settings).unwrap();
-        let mut app = fixture.app();
-        app.execute_command(CommandId::OpenStackCatalog).unwrap();
-        assert!(app.stack_catalog.as_ref().unwrap().list().iter().any(|p| p
-            .key
-            .profile_id
-            .as_str()
-            == "external"));
-        fs::remove_file(external_media.join("media-runtimes.json")).unwrap();
-        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))
-            .unwrap();
-        assert!(app.stack_catalog.is_none());
-        assert!(app
-            .stack_catalog_error
-            .as_ref()
-            .unwrap()
-            .contains("media-runtimes.json"));
-        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
-        terminal.draw(|frame| app.draw(frame)).unwrap();
-        assert!(terminal_text(&terminal).contains("Stack Catalog · manifest view"));
-        assert!(app.running_process.is_none());
     }
 
     #[test]

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Removed
+- The layered stack-settings layer: `media_toolkit_root`, `decisions_toolkit_root`,
+  `artifact_root`, `gpu_policy` and `task_defaults`, with `L3MS_MEDIA_TOOLKIT_ROOT`,
+  `L3MS_DECISIONS_TOOLKIT_ROOT`, `L3MS_ARTIFACT_ROOT`, `L3MS_GPU_POLICY` and
+  `L3MS_TASK_DEFAULT_*`. Nothing in production read the last three; both manifests
+  now always load from the repository root. An old `settings.json` with a `stack`
+  key still loads (unknown fields are ignored) and drops it on the next save.
+
 ### Changed
 - The Activity log pane fits its content (3 to 5 rows) instead of always taking 5,
   returning working space to every tab while the log is short.
