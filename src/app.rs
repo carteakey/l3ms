@@ -2403,8 +2403,18 @@ impl App {
         Ok(())
     }
 
+    /// Every visible command matching the query. Commands for the current
+    /// screen (and global ones) come first; the rest stay reachable by search.
     fn palette_commands(&self) -> Vec<&'static crate::commands::CommandSpec> {
-        search_all_commands(&self.palette_query)
+        let context = self.command_context();
+        let mut commands = search_all_commands(&self.palette_query);
+        commands.sort_by_key(|spec| {
+            !spec
+                .contexts
+                .iter()
+                .any(|owner| *owner == CommandContext::Global || *owner == context)
+        });
+        commands
     }
 
     fn handle_chat_sessions_key(&mut self, key: KeyEvent) {
@@ -7815,7 +7825,7 @@ impl App {
     }
 
     fn draw_palette(&mut self, frame: &mut Frame) {
-        let area = centered_rect(84, 84, frame.area());
+        let area = centered_rect(94, 84, frame.area());
         frame.render_widget(Clear, area);
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -12111,6 +12121,37 @@ mod tests {
         // The first row is selected, which restyles it; the others keep lane colour.
         assert_eq!(fg_of("media"), Some(theme::CYAN));
         assert_eq!(fg_of("decisions"), Some(theme::AMBER));
+    }
+
+    #[test]
+    fn palette_lists_current_screen_commands_first_but_keeps_every_command_searchable() {
+        let fixture = AppFixture::new();
+        let mut app = fixture.app();
+        app.tab = Tab::Workbench;
+        let owned_here = |spec: &crate::commands::CommandSpec| {
+            spec.contexts
+                .iter()
+                .any(|c| *c == CommandContext::Global || *c == CommandContext::Workbench)
+        };
+        let all = app.palette_commands();
+        let first_foreign = all.iter().position(|spec| !owned_here(spec)).unwrap();
+        assert!(
+            all[..first_foreign].iter().all(|spec| owned_here(spec)),
+            "screen and global commands must precede the rest"
+        );
+        assert!(all[first_foreign..].iter().all(|spec| !owned_here(spec)));
+        assert_eq!(
+            all.len(),
+            search_all_commands("").len(),
+            "nothing is hidden"
+        );
+
+        // A command that belongs to another screen is still found by searching.
+        app.palette_query = "native task".into();
+        assert!(app
+            .palette_commands()
+            .iter()
+            .any(|spec| spec.id == CommandId::StackCatalogForm));
     }
 
     #[test]

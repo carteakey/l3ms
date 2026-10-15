@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### Changed
+- Command palette (`Ctrl+P`) lists the current screen's commands and global ones
+  first instead of one flat list of all 102, keeps every other command searchable,
+  and is wide enough that descriptions no longer truncate at 80 columns.
 - Reconcile pending main-checkout media changes: retain FLUX.3 support and its
   shared ComfyUI pin while preserving LTX/YuE2 workflow routing and the Turbo
   downloader fix. Preserve unrelated VAE aliases during FLUX.3 setup.
