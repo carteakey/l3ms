@@ -39,7 +39,7 @@ text are not executed.
 - `media-models/`: editable generation wrappers including `generate-breeze-tts-2.sh`.
 - `maintenance/refresh-audio-cpp.sh`: operational script to audit, build with CUDA, and smoke-test audio.cpp.
 - `maintenance/setup-media-runtimes.sh`: runtime install/readiness commands.
-- `model_downloader/models_config.json`: extracted Qwen Image, Qwen Image Edit,
+- `models_config.json`: extracted Qwen Image, Qwen Image Edit,
   and LTX-2.3 downloads. These are download entries, not new generation wrappers.
 - `docs/media-generation-runbook.md`: setup and usage details.
 - `HANDOFF.md` and `DETAILED_SESSION.md`: historical L3MS media records;
@@ -56,7 +56,7 @@ No weights are bundled or downloaded during repository setup.
 
 python3 -m venv .venv
 .venv/bin/pip install -r requirements-downloader.txt
-.venv/bin/python model_downloader/download_hf_model.py --config model_downloader/models_config.json
+.venv/bin/python ../../model_downloader/download_hf_model.py --config models_config.json
 ```
 
 Review download destinations before running the downloader; the extracted config
@@ -79,7 +79,6 @@ returned after completion, not played live.
 cargo fmt --all -- --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --all-targets --locked
-python3 -m unittest discover -s model_downloader -p 'test_*.py'
 python3 -m unittest discover -s media-models -p 'test_*.py'
 for script in media-models/*.sh maintenance/*.sh; do bash -n "$script"; done
 ```

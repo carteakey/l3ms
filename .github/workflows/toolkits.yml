@@ -43,11 +43,10 @@ jobs:
       - name: List media profiles without starting a runtime
         run: ./target/release/l2m2 --list
       - name: Check Python syntax
-        run: python3 -m compileall -q model_downloader media-models maintenance
+        run: python3 -m compileall -q media-models maintenance
       - name: Run README Python checks
         run: |
           # unittest discovery imports test_resume.py but does not execute its download helpers.
-          python3 -m unittest discover -s model_downloader -p 'test_*.py'
           python3 -m unittest discover -s media-models -p 'test_*.py'
       - name: Check bounded acceptance harness without services or models
         run: python3 maintenance/probe-breeze-acceptance.py --self-test
