@@ -33,6 +33,10 @@
   deleted coordinator commands.
 
 ### Breaking changes
+- Remove the HeartMuLa direct-script executor and recipe (and their tests): HeartMuLa
+  music runs through llama-swap's `/audiocpp/` route, so it no longer counts as a
+  GPU-window profile. Only H3 video, CUDA Nagi/Laya decisions and Blender still use
+  the idle-GPU window.
 - CUDA Breeze-TTS-2 speech (`media:breeze-tts-2`) now runs through llama-swap's
   `/audiocpp/` route from both the CLI and the TUI instead of the shell script and
   an idle-GPU window: standard, design, clone and streaming (`breeze-tts`,

@@ -303,30 +303,6 @@ pub fn prepare_breeze_speech_recipe_for_route(
     )
 }
 
-/// Prepare the declared HeartMuLa music script against the accepted CUDA route
-/// and append only the caller-owned output target. The script's native output
-/// aliases are not accepted from request arguments.
-pub(crate) fn prepare_heartmula_music_recipe_for_route(
-    catalog: &Catalog,
-    request: &InferenceRequest,
-    accepted_route: &ResolvedProfileRoute,
-    output_file: &std::path::Path,
-) -> Result<NativeCommandRecipe> {
-    ensure!(
-        is_supported_heartmula_request_route(request, accepted_route),
-        "request is not a supported HeartMuLa music route"
-    );
-    let recipe = prepare_native_command_for_route(catalog, request, accepted_route)?;
-    ensure!(
-        matches!(
-            &recipe.expectation,
-            NativeOutputExpectation::MediaScript { task } if task == "music"
-        ),
-        "HeartMuLa preparation did not resolve to the declared music script"
-    );
-    append_private_output_controls(recipe, output_file, None)
-}
-
 /// Prepare audio.cpp MiniMax-H3 for one declared task, keeping generation mode
 /// and output locations under caller control rather than the request payload.
 pub(crate) fn prepare_h3_recipe_for_route(
@@ -452,37 +428,6 @@ pub(crate) fn is_supported_heartmula_args(arguments: &[String]) -> bool {
     }
 
     has_prompt && !(instrumental && has_lyrics)
-}
-
-pub(crate) fn is_supported_heartmula_request_route(
-    request: &InferenceRequest,
-    route: &ResolvedProfileRoute,
-) -> bool {
-    let InferenceRequest::Media {
-        profile,
-        input: MediaInput::Script { task, args },
-    } = request
-    else {
-        return false;
-    };
-    let NativeRoute::MediaScript { path } = &route.native_route else {
-        return false;
-    };
-    profile == &route.profile
-        && profile.lane == Lane::Media
-        && profile.profile_id.as_str() == "heartmula-music"
-        && task.as_str() == "music"
-        && route.runtime.lane == Lane::Media
-        && route.runtime.as_str() == "audio.cpp"
-        && route.device.as_ref() == Some(&Device::Cuda)
-        && route
-            .tasks
-            .iter()
-            .any(|declared| declared.as_str() == "music")
-        && path.ends_with(std::path::Path::new(
-            "media-models/generate-heartmula-music.sh",
-        ))
-        && is_supported_heartmula_args(args)
 }
 
 /// Shape-only H3 wrapper admission. Request options are limited to the
@@ -1430,58 +1375,6 @@ mod tests {
                 "accepted unsupported HeartMuLa argument shape"
             );
         }
-    }
-
-    #[test]
-    fn heartmula_recipe_pins_both_script_output_controls_to_private_target() {
-        let fixture = Fixture::new(
-            "heartmula-music",
-            "media-models/generate-heartmula-music.sh",
-            &["music"],
-        );
-        fixture.write_media_script("media-models/generate-heartmula-music.sh");
-        let manifest_path = fixture.media_root.join("media-runtimes.json");
-        let mut manifest: Value =
-            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
-        manifest["profiles"][0]["device"] = Value::String("cuda".into());
-        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
-        let catalog = fixture.catalog();
-        let request = InferenceRequest::Media {
-            profile: key(Lane::Media, "heartmula-music"),
-            input: MediaInput::Script {
-                task: super::super::catalog::Task::new("music").unwrap(),
-                args: vec!["--prompt".into(), "fixture song".into()],
-            },
-        };
-        let accepted = resolve_profile_route(&catalog, request.profile()).unwrap();
-        assert!(is_supported_heartmula_request_route(&request, &accepted));
-        let output = fixture._parent.path().join("private-job/result.wav");
-        let recipe =
-            prepare_heartmula_music_recipe_for_route(&catalog, &request, &accepted, &output)
-                .unwrap();
-        let argv = argv_strings(&recipe);
-        assert_eq!(
-            &argv[argv.len() - 4..],
-            [
-                "--output",
-                output.to_str().unwrap(),
-                "--out-dir",
-                output.parent().unwrap().to_str().unwrap(),
-            ]
-        );
-        let mut wrong_device = accepted;
-        wrong_device.device = Some(Device::Cpu);
-        assert!(!is_supported_heartmula_request_route(
-            &request,
-            &wrong_device
-        ));
-        assert!(prepare_heartmula_music_recipe_for_route(
-            &catalog,
-            &request,
-            &wrong_device,
-            &output,
-        )
-        .is_err());
     }
 
     #[test]

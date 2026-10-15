@@ -10206,7 +10206,10 @@ mod tests {
         focus_stack_profile_by_id(&mut app, "heartmula-music");
         let profile = app.selected_stack_profile().unwrap();
         assert!(is_direct_cuda_music_profile(profile));
-        assert!(is_direct_cuda_profile(profile));
+        assert!(
+            !is_direct_cuda_profile(profile) && !direct_run::requires_operator_gpu_window(profile),
+            "HeartMuLa music is routed through llama-swap, not an operator GPU window"
+        );
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
             .unwrap();
 

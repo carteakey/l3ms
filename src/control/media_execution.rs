@@ -23,11 +23,9 @@ use super::cuda_device::CudaDevice;
 use super::language::SpeechAudio;
 use super::native_commands::{
     is_supported_blender_request_route, is_supported_cpu_breeze_speech, is_supported_h3_args,
-    is_supported_h3_request_route, is_supported_heartmula_args,
-    is_supported_heartmula_request_route, prepare_blender_recipe_for_route,
+    is_supported_h3_request_route, is_supported_heartmula_args, prepare_blender_recipe_for_route,
     prepare_breeze_speech_recipe, prepare_breeze_speech_recipe_for_route,
-    prepare_h3_recipe_for_route, prepare_heartmula_music_recipe_for_route, NativeOutputExpectation,
-    CPU_BREEZE_PROFILE_ID,
+    prepare_h3_recipe_for_route, NativeOutputExpectation, CPU_BREEZE_PROFILE_ID,
 };
 use super::process::{self, ProcessFailureDisposition, ProcessFailureKind, ProcessLimits};
 use super::requests::{InferenceRequest, MediaInput, SpeechMode};
@@ -142,52 +140,6 @@ impl fmt::Debug for MediaExecutionResult {
             .field("artifact_count", &self.artifacts.len())
             .finish()
     }
-}
-
-/// Execute HeartMuLa music for one exact accepted CUDA route. The caller must
-/// establish GPU admission and retain its ownership through process cleanup;
-/// this function only pins child visibility and validates the final WAV.
-pub(crate) fn execute_heartmula_music_on_device(
-    catalog: &Catalog,
-    request: &InferenceRequest,
-    accepted_route: &ResolvedProfileRoute,
-    device: &CudaDevice,
-    job_directory: &Path,
-    context: &OperationContext<'_>,
-    recovery: RecoveryPolicy,
-) -> Result<MediaExecutionResult, MediaExecutionFailure> {
-    if !is_supported_heartmula_request_route(request, accepted_route) {
-        return Err(not_dispatched(MediaExecutionErrorKind::InvalidRequest));
-    }
-
-    let output_root = validate_job_directory(job_directory)?;
-    ensure_absent(&output_root.join(OUTPUT_NAME))?;
-    ensure_absent(&output_root.join(CHUNKS_NAME))?;
-    let recipe = prepare_heartmula_music_recipe_for_route(
-        catalog,
-        request,
-        accepted_route,
-        &output_root.join(OUTPUT_NAME),
-    )
-    .map_err(|_| not_dispatched(MediaExecutionErrorKind::InvalidRequest))?;
-
-    execute_script_recipe(
-        &recipe,
-        &output_root,
-        Some(device),
-        context,
-        recovery,
-        ScriptMode::Default,
-    )?;
-    // The shared validator's Standard mode means one final WAV and no chunks;
-    // it does not imply that the HeartMuLa result is speech.
-    let artifacts = discover_artifacts(&output_root, SpeechMode::Standard, context)?;
-    check_after_child(context)?;
-    Ok(MediaExecutionResult {
-        output_root,
-        mode: SpeechMode::Standard,
-        artifacts,
-    })
 }
 
 /// Run the declared MiniMax-H3 audio or synchronized audio/video script on its
@@ -2054,155 +2006,6 @@ esac
                 .kind(),
             MediaExecutionErrorKind::InvalidArtifact
         );
-    }
-
-    #[test]
-    fn heartmula_music_runs_once_with_uuid_and_only_private_wav_targets() {
-        const UUID: &str = "GPU-01234567-89ab-cdef-0123-456789abcdef";
-        let fixture = Fixture::new();
-        let catalog = fixture.catalog();
-        let request = music_request(&["--prompt", "fixture ambient song", "--instrumental"]);
-        let accepted =
-            crate::control::routes::resolve_profile_route(&catalog, request.profile()).unwrap();
-        let device = CudaDevice::new(UUID).unwrap();
-        let output = fixture.output_directory("heartmula-private");
-        let context = context(&NeverCancel, Duration::from_secs(5));
-        let result = execute_heartmula_music_on_device(
-            &catalog,
-            &request,
-            &accepted,
-            &device,
-            &output,
-            &context,
-            recovery(),
-        )
-        .unwrap();
-
-        assert_eq!(result.mode(), SpeechMode::Standard);
-        assert_eq!(result.artifacts().len(), 1);
-        assert_eq!(result.artifacts()[0].kind(), MediaArtifactKind::FinalWave);
-        assert_eq!(
-            result.artifacts()[0].relative_path(),
-            Path::new(OUTPUT_NAME)
-        );
-        assert_eq!(result.output_root(), fs::canonicalize(&output).unwrap());
-        assert_eq!(
-            fs::read_dir(&output).unwrap().count(),
-            1,
-            "the wrapper output directory remains scoped to this job"
-        );
-
-        let bad_args = [
-            music_request(&["--prompt"]),
-            music_request(&["--prompt", "song", "--output", "/tmp/escape.wav"]),
-            music_request(&["--prompt", "song", "--out-dir", "/tmp/escape"]),
-            music_request(&["--prompt", "song", "--backend", "cpu"]),
-        ];
-        for (index, invalid_request) in bad_args.iter().enumerate() {
-            let rejected_output = fixture.output_directory(&format!("heartmula-rejected-{index}"));
-            let error = execute_heartmula_music_on_device(
-                &catalog,
-                invalid_request,
-                &accepted,
-                &device,
-                &rejected_output,
-                &context,
-                recovery(),
-            )
-            .expect_err("invalid HeartMuLa argument shape must not dispatch");
-            assert_eq!(error.kind(), MediaExecutionErrorKind::InvalidRequest);
-            assert_eq!(
-                error.disposition(),
-                ProcessFailureDisposition::NoChildSpawned
-            );
-            assert_eq!(fs::read_dir(rejected_output).unwrap().count(), 0);
-        }
-
-        let mut wrong_device = accepted.clone();
-        wrong_device.device = Some(Device::Cpu);
-        let route_rejected_output = fixture.output_directory("heartmula-route-rejected");
-        let error = execute_heartmula_music_on_device(
-            &catalog,
-            &request,
-            &wrong_device,
-            &device,
-            &route_rejected_output,
-            &context,
-            recovery(),
-        )
-        .expect_err("HeartMuLa must remain bound to its declared CUDA route");
-        assert_eq!(error.kind(), MediaExecutionErrorKind::InvalidRequest);
-        assert_eq!(
-            error.disposition(),
-            ProcessFailureDisposition::NoChildSpawned
-        );
-        assert_eq!(fs::read_dir(route_rejected_output).unwrap().count(), 0);
-
-        let mut drifted_route = accepted.clone();
-        drifted_route.tasks.clear();
-        let drift_rejected_output = fixture.output_directory("heartmula-task-drift");
-        let error = execute_heartmula_music_on_device(
-            &catalog,
-            &request,
-            &drifted_route,
-            &device,
-            &drift_rejected_output,
-            &context,
-            recovery(),
-        )
-        .expect_err("accepted music task drift must fail before spawn");
-        assert_eq!(error.kind(), MediaExecutionErrorKind::InvalidRequest);
-        assert_eq!(
-            error.disposition(),
-            ProcessFailureDisposition::NoChildSpawned
-        );
-        assert_eq!(fs::read_dir(drift_rejected_output).unwrap().count(), 0);
-    }
-
-    #[test]
-    fn heartmula_process_failure_is_not_retried_and_logs_are_not_returned() {
-        const UUID: &str = "GPU-01234567-89ab-cdef-0123-456789abcdef";
-        let fixture = Fixture::new();
-        let marker = fixture._parent.path().join("heartmula-attempts");
-        fs::write(
-            fixture
-                .media_root
-                .join("media-models/generate-heartmula-music.sh"),
-            format!(
-                "printf x >> '{}'; printf 'private native log'; exit 7\n",
-                marker.display()
-            ),
-        )
-        .unwrap();
-        let catalog = fixture.catalog();
-        let request = music_request(&["--prompt", "fixture ambient song"]);
-        let accepted =
-            crate::control::routes::resolve_profile_route(&catalog, request.profile()).unwrap();
-        let output = fixture.output_directory("heartmula-one-attempt");
-        let error = execute_heartmula_music_on_device(
-            &catalog,
-            &request,
-            &accepted,
-            &CudaDevice::new(UUID).unwrap(),
-            &output,
-            &context(&NeverCancel, Duration::from_secs(5)),
-            recovery(),
-        )
-        .unwrap_err();
-        assert!(matches!(
-            error.kind(),
-            MediaExecutionErrorKind::Process(ProcessFailureKind::ChildExitedUnsuccessfully {
-                code: Some(7)
-            })
-        ));
-        assert_eq!(
-            error.disposition(),
-            ProcessFailureDisposition::ChildGroupReaped
-        );
-        assert_eq!(fs::read(marker).unwrap(), b"x");
-        assert_eq!(fs::read_dir(output).unwrap().count(), 0);
-        assert!(!format!("{error:?}").contains("private native log"));
-        assert!(!error.to_string().contains("private native log"));
     }
 
     #[test]

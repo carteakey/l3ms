@@ -24,8 +24,8 @@ use super::desktop_gpu::DesktopGpuBaseline;
 use super::gpu_probe::{GpuProbeConfig, NvidiaSmiGpuProbe};
 use super::language::{DispatchDisposition, LanguageAdapter, LanguageErrorKind, LanguageFailure};
 use super::media_execution::{
-    execute_breeze_speech_on_cpu, execute_heartmula_music_on_device, is_supported_cpu_breeze_route,
-    MediaExecutionErrorKind, MediaExecutionFailure, MediaExecutionResult,
+    execute_breeze_speech_on_cpu, is_supported_cpu_breeze_route, MediaExecutionErrorKind,
+    MediaExecutionFailure, MediaExecutionResult,
 };
 use super::ownership::CoordinatorLock;
 use super::process::{ProcessFailureDisposition, ProcessFailureKind};
@@ -652,18 +652,15 @@ fn run_native(
             .map(DirectRunResult::ScriptMedia)
             .map_err(|error| media_execution_error(error, context));
         }
-        if !is_supported_direct_script_profile(profile) || cuda.is_none() {
+        // HeartMuLa music and H3 music/tts are routed above; only H3 video still
+        // runs as a script in an operator GPU window.
+        if !is_supported_direct_h3_profile(profile) || cuda.is_none() {
             return Err(DirectRunError::new(
                 DirectRunErrorKind::UnsupportedRoute,
                 ProcessFailureDisposition::NoChildSpawned,
             ));
         }
-        let execute = if is_supported_direct_h3_profile(profile) {
-            super::media_execution::execute_h3_on_device
-        } else {
-            execute_heartmula_music_on_device
-        };
-        execute(
+        super::media_execution::execute_h3_on_device(
             &catalog,
             request,
             &route,
@@ -1043,7 +1040,7 @@ pub(crate) fn is_routed_audio_script_request(
 }
 
 pub(crate) fn is_supported_direct_script_profile(profile: &CatalogProfile) -> bool {
-    is_supported_direct_music_profile(profile) || is_supported_direct_h3_profile(profile)
+    is_supported_direct_h3_profile(profile)
 }
 
 /// GPU admission is separate from selecting a CUDA inference device. Blender
