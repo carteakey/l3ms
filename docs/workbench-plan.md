@@ -31,6 +31,47 @@ drawing; `src/commands.rs` is a UI-free command registry (102 commands,
 `src/telemetry.rs` has `GpuTelemetry`, `SystemMemoryTelemetry`,
 `ServerIoTelemetry`, polled by `App` with a GPU-utilisation history.
 
+## References and what upstream already does
+
+Three UIs on this machine set the bar (screenshots shared 2026-10-15):
+
+- **herdr**: sidebar with sections, user tabs, split panes, status bar.
+- **llama-swap v265 web UI** (`/ui/`): sidebar (Activity, Playground, Models
+  with state dots, Logs, Performance, Hardware); Playground tabs Chat, Images,
+  Speech, Transcription, Rerank and **Load Test** (queue models, fire
+  concurrent streaming requests, live per-request panels).
+- **Strata monitor** (`/upstream/<strata-model>/#monitor`): model state strip
+  (Idle, Reading, Generating, Queued, Error, with the current activity and a
+  progress bar); metric cards with a big number and a sparkline (decode and
+  prefill t/s, GPU load, VRAM with experts cached, GPU temperature, power of
+  limit, PCIe generation and throughput, CPU, disk read and write); context fill
+  gauge; experts-in-VRAM, system RAM and GPU temperature bars; recent requests
+  table (time, status, prompt, reused, output, prefill t/s, decode t/s, VRAM hit
+  rate, duration) with a since-start summary.
+
+Consequence: L3MS does not rebuild a playground, log viewer or hardware page.
+Its views read llama-swap's and the engine's own data, link out to their web UI
+(`o` opens the matching page in the browser), and spend effort on what neither
+has: bench with readiness gating and history, tune with snapshot and revert,
+engine updates, downloads with preflight, media workflows with artifacts, job
+history across lanes, and keyboard-first use over SSH.
+
+Read-only APIs verified on the live router (2026-10-15, no model dispatched):
+
+| Endpoint | Gives |
+| --- | --- |
+| `GET /running` | resident models and state |
+| `GET /api/events` (SSE) | `modelStatus`, `inflight`, `profileChanged`, `uiConfig` events |
+| `GET /api/performance` | `gpu_stats` and `sys_stats` histories (720 samples: GPU util, VRAM, temperature, power, fan; per-core CPU, RAM, swap, load, net I/O) |
+| `GET /api/hardware` | host description (CPU, memory, board, OS) |
+| `GET /logs` | router log tail |
+| `GET /upstream/<id>/status` (Strata) | `busy`, `queued`, `phase`, prompt and generated tokens, current tool, output tail |
+| Strata `/metrics`, `/metrics/prometheus`, `/api/requests` (path under `/upstream/<id>/` to be confirmed; `/api/requests` returned 404 there) | engine counters and recent requests |
+
+Hazard: any `/upstream/<id>/…` request for a model that is not running makes
+llama-swap load it, evicting the resident model. Only query upstream paths for
+models `/running` reports as ready.
+
 ## Step 1 — shell
 
 Replace the tab bar and per-tab chrome with the new frame. Keep existing views
@@ -128,30 +169,34 @@ Measure its VRAM use with a model loaded before going further.
 Goal: the user can see at a glance whether the machine is in a state where
 serving and bench numbers are trustworthy, without leaving L3MS.
 
-**Sources** (extend `src/telemetry.rs`; poll off the UI thread, 1–2 s for fast
-values, 30 s for slow ones):
+**Sources.** Subscribe to llama-swap first, probe locally only for the gaps:
 
 | Signal | Source |
 | --- | --- |
-| GPU util, VRAM, temperature, power | `nvidia-smi` (existing `GpuTelemetry`) |
-| RAM used/available, zram | `/proc/meminfo`, `/sys/block/zram*` (existing `SystemMemoryTelemetry`, add available) |
-| CPU load per core, governor, EPP | `/proc/stat`, `/sys/devices/system/cpu/cpu*/cpufreq/` |
-| Power profile | `powerprofilesctl get` (slow poll) |
+| Model state, in-flight requests | `/api/events` (`modelStatus`, `inflight`) |
+| GPU util, VRAM, temperature, power, fan; CPU per core, RAM, swap, load, net I/O | `/api/performance` (poll the tail; histories feed sparklines) |
+| Engine phase, tokens, context, recent requests | engine endpoints under `/upstream/<id>/` for ready models only (Strata `status`, `metrics`) |
+| Governor, EPP, power profile | `/sys/devices/system/cpu/cpu*/cpufreq/`, `powerprofilesctl get` |
 | CPU temperature | `/sys/class/hwmon` |
 | Disk free | `statvfs` on `/home`, `/mnt/dev` and the models root |
 | THP mode | `/sys/kernel/mm/transparent_hugepage/enabled` |
-| Model server I/O and RSS | `/proc/<pid>/io` `read_bytes` delta (existing spill check), `/proc/<pid>/status` VmRSS |
-| Router state | llama-swap `/running` (resident model, state, in-flight) |
-| Decode speed | llama-swap request log or server `/metrics` if the engine exposes it; otherwise last bench result |
+| Spill check, server RSS | `/proc/<pid>/io` `read_bytes` delta, `/proc/<pid>/status` VmRSS |
+
+Retire L3MS's own `nvidia-smi` and `/proc/meminfo` polling in
+`src/telemetry.rs` once `/api/performance` covers them; keep a local fallback
+only for when the router is down.
 
 **Where it shows:**
 
 - **Status bar** (always): resident model, VRAM bar, RAM bar, CPU %, governor,
   disk free of the fullest watched mount, router endpoint. Values go amber at
   their warning threshold and red at the critical one, always with the number.
-- **System view** (pane, toolbar button `♥`): every signal above with short
-  history sparklines (GPU util, VRAM, RAM, read_bytes rate, CPU temperature)
-  and the bench-readiness checklist.
+- **System view** (pane, toolbar button `♥`), laid out like the Strata
+  monitor: a model state strip (idle, reading, generating, queued, error, with
+  the current activity), metric cards with a value and sparkline (decode and
+  prefill t/s, GPU load, VRAM, GPU temperature, power, CPU, disk read, RAM),
+  context fill, a recent-requests table, and the bench-readiness checklist. In
+  the TUI the cards are compact rows with braille sparklines.
 - **Alerts** become entries in the sidebar Jobs section (kind `alert`) so they
   are seen and dismissible: hot-expert spill (read rate over 1 MB/s for 10 s
   after warm-up), RAM available under 4 GiB, governor not `performance`,
