@@ -9,26 +9,14 @@ for scope and evidence.
 
 ## Monorepo: next work
 
-- [ ] Finish the native decision-image check. Actual CPU text cases for d3 and
-  Clef pass, and the d3 image case passes. The Clef image attempt used an invalid
-  question and returned HTTP 400; its preflight is fixed, but that model request
-  has not been rerun. These are sanity cases, not quality evaluation.
-- [ ] Recheck Comfy cancellation through the opt-in v265 router recipe under a
-  quiet CPU fixture. A bounded `EmptyImage` → `SaveImage` job and artifact passed;
-  an earlier cancellation passed, but the latest run's cancel observation stayed
-  `in_progress` under load. Do not claim cancellation parity, GPU acceptance, or
-  learned-model acceptance from these runs.
-- [ ] Finish Blender acceptance at the intended boundaries. Standalone CPU-only
-  headless rendering and child cleanup pass. Real standalone GUI/MCP scene
-  mutation/read-back also passed, but Blender crashed on shutdown; all private
-  processes/listeners were released. Successful root CLI/Stack headless execution,
-  clean interactive lifecycle and GPU acceptance remain open. See the
-  [Blender record](docs/migration/blender-acceptance.md).
-- [ ] With the operator, arrange any live GPU or language → media → language
-  check after Pi's GPU window is clear. Read-only checks already confirmed the
-  installed/running llama-swap v265 build; no model was dispatched. Verify
-  cancellation, artifacts and restoration only in an approved window. This
-  checklist does not authorize service changes or downloads.
+- [x] Native decision-image check: d3 and Clef text and image cases pass through
+  isolated v265 `/v1/systemone` (sanity cases, not quality evaluation).
+- [x] Comfy scoped cancellation and a learned Krea CUDA graph pass through the
+  opt-in v265 router recipe ([live receipts](docs/migration/live-port-acceptance.md)).
+- [x] Blender root CLI CPU render passes. Open: clean GUI shutdown
+  ([Blender record](docs/migration/blender-acceptance.md)).
+- [x] Live language → CUDA speech → language continuation passed in the approved
+  window; service and model restored.
 - [ ] Finish remaining cross-lane runtime and keyboard/visual checks, including
   Comfy and GPU workflows. Committed standalone-source parity, source-export
   builds and toolkit tests pass; remaining runtime checks are separate. Remote
@@ -36,8 +24,8 @@ for scope and evidence.
   speech and embedding acceptance cover those paths only,
   not full-port acceptance. See the [speech record](docs/migration/direct-speech-acceptance.md).
   The post-retirement 80×24 decision-image form, Chat capability selection and
-  metadata-only history pass against a private synthetic endpoint; real Clef
-  image inference and comprehensive accessibility checks remain open. The current
+  metadata-only history pass against a private synthetic endpoint; comprehensive
+  accessibility checks remain open. The current
   site passes real desktop/mobile pointer, keyboard, focus and overflow checks
   with all 8 media and 9 decision cards; see the
   [browser record](docs/migration/site-browser-acceptance.md).

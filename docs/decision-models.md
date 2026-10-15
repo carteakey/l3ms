@@ -68,10 +68,11 @@ cancellation or GPU release.
 
 These are router-owned CUDA models. The router performs its normal model swap;
 do not apply the external-media service-stop path to a decision request served
-by that same router. Requests can evict a loaded language model. Live switching
-is parked while Pi works: **do not run these commands against the live router
-until a quiet window is arranged**. No automatic restoration of the prior
-language model or seamless LLM tool-call continuation is claimed by this port.
+by that same router. Requests can evict a loaded language model. Run
+them against the live router only when its loaded model can be evicted. No
+automatic restoration of the prior language model or seamless LLM tool-call
+continuation is claimed; an external client can resume a saved conversation
+after the model returns (see [live acceptance](migration/live-port-acceptance.md)).
 
 The form/CLI and standalone runner carry optional bounded image data URLs, but
 do not decode, resize, or fetch them. A valid data URL does not establish that a

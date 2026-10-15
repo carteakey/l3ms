@@ -45,12 +45,10 @@ Next sequence, before adding more runtime code:
    Include Comfy jobs/cancellation/artifacts, audio tasks, discovery, auth,
    reverse-proxy prefixes and log events. Passthrough alone is not task acceptance.
 2. Prepare an isolated version-pinned upgrade/config compatibility check. The
-   user upgraded the live service to v265; read-only version/catalog checks pass.
-   Do not change that service or dispatch models while Pi's window is parked.
-   In particular, verify the newer `/api/events/logs` contract against callers.
+   user upgraded the live service to v265; version/catalog checks and the approved
+   live window passed (see [live acceptance](live-port-acceptance.md)). In particular, verify the newer `/api/events/logs` contract against callers.
 3. Move decision callers to native `/v1/systemone` once the selected runtime
-   version supports it. Remove the old `/upstream/<id>/v1/systemone` bridge when
-   its callers are migrated; do not add ambiguous inference retry/fallback.
+   version supports it. The old `/upstream/<id>/v1/systemone` bridge is removed; do not add ambiguous inference retry/fallback.
 4. Prefer native media/TTS serving where its tested contract fits. Keep existing
    standalone recipes where it does not; do not recreate missing upstream features
    preemptively. Delete displaced custom ownership, transport and configuration
@@ -61,7 +59,7 @@ Next sequence, before adding more runtime code:
    prior-model restoration; neither a continuous stream nor KV preservation is
    promised. Implement only demonstrated missing glue.
 
-The prepared custom service-stop/restoration harness remains parked, not the
+The custom service-stop/restoration harness is a deletion candidate, not the
 default next task. Retain safeguards for surviving direct workflows until they
 are replaced. Measure real net code removal; moving modules or increasing test
 counts does not satisfy the simplification target. No upgrade, live cutover or

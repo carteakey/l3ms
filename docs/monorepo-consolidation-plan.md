@@ -1,5 +1,7 @@
 # Monorepo consolidation plan
 
+> **Historical.** Superseded by [migration/simplification-plan.md](migration/simplification-plan.md): L3MS is a workbench for llama-swap, not a second inference platform. Phases 4–7 (coordinator, gateway) are not requirements.
+
 ## Current direction — simplicity first, 2026-10-09
 
 The user has approved a smaller native-engine wrapper with fewer lines of code.

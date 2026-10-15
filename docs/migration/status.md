@@ -11,6 +11,14 @@ runtime check.
 
 ## Upstream-first retirement and acceptance — 2026-10-15
 
+Approved live-window follow-up: the real CUDA speech handoff and external
+language → tool → language continuation passed. Clef image inference, root
+Blender CPU rendering, confirmed Comfy scoped cancellation and a learned Krea
+CUDA image passed. The original service/config/drop-in hashes and ready language
+model are restored, the temporary override is removed and no recovery marker
+remains. See [live receipts and scope](live-port-acceptance.md). No new runtime
+layer, model download, permanent deployment or public push was added.
+
 Follow-up discovery fix: Chat now excludes explicit known non-chat outputs
 (decision, image, audio, video or embeddings) when no text output is declared.
 Text-output vision models, unknown-only metadata and older servers stay usable.
@@ -56,29 +64,33 @@ GPU guards and resident-unit controls remain with their actual callers.
 
 Root and standalone L3DS route decisions through one authenticated, prefixed
 `/v1/systemone` request; there is no retry or passthrough fallback. Isolated CPU
-text sanity cases passed for d3 and Clef. The d3 image case passed; the Clef
-image attempt returned HTTP 400 because its question was invalid. The preflight
-was corrected, but that Clef image inference has not been rerun. None of these
-cases establishes quality or live-router compatibility.
+text and image sanity cases passed for d3 and Clef. Clef's earlier invalid
+question returned HTTP 400; the corrected image case now returns the expected
+`green` through an isolated CPU-only v265 router. These are not quality or
+decision-route deployment claims against the shared live config.
 
 The v265 Comfy recipe remains opt-in. A bounded CPU `EmptyImage` → `SaveImage`
 job and artifact passed in `.toolkit/comfy-native-acceptance-fFidtt/run-06530039`,
 including a completed cancellation. A later run returned an artifact, but its
-cancellation observation remained `in_progress` under load. Treat the latest
-cancellation gate as open; no learned-model or GPU workflow was tested. The
-recipe does not alter tracked serving configuration or prove deployment.
+cancellation observation remained `in_progress` under load. The subsequent quiet
+fixture now confirms exact-job cancellation and `execution_interrupted`, with no
+client artifact and verified cleanup; the product's five-second recovery budget
+is unchanged. A real Krea CUDA graph also completed through an isolated v265
+router and returned a decoded PNG. The recipe remains opt-in, not a permanent
+serving-config change or deployment/quality claim.
 
 A separate read-only check verified the installed/running llama-swap as v265
 `d1e743f` via `/api/version`, `/v1/models` and `/running`; no model was
-dispatched by that check. This establishes version/route visibility, not live
-task, GPU or restoration acceptance. The release-profile `--list stack | head`
-smoke now exits 0 and lists 34 profiles.
+dispatched by that earlier check. The later approved live speech handoff and
+actual conversation continuation establish the bounded runtime behavior
+described above. The release-profile `--list stack | head` smoke exits 0 and
+lists 34 profiles.
 
 Four real CPU speech modes (standard, design, clone and streaming) passed after
 the platform retirement using the existing audio.cpp pin and weights. Each
-receipt verified child-process cleanup; no quality or GPU claim follows. A
-standalone CPU-only Blender headless render and child cleanup also passed; root
-CLI/Stack successful headless execution and GPU acceptance remain open. A real
+receipt verified child-process cleanup. Later standard CUDA speech and resident
+restoration also passed; quality and other backend/mode qualification remain
+separate. Standalone and root CLI CPU-only Blender rendering passed. A real
 standalone software-rendered GUI/MCP handshake, scene mutation and read-back
 passed, but Blender crashed during shutdown; its private listener/processes were
 released. This is not a clean lifecycle pass. See the
@@ -99,10 +111,11 @@ maintenance), root downloader tests (14), and dashboard tests (11 plus DOM
 fixtures) passed at the latest reported check. The tracked `src/control` source
 count is currently 30,414 lines (65,624 at the 2c checkpoint); historical
 measurement baselines differ, so no exact half-reduction claim is made.
-These checks and real isolated CPU inference receipts are bounded evidence, not
-full acceptance. No live GPU workflow, Pi handoff, task against the shared live
-router or complete all-lane acceptance has been established. Read-only router
-version/catalog visibility is verified; Pi's GPU window remains parked.
+These are bounded source/workflow checks, not qualification of every model and
+backend combination. Pi's approved window has closed with the original ready
+model and service definition restored. Actual shared-router conversation,
+CUDA speech handoff and isolated learned-image execution are verified; known
+external GUI, model-specific quality and publication limits remain explicit.
 
 Tracked-source recheck: exported `914afa8` with `git archive` to
 `/tmp/l3ms-native-source-mkQ3UC`, without ignored vendors, models or environments.

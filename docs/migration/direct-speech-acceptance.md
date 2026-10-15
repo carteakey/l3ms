@@ -24,7 +24,10 @@ An earlier separate 80×24 keyboard UI run accepted standard CPU speech, recorde
 metadata-only history and successfully cancelled a running job before reopening
 admission after cleanup. That UI run predates the current retirement checkpoint;
 the four post-retirement receipts above are CLI runs, not a new UI acceptance.
-GPU orchestration/restoration and complete artifact navigation remain open.
+A later real CUDA standard-speech call, resident pause/restoration and external
+LLM tool continuation passed; see [live port acceptance](live-port-acceptance.md).
+This does not independently qualify all GPU speech modes or complete manual
+artifact-navigation/voice-quality checks.
 
 The audio.cpp server route is not a replacement for the tested CLI behavior:
 the pinned server has no inference-cancel endpoint, its busy timeout only bounds

@@ -5,7 +5,10 @@ foreground runner as CPU work. By default this is an **operator-managed idle
 window**: no service is stopped or restored. An explicit resident llama-swap
 opt-in adds bounded pause/restore around that same foreground owner. It does not
 install a unit, adopt arbitrary services or fence external clients. Original
-standalone commands remain available. Live switching acceptance remains open.
+standalone commands remain available. A bounded real CUDA speech pause/restore
+and external LLM tool continuation passed; see
+[live acceptance](migration/live-port-acceptance.md). This is not uninterrupted
+SSE/KV preservation or a fence against other clients.
 Blender headless work shares this admission/release guard but keeps its native
 scene-selected backend: its manifest does not declare CPU or CUDA, and no CUDA
 connection or visibility override is fabricated for it.
@@ -258,10 +261,10 @@ establish ownership/release of a multi-GPU scene.
 The existing GUI/MCP commands remain standalone and externally owned. They are
 not adopted, stopped, or counted as completed headless jobs; `--prompt` still only
 prints guidance. See [Blender workflow](../toolkits/l2m2/docs/blender-mcp-setup.md).
-Standalone CPU headless rendering and a real software-rendered GUI/MCP scene
-round trip have passed, but the GUI crashed during shutdown. Successful root
-CLI/Stack headless execution, clean interactive lifecycle and GPU/device
-acceptance remain open; see [Blender evidence](migration/blender-acceptance.md).
+Standalone and root CLI CPU headless rendering and a real software-rendered
+GUI/MCP scene round trip have passed, but the GUI crashed during shutdown.
+Manual Stack rendering, clean interactive lifecycle and other GPU/device
+qualification are separate; see [Blender evidence](migration/blender-acceptance.md).
 
 ## What the wrapper checks
 
