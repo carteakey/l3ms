@@ -18,6 +18,8 @@ LTX_REF="${L3MS_LTX_REF:-main}"
 H3_PACKAGE_ID="${L3MS_H3_PACKAGE_ID:-minimax_h3_q4_k}"
 MUSIC_PACKAGE_ID="${L3MS_MUSIC_PACKAGE_ID:-heartmula_q8_0}"
 BREEZE_PACKAGE_ID="${L3MS_BREEZE_PACKAGE_ID:-breeze_tts_2_q8_0}"
+YUE_ROOT="${L3MS_YUE_ROOT:-${HOME}/repos/YuE}"
+YUE_REF="${L3MS_YUE_REF:-main}"
 
 log() { printf '%s\n' "-> $*"; }
 ok() { printf '%s\n' "[OK] $*"; }
@@ -43,9 +45,10 @@ Commands:
   install-breeze     Build audio.cpp and install BreezeTTS 2 Q8_0 GGUF
   install-tts        Compatibility alias for install-breeze
   install-ltx        Clone LTX-2 and create its uv environment
+  install-yue        Clone YuE and create its Python 3.12 uv environment
   install-music      Build audio.cpp and install HeartMuLa Q8_0 GGUF
   install-music-cli  Compatibility alias for install-music
-  install            Install audio.cpp models (H3, HeartMuLa, BreezeTTS) and LTX (weights remain gated)
+  install            Install audio.cpp models (H3, HeartMuLa, BreezeTTS), LTX, and YuE
 
 Environment:
   L3MS_MEDIA_ROOT       Shared media models/output root (default: ~/models/media)
@@ -240,6 +243,10 @@ install_ltx() {
     fi
 }
 
+install_yue() {
+    "${REPO_DIR}/maintenance/setup-yue2.sh" install
+}
+
 check_file() {
     local label="$1"
     local path="$2"
@@ -342,6 +349,10 @@ check_runtime() {
         warn "Blender not found at $blender_bin"
     fi
 
+    if [[ -x "${REPO_DIR}/maintenance/setup-yue2.sh" ]]; then
+        "${REPO_DIR}/maintenance/setup-yue2.sh" check || missing=1
+    fi
+
     return "$missing"
 }
 
@@ -360,6 +371,9 @@ case "$command" in
     install-ltx)
         install_ltx
         ;;
+    install-yue)
+        install_yue
+        ;;
     install-music|install-music-cli)
         if [[ "$command" == "install-music-cli" ]]; then
             warn "install-music-cli now installs the local audio.cpp HeartMuLa Q8_0 profile"
@@ -370,6 +384,7 @@ case "$command" in
         install_audio_cpp
         install_breeze_tts
         install_ltx
+        install_yue
         ;;
     -h|--help|"")
         usage

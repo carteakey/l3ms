@@ -22,6 +22,7 @@ MODEL_FILES = (
     "text_encoders/qwen3vl_8b_int8_convrot.safetensors",
     "vae/qwen_image_2.1_vae_bf16.safetensors",
 )
+DEFAULT_UNET = "qwen_image_2.1_int8_convrot.safetensors"
 REQUIRED_NODES = (
     "UNETLoader",
     "CLIPLoader",
@@ -43,13 +44,14 @@ def build_workflow(
     seed: int,
     cfg: float,
     filename_prefix: str,
+    unet_name: str = DEFAULT_UNET,
 ) -> dict[str, dict[str, object]]:
     """Return the API-format graph matching Comfy-Org's Qwen 2.1 workflow."""
     return {
         "1": {
             "class_type": "UNETLoader",
             "inputs": {
-                "unet_name": "qwen_image_2.1_int8_convrot.safetensors",
+                "unet_name": unet_name,
                 "weight_dtype": "default",
             },
         },
@@ -107,7 +109,14 @@ def build_workflow(
     }
 
 
-def validate_settings(width: int, height: int, steps: int, cfg: float, timeout: float) -> None:
+def validate_settings(
+    width: int,
+    height: int,
+    steps: int,
+    cfg: float,
+    timeout: float,
+    unet_name: str = DEFAULT_UNET,
+) -> None:
     for label, value in (("width", width), ("height", height)):
         if value < 32 or value > 2048 or value % 32:
             raise ValueError(f"{label} must be a multiple of 32 between 32 and 2048")
@@ -117,6 +126,8 @@ def validate_settings(width: int, height: int, steps: int, cfg: float, timeout: 
         raise ValueError("CFG must be greater than 0 and at most 20")
     if timeout <= 0:
         raise ValueError("timeout must be positive")
+    if not unet_name.endswith(".safetensors") or unet_name.startswith("/") or ".." in unet_name:
+        raise ValueError("--model must be a .safetensors file inside ComfyUI's diffusion_models/")
 
 
 def api_url() -> str:
@@ -148,9 +159,10 @@ def request_json(path: str, payload: dict[str, object] | None = None, timeout: f
     return json.loads(request_bytes(path, payload, timeout).decode("utf-8"))
 
 
-def check_models() -> None:
+def check_models(unet_name: str = DEFAULT_UNET) -> None:
     model_dir = ROOT / "vendor" / "ComfyUI" / "models"
-    missing = [str(model_dir / relative) for relative in MODEL_FILES if not (model_dir / relative).is_file()]
+    relatives = (f"diffusion_models/{unet_name}", *MODEL_FILES[1:])
+    missing = [str(model_dir / relative) for relative in relatives if not (model_dir / relative).is_file()]
     if missing:
         raise RuntimeError(
             "Missing Qwen model files; run maintenance/setup-qwen-image-2.1-comfyui.sh:\n"
@@ -187,23 +199,56 @@ def check_gpu_exclusive() -> None:
                     "llama-swap.service is active. Stop it before Qwen generation; "
                     "the L2M2 ComfyUI profile will not interrupt it."
                 )
+
     nvidia_smi = shutil.which("nvidia-smi")
     if nvidia_smi:
+        comfy_pids: set[int] = set()
+        systemctl = shutil.which("systemctl")
+        if systemctl:
+            res = subprocess.run(
+                [systemctl, "--user", "show", "-p", "MainPID", "--value", "l2m2-comfyui.service"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if res.returncode == 0 and res.stdout.strip().isdigit():
+                pid = int(res.stdout.strip())
+                if pid > 0:
+                    comfy_pids.add(pid)
+
         result = subprocess.run(
-            [nvidia_smi, "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+            [nvidia_smi, "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"],
             check=False,
             capture_output=True,
             text=True,
         )
-        if result.returncode == 0:
-            try:
-                used_mib = int(result.stdout.splitlines()[0].strip())
-            except (IndexError, ValueError):
-                return
-            if used_mib >= 1500:
-                raise RuntimeError(
-                    f"GPU is busy ({used_mib} MiB used). Wait for other workloads to finish."
-                )
+        if result.returncode == 0 and result.stdout.strip():
+            for line in result.stdout.splitlines():
+                parts = [p.strip() for p in line.split(",") if p.strip()]
+                if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+                    pid, mem = int(parts[0]), int(parts[1])
+                    if pid in comfy_pids:
+                        continue
+                    if mem >= 1500:
+                        raise RuntimeError(
+                            f"GPU is busy (PID {pid} using {mem} MiB). Wait for other workloads to finish."
+                        )
+        else:
+            result_total = subprocess.run(
+                [nvidia_smi, "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if result_total.returncode == 0:
+                try:
+                    used_mib = int(result_total.stdout.splitlines()[0].strip())
+                    if used_mib >= 1500 and not comfy_pids:
+                        raise RuntimeError(
+                            f"GPU is busy ({used_mib} MiB used). Wait for other workloads to finish."
+                        )
+                except (IndexError, ValueError):
+                    pass
 
 
 def wait_for_image(prompt_id: str, timeout: float) -> dict[str, str]:
@@ -245,7 +290,15 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--height", type=int, default=1024)
     result.add_argument("--steps", type=int, default=25)
     result.add_argument("--seed", type=int, default=42)
-    result.add_argument("--cfg", type=float, default=1.0)
+    # 2.5, not 1.0: at cfg 1 ComfyUI skips the negative-conditioning pass entirely, so the
+    # per-row negative prompts in prompts/*.tsv would be inert. Measured on NSFW probes:
+    # cfg 1.0 was the worst regime for multi-person anatomy, cfg 3.5/5.0 over-sharpen.
+    result.add_argument("--cfg", type=float, default=2.5)
+    result.add_argument(
+        "--model",
+        default=DEFAULT_UNET,
+        help=f"Diffusion model filename in ComfyUI diffusion_models/ (default: {DEFAULT_UNET})",
+    )
     result.add_argument("--timeout", type=float, default=3600)
     result.add_argument("--check", action="store_true", help="Check model files and local ComfyUI nodes")
     return result
@@ -254,7 +307,7 @@ def parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = parser().parse_args()
     try:
-        check_models()
+        check_models(args.model)
         if args.check:
             check_api()
             print("Qwen Image 2.1 model files and ComfyUI nodes are ready.")
@@ -266,7 +319,7 @@ def main() -> int:
             prompt = args.prompt_file.read_text(encoding="utf-8")
         if not prompt or not prompt.strip():
             raise ValueError("Qwen Image 2.1 requires --prompt or --prompt-file")
-        validate_settings(args.width, args.height, args.steps, args.cfg, args.timeout)
+        validate_settings(args.width, args.height, args.steps, args.cfg, args.timeout, unet_name=args.model)
         check_gpu_exclusive()
         check_api()
 
@@ -281,13 +334,15 @@ def main() -> int:
             args.seed,
             args.cfg,
             filename_prefix,
+            unet_name=args.model,
         )
         response = request_json("/prompt", {"prompt": workflow}, timeout=60)
         if not isinstance(response, dict) or not response.get("prompt_id"):
             raise RuntimeError(f"ComfyUI did not accept the workflow: {response}")
         prompt_id = str(response["prompt_id"])
         print(
-            f"Generating {args.width}x{args.height}, {args.steps} steps, seed {args.seed}; "
+            f"Generating {args.width}x{args.height} with {args.model}, {args.steps} steps, "
+            f"seed {args.seed}; "
             f"ComfyUI job {prompt_id}."
         )
         image = wait_for_image(prompt_id, args.timeout)

@@ -21,6 +21,10 @@ ComfyUI has an exclusive GPU window.
   - `text_encoders/qwen3vl_4b_fp8_scaled.safetensors` (5,242,467,968 bytes)
   - `vae/qwen_image_vae.safetensors` (253,806,246 bytes)
   - `loras/krea2_turbo_distill_r128.safetensors` (936,944,890 bytes)
+  - `loras/Krea2_TextFusion_Refusal_Reduction.safetensors` (27,665,664 bytes) — refusal-reduction
+    bypass applied to the DiT text-fusion blocks
+  - `loras/fedor_bypass.safetensors` (488 bytes) — surgical knob 9/10 refusal bypass from
+    `CliffNodes/fedor_bypass` revision `024bf4cd96c824321807ce93574a57ca72867366`
 
 Review the [Krea-2 model repository](https://huggingface.co/Comfy-Org/Krea-2)
 and the Krea Community License before using or redistributing the weights.
@@ -60,6 +64,10 @@ systemctl --user stop llama-swap.service
 systemctl --user start llama-swap.service
 ```
 
+`media-models/krea_2.py` checks GPU exclusivity per process and whitelists the
+`l2m2-comfyui.service` MainPID: ComfyUI holding the checkpoint between jobs is the workload it
+is submitting to, not a foreign workload. Only another process above 1500 MiB blocks generation.
+
 The L2M2 CLI profile forwards quoted arguments to the same script:
 
 ```sh
@@ -74,13 +82,29 @@ The L2M2 CLI profile forwards quoted arguments to the same script:
 - **CFG Scale:** `1.5` (controlled via `--cfg 1.5`).
 - **Resolution:** `1024x1024` or portrait/landscape combinations up to `1024x1536` / `1536x1024` (max 1,572,864 pixels, multiples of 32).
 - **Seed:** `42` default (`--seed`).
+- **Refusal bypass:** Krea 2's open weights carry alignment-trained refusal, and it shows up as
+  unsolicited clothing rather than a refusal message. `--refusal-bypass` applies
+  `Krea2_TextFusion_Refusal_Reduction.safetensors` at `--refusal-bypass-strength 1.0` (text-fusion
+  blocks, style-neutral). For the surgical alternative use
+  `--refusal-bypass --refusal-bypass-lora fedor_bypass.safetensors --refusal-bypass-strength 4.0`
+  (recommended range 3-5; if a prompt still refuses at strength 5, that refusal rides on knob 11
+  and needs FilterBypass3 instead). Measured against the explicit prompt pack in the sibling
+  `l2m2-nsfw` repo (12 rows, seed 42): unsolicited clothing went 9/12 → 1/12 with TextFusion and
+  9/12 → 0/12 with `fedor_bypass`; see `~/repos/l2m2-nsfw/docs/experiments/` for that study and
+  the follow-up eight-regime comparison.
+- **Measured throughput on this card:** 32-36 s per 1024x1024 12-step image. ComfyUI stages
+  12,864 MB for the INT8 DiT and 4,999 MB for the FP8 text encoder, so the DiT cannot stay
+  resident on a 12,288 MiB card and is re-staged for every job (the journal shows a fresh
+  `Model Krea2 prepared for dynamic VRAM loading` line per generation). A 10-14 s figure only
+  holds while the checkpoint is already resident.
 
 Outputs go to `~/media-output` unless `--output` or `L3MS_MEDIA_OUTPUT_DIR` is set.
 The ComfyUI listener is loopback-only; use an SSH port forward if accessing ComfyUI
 from another machine.
 
 Import `workflows/krea-2/image_krea2_turbo_t2i_int8.json` for native ComfyUI GUI
-generation and prompt experimentation.
+generation and prompt experimentation. To add the refusal bypass in the GUI, add a `LoraLoaderModelOnly` node pointing to `Krea2_TextFusion_Refusal_Reduction.safetensors` (strength 1.0) chained before or after the Turbo LoRA. The same node type loads `fedor_bypass.safetensors` at
+strength 4.0, and the two bypasses stack (text-side and DiT-side) if one alone is not enough.
 
 ## Verification
 
