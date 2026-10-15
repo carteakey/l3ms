@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### Changed
+- Maintenance tab: the script list and editor now end on the same row (the editor's
+  hint line no longer misaligns them). Chat's header shows `system: —` for an empty
+  system prompt, matching `model: —`.
 - Stack tab gains a **Router** column with the live llama-swap state (`loaded`,
   `loading`, `unloaded`) for profiles the router serves, and `—` for everything
   it does not list (never guessed). `r` now refreshes the router state as well as

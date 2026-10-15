@@ -6826,7 +6826,11 @@ impl App {
             Paragraph::new(format!(
                 "connection: {connection}\nendpoint: {}\nmodel: {selected_model} │ system: {} │ temp {:.1} │ max {} │ thinking {}",
                 self.chat_endpoint_draft,
-                self.chat_system_prompt,
+                if self.chat_system_prompt.trim().is_empty() {
+                    "—"
+                } else {
+                    self.chat_system_prompt.as_str()
+                },
                 self.chat_temperature,
                 self.chat_max_tokens,
                 if self.chat_thinking { "on" } else { "off" }
@@ -7717,7 +7721,13 @@ impl App {
             )
             .highlight_symbol("▶ ")
             .highlight_style(theme::title());
-        frame.render_stateful_widget(list, panes[0], &mut self.maintenance_state);
+        // The editor reserves its bottom row for key hints; match that height so
+        // both boxes end on the same row.
+        let list_area = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(1)])
+            .split(panes[0])[0];
+        frame.render_stateful_widget(list, list_area, &mut self.maintenance_state);
         self.draw_script_editor(frame, panes[1], ScriptEditorTarget::Maintenance);
     }
 
@@ -12164,6 +12174,33 @@ mod tests {
             .map(|(x, y)| buffer[(x, y)].symbol().to_string())
             .collect();
         assert!(text.contains("unloaded"));
+    }
+
+    #[test]
+    fn maintenance_panes_end_on_the_same_row_and_empty_chat_values_show_a_dash() {
+        let fixture = AppFixture::new();
+        let mut app = fixture.app();
+        app.tab = Tab::Maintenance;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        // Bottom-left corner glyphs of the two boxes must share a row.
+        let corners: Vec<(u16, u16)> = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| buffer[(x, y)].symbol() == "└" && (4..18).contains(&y))
+            .collect();
+        let rows: std::collections::BTreeSet<u16> = corners.iter().map(|&(_, y)| y).collect();
+        assert!(
+            corners.len() >= 2,
+            "expected list and editor boxes: {corners:?}"
+        );
+        assert_eq!(rows.len(), 1, "boxes end on different rows: {corners:?}");
+
+        app.tab = Tab::Chat;
+        app.chat_system_prompt.clear();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let text = terminal_text(&terminal);
+        assert!(text.contains("system: —"), "{text}");
     }
 
     #[test]
