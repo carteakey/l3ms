@@ -293,7 +293,8 @@ not text or audio bytes. See [real CPU speech evidence](docs/migration/direct-sp
 
 ### Native tasks and routed engines
 
-Speech, images, embeddings, language and decisions go through llama-swap: Breeze
+Speech, images, embeddings, language and decisions go through llama-swap:
+`l3ms --run-profile media:breeze-tts-2` calls its `/audiocpp/` route, and Breeze
 TTS (`audiocpp_auto`) and ComfyUI (`comfyui_auto`) are declared in
 `llama-swap.yaml`, so the router swaps them like any model; see
 [media through llama-swap](docs/migration/media-through-llama-swap.md). The

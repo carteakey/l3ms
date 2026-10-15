@@ -58,6 +58,18 @@ not the CLI's WAV chunk files. Comfy cancellation and learned-model CUDA
 execution through this route were verified earlier; see
 [live acceptance](live-port-acceptance.md).
 
+## L3MS itself uses the route (2026-10-15)
+
+`l3ms --run-profile media:breeze-tts-2` and the TUI form no longer run the shell
+script inside a GPU window; they post to `/audiocpp/v1/audio/speech` through
+`LanguageAdapter::execute_speech` and publish the result with the same file names
+and validation as before. Real CLI runs against the live v265 router on CUDA, no
+`L3MS_NATIVE_GPU`, exit 0: standard (2.08 s of audio, 21 s total including evicting
+the resident model and cold-starting audio.cpp), design (2.0 s), clone (3.04 s, from
+the generated reference) and streaming (2.48 s, two `chunk_NNNN.wav` files). The
+resident `qwen38-flash-next-plat-abliterated` returned with one chat request
+(14 s); no `audiocpp_server` process remained.
+
 ## What this let us delete
 
 The resident pause/restore handoff (the opt-in stop-and-restore of

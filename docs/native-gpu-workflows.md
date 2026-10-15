@@ -1,12 +1,14 @@
 # Explicit idle-GPU native work
 
-> **Speech and images no longer need this window.** `audiocpp_auto` and
+> **CUDA Breeze speech and images no longer use this window.** `audiocpp_auto` and
 > `comfyui_auto` are declared in `llama-swap.yaml`, so llama-swap swaps them in and
-> out like any model; see [media through llama-swap](migration/media-through-llama-swap.md).
-> The pause/restore handoff that used to stop `llama-swap.service` was removed.
-> This page now covers only direct scripts that bypass the router.
+> out like any model, and `l3ms --run-profile media:breeze-tts-2` (and the TUI form)
+> call llama-swap's `/audiocpp/` route directly; see
+> [media through llama-swap](migration/media-through-llama-swap.md). The
+> pause/restore handoff that used to stop `llama-swap.service` was removed. This
+> page now covers only direct scripts that bypass the router.
 
-CUDA-local Nagi/Laya decisions, `media:breeze-tts-2` speech, HeartMuLa, H3 and LTX use the same
+CUDA-local Nagi/Laya decisions, HeartMuLa, H3 and LTX use the same
 foreground runner as CPU work. This is an **operator-managed idle window**: no
 service is stopped or restored, and other clients are not fenced. Original
 standalone commands remain available.
@@ -76,19 +78,31 @@ L3MS_LIVE_GPU_UUID=GPU-your-physical-uuid cargo test --lib real_kde_baseline_ref
 These inspect manager/process/GPU state only; neither starts inference nor
 changes a service. A rejection test is not a successful switching test.
 
-Use the existing native CLI shapes, selecting the declared CUDA profile:
+Use the existing native CLI shape, selecting the declared CUDA profile:
 
 ```sh
 l3ms --run-profile decisions:nagi-smol --task decision --input input.json
-l3ms --run-profile media:breeze-tts-2 --task tts --input speech.json --output-dir /absolute/private/fresh-output
 ```
 
 The Stack Catalog typed form (`f`, then `Ctrl+Enter`) uses the same operation.
-Speech supports standard, design, cloning with a reference transcript, and
-completed streaming chunks; see [CPU/native input shapes](cpu-native-workflows.md).
-Completed chunks are not live playback. The selected runtime and weights must
-already be installed; there are no implicit downloads or simulated decisions.
-SemIf/OpenJev and unrelated media scripts are not admitted by this path.
+The selected runtime and weights must already be installed; there are no implicit
+downloads or simulated decisions. SemIf/OpenJev and unrelated media scripts are
+not admitted by this path.
+
+### Breeze speech (routed, no window)
+
+```sh
+export LLAMA_SWAP_URL=http://127.0.0.1:8080 LLAMA_SWAP_API_KEY=...
+l3ms --run-profile media:breeze-tts-2 --task tts --input speech.json --output-dir /absolute/private/fresh-output
+```
+
+Standard, design, cloning (reference WAV plus transcript) and streaming take the
+same JSON shapes as the CPU profile ([input shapes](cpu-native-workflows.md)). The
+request goes to the router, which evicts the resident model, starts audio.cpp and
+restores nothing on its own: the next request for the language model reloads it.
+Run it when evicting that model is acceptable. Streaming returns after completion
+with `result.wav.chunks/chunk_NNNN.wav`; it is not live playback. In the TUI, connect
+Chat first; the form reuses that confirmed endpoint and key.
 
 ### HeartMuLa music
 
