@@ -13,6 +13,13 @@
   decisions lane signatures. Remove the unused falling-trail boot animation.
 
 ### Breaking changes
+- Remove the opt-in resident llama-swap pause/restore handoff
+  (`resident_llama_swap` in `L3MS_NATIVE_GPU`; `L3MS_NATIVE_GPU` documents that
+  member as unknown now, so existing configs that set it are refused). llama-swap
+  swaps speech and image engines itself (`audiocpp_auto`, `comfyui_auto`; CUDA
+  verified on the live router). The idle-GPU check for direct scripts, the KDE
+  desktop baseline and the recovery marker remain. `resident_unit.rs` becomes
+  `desktop_gpu.rs`. Net `src/` change: about -1,670 lines.
 - Remove the retained-ID coordinator clients: the CLI flags
   `--coordinator-status`, `--coordinator-cancel`, `--request-results`,
   `--request-output`, `--artifact-chunk` (with its `--artifact-*`, `--request-lane`,

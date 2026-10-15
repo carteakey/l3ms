@@ -1,14 +1,15 @@
 # Explicit idle-GPU native work
 
+> **Speech and images no longer need this window.** `audiocpp_auto` and
+> `comfyui_auto` are declared in `llama-swap.yaml`, so llama-swap swaps them in and
+> out like any model; see [media through llama-swap](migration/media-through-llama-swap.md).
+> The pause/restore handoff that used to stop `llama-swap.service` was removed.
+> This page now covers only direct scripts that bypass the router.
+
 CUDA-local Nagi/Laya decisions, `media:breeze-tts-2` speech, HeartMuLa, H3 and LTX use the same
-foreground runner as CPU work. By default this is an **operator-managed idle
-window**: no service is stopped or restored. An explicit resident llama-swap
-opt-in adds bounded pause/restore around that same foreground owner. It does not
-install a unit, adopt arbitrary services or fence external clients. Original
-standalone commands remain available. A bounded real CUDA speech pause/restore
-and external LLM tool continuation passed; see
-[live acceptance](migration/live-port-acceptance.md). This is not uninterrupted
-SSE/KV preservation or a fence against other clients.
+foreground runner as CPU work. This is an **operator-managed idle window**: no
+service is stopped or restored, and other clients are not fenced. Original
+standalone commands remain available.
 Blender headless work shares this admission/release guard but keeps its native
 scene-selected backend: its manifest does not declare CPU or CUDA, and no CUDA
 connection or visibility override is fabricated for it.
@@ -88,68 +89,6 @@ completed streaming chunks; see [CPU/native input shapes](cpu-native-workflows.m
 Completed chunks are not live playback. The selected runtime and weights must
 already be installed; there are no implicit downloads or simulated decisions.
 SemIf/OpenJev and unrelated media scripts are not admitted by this path.
-
-### Optional resident llama-swap handoff
-
-Add this member to the same `L3MS_NATIVE_GPU` JSON only when you want the wrapper
-to pause the fixed **user** `llama-swap.service` during native GPU work:
-
-```json
-"resident_llama_swap": {
-  "router_config": "/absolute/current/router/llama-swap.yaml",
-  "base_url": "http://127.0.0.1:8080",
-  "api_key_env": "LLAMA_SWAP_API_KEY",
-  "managers_quiesced": true,
-  "restore_timeout_ms": 120000
-}
-```
-
-This is a JSON member, not a complete standalone configuration. Omit
-`api_key_env` for a deliberately unauthenticated local router; a declared but
-missing/empty key refuses before any stop. The endpoint must be loopback and
-must belong to that unit: endpoint identity is an operator assertion, not an
-authenticated unit-discovery protocol. Embedded URL credentials are refused.
-Resident HTTP calls bypass environment proxies; redirects and client retries are
-disabled. Only the explicit read-only readiness loop can repeat a request.
-The restoration budget must be 1–300 seconds and includes unit startup, model
-readiness and final verification.
-
-`clients_quiesced` must include all direct router/engine clients and in-flight
-requests. `managers_quiesced` additionally asserts that no other process will
-stop/start/restart the unit or edit/reload its config/definitions throughout the
-operation. The name-based systemd commands are not atomic compare-and-swap.
-These assertions are mandatory operational assumptions, not built-in fences.
-
-The live unit must be loaded, active/running or inactive/dead, with
-`KillMode=control-group` and `SendSIGKILL=yes`. Only the supported fixed unit/config
-shape is accepted; ambiguous definitions, changing files, unknown claimants or
-unverified process identities refuse. The branch's unit template is not proof
-that the live unit has these settings. Installing/reloading it is a separate
-operator action; this implementation does neither.
-
-Under the existing shared locks, the runner captures the active state and exact
-ready model IDs, checks resident GPU claimants, writes the existing empty recovery
-marker, then attempts one unit stop. It verifies the old cgroup is empty/gone
-and the GPU is idle before one native execution. Known child cleanup and idle
-release are required before one unit start. Startup-only extra models are unloaded
-with model-scoped calls; missing prior models receive one routed health activation
-each. Only read-only readiness polling is repeated. Exact ready-ID equality,
-unchanged definitions/config and verified restored claimants are required before
-clearing the marker and publishing the result. An originally inactive unit stays
-inactive. Cancellation cannot skip bounded restoration.
-
-Restoration means a new verified unit generation and the captured ready model
-IDs—not the old PIDs, in-flight requests, cache contents or TTL timers. Routed
-health activation requires compatible native backends; an unsupported backend
-fails restoration rather than silently falling back. Ambiguous stop/start,
-activation or release leaves the marker and scheduling closed. A crash can leave
-the original service stopped: the snapshot is in memory only, with no durable
-Stop journal or automatic recovery. Inspect and restore the actual unit/model
-state and GPU release before manually removing the marker. Never auto-replay an
-inference or delete a marker merely to make the next job start.
-Conservative marker retention also covers a failed re-verification after marker
-creation, even if no Stop was issued. It does not by itself prove a service was
-changed; inspect the actual state before manual recovery.
 
 ### HeartMuLa music
 

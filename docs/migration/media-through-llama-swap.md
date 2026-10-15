@@ -38,11 +38,19 @@ and checks that `/unload` stops the audio.cpp process.
 - **CPU, passed (2026-10-15):** standard 2.56 s, design 2.48 s, clone 2.32 s,
   streaming 4 SSE events (all 24 kHz mono), and the engine process ended on
   unload. Cold start through the router took about 34 s.
-- **CUDA, not run.** It needs the shared card, which the live router holds
-  (a resident Strata model and an open client connection at the time of
-  writing). Run it in a window the operator approves: stop the live unit, run
-  the script with `cuda`, check `nvidia-smi` returns to the desktop baseline,
-  and start the unit again.
+- **CUDA on the live router, passed (2026-10-15, 11:28-11:31, router idle with
+  zero clients):** after a SIGHUP reload, the live v265 router swapped engines
+  on its own with no service stop and no custom guard.
+  chat model (`qwen38-flash-next-plat`, 11.5 GB) → Breeze on CUDA (3.9 GB) →
+  ComfyUI (`/comfyui/system_stats` ready in 6.7 s) → the original
+  `qwen38-flash-next-plat-abliterated` restored by one chat request (23 s,
+  VRAM back to 11.6 GB held by the Strata process only).
+  Breeze on CUDA: standard 2.08 s of audio (12.7 s cold swap), design 2.0 s
+  (1.2 s warm), clone 3.04 s (6.2 s), streaming 4 SSE events (5.7 s).
+- **SIGHUP is not free.** Reloading evicted the resident model and the config's
+  startup preload loaded `qwen38-flash-next-plat` (77 s). The router stayed up
+  and served throughout; the earlier note that running models keep serving was
+  wrong whenever the config preloads a model.
 
 Known upstream limits, unchanged: the pinned audio.cpp server has no
 mid-inference cancel (only a busy timeout), and streaming emits PCM SSE events,
@@ -50,10 +58,11 @@ not the CLI's WAV chunk files. Comfy cancellation and learned-model CUDA
 execution through this route were verified earlier; see
 [live acceptance](live-port-acceptance.md).
 
-## What this lets us delete
+## What this let us delete
 
-After the CUDA run passes, the custom GPU guard (`resident_unit`, `gpu_probe`,
-`cuda_device`, `ownership`, `foreground_shutdown`, about 3.8k lines) and the
-stop-and-restore flow have no remaining role for these lanes: llama-swap's own
-swap and unload do the work. Direct scripts that bypass the router keep a simple
-"GPU is busy" check until they move to the route.
+The resident pause/restore handoff (the opt-in stop-and-restore of
+`llama-swap.service`, about 1,700 lines of service management plus its tests) is
+removed. The idle-GPU window, the KDE desktop baseline and the recovery marker
+stay for the direct scripts that still bypass the router (LTX, YuE2, Blender,
+HeartMuLa). Moving those lanes onto routed engines would let the rest of the
+window code go too, and is the next simplification.

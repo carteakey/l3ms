@@ -130,9 +130,9 @@ impl SwapClient {
         Self::build(base_url.as_ref(), api_key, false)
     }
 
-    /// Resident handoff must contact its configured local router directly,
-    /// never an environment-selected HTTP proxy.
-    pub(crate) fn local_resident(base_url: &str, api_key: Option<&str>) -> Result<Self> {
+    /// Loopback-only client that ignores environment HTTP proxies (tests).
+    #[cfg(test)]
+    pub(crate) fn local_direct(base_url: &str, api_key: Option<&str>) -> Result<Self> {
         Self::build(base_url, api_key, true)
     }
 
@@ -624,7 +624,7 @@ mod tests {
             }
             requests
         });
-        let client = SwapClient::local_resident(&endpoint, Some("fixture-token")).unwrap();
+        let client = SwapClient::local_direct(&endpoint, Some("fixture-token")).unwrap();
         (client, worker)
     }
 
