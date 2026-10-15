@@ -77,7 +77,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{
         Block, Borders, Cell, Clear, Gauge, List, ListItem, ListState, Paragraph, Row, Sparkline,
-        Table, TableState, Tabs, Wrap,
+        Table, TableState, Wrap,
     },
     Frame, Terminal,
 };
@@ -6105,7 +6105,7 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1),
-                Constraint::Length(3),
+                Constraint::Length(1),
                 Constraint::Min(8),
                 Constraint::Length(activity_height),
                 Constraint::Length(1),
@@ -6158,25 +6158,52 @@ impl App {
             Span::styled(endpoint, theme::dim()),
         ]);
         frame.render_widget(Paragraph::new(line).style(theme::text()), area);
+        if let Some(model) = self.models.iter().find(|model| model.state == "loaded") {
+            let label = format!("● {} ", model.id);
+            let width = label.chars().count() as u16;
+            if area.width > width + 50 {
+                let right = Rect::new(area.x + area.width - width, area.y, width, 1);
+                frame.render_widget(Paragraph::new(Span::styled(label, theme::title())), right);
+            }
+        }
     }
 
     fn draw_tabs(&self, frame: &mut Frame, area: Rect) {
-        let names = if area.width >= 112 {
-            &TAB_NAMES
-        } else {
-            &TAB_SHORT_NAMES
+        // One flat row: the selected tab is a filled chip, the rest are dim.
+        // Numbers (the F-key for each tab) are dropped before names are clipped.
+        let width = area.width as usize;
+        let chips = |names: &[&str], numbered: bool| -> (Vec<Span<'static>>, usize) {
+            let mut spans = Vec::new();
+            let mut used = 0;
+            for (index, name) in names.iter().enumerate() {
+                let label = if numbered {
+                    format!(" {} {name} ", index + 1)
+                } else {
+                    format!(" {name} ")
+                };
+                used += label.chars().count();
+                let style = if index == self.tab.index() {
+                    theme::selected()
+                } else {
+                    theme::dim()
+                };
+                spans.push(Span::styled(label, style));
+            }
+            (spans, used)
         };
-        let titles = names
+        let (mut spans, used) = chips(&TAB_NAMES, true);
+        if used > width {
+            (spans, _) = chips(&TAB_SHORT_NAMES, true);
+        }
+        if spans
             .iter()
-            .map(|name| Line::from(*name))
-            .collect::<Vec<_>>();
-        let tabs = Tabs::new(titles)
-            .block(theme::block().borders(Borders::ALL))
-            .style(theme::text())
-            .select(self.tab.index())
-            .highlight_style(theme::title())
-            .divider("│");
-        frame.render_widget(tabs, area);
+            .map(|s| s.content.chars().count())
+            .sum::<usize>()
+            > width
+        {
+            (spans, _) = chips(&TAB_SHORT_NAMES, false);
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)).style(theme::text()), area);
     }
 
     fn draw_workbench(&mut self, frame: &mut Frame, area: Rect) {
@@ -6239,10 +6266,7 @@ impl App {
     }
 
     fn draw_gpu_monitor(&self, frame: &mut Frame, area: Rect) {
-        let title = format!(
-            "Hardware & GPU (nvidia-smi) · v layout ({})",
-            self.workbench_layout.label()
-        );
+        let title = format!("GPU · v layout ({})", self.workbench_layout.label());
         let block = theme::block().title(title).borders(Borders::ALL);
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -6277,8 +6301,9 @@ impl App {
             };
             lines.push(Line::from(vec![
                 Span::styled("VRAM: ", theme::title()),
+                Span::styled(gauge(vram_pct, 12), vram_style),
                 Span::styled(
-                    format!("{vram_used_gib:.2}/{vram_total_gib:.2} GiB ({vram_pct}%)"),
+                    format!(" {vram_used_gib:.1}/{vram_total_gib:.1} GiB {vram_pct}%"),
                     vram_style,
                 ),
                 Span::raw("  Load: "),
@@ -6307,8 +6332,16 @@ impl App {
             let swap_used = mem.used_swap_mib as f64 / 1024.0;
             lines.push(Line::from(vec![
                 Span::styled("RAM:  ", theme::title()),
+                Span::styled(
+                    gauge(ram_pct, 12),
+                    if ram_pct > 90 {
+                        theme::warning()
+                    } else {
+                        theme::text()
+                    },
+                ),
                 Span::raw(format!(
-                    "{ram_used:.1}/{ram_total:.1} GiB ({ram_pct}%) · zram: {swap_used:.1} GiB"
+                    " {ram_used:.1}/{ram_total:.1} GiB {ram_pct}% · zram {swap_used:.1}"
                 )),
             ]));
         }
@@ -6766,12 +6799,7 @@ impl App {
         let rows = self
             .visible_models()
             .into_iter()
-            .map(|model| {
-                Row::new(vec![
-                    Cell::from(model.id.clone()),
-                    Cell::from(model.state.clone()),
-                ])
-            })
+            .map(|model| Row::new(vec![Cell::from(model.id.clone()), state_cell(&model.state)]))
             .collect::<Vec<_>>();
         let table = Table::new(
             rows,
@@ -7969,6 +7997,25 @@ fn lane_style(lane: Lane) -> Style {
     }
 }
 
+/// Fixed-width gauge such as `████░░░░░░`; callers pair it with a numeric label.
+fn gauge(percent: u64, cells: usize) -> String {
+    let filled = ((percent.min(100) as usize) * cells)
+        .div_ceil(100)
+        .min(cells);
+    format!("{}{}", "█".repeat(filled), "░".repeat(cells - filled))
+}
+
+/// Dot plus state word, colored by state; the word always carries the meaning.
+fn state_cell(state: &str) -> Cell<'static> {
+    let (text, style) = match state {
+        "loaded" => ("● loaded", theme::title()),
+        "loading" => ("◐ loading", theme::warning()),
+        "unloaded" => ("○ unloaded", theme::dim()),
+        other => return Cell::from(other.to_owned()).style(theme::dim()),
+    };
+    Cell::from(text).style(style)
+}
+
 /// Live llama-swap state for a profile the router serves under the same id.
 /// Anything the router does not list is shown as unknown, never guessed.
 fn router_state(models: &[SwapModel], profile_id: &str) -> (&'static str, Style) {
@@ -7977,9 +8024,9 @@ fn router_state(models: &[SwapModel], profile_id: &str) -> (&'static str, Style)
         .find(|model| model.id == profile_id)
         .map(|model| model.state.as_str())
     {
-        Some("loaded") => ("loaded", theme::title()),
-        Some("loading") => ("loading", theme::warning()),
-        Some("unloaded") => ("unloaded", theme::dim()),
+        Some("loaded") => ("● loaded", theme::title()),
+        Some("loading") => ("◐ loading", theme::warning()),
+        Some("unloaded") => ("○ unloaded", theme::dim()),
         Some(_) => ("unknown", theme::dim()),
         None => ("—", theme::dim()),
     }
@@ -9909,11 +9956,11 @@ mod tests {
         let mut app = fixture.app();
         app.tab = Tab::StackCatalog;
 
-        let mut narrow = Terminal::new(TestBackend::new(80, 3)).unwrap();
+        let mut narrow = Terminal::new(TestBackend::new(80, 1)).unwrap();
         narrow
-            .draw(|frame| app.draw_tabs(frame, Rect::new(0, 0, 80, 3)))
+            .draw(|frame| app.draw_tabs(frame, Rect::new(0, 0, 80, 1)))
             .unwrap();
-        let narrow_row = terminal_row(&narrow, 1);
+        let narrow_row = terminal_row(&narrow, 0);
         for label in TAB_SHORT_NAMES {
             assert!(narrow_row.contains(label), "missing narrow tab {label:?}");
         }
@@ -9922,10 +9969,10 @@ mod tests {
             "selected Stack tab was clipped"
         );
 
-        let mut wide = Terminal::new(TestBackend::new(120, 3)).unwrap();
-        wide.draw(|frame| app.draw_tabs(frame, Rect::new(0, 0, 120, 3)))
+        let mut wide = Terminal::new(TestBackend::new(120, 1)).unwrap();
+        wide.draw(|frame| app.draw_tabs(frame, Rect::new(0, 0, 120, 1)))
             .unwrap();
-        let wide_row = terminal_row(&wide, 1);
+        let wide_row = terminal_row(&wide, 0);
         for label in TAB_NAMES {
             assert!(wide_row.contains(label), "missing full-width tab {label:?}");
         }
@@ -12117,7 +12164,12 @@ mod tests {
                 })
                 .collect()
         };
-        let row_of = |id: &str| rows.iter().find(|row| row.contains(id)).unwrap().clone();
+        let row_of = |id: &str| {
+            rows.iter()
+                .find(|row| row.contains(id) && row.contains("manifest-only"))
+                .unwrap()
+                .clone()
+        };
         assert!(rows.iter().any(|row| row.contains("Router")));
         assert!(
             row_of("local-chat").contains("loaded"),

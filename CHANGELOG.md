@@ -11,6 +11,11 @@
   key still loads (unknown fields are ignored) and drops it on the next save.
 
 ### Changed
+- Flatter, denser chrome: the boxed three-row tab strip is now a single row of
+  numbered chips (selected tab filled), returning two rows to every screen, and
+  the header shows the currently loaded model. Model and router states carry a
+  dot (`● loaded`, `◐ loading`, `○ unloaded`), and the GPU panel shows VRAM and
+  RAM gauges.
 - The Activity log pane fits its content (3 to 5 rows) instead of always taking 5,
   returning working space to every tab while the log is short.
 - Maintenance tab: the script list and editor now end on the same row (the editor's
