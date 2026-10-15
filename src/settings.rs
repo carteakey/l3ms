@@ -75,8 +75,6 @@ pub struct StackPreferences {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decisions_toolkit_root: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub coordinator_socket_dir: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact_root: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gpu_policy: Option<GpuPolicy>,
@@ -90,7 +88,6 @@ impl Default for StackPreferences {
             schema_version: 1,
             media_toolkit_root: None,
             decisions_toolkit_root: None,
-            coordinator_socket_dir: None,
             artifact_root: None,
             gpu_policy: None,
             task_defaults: BTreeMap::new(),
@@ -103,7 +100,6 @@ impl StackPreferences {
         self.schema_version == 1
             && self.media_toolkit_root.is_none()
             && self.decisions_toolkit_root.is_none()
-            && self.coordinator_socket_dir.is_none()
             && self.artifact_root.is_none()
             && self.gpu_policy.is_none()
             && self.task_defaults.is_empty()
@@ -120,7 +116,6 @@ impl StackPreferences {
         for (name, value) in [
             ("media_toolkit_root", &self.media_toolkit_root),
             ("decisions_toolkit_root", &self.decisions_toolkit_root),
-            ("coordinator_socket_dir", &self.coordinator_socket_dir),
             ("artifact_root", &self.artifact_root),
         ] {
             if value
@@ -161,7 +156,6 @@ pub enum GpuPolicy {
 pub struct ResolvedStackSettings {
     pub media_toolkit_root: PathBuf,
     pub decisions_toolkit_root: PathBuf,
-    pub coordinator_socket_dir: Option<PathBuf>,
     pub artifact_root: Option<PathBuf>,
     pub gpu_policy: GpuPolicy,
     pub task_defaults: BTreeMap<String, String>,
@@ -172,7 +166,6 @@ pub struct ResolvedStackSettings {
 pub struct StackOverrides {
     pub media_toolkit_root: Option<PathBuf>,
     pub decisions_toolkit_root: Option<PathBuf>,
-    pub coordinator_socket_dir: Option<PathBuf>,
     pub artifact_root: Option<PathBuf>,
     pub gpu_policy: Option<GpuPolicy>,
     pub task_defaults: BTreeMap<String, String>,
@@ -192,7 +185,6 @@ pub fn resolve_stack_settings(
     let mut resolved = ResolvedStackSettings {
         media_toolkit_root: repo_root.join("toolkits/l2m2"),
         decisions_toolkit_root: repo_root.join("toolkits/l3ds"),
-        coordinator_socket_dir: None,
         artifact_root: None,
         gpu_policy: GpuPolicy::Manual,
         task_defaults: BTreeMap::new(),
@@ -209,16 +201,8 @@ pub fn resolve_stack_settings(
         if let Some(root) = &layer.decisions_toolkit_root {
             resolved.decisions_toolkit_root = resolve_declared_path(declaring_dir, Path::new(root));
         }
-        for (value, target) in [
-            (
-                &layer.coordinator_socket_dir,
-                &mut resolved.coordinator_socket_dir,
-            ),
-            (&layer.artifact_root, &mut resolved.artifact_root),
-        ] {
-            if let Some(path) = value {
-                *target = Some(resolve_declared_path(declaring_dir, Path::new(path)));
-            }
+        if let Some(path) = &layer.artifact_root {
+            resolved.artifact_root = Some(resolve_declared_path(declaring_dir, Path::new(path)));
         }
         if let Some(policy) = layer.gpu_policy {
             resolved.gpu_policy = policy;
@@ -242,13 +226,7 @@ pub fn resolve_stack_settings(
     if let Some(value) = environment.get("L3MS_GPU_POLICY") {
         resolved.gpu_policy = parse_gpu_policy(value)?;
     }
-    for (key, target) in [
-        (
-            "L3MS_COORDINATOR_SOCKET_DIR",
-            &mut resolved.coordinator_socket_dir,
-        ),
-        ("L3MS_ARTIFACT_ROOT", &mut resolved.artifact_root),
-    ] {
+    for (key, target) in [("L3MS_ARTIFACT_ROOT", &mut resolved.artifact_root)] {
         if let Some(value) = environment.get(key) {
             if value.trim().is_empty() || value.contains('\0') {
                 return Err(anyhow!("{key} must be a non-empty path without NUL"));
@@ -300,13 +278,7 @@ pub fn resolve_stack_settings(
     if let Some(policy) = cli.gpu_policy {
         resolved.gpu_policy = policy;
     }
-    for (value, target) in [
-        (
-            &cli.coordinator_socket_dir,
-            &mut resolved.coordinator_socket_dir,
-        ),
-        (&cli.artifact_root, &mut resolved.artifact_root),
-    ] {
+    for (value, target) in [(&cli.artifact_root, &mut resolved.artifact_root)] {
         if let Some(path) = value {
             if path.as_os_str().is_empty() || path.to_string_lossy().contains('\0') {
                 return Err(anyhow!("CLI control path must not be empty or contain NUL"));
@@ -361,7 +333,6 @@ pub fn load_current_stack_settings_in(
             "L3MS_MEDIA_TOOLKIT_ROOT"
                 | "L3MS_DECISIONS_TOOLKIT_ROOT"
                 | "L3MS_GPU_POLICY"
-                | "L3MS_COORDINATOR_SOCKET_DIR"
                 | "L3MS_ARTIFACT_ROOT"
         ) && !key.starts_with("L3MS_TASK_DEFAULT_")
         {
@@ -494,7 +465,6 @@ pub fn export_profile_in(
     // export machine-local toolkit/control paths or host GPU policy.
     settings.stack.media_toolkit_root = None;
     settings.stack.decisions_toolkit_root = None;
-    settings.stack.coordinator_socket_dir = None;
     settings.stack.artifact_root = None;
     settings.stack.gpu_policy = None;
     let config_path = repo_root.join("model_downloader/models_config.json");
@@ -812,13 +782,11 @@ mod tests {
             &invocation,
         )
         .unwrap();
-        assert!(empty.coordinator_socket_dir.is_none());
         assert!(empty.artifact_root.is_none());
         let mut host = Settings::default();
-        host.stack.coordinator_socket_dir = Some("host-socket".into());
         host.stack.artifact_root = Some("host-artifacts".into());
         let mut user = Settings::default();
-        user.stack.coordinator_socket_dir = Some("user-socket".into());
+        user.stack.artifact_root = Some("user-artifacts".into());
         let layered = resolve_stack_settings(
             &repo,
             Some((&host, &host_dir)),
@@ -828,19 +796,9 @@ mod tests {
             &invocation,
         )
         .unwrap();
-        assert_eq!(
-            layered.coordinator_socket_dir,
-            Some(user_dir.join("user-socket"))
-        );
-        assert_eq!(layered.artifact_root, Some(host_dir.join("host-artifacts")));
-        let environment = BTreeMap::from([
-            ("L3MS_COORDINATOR_SOCKET_DIR".into(), "env-socket".into()),
-            ("L3MS_ARTIFACT_ROOT".into(), "env-artifacts".into()),
-        ]);
-        let cli = StackOverrides {
-            coordinator_socket_dir: Some("cli-socket".into()),
-            ..StackOverrides::default()
-        };
+        assert_eq!(layered.artifact_root, Some(user_dir.join("user-artifacts")));
+        let environment = BTreeMap::from([("L3MS_ARTIFACT_ROOT".into(), "env-artifacts".into())]);
+        let cli = StackOverrides::default();
         let overridden = resolve_stack_settings(
             &repo,
             Some((&host, &host_dir)),
@@ -850,10 +808,6 @@ mod tests {
             &invocation,
         )
         .unwrap();
-        assert_eq!(
-            overridden.coordinator_socket_dir,
-            Some(invocation.join("cli-socket"))
-        );
         assert_eq!(
             overridden.artifact_root,
             Some(invocation.join("env-artifacts"))
@@ -866,22 +820,17 @@ mod tests {
         let temp = TempDir::new().unwrap();
         for invalid in ["", "\0", "  "] {
             let mut settings = Settings::default();
-            settings.stack.coordinator_socket_dir = Some(invalid.into());
-            assert!(save_settings_in(temp.path(), &settings).is_err());
-            settings.stack.coordinator_socket_dir = None;
             settings.stack.artifact_root = Some(invalid.into());
             assert!(save_settings_in(temp.path(), &settings).is_err());
-            for key in ["L3MS_COORDINATOR_SOCKET_DIR", "L3MS_ARTIFACT_ROOT"] {
-                assert!(resolve_stack_settings(
-                    temp.path(),
-                    None,
-                    None,
-                    &BTreeMap::from([(key.into(), invalid.into())]),
-                    &StackOverrides::default(),
-                    temp.path()
-                )
-                .is_err());
-            }
+            assert!(resolve_stack_settings(
+                temp.path(),
+                None,
+                None,
+                &BTreeMap::from([("L3MS_ARTIFACT_ROOT".into(), invalid.into())]),
+                &StackOverrides::default(),
+                temp.path()
+            )
+            .is_err());
         }
         assert!(!settings_path(temp.path()).exists());
     }
@@ -892,7 +841,6 @@ mod tests {
         if let Some(root) = std::env::var_os(MARKER) {
             let root = PathBuf::from(root);
             let resolved = load_current_stack_settings_in(&root, &root.join("user")).unwrap();
-            assert_eq!(resolved.coordinator_socket_dir, Some(root.join("socket")));
             assert_eq!(resolved.artifact_root, Some(root.join("artifacts")));
             assert!(!root.join("user").exists());
             return;
@@ -906,7 +854,6 @@ mod tests {
                     "settings::tests::current_control_settings_read_environment_in_an_isolated_process",
                 ])
                 .env(MARKER, temp.path())
-                .env("L3MS_COORDINATOR_SOCKET_DIR", temp.path().join("socket"))
                 .env("L3MS_ARTIFACT_ROOT", temp.path().join("artifacts"))
                 .env_remove("L3MS_HOST_SETTINGS_DIR")
                 .output()
@@ -1063,7 +1010,6 @@ mod tests {
         let mut settings = Settings::default();
         settings.stack.media_toolkit_root = Some("/private/media".into());
         settings.stack.decisions_toolkit_root = Some("/private/decisions".into());
-        settings.stack.coordinator_socket_dir = Some("/private/coordinator".into());
         settings.stack.artifact_root = Some("/private/artifacts".into());
         settings.stack.gpu_policy = Some(GpuPolicy::Exclusive);
         settings
@@ -1076,7 +1022,6 @@ mod tests {
         let exported = export_profile_in(repository.path(), data.path(), &bundle).unwrap();
         assert_eq!(exported.settings.stack.media_toolkit_root, None);
         assert_eq!(exported.settings.stack.decisions_toolkit_root, None);
-        assert_eq!(exported.settings.stack.coordinator_socket_dir, None);
         assert_eq!(exported.settings.stack.artifact_root, None);
         assert_eq!(exported.settings.stack.gpu_policy, None);
         assert_eq!(

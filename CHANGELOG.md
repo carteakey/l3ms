@@ -11,6 +11,9 @@
   `local_ipc`, `result_buffer`, `result_consumer`, `client` and
   `coordinator_workbench` modules. Stack `c` now cancels the active foreground
   native task. Net `src/` change: -11,123 lines (68,873 to 57,750).
+- Remove the `coordinator_socket_dir` stack setting, its CLI override and the
+  `L3MS_COORDINATOR_SOCKET_DIR` variable. Existing `settings.json` files that
+  still contain the key load normally; the key is ignored.
 - Retire the branch-added `--coordinator-managed-session` server and hidden
   engine/job helper entrypoints, with their private transport, ownership stores
   and duplicate chat implementation. Native CLI/UI execution, the actual Chat

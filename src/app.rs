@@ -4459,7 +4459,7 @@ impl App {
                 return;
             }
             if !direct_native_profile {
-                self.status = "No direct native workflow is available for this profile; coordinator task submission has been retired".into();
+                self.status = "No direct native workflow is available for this profile".into();
                 return;
             }
             self.task_form_editor = Some(TaskFormEditor::new_with_direct_embeddings(
@@ -4641,7 +4641,7 @@ impl App {
                 self.run_direct_native();
                 return;
             }
-            self.status = "Coordinator task submission has been retired; only allowlisted direct native forms can run".into();
+            self.status = "Only allowlisted direct native forms can run".into();
         }
     }
 
@@ -12026,19 +12026,9 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_task_form_refuses_without_contacting_configured_coordinator() {
+    fn unsupported_task_form_refuses_with_native_guidance() {
         let fixture = AppFixture::new();
         write_coordinator_decision_stack_fixture(&fixture);
-        let mut settings = crate::settings::Settings::default();
-        settings.stack.coordinator_socket_dir = Some(
-            fixture
-                .data
-                .path()
-                .join("no-listener")
-                .display()
-                .to_string(),
-        );
-        crate::settings::save_settings_in(fixture.data.path(), &settings).unwrap();
         let mut app = fixture.app();
         focus_stack_profile_by_id(&mut app, "semif-fixture");
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
@@ -12046,7 +12036,7 @@ mod tests {
         assert_eq!(app.input_mode, InputMode::Normal);
         assert!(app
             .status
-            .contains("coordinator task submission has been retired"));
+            .contains("No direct native workflow is available for this profile"));
         assert!(app.task_form_editor.is_none());
         assert!(app.direct_native_job.is_none());
         assert!(app.job_history.records().is_empty());
