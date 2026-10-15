@@ -44,15 +44,26 @@ the clones only. The originals were not touched.
 Codex's `comfy-local` MCP server was repointed to the monorepo launcher (backup
 in `_backups/siblings-20261015/codex-config.toml.bak`).
 
-## Remaining before the sibling directories can be deleted
+## Retired (2026-10-15)
 
-- Three `comfy-mcp` processes started by the Codex app-server and `agy` still
-  run from `~/repos/l2m2/.venv-comfy-mcp`. They exit when those clients restart
-  their MCP servers; `agy`'s own MCP config was not found and still needs the
-  same one-line repoint.
-- `~/repos/l2m2-nsfw` runners hardcode `~/repos/l2m2` paths (separate repo; not
-  edited here).
-- `l2m2/vendor/audio.cpp` is a dangling symlink; the pinned binaries now live in
-  `vendor/audio.cpp-955c872/` (git-ignored) in the deployed checkout.
-- Then, with approval, remove `~/repos/l2m2` and `~/repos/l3ds`. The bundles in
-  `_backups/siblings-20261015/` hold their full history and uncommitted files.
+`~/repos/l2m2` and `~/repos/l3ds` were moved, not deleted, to `~/repos/_retired/`.
+Before the move every consumer was repointed and nothing was running from the
+old paths:
+
+- Codex's and `agy`'s `comfy-local` MCP servers now launch
+  `toolkits/l2m2/maintenance/run-comfy-mcp.sh` (backups in
+  `_backups/siblings-20261015/`).
+- `~/repos/l2m2-nsfw` runners default `L2M2_ROOT` to `~/repos/l3ms/toolkits/l2m2`
+  (uncommitted edits in that repo for the owner to review).
+- The dev worktree's `.toolkit`, `vendor` and `.venv-comfy` symlinks point at the
+  deployed clones.
+
+Verified after the move: ComfyUI venv (torch 2.14 + CUDA), the MCP handshake,
+L3DS suites, root tests (543), and both toolkit binaries listing their profiles.
+
+To undo: `mv ~/repos/_retired/l2m2 ~/repos/l2m2` (and `l3ds`). To remove for good,
+delete `~/repos/_retired/`; full history and the uncommitted files are in
+`~/repos/_backups/siblings-20261015/`.
+
+`l2m2/vendor/audio.cpp` was a dangling symlink; the pinned binaries live in
+`vendor/audio.cpp-955c872/` in the deployed checkout.
