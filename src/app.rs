@@ -6090,6 +6090,7 @@ impl App {
     }
 
     fn draw(&mut self, frame: &mut Frame) {
+        frame.render_widget(Block::default().style(theme::surface()), frame.area());
         let areas = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -6137,7 +6138,13 @@ impl App {
             env::var("LLAMA_SWAP_URL").unwrap_or_else(|_| "http://localhost:8080".into());
         let line = Line::from(vec![
             Span::styled(" L3MS ", theme::badge()),
-            Span::raw(format!(" Rust v{}  ", env!("CARGO_PKG_VERSION"))),
+            Span::raw(format!(" v{}  ", env!("CARGO_PKG_VERSION"))),
+            Span::styled("language", theme::lane_language()),
+            Span::styled(" · ", theme::dim()),
+            Span::styled("media", theme::lane_media()),
+            Span::styled(" · ", theme::dim()),
+            Span::styled("decisions", theme::lane_decisions()),
+            Span::raw("  "),
             Span::styled(endpoint, theme::dim()),
         ]);
         frame.render_widget(Paragraph::new(line).style(theme::text()), area);
@@ -6833,7 +6840,7 @@ impl App {
             let color = if message.role == "user" {
                 theme::AMBER
             } else {
-                theme::GREEN
+                theme::PHOSPHOR
             };
             lines.push(Line::from(Span::styled(
                 format!("{}:", message.role),
@@ -6845,7 +6852,7 @@ impl App {
         if !self.chat_streaming.is_empty() {
             lines.push(Line::from(Span::styled(
                 "assistant (streaming):",
-                Style::default().fg(theme::GREEN).bold(),
+                Style::default().fg(theme::PHOSPHOR).bold(),
             )));
             lines.push(Line::from(self.chat_streaming.as_str()));
         }
@@ -12040,6 +12047,27 @@ mod tests {
         assert!(app.task_form_editor.is_none());
         assert!(app.direct_native_job.is_none());
         assert!(app.job_history.records().is_empty());
+    }
+
+    #[test]
+    fn signal_theme_fills_the_frame_and_marks_the_three_lanes_at_80x24() {
+        let fixture = AppFixture::new();
+        let mut app = fixture.app();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let header: String = (0..80)
+            .map(|x| buffer[(x, 0)].symbol().to_string())
+            .collect();
+        for lane in ["language", "media", "decisions"] {
+            assert!(header.contains(lane), "header missing {lane}: {header:?}");
+        }
+        assert!(header.contains("L3MS"));
+        assert_eq!(buffer[(79, 12)].bg, theme::BG);
+        let find = |word: &str| header.find(word).unwrap() as u16;
+        assert_eq!(buffer[(find("language"), 0)].fg, theme::PHOSPHOR);
+        assert_eq!(buffer[(find("media"), 0)].fg, theme::CYAN);
+        assert_eq!(buffer[(find("decisions"), 0)].fg, theme::AMBER);
     }
 
     #[test]

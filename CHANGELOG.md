@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed
+- TUI adopts the Signal / 03 palette from `docs/interface-direction.md`: ink-graphite
+  surface fill, phosphor-mint focus and selection, readable secondary text
+  (contrast-tested at 4.5:1), and a header that shows the language, media and
+  decisions lane signatures. Remove the unused falling-trail boot animation.
+
 ### Breaking changes
 - Remove the retained-ID coordinator clients: the CLI flags
   `--coordinator-status`, `--coordinator-cancel`, `--request-results`,

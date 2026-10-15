@@ -1,6 +1,5 @@
 pub mod app;
 pub mod bench_results;
-pub mod boot_anim;
 pub mod chat;
 pub mod chat_history;
 pub mod cli;
