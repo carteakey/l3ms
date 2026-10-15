@@ -4419,13 +4419,10 @@ impl App {
             .as_ref()
             .is_some_and(|catalog| is_direct_native_language_embeddings_profile(&profile, catalog));
         #[cfg(target_os = "linux")]
-        let direct_native_profile = is_direct_native_decision_profile(&profile)
-            || is_direct_breeze_speech_profile(&profile)
-            || is_direct_cuda_music_profile(&profile)
-            || is_direct_cuda_profile(&profile)
-            || is_direct_blender_headless_profile(&profile)
-            || is_direct_comfy_workflow_profile(&profile)
-            || direct_language_embeddings;
+        let direct_native_profile = self
+            .stack_catalog
+            .as_ref()
+            .is_some_and(|catalog| is_direct_native_profile(&profile, catalog));
 
         #[cfg(target_os = "linux")]
         if direct_native_profile {
@@ -4475,6 +4472,8 @@ impl App {
                 "Foreground CUDA MiniMax H3 form open · choose music, tts, or video; prompt/argv stay in memory · the selected GPU must be idle before starting · run once with Ctrl+Enter".into()
             } else if is_direct_cuda_music_profile(&profile) {
                 "Foreground CUDA HeartMuLa music form open · the selected GPU must be idle before starting · prompt/lyrics stay in memory · run once with Ctrl+Enter".into()
+            } else if direct_run::is_supported_cuda_breeze_profile(&profile) {
+                "Breeze speech form open · served by llama-swap (/audiocpp/) · connect Chat first · run once with Ctrl+Enter".into()
             } else if is_direct_cuda_profile(&profile) {
                 "Foreground CUDA native form open · the selected GPU must be idle before starting · run once with Ctrl+Enter".into()
             } else if is_direct_native_decision_profile(&profile) {
@@ -4728,7 +4727,16 @@ impl App {
         } else {
             direct_native_task_label(&task)
         };
-        let language_adapter = if task == "embeddings" {
+        let routed_speech = is_routed_speech_request(&catalog, &request);
+        let language_adapter = if routed_speech {
+            match self.prepare_direct_routed_speech_adapter(&catalog, &request) {
+                Ok(adapter) => Some(adapter),
+                Err(message) => {
+                    self.status = message;
+                    return;
+                }
+            }
+        } else if task == "embeddings" {
             match self.prepare_direct_embedding_adapter(&catalog, &request) {
                 Ok(adapter) => Some(adapter),
                 Err(message) => {
@@ -4964,7 +4972,7 @@ impl App {
         let NativeRoute::LlamaSwapModel { model_id, .. } = route.native_route else {
             return Err("The selected embeddings task has no native llama-swap model route".into());
         };
-        self.prepare_confirmed_chat_adapter(model_id.as_str(), "embeddings")
+        self.prepare_confirmed_chat_adapter(Some(model_id.as_str()), "embeddings")
     }
 
     #[cfg(target_os = "linux")]
@@ -4989,13 +4997,25 @@ impl App {
         let NativeRoute::DecisionRunner { model, .. } = route.native_route else {
             return Err("The selected llama.cpp decision task has no router model ID".into());
         };
-        self.prepare_confirmed_chat_adapter(&model, "decision")
+        self.prepare_confirmed_chat_adapter(Some(&model), "decision")
+    }
+
+    #[cfg(target_os = "linux")]
+    fn prepare_direct_routed_speech_adapter(
+        &self,
+        catalog: &Catalog,
+        request: &crate::control::requests::InferenceRequest,
+    ) -> Result<LanguageAdapter, String> {
+        if !is_routed_speech_request(catalog, request) {
+            return Err("Routed speech is limited to the declared CUDA Breeze task".into());
+        }
+        self.prepare_confirmed_chat_adapter(None, "speech")
     }
 
     #[cfg(target_os = "linux")]
     fn prepare_confirmed_chat_adapter(
         &self,
-        model_id: &str,
+        model_id: Option<&str>,
         task_label: &str,
     ) -> Result<LanguageAdapter, String> {
         if self.chat_connection_pending
@@ -5021,15 +5041,18 @@ impl App {
                 "The current Chat endpoint is not a confirmed connection; reconnect before running {task_label}"
             ));
         }
-        let Some(model) = self.chat_models.iter().find(|model| model.id == model_id) else {
-            return Err(format!(
-                "The exact {task_label} route model is not advertised by the connected Chat endpoint; refresh Chat models"
-            ));
-        };
-        if model.disabled {
-            return Err(format!(
-                "The exact {task_label} route model is disabled in Chat"
-            ));
+        // Reserved engine routes (for example audiocpp_auto) are not Chat models.
+        if let Some(model_id) = model_id {
+            let Some(model) = self.chat_models.iter().find(|model| model.id == model_id) else {
+                return Err(format!(
+                    "The exact {task_label} route model is not advertised by the connected Chat endpoint; refresh Chat models"
+                ));
+            };
+            if model.disabled {
+                return Err(format!(
+                    "The exact {task_label} route model is disabled in Chat"
+                ));
+            }
         }
         client.embedding_adapter().map_err(|_| {
             format!("Could not configure the confirmed Chat endpoint for {task_label}")
@@ -7263,8 +7286,9 @@ impl App {
             "MiniMax H3 · choose music/tts/video; JSON argv only · prompt stays in memory · GPU must be idle before starting"
         } else if editor.direct_native_music {
             "HeartMuLa music · JSON argv only · prompt/lyrics stay in memory · GPU must be idle before starting"
-        } else if editor.direct_breeze_speech && is_direct_cuda_profile(&editor.profile_snapshot) {
-            "CUDA Breeze · GPU must be idle before starting · tts/clon/design fields stay task-specific"
+        } else if editor.direct_breeze_speech && is_routed_breeze_profile(&editor.profile_snapshot)
+        {
+            "Breeze via llama-swap · needs a confirmed Chat connection · tts/clon/design fields stay task-specific"
         } else if editor.direct_breeze_speech {
             "CPU Breeze · tts standard/streaming, clon reference, design instruction"
         } else if editor.direct_native_decision {
@@ -7975,6 +7999,23 @@ fn is_hosted_direct_decision_profile(profile: &CatalogProfile) -> bool {
     profile.runtime.as_str() == "jev" && direct_run::is_supported_direct_decision_profile(profile)
 }
 
+/// CUDA Breeze speech runs through llama-swap's /audiocpp/ route.
+#[cfg(target_os = "linux")]
+fn is_routed_speech_request(
+    catalog: &Catalog,
+    request: &crate::control::requests::InferenceRequest,
+) -> bool {
+    matches!(
+        request,
+        crate::control::requests::InferenceRequest::Media {
+            input: crate::control::requests::MediaInput::Speech(_),
+            ..
+        }
+    ) && catalog
+        .inspect(request.profile())
+        .is_some_and(direct_run::is_supported_cuda_breeze_profile)
+}
+
 #[cfg(target_os = "linux")]
 fn is_direct_cuda_profile(profile: &CatalogProfile) -> bool {
     direct_run::is_supported_direct_cuda_profile(profile)
@@ -8043,16 +8084,18 @@ fn is_direct_breeze_speech_profile(profile: &CatalogProfile) -> bool {
     if is_direct_cpu_speech_profile(profile) {
         return true;
     }
-    is_direct_cuda_profile(profile)
-        && profile.key.lane == Lane::Media
-        && profile.key.profile_id.as_str() == "breeze-tts-2"
-        && profile.runtime.as_str() == "audio.cpp"
-        && ["tts", "clon", "design"].iter().any(|task| {
-            profile
-                .tasks
-                .iter()
-                .any(|declared| declared.as_str() == *task)
-        })
+    is_routed_breeze_profile(profile)
+}
+
+/// CUDA Breeze speech is served by llama-swap's `/audiocpp/` route.
+#[cfg(target_os = "linux")]
+fn is_routed_breeze_profile(profile: &CatalogProfile) -> bool {
+    direct_run::is_supported_cuda_breeze_profile(profile)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_routed_breeze_profile(_profile: &CatalogProfile) -> bool {
+    false
 }
 
 #[cfg(target_os = "linux")]
@@ -10161,6 +10204,30 @@ mod tests {
             .iter()
             .all(|line| !line.contains("private CUDA design instruction")));
         assert!(app.direct_native_job.is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn routed_breeze_refuses_to_run_without_a_confirmed_router_connection() {
+        let fixture = AppFixture::new();
+        write_cuda_decision_stack_fixture(&fixture);
+        write_cuda_breeze_media_manifest(&fixture);
+        let mut app = fixture.app();
+        focus_stack_profile_by_id(&mut app, "breeze-tts-2");
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.status.contains("llama-swap"), "{}", app.status);
+        let editor = app.task_form_editor.as_mut().unwrap();
+        editor.values.speech_text = "routed speech".into();
+        app.run_direct_native();
+        assert!(
+            app.status
+                .contains("Connect Chat before running native speech"),
+            "{}",
+            app.status
+        );
+        assert!(app.direct_native_job.is_none());
+        assert!(app.job_history.records().is_empty());
     }
 
     #[cfg(target_os = "linux")]

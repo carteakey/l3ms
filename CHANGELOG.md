@@ -22,6 +22,13 @@
   deleted coordinator commands.
 
 ### Breaking changes
+- CUDA Breeze-TTS-2 speech (`media:breeze-tts-2`) now runs through llama-swap's
+  `/audiocpp/` route from both the CLI and the TUI instead of the shell script and
+  an idle-GPU window: standard, design, clone and streaming (`breeze-tts`,
+  `breeze-clone`, `breeze-stream` in `toolkits/l2m2/audiocpp-server.json`). It needs
+  `LLAMA_SWAP_URL`/`LLAMA_SWAP_API_KEY` (CLI) or a confirmed Chat connection (TUI)
+  and no `L3MS_NATIVE_GPU`. Output files and validation are unchanged. The CPU
+  profile still runs its script.
 - Remove the opt-in resident llama-swap pause/restore handoff
   (`resident_llama_swap` in `L3MS_NATIVE_GPU`; `L3MS_NATIVE_GPU` documents that
   member as unknown now, so existing configs that set it are refused). llama-swap

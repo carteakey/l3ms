@@ -1059,9 +1059,10 @@ fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
         .map_err(|_| anyhow::anyhow!("native request is invalid"))?;
     let output_dir = comfy_output_directory.as_deref().or(output_dir);
     let uses_router = spec.task == "embeddings"
-        || catalog
-            .inspect(request.profile())
-            .is_some_and(crate::control::direct_run::is_llamacpp_decision_profile);
+        || catalog.inspect(request.profile()).is_some_and(|profile| {
+            crate::control::direct_run::is_llamacpp_decision_profile(profile)
+                || crate::control::direct_run::is_supported_cuda_breeze_profile(profile)
+        });
     let language = if uses_router {
         let endpoint = env::var("LLAMA_SWAP_URL")
             .unwrap_or_else(|_| crate::llama_swap::DEFAULT_BASE_URL.to_owned());

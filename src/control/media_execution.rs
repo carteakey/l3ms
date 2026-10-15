@@ -20,6 +20,7 @@ use serde::{Deserialize, Deserializer};
 
 use super::catalog::{Catalog, Device};
 use super::cuda_device::CudaDevice;
+use super::language::SpeechAudio;
 use super::native_commands::{
     is_supported_blender_request_route, is_supported_cpu_breeze_speech,
     is_supported_h3_request_route, is_supported_heartmula_request_route,
@@ -142,87 +143,6 @@ impl fmt::Debug for MediaExecutionResult {
             .field("artifact_count", &self.artifacts.len())
             .finish()
     }
-}
-
-/// Run one Breeze speech request using a caller-allocated job directory.
-/// `job_directory` must already exist, belong to the current UID, and have
-/// mode 0700. The result and streaming-chunk targets must not exist yet. No
-/// job directory creation, cleanup, default-directory scan, or stdout parsing
-/// occurs here.
-pub fn execute_breeze_speech(
-    catalog: &Catalog,
-    request: &InferenceRequest,
-    job_directory: &Path,
-    context: &OperationContext<'_>,
-    recovery: RecoveryPolicy,
-) -> Result<MediaExecutionResult, MediaExecutionFailure> {
-    execute_breeze_inner(
-        catalog,
-        request,
-        BreezeBinding {
-            route: None,
-            device: None,
-            hide_cuda: false,
-        },
-        job_directory,
-        context,
-        recovery,
-    )
-}
-
-/// Execute against a complete previously accepted route. The caller must
-/// already have passed the coordinator's dispatch gate and retained its
-/// ownership/reservation. This checks route freshness, not GPU admission or
-/// release; uncertain process cleanup must still quarantine conflicting work.
-pub fn execute_breeze_speech_for_route(
-    catalog: &Catalog,
-    request: &InferenceRequest,
-    accepted_route: &ResolvedProfileRoute,
-    job_directory: &Path,
-    context: &OperationContext<'_>,
-    recovery: RecoveryPolicy,
-) -> Result<MediaExecutionResult, MediaExecutionFailure> {
-    execute_breeze_inner(
-        catalog,
-        request,
-        BreezeBinding {
-            route: Some(accepted_route),
-            device: None,
-            hide_cuda: false,
-        },
-        job_directory,
-        context,
-        recovery,
-    )
-}
-
-/// Execute an accepted CUDA Breeze route on exactly one configured physical
-/// device. Native artifacts are candidates only: the owner must separately
-/// stop the exact service, prove cgroup/GPU release and revalidate artifacts.
-pub fn execute_breeze_speech_on_device(
-    catalog: &Catalog,
-    request: &InferenceRequest,
-    accepted_route: &ResolvedProfileRoute,
-    device: &CudaDevice,
-    job_directory: &Path,
-    context: &OperationContext<'_>,
-    recovery: RecoveryPolicy,
-) -> Result<MediaExecutionResult, MediaExecutionFailure> {
-    if accepted_route.device != Some(Device::Cuda) {
-        return Err(not_dispatched(MediaExecutionErrorKind::InvalidRequest));
-    }
-    execute_breeze_inner(
-        catalog,
-        request,
-        BreezeBinding {
-            route: Some(accepted_route),
-            device: Some(device),
-            hide_cuda: false,
-        },
-        job_directory,
-        context,
-        recovery,
-    )
 }
 
 /// Execute HeartMuLa music for one exact accepted CUDA route. The caller must
@@ -487,7 +407,6 @@ pub fn execute_breeze_speech_on_cpu(
         request,
         BreezeBinding {
             route: Some(accepted_route),
-            device: None,
             hide_cuda: true,
         },
         job_directory,
@@ -498,7 +417,6 @@ pub fn execute_breeze_speech_on_cpu(
 
 struct BreezeBinding<'a> {
     route: Option<&'a ResolvedProfileRoute>,
-    device: Option<&'a CudaDevice>,
     hide_cuda: bool,
 }
 
@@ -585,9 +503,6 @@ fn execute_breeze_inner(
 
     let mut command = Command::new(&recipe.executable);
     command.args(&recipe.argv).current_dir(&recipe.cwd);
-    if let Some(device) = binding.device {
-        device.apply_to(&mut command);
-    }
     if binding.hide_cuda {
         command.env("CUDA_VISIBLE_DEVICES", "");
     }
@@ -607,6 +522,71 @@ fn execute_breeze_inner(
         mode,
         artifacts,
     })
+}
+
+/// Publish speech that llama-swap's `/audiocpp/` route returned into a
+/// caller-allocated job directory. The files and validation are exactly those
+/// of a script run (`result.wav`, plus `result.wav.chunks/` when streaming), so
+/// every consumer of `MediaExecutionResult` is unchanged. Nothing is written
+/// until the directory and target names pass the same checks.
+pub(crate) fn publish_routed_speech(
+    request: &InferenceRequest,
+    audio: &SpeechAudio,
+    job_directory: &Path,
+    context: &OperationContext<'_>,
+) -> Result<MediaExecutionResult, MediaExecutionFailure> {
+    let InferenceRequest::Media {
+        input: MediaInput::Speech(input),
+        ..
+    } = request
+    else {
+        return Err(not_dispatched(MediaExecutionErrorKind::InvalidRequest));
+    };
+    let mode = input.mode;
+    if (mode == SpeechMode::Streaming) != !audio.chunks.is_empty() {
+        return Err(invalid_artifact());
+    }
+    let output_root = validate_job_directory(job_directory)?;
+    ensure_absent(&output_root.join(OUTPUT_NAME))?;
+    ensure_absent(&output_root.join(CHUNKS_NAME))?;
+    write_private_file(&output_root.join(OUTPUT_NAME), &audio.wave)?;
+    if mode == SpeechMode::Streaming {
+        let chunks_directory = output_root.join(CHUNKS_NAME);
+        create_private_directory(&chunks_directory)?;
+        for (index, chunk) in audio.chunks.iter().enumerate() {
+            write_private_file(
+                &chunks_directory.join(format!("chunk_{:04}.wav", index + 1)),
+                chunk,
+            )?;
+        }
+    }
+    let artifacts = discover_artifacts(&output_root, mode, context)?;
+    check_after_child(context)?;
+    Ok(MediaExecutionResult {
+        output_root,
+        mode,
+        artifacts,
+    })
+}
+
+fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), MediaExecutionFailure> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|_| invalid_artifact())?;
+    file.write_all(bytes).map_err(|_| invalid_artifact())
+}
+
+fn create_private_directory(path: &Path) -> Result<(), MediaExecutionFailure> {
+    use std::os::unix::fs::DirBuilderExt;
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(path)
+        .map_err(|_| invalid_artifact())
 }
 
 fn validate_job_directory(path: &Path) -> Result<PathBuf, MediaExecutionFailure> {
@@ -1926,6 +1906,49 @@ esac
         );
     }
 
+    /// Script execution without a device pin, for fixture tests of the shared
+    /// inner executor (production CUDA Breeze goes through the router instead).
+    fn execute_breeze_speech(
+        catalog: &Catalog,
+        request: &InferenceRequest,
+        job_directory: &Path,
+        context: &OperationContext<'_>,
+        recovery: RecoveryPolicy,
+    ) -> Result<MediaExecutionResult, MediaExecutionFailure> {
+        execute_breeze_inner(
+            catalog,
+            request,
+            BreezeBinding {
+                route: None,
+                hide_cuda: false,
+            },
+            job_directory,
+            context,
+            recovery,
+        )
+    }
+
+    fn execute_breeze_speech_for_route(
+        catalog: &Catalog,
+        request: &InferenceRequest,
+        accepted_route: &ResolvedProfileRoute,
+        job_directory: &Path,
+        context: &OperationContext<'_>,
+        recovery: RecoveryPolicy,
+    ) -> Result<MediaExecutionResult, MediaExecutionFailure> {
+        execute_breeze_inner(
+            catalog,
+            request,
+            BreezeBinding {
+                route: Some(accepted_route),
+                hide_cuda: false,
+            },
+            job_directory,
+            context,
+            recovery,
+        )
+    }
+
     fn run(
         fixture: &Fixture,
         mode: SpeechMode,
@@ -1941,6 +1964,80 @@ esac
             &context(cancel, duration),
             recovery(),
         )
+    }
+
+    fn sine_pcm(samples: usize) -> Vec<u8> {
+        (0..samples)
+            .map(|index| (((index as f32) * 0.3).sin() * 8000.0) as i16)
+            .flat_map(i16::to_le_bytes)
+            .collect()
+    }
+
+    #[test]
+    fn routed_speech_uses_script_compatible_names_and_is_fully_validated() {
+        use crate::control::language::wav_from_pcm16;
+        let fixture = Fixture::new();
+        let ctx = context(&NeverCancel, Duration::from_secs(5));
+        let (first, second) = (sine_pcm(1200), sine_pcm(800));
+        let streaming_audio = SpeechAudio {
+            wave: wav_from_pcm16(&[first.clone(), second.clone()].concat()),
+            chunks: vec![wav_from_pcm16(&first), wav_from_pcm16(&second)],
+        };
+        let output = fixture.output_directory("routed-stream");
+        let request_streaming = request(SpeechMode::Streaming, "stream", &fixture);
+        let result =
+            publish_routed_speech(&request_streaming, &streaming_audio, &output, &ctx).unwrap();
+        assert_eq!(result.mode(), SpeechMode::Streaming);
+        let names: Vec<_> = result
+            .artifacts()
+            .iter()
+            .map(|artifact| artifact.relative_path().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "result.wav",
+                "result.wav.chunks/chunk_0001.wav",
+                "result.wav.chunks/chunk_0002.wav"
+            ]
+        );
+        // The same files pass the independent fresh re-validation used after script runs.
+        assert_eq!(
+            revalidate_breeze_artifacts(&output, SpeechMode::Streaming, &ctx)
+                .unwrap()
+                .artifacts(),
+            result.artifacts()
+        );
+
+        // A second publish into the same directory never overwrites.
+        let error =
+            publish_routed_speech(&request_streaming, &streaming_audio, &output, &ctx).unwrap_err();
+        assert_eq!(error.kind(), MediaExecutionErrorKind::OutputAlreadyExists);
+
+        // Chunks only belong to streaming, and streaming must carry chunks.
+        let standard = request(SpeechMode::Standard, "plain", &fixture);
+        let error = publish_routed_speech(
+            &standard,
+            &streaming_audio,
+            &fixture.output_directory("routed-mismatch"),
+            &ctx,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), MediaExecutionErrorKind::InvalidArtifact);
+
+        // Whatever the router returned is validated like native output.
+        let junk = SpeechAudio {
+            wave: b"RIFF not a wave".to_vec(),
+            chunks: Vec::new(),
+        };
+        let error = publish_routed_speech(
+            &standard,
+            &junk,
+            &fixture.output_directory("routed-junk"),
+            &ctx,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), MediaExecutionErrorKind::InvalidArtifact);
     }
 
     #[test]
@@ -1965,77 +2062,6 @@ esac
                 .kind(),
             MediaExecutionErrorKind::InvalidArtifact
         );
-    }
-
-    #[test]
-    fn accepted_cuda_breeze_passes_exact_physical_uuid_and_rejects_cpu_route() {
-        const UUID: &str = "GPU-01234567-89ab-cdef-0123-456789abcdef";
-        let fixture = Fixture::new();
-        let manifest_path = fixture.media_root.join("media-runtimes.json");
-        let mut manifest: serde_json::Value =
-            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
-        manifest["profiles"][0]["device"] = serde_json::json!("cuda");
-        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
-        fs::write(
-            fixture
-                .media_root
-                .join("media-models/generate-breeze-tts-2.sh"),
-            format!("[ \"$CUDA_VISIBLE_DEVICES\" = '{UUID}' ] || exit 8\n{FIXTURE_SCRIPT}"),
-        )
-        .unwrap();
-        let catalog = fixture.catalog();
-        let request = request(SpeechMode::Standard, "fixture speech", &fixture);
-        let accepted =
-            crate::control::routes::resolve_profile_route(&catalog, request.profile()).unwrap();
-        let device = CudaDevice::new(UUID).unwrap();
-        let output = fixture.output_directory("cuda-selected");
-        let ctx = context(&NeverCancel, Duration::from_secs(5));
-        let result = execute_breeze_speech_on_device(
-            &catalog,
-            &request,
-            &accepted,
-            &device,
-            &output,
-            &ctx,
-            recovery(),
-        )
-        .unwrap();
-        assert_eq!(result.artifacts().len(), 1);
-        let mut cpu = accepted.clone();
-        cpu.device = Some(Device::Cpu);
-        let rejected_output = fixture.output_directory("cpu-rejected");
-        let error = execute_breeze_speech_on_device(
-            &catalog,
-            &request,
-            &cpu,
-            &device,
-            &rejected_output,
-            &ctx,
-            recovery(),
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.disposition(),
-            ProcessFailureDisposition::NoChildSpawned
-        );
-        assert!(!rejected_output.join(OUTPUT_NAME).exists());
-        manifest["profiles"][0]["device"] = serde_json::json!("cpu");
-        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
-        let error = execute_breeze_speech_on_device(
-            &fixture.catalog(),
-            &request,
-            &accepted,
-            &device,
-            &rejected_output,
-            &ctx,
-            recovery(),
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.disposition(),
-            ProcessFailureDisposition::NoChildSpawned
-        );
-        assert!(!rejected_output.join(OUTPUT_NAME).exists());
     }
 
     #[test]

@@ -16,8 +16,8 @@ use serde_json::Value;
 use super::catalog::{Catalog, Lane, ProfileKey};
 use super::decision::{decode_systemone_response, NativeDecisionResult};
 use super::requests::{
-    EmbeddingUsage, InferenceRequest, InferenceResult, MAX_EMBEDDING_INPUTS,
-    MAX_EMBEDDING_JSON_BYTES,
+    EmbeddingUsage, InferenceRequest, InferenceResult, SpeechInput, SpeechMode,
+    MAX_EMBEDDING_INPUTS, MAX_EMBEDDING_JSON_BYTES,
 };
 use super::routes::{resolve_profile_route, NativeRoute, ResolvedProfileRoute};
 use super::runtime::OperationContext;
@@ -221,6 +221,82 @@ impl LanguageAdapter {
             .map_err(|_| failure(DispatchDisposition::Uncertain, LanguageErrorKind::Protocol))
     }
 
+    /// Run one Breeze speech request through llama-swap's `/audiocpp/` route
+    /// (reserved model `audiocpp_auto`). llama-swap owns starting, swapping and
+    /// stopping the engine; this only posts once and returns the audio. A
+    /// dispatched request is never retried.
+    pub fn execute_speech(
+        &self,
+        input: &SpeechInput,
+        context: &OperationContext<'_>,
+    ) -> Result<SpeechAudio, LanguageFailure> {
+        check_context(context, DispatchDisposition::NoDispatch)?;
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return Err(failure(
+                DispatchDisposition::NoDispatch,
+                LanguageErrorKind::Configuration,
+            ));
+        }
+        let url = self.audiocpp_speech_url()?;
+        let body = speech_request_body(input)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| {
+                failure(
+                    DispatchDisposition::NoDispatch,
+                    LanguageErrorKind::Configuration,
+                )
+            })?;
+        runtime.block_on(async {
+            let client = self.http_client_without_proxy(context)?;
+            let streaming = input.mode == SpeechMode::Streaming;
+            let http = client
+                .post(url)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .header(
+                    reqwest::header::ACCEPT,
+                    if streaming {
+                        "text/event-stream"
+                    } else {
+                        "audio/wav"
+                    },
+                )
+                .body(body);
+            let mime = if streaming {
+                "text/event-stream"
+            } else {
+                "audio/wav"
+            };
+            let bytes = send_body(http, context, MAX_SPEECH_BYTES, mime).await?;
+            if streaming {
+                parse_speech_stream(&bytes)
+            } else {
+                Ok(SpeechAudio {
+                    wave: bytes,
+                    chunks: Vec::new(),
+                })
+            }
+        })
+    }
+
+    fn audiocpp_speech_url(&self) -> Result<reqwest::Url, LanguageFailure> {
+        let configuration = failure(
+            DispatchDisposition::NoDispatch,
+            LanguageErrorKind::Configuration,
+        );
+        let mut url = reqwest::Url::parse(&self.endpoint).map_err(|_| configuration)?;
+        if !is_loopback_url(&url) {
+            return Err(configuration);
+        }
+        let mut segments = url.path_segments_mut().map_err(|_| configuration)?;
+        segments
+            .pop_if_empty()
+            .extend(["audiocpp", "v1", "audio", "speech"]);
+        drop(segments);
+        Ok(url)
+    }
+
     fn systemone_url(&self) -> Result<reqwest::Url, LanguageFailure> {
         let configuration = failure(
             DispatchDisposition::NoDispatch,
@@ -357,6 +433,17 @@ async fn send_json_body(
     context: &OperationContext<'_>,
     maximum_bytes: usize,
 ) -> Result<Vec<u8>, LanguageFailure> {
+    send_body(http, context, maximum_bytes, "application/json").await
+}
+
+/// One bounded request/response exchange that requires an exact response MIME
+/// type. Never retries; cancellation and the deadline are polled throughout.
+async fn send_body(
+    http: reqwest::RequestBuilder,
+    context: &OperationContext<'_>,
+    maximum_bytes: usize,
+    expected_mime: &str,
+) -> Result<Vec<u8>, LanguageFailure> {
     check_context(context, DispatchDisposition::NoDispatch)?;
     let send = http.send();
     tokio::pin!(send);
@@ -382,7 +469,7 @@ async fn send_json_body(
             value
                 .split(';')
                 .next()
-                .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("application/json"))
+                .is_some_and(|mime| mime.trim().eq_ignore_ascii_case(expected_mime))
         })
     {
         return Err(failure(
@@ -470,6 +557,158 @@ fn native_systemone_model(
         return Err(invalid);
     };
     Ok(model_id.to_string())
+}
+
+/// Audio returned by one routed speech request. `wave` is a complete WAV file;
+/// `chunks` holds one WAV per streamed event (empty unless streaming).
+pub struct SpeechAudio {
+    pub wave: Vec<u8>,
+    pub chunks: Vec<Vec<u8>>,
+}
+
+const MAX_SPEECH_BYTES: usize = 128 * 1024 * 1024;
+/// Breeze-TTS-2 streams raw signed 16-bit little-endian mono PCM at 24 kHz.
+const SPEECH_SAMPLE_RATE: u32 = 24_000;
+
+/// Server model ids registered in `toolkits/l2m2/audiocpp-server.json`.
+fn speech_model_id(mode: SpeechMode) -> &'static str {
+    match mode {
+        SpeechMode::Standard | SpeechMode::VoiceDesign => "breeze-tts",
+        SpeechMode::VoiceClone => "breeze-clone",
+        SpeechMode::Streaming => "breeze-stream",
+    }
+}
+
+fn speech_request_body(input: &SpeechInput) -> Result<Vec<u8>, LanguageFailure> {
+    let invalid = failure(
+        DispatchDisposition::NoDispatch,
+        LanguageErrorKind::InvalidRequest,
+    );
+    let mut body = serde_json::json!({
+        "model": speech_model_id(input.mode),
+        "input": input.text,
+    });
+    let object = body.as_object_mut().ok_or(invalid)?;
+    let mut options = serde_json::Map::new();
+    if let Some(instruction) = input.instruction.as_deref().filter(|text| !text.is_empty()) {
+        options.insert("instruction".into(), instruction.into());
+    }
+    if input.mode == SpeechMode::Streaming {
+        object.insert("stream".into(), true.into());
+        object.insert("stream_format".into(), "sse".into());
+        object.insert("response_format".into(), "pcm".into());
+        options.insert("stream_frames_per_event".into(), "16".into());
+        options.insert("stream_lookahead_margin".into(), "12".into());
+    } else {
+        object.insert("response_format".into(), "wav".into());
+    }
+    if input.mode == SpeechMode::VoiceClone {
+        // The server reads the reference from the same host's filesystem.
+        let reference = input.voice_reference.as_deref().ok_or(invalid)?;
+        let reference = std::fs::canonicalize(reference).map_err(|_| invalid)?;
+        let transcript = input
+            .reference_text
+            .as_deref()
+            .filter(|text| !text.is_empty())
+            .ok_or(invalid)?;
+        object.insert(
+            "voice_ref".into(),
+            reference.to_str().ok_or(invalid)?.into(),
+        );
+        object.insert("reference_text".into(), transcript.into());
+    }
+    if !options.is_empty() {
+        object.insert("options".into(), options.into());
+    }
+    serde_json::to_vec(&body).map_err(|_| invalid)
+}
+
+/// Parse a complete server-sent-event body: `speech.audio.delta` events carry
+/// base64 PCM, `speech.audio.done` ends the stream, `[DONE]` is a sentinel.
+fn parse_speech_stream(body: &[u8]) -> Result<SpeechAudio, LanguageFailure> {
+    let protocol = failure(DispatchDisposition::Uncertain, LanguageErrorKind::Protocol);
+    let text = std::str::from_utf8(body).map_err(|_| protocol)?;
+    let mut pcm_chunks: Vec<Vec<u8>> = Vec::new();
+    let mut done = false;
+    for line in text.lines() {
+        let Some(data) = line.strip_prefix("data:").map(str::trim) else {
+            continue;
+        };
+        if data == "[DONE]" {
+            break;
+        }
+        let event: Value = serde_json::from_str(data).map_err(|_| protocol)?;
+        match event.get("type").and_then(Value::as_str) {
+            Some("speech.audio.delta") => {
+                let encoded = event.get("audio").and_then(Value::as_str).ok_or(protocol)?;
+                let pcm = decode_base64(encoded).ok_or(protocol)?;
+                if pcm.is_empty() || pcm.len() % 2 != 0 {
+                    return Err(protocol);
+                }
+                pcm_chunks.push(pcm);
+            }
+            Some("speech.audio.done") => done = true,
+            _ => {
+                return Err(failure(
+                    DispatchDisposition::Uncertain,
+                    LanguageErrorKind::Rejected,
+                ))
+            }
+        }
+    }
+    if !done || pcm_chunks.is_empty() {
+        return Err(protocol);
+    }
+    let all: Vec<u8> = pcm_chunks.iter().flatten().copied().collect();
+    Ok(SpeechAudio {
+        wave: wav_from_pcm16(&all),
+        chunks: pcm_chunks.iter().map(|pcm| wav_from_pcm16(pcm)).collect(),
+    })
+}
+
+/// Canonical 44-byte-header PCM16 mono WAV.
+pub(crate) fn wav_from_pcm16(pcm: &[u8]) -> Vec<u8> {
+    let data_len = pcm.len() as u32;
+    let mut wav = Vec::with_capacity(44 + pcm.len());
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+    wav.extend_from_slice(&SPEECH_SAMPLE_RATE.to_le_bytes());
+    wav.extend_from_slice(&(SPEECH_SAMPLE_RATE * 2).to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes()); // block align
+    wav.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    wav.extend_from_slice(pcm);
+    wav
+}
+
+/// Standard-alphabet base64 (padding optional); `None` on any invalid byte.
+fn decode_base64(text: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len() / 4 * 3);
+    let (mut buffer, mut bits) = (0u32, 0u32);
+    for byte in text.bytes() {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => break,
+            _ => return None,
+        };
+        buffer = (buffer << 6) | u32::from(value);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buffer >> bits) as u8);
+            buffer &= (1 << bits) - 1;
+        }
+    }
+    Some(out)
 }
 
 fn is_loopback_url(url: &reqwest::Url) -> bool {
@@ -1434,5 +1673,238 @@ mod tests {
             .unwrap();
         assert_eq!(error.disposition, DispatchDisposition::Uncertain);
         server.join().unwrap();
+    }
+
+    fn speech_input(mode: SpeechMode) -> SpeechInput {
+        SpeechInput {
+            text: "Hello there.".into(),
+            mode,
+            instruction: None,
+            voice_reference: None,
+            reference_text: None,
+        }
+    }
+
+    fn json_body(input: &SpeechInput) -> Value {
+        serde_json::from_slice(&speech_request_body(input).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn base64_decoder_handles_padding_and_rejects_garbage() {
+        assert_eq!(decode_base64("aGVsbG8=").unwrap(), b"hello");
+        assert_eq!(decode_base64("aGVsbG8").unwrap(), b"hello");
+        assert_eq!(decode_base64("AAECAw==").unwrap(), [0, 1, 2, 3]);
+        assert_eq!(decode_base64("").unwrap(), Vec::<u8>::new());
+        assert!(decode_base64("not base64!").is_none());
+    }
+
+    #[test]
+    fn wav_header_describes_24khz_mono_pcm16() {
+        let wav = wav_from_pcm16(&[1, 0, 2, 0, 3, 0]);
+        assert_eq!(&wav[..4], b"RIFF");
+        assert_eq!(u32::from_le_bytes(wav[4..8].try_into().unwrap()), 36 + 6);
+        assert_eq!(&wav[8..16], b"WAVEfmt ");
+        assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 24_000);
+        assert_eq!(u16::from_le_bytes(wav[22..24].try_into().unwrap()), 1);
+        assert_eq!(u16::from_le_bytes(wav[34..36].try_into().unwrap()), 16);
+        assert_eq!(&wav[36..40], b"data");
+        assert_eq!(u32::from_le_bytes(wav[40..44].try_into().unwrap()), 6);
+        assert_eq!(&wav[44..], [1, 0, 2, 0, 3, 0]);
+    }
+
+    #[test]
+    fn speech_stream_builds_chunks_and_a_merged_wave() {
+        // The real audio.cpp grammar: delta events, a done event, then [DONE].
+        let body = concat!(
+            "data: {\"type\":\"speech.audio.delta\",\"audio\":\"AQACAA==\"}\n\n",
+            "data: {\"type\":\"speech.audio.delta\",\"audio\":\"AwAEAA==\"}\n\n",
+            "data: {\"type\":\"speech.audio.done\",\"timing\":{\"ttft_ms\":1.5}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let audio = parse_speech_stream(body.as_bytes()).unwrap();
+        assert_eq!(audio.chunks.len(), 2);
+        assert_eq!(&audio.chunks[0][44..], [1, 0, 2, 0]);
+        assert_eq!(&audio.wave[44..], [1, 0, 2, 0, 3, 0, 4, 0]);
+    }
+
+    #[test]
+    fn malformed_or_incomplete_streams_are_protocol_errors_not_audio() {
+        for body in [
+            "",
+            "data: [DONE]\n",
+            // No done event: the engine may have been cut off.
+            "data: {\"type\":\"speech.audio.delta\",\"audio\":\"AQAC\"}\n",
+            // Odd byte count cannot be PCM16.
+            "data: {\"type\":\"speech.audio.delta\",\"audio\":\"AQ==\"}\ndata: {\"type\":\"speech.audio.done\"}\n",
+            "data: {\"type\":\"speech.audio.delta\",\"audio\":\"%%%\"}\n",
+            "data: {\"type\":\"error\"}\n",
+        ] {
+            assert!(parse_speech_stream(body.as_bytes()).is_err(), "{body:?}");
+        }
+    }
+
+    #[test]
+    fn speech_requests_select_the_declared_server_model_per_mode() {
+        let standard = json_body(&speech_input(SpeechMode::Standard));
+        assert_eq!(standard["model"], "breeze-tts");
+        assert_eq!(standard["response_format"], "wav");
+        assert!(standard.get("options").is_none() && standard.get("stream").is_none());
+
+        let mut design = speech_input(SpeechMode::VoiceDesign);
+        design.instruction = Some("Warm narrator.".into());
+        let design = json_body(&design);
+        assert_eq!(design["model"], "breeze-tts");
+        assert_eq!(design["options"]["instruction"], "Warm narrator.");
+
+        let streaming = json_body(&speech_input(SpeechMode::Streaming));
+        assert_eq!(streaming["model"], "breeze-stream");
+        assert_eq!(streaming["stream"], true);
+        assert_eq!(streaming["stream_format"], "sse");
+        assert_eq!(streaming["response_format"], "pcm");
+        assert_eq!(streaming["options"]["stream_frames_per_event"], "16");
+    }
+
+    #[test]
+    fn voice_clone_needs_an_existing_reference_and_a_transcript() {
+        let directory = tempfile::tempdir().unwrap();
+        let reference = directory.path().join("ref.wav");
+        std::fs::write(&reference, b"RIFF").unwrap();
+        let mut clone = speech_input(SpeechMode::VoiceClone);
+        assert!(speech_request_body(&clone).is_err(), "missing reference");
+        clone.voice_reference = Some(reference.clone());
+        assert!(speech_request_body(&clone).is_err(), "missing transcript");
+        clone.reference_text = Some("Transcript.".into());
+        let body = json_body(&clone);
+        assert_eq!(body["model"], "breeze-clone");
+        assert_eq!(body["reference_text"], "Transcript.");
+        assert_eq!(
+            body["voice_ref"],
+            reference.canonicalize().unwrap().to_str().unwrap()
+        );
+        clone.voice_reference = Some(directory.path().join("missing.wav"));
+        assert!(
+            speech_request_body(&clone).is_err(),
+            "nonexistent reference"
+        );
+    }
+
+    #[test]
+    fn speech_url_keeps_a_reverse_proxy_prefix_and_requires_loopback() {
+        let prefixed = LanguageAdapter::new("http://127.0.0.1:8080/swap", None).unwrap();
+        assert_eq!(
+            prefixed.audiocpp_speech_url().unwrap().as_str(),
+            "http://127.0.0.1:8080/swap/audiocpp/v1/audio/speech"
+        );
+        let remote = LanguageAdapter::new("http://example.com", None).unwrap();
+        assert!(remote.audiocpp_speech_url().is_err());
+    }
+
+    /// One-shot loopback router: checks the exact path, bearer token and Accept
+    /// header, then answers with the given status line, content type and body.
+    fn speech_router(
+        status: &'static str,
+        content_type: &'static str,
+        body: Vec<u8>,
+        accept: &'static str,
+    ) -> (String, std::thread::JoinHandle<Value>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let (headers, payload) = read_http_json_with_headers(
+                &mut stream,
+                "/audiocpp/v1/audio/speech",
+                MAX_OUTPUT_BYTES,
+            );
+            assert!(headers
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("authorization: Bearer speech-secret")));
+            assert!(headers
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case(&format!("accept: {accept}"))));
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(&body).unwrap();
+            stream.flush().unwrap();
+            payload
+        });
+        (endpoint, server)
+    }
+
+    fn speech_context() -> OperationContext<'static> {
+        OperationContext::new(Instant::now() + Duration::from_secs(5), &NeverCancel)
+    }
+
+    #[test]
+    fn routed_speech_posts_once_and_returns_the_wave() {
+        let wave = wav_from_pcm16(&[0, 0, 1, 0]);
+        let (endpoint, server) = speech_router("200 OK", "audio/wav", wave.clone(), "audio/wav");
+        let adapter = LanguageAdapter::new(&endpoint, Some("speech-secret")).unwrap();
+        let audio = adapter
+            .execute_speech(&speech_input(SpeechMode::Standard), &speech_context())
+            .unwrap();
+        assert_eq!(audio.wave, wave);
+        assert!(audio.chunks.is_empty());
+        let payload = server.join().unwrap();
+        assert_eq!(payload["model"], "breeze-tts");
+        assert_eq!(payload["input"], "Hello there.");
+    }
+
+    #[test]
+    fn routed_streaming_speech_returns_chunks_from_the_event_stream() {
+        let body = concat!(
+            "data: {\"type\":\"speech.audio.delta\",\"audio\":\"AQACAA==\"}\n\n",
+            "data: {\"type\":\"speech.audio.done\"}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let (endpoint, server) = speech_router(
+            "200 OK",
+            "text/event-stream; charset=utf-8",
+            body.as_bytes().to_vec(),
+            "text/event-stream",
+        );
+        let adapter = LanguageAdapter::new(&endpoint, Some("speech-secret")).unwrap();
+        let audio = adapter
+            .execute_speech(&speech_input(SpeechMode::Streaming), &speech_context())
+            .unwrap();
+        assert_eq!(audio.chunks.len(), 1);
+        assert_eq!(&audio.wave[44..], [1, 0, 2, 0]);
+        assert_eq!(server.join().unwrap()["model"], "breeze-stream");
+    }
+
+    #[test]
+    fn routed_speech_rejections_and_wrong_content_types_never_become_audio() {
+        for (status, content_type, kind) in [
+            (
+                "503 Service Unavailable",
+                "application/json",
+                LanguageErrorKind::Rejected,
+            ),
+            ("200 OK", "application/json", LanguageErrorKind::Protocol),
+            ("200 OK", "text/html", LanguageErrorKind::Protocol),
+        ] {
+            let (endpoint, server) = speech_router(
+                status,
+                content_type,
+                b"{\"error\":\"busy\"}".to_vec(),
+                "audio/wav",
+            );
+            let adapter = LanguageAdapter::new(&endpoint, Some("speech-secret")).unwrap();
+            let error = adapter
+                .execute_speech(&speech_input(SpeechMode::Standard), &speech_context())
+                .err()
+                .unwrap();
+            assert_eq!(error.kind, kind, "{status} {content_type}");
+            // The request was sent, so completion is uncertain: never retried.
+            assert_eq!(error.disposition, DispatchDisposition::Uncertain);
+            server.join().unwrap();
+        }
     }
 }

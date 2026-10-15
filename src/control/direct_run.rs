@@ -24,9 +24,8 @@ use super::desktop_gpu::DesktopGpuBaseline;
 use super::gpu_probe::{GpuProbeConfig, NvidiaSmiGpuProbe};
 use super::language::{DispatchDisposition, LanguageAdapter, LanguageErrorKind, LanguageFailure};
 use super::media_execution::{
-    execute_breeze_speech_on_cpu, execute_breeze_speech_on_device,
-    execute_heartmula_music_on_device, is_supported_cpu_breeze_route, MediaExecutionErrorKind,
-    MediaExecutionFailure, MediaExecutionResult,
+    execute_breeze_speech_on_cpu, execute_heartmula_music_on_device, is_supported_cpu_breeze_route,
+    MediaExecutionErrorKind, MediaExecutionFailure, MediaExecutionResult,
 };
 use super::ownership::CoordinatorLock;
 use super::process::{ProcessFailureDisposition, ProcessFailureKind};
@@ -418,6 +417,23 @@ fn with_idle_gpu<T>(
     result
 }
 
+/// Any of the four Breeze speech modes as a typed request.
+fn is_breeze_speech_request(request: &InferenceRequest) -> bool {
+    matches!(
+        request,
+        InferenceRequest::Media {
+            input: MediaInput::Speech(input),
+            ..
+        } if matches!(
+            input.mode,
+            SpeechMode::Standard
+                | SpeechMode::VoiceDesign
+                | SpeechMode::VoiceClone
+                | SpeechMode::Streaming
+        )
+    )
+}
+
 /// Execute one already-built native request on an explicitly selected route.
 /// Comfy workflow IDs must be generated and persisted by the caller before this
 /// function; this runner never chooses a fallback, starts a runtime, or retries
@@ -450,21 +466,17 @@ fn run_native(
         && catalog
             .inspect(request.profile())
             .is_some_and(is_llamacpp_decision_profile);
-    let is_remote_operation =
-        is_embeddings || is_comfy_workflow || is_hosted_jev_decision || is_llamacpp_decision;
-    let is_breeze_speech = matches!(
-        request,
-        InferenceRequest::Media {
-            input: MediaInput::Speech(input),
-            ..
-        } if matches!(
-            input.mode,
-            SpeechMode::Standard
-                | SpeechMode::VoiceDesign
-                | SpeechMode::VoiceClone
-                | SpeechMode::Streaming
-        )
-    );
+    // CUDA Breeze speech is served by llama-swap's /audiocpp/ route (no GPU window).
+    let is_routed_speech = is_breeze_speech_request(request)
+        && catalog
+            .inspect(request.profile())
+            .is_some_and(is_supported_cuda_breeze_profile);
+    let is_remote_operation = is_embeddings
+        || is_comfy_workflow
+        || is_hosted_jev_decision
+        || is_llamacpp_decision
+        || is_routed_speech;
+    let is_breeze_speech = is_breeze_speech_request(request);
     let is_script_media = matches!(
         request,
         InferenceRequest::Media {
@@ -486,6 +498,9 @@ fn run_native(
                 && language.is_some() == is_llamacpp_decision
                 && comfy.is_none()
                 && (!is_llamacpp_decision || cuda.is_none())
+        }
+        InferenceRequest::Media { .. } if is_routed_speech => {
+            output_directory.is_some() && language.is_some() && comfy.is_none() && cuda.is_none()
         }
         InferenceRequest::Media { .. } if is_breeze_speech || is_script_media => {
             output_directory.is_some() && language.is_none() && comfy.is_none()
@@ -661,21 +676,23 @@ fn run_native(
             .map(DirectRunResult::Speech)
             .map_err(|error| media_execution_error(error, context))
         } else if is_supported_cuda_breeze_route(request, &route) {
-            let Some(device) = cuda else {
-                return Err(DirectRunError::new(
-                    DirectRunErrorKind::UnsupportedRoute,
-                    ProcessFailureDisposition::NoChildSpawned,
-                ));
+            let InferenceRequest::Media {
+                input: MediaInput::Speech(input),
+                ..
+            } = request
+            else {
+                unreachable!("validated speech request")
             };
             let output_directory = output_directory.expect("validated speech output directory");
-            execute_breeze_speech_on_device(
-                &catalog,
+            let audio = language
+                .expect("validated routed speech connection")
+                .execute_speech(input, context)
+                .map_err(remote_language_error)?;
+            super::media_execution::publish_routed_speech(
                 request,
-                &route,
-                device,
+                &audio,
                 output_directory,
                 context,
-                recovery,
             )
             .map(DirectRunResult::Speech)
             .map_err(|error| media_execution_error(error, context))
@@ -977,7 +994,6 @@ pub(crate) fn is_supported_cuda_breeze_profile(profile: &CatalogProfile) -> bool
 /// must still apply its operator-selected device and admission checks.
 pub(crate) fn is_supported_direct_cuda_profile(profile: &CatalogProfile) -> bool {
     is_supported_cuda_direct_decision_profile(profile)
-        || is_supported_cuda_breeze_profile(profile)
         || is_supported_direct_script_profile(profile)
 }
 
@@ -1702,6 +1718,10 @@ fi
     }
 
     fn read_embedding_request(stream: &mut TcpStream) -> serde_json::Value {
+        read_json_request(stream, "POST /v1/embeddings HTTP/1.1")
+    }
+
+    fn read_json_request(stream: &mut TcpStream, request_line: &str) -> serde_json::Value {
         let mut header = Vec::new();
         let mut byte = [0];
         while !header.ends_with(b"\r\n\r\n") {
@@ -1710,7 +1730,10 @@ fi
             assert!(header.len() < 16_384, "request headers are bounded");
         }
         let header = String::from_utf8(header).unwrap();
-        assert!(header.contains("POST /v1/embeddings HTTP/1.1"));
+        assert!(
+            header.contains(request_line),
+            "unexpected request: {header}"
+        );
         let length = header
             .lines()
             .find_map(|line| {
@@ -1979,26 +2002,34 @@ fi
         assert!(!launch_marker.exists());
     }
 
-    #[test]
-    fn direct_breeze_cuda_route_requires_explicit_device() {
-        let (root, catalog) = breeze_fixture("breeze-tts-2", "cuda");
-        let request = InferenceRequest::Media {
+    fn cuda_breeze_request(mode: SpeechMode) -> InferenceRequest {
+        InferenceRequest::Media {
             profile: ProfileKey::new(Lane::Media, "breeze-tts-2").unwrap(),
             input: MediaInput::Speech(super::super::requests::SpeechInput {
                 text: "fixture speech".into(),
-                mode: SpeechMode::Standard,
+                mode,
                 instruction: None,
                 voice_reference: None,
                 reference_text: None,
             }),
-        };
-        assert!(is_supported_cuda_breeze_profile(
-            catalog.inspect(request.profile()).unwrap()
-        ));
+        }
+    }
+
+    #[test]
+    fn cuda_breeze_runs_through_the_router_with_no_device_or_gpu_window() {
+        let (root, catalog) = breeze_fixture("breeze-tts-2", "cuda");
+        let request = cuda_breeze_request(SpeechMode::Standard);
+        let profile = catalog.inspect(request.profile()).unwrap();
+        assert!(is_supported_cuda_breeze_profile(profile));
+        assert!(
+            !requires_operator_gpu_window(profile),
+            "llama-swap owns the engine; no operator GPU window"
+        );
         let route = resolve_profile_route(&catalog, request.profile()).unwrap();
         assert!(is_supported_cuda_breeze_route(&request, &route));
 
-        let output = cpu_breeze_output(root.path(), "cuda-missing-device");
+        // Without a router connection the request is refused before any script.
+        let output = cpu_breeze_output(root.path(), "routed-missing-router");
         let error = run_native(
             &catalog,
             &request,
@@ -2007,25 +2038,28 @@ fi
             &context(&NeverCancel),
         )
         .err()
-        .expect("CUDA Breeze route without an explicit device is rejected");
-        assert_eq!(error.kind(), DirectRunErrorKind::UnsupportedRoute);
+        .expect("CUDA Breeze needs the router connection");
+        assert_eq!(error.kind(), DirectRunErrorKind::InvalidRequest);
+        assert!(error.is_remote());
+        assert!(!error.blocks_following_work());
 
+        // A pinned CUDA device is no longer a valid connection for this lane.
         let device = CudaDevice::new("GPU-01234567-89ab-cdef-0123-456789abcdef").unwrap();
-        let missing_output = root.path().join("missing-output");
         let error = run_native(
             &catalog,
             &request,
-            Some(&missing_output),
+            Some(&output),
             Some(DirectConnection::Cuda(&device)),
             &context(&NeverCancel),
         )
         .err()
-        .expect("an admitted route proceeds to output validation before dispatch");
+        .expect("a device connection is refused");
         assert_eq!(error.kind(), DirectRunErrorKind::InvalidRequest);
         assert!(!root
             .path()
             .join("toolkits/l2m2/media-models/generate-breeze-tts-2.sh.calls")
             .exists());
+        assert!(!output.join("result.wav").exists());
 
         let (cpu_root, cpu_catalog) = cpu_breeze_fixture();
         let cpu_request = cpu_breeze_request(SpeechMode::Standard, cpu_root.path());
@@ -2082,6 +2116,59 @@ fi
         );
         assert!(!error.blocks_following_work());
         assert!(!launch_marker.exists());
+    }
+
+    #[test]
+    fn routed_cuda_breeze_publishes_validated_files_from_the_router_response() {
+        let (root, catalog) = breeze_fixture("breeze-tts-2", "cuda");
+        let request = cuda_breeze_request(SpeechMode::Standard);
+        let output = cpu_breeze_output(root.path(), "routed-ok");
+        let pcm: Vec<u8> = (0..2400)
+            .map(|index| (((index as f32) * 0.3).sin() * 8000.0) as i16)
+            .flat_map(i16::to_le_bytes)
+            .collect();
+        let wave = super::super::language::wav_from_pcm16(&pcm);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let served = wave.clone();
+        let server = std::thread::spawn(move || {
+            let mut stream = accept_bounded(&listener);
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let payload = read_json_request(&mut stream, "POST /audiocpp/v1/audio/speech HTTP/1.1");
+            assert_eq!(payload["model"], "breeze-tts");
+            assert_eq!(payload["input"], "fixture speech");
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                served.len()
+            )
+            .unwrap();
+            stream.write_all(&served).unwrap();
+        });
+        let adapter = LanguageAdapter::new(&endpoint, None).unwrap();
+        let result = run_native(
+            &catalog,
+            &request,
+            Some(&output),
+            Some(DirectConnection::Language(&adapter)),
+            &context(&NeverCancel),
+        )
+        .unwrap();
+        let DirectRunResult::Speech(result) = result else {
+            panic!("routed Breeze returns the same typed speech result")
+        };
+        assert_eq!(result.mode(), SpeechMode::Standard);
+        assert_eq!(result.artifacts().len(), 1);
+        assert_eq!(fs::read(output.join("result.wav")).unwrap(), wave);
+        // No script ran and nothing else was written.
+        assert!(!root
+            .path()
+            .join("toolkits/l2m2/media-models/generate-breeze-tts-2.sh.calls")
+            .exists());
+        server.join().unwrap();
     }
 
     #[test]
