@@ -1088,7 +1088,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--run",
         action="store_true",
-        help="explicitly run one offline CPU-only Nagi-Smol coordinator request",
+        help="retired coordinator path: refuses before any model or service work",
     )
     parser.add_argument(
         "--timeout-seconds",

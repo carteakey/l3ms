@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Correct the retired coordinator probe's `--run` help; it already refuses
+  without model or service work. Use the direct native CLI for execution.
+
 - Accept optional bounded image data URLs for the native d3/Clef profiles,
   forwarding top-level `images` without downloads or local file reads. Reject
   other image-bearing profiles before engine construction; check Clef question
