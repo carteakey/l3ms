@@ -197,7 +197,7 @@ started or stopped. Live transport/media acceptance remains pending.
 The preferred new local candidates are `decisions:vllm-d3-flash` and
 `decisions:cloudflare-clef-flash`. They use the existing authenticated llama-swap
 connection, not a separate decision environment or daemon. See
-[native decision routing](docs/decision-models.md) for CLI/form usage. These calls
+[native decision routing](docs/decision-models-cli.md) for CLI/form usage. These calls
 can evict a loaded language model; use a quiet window. CLI and form inputs accept
 optional bounded image data-URL arrays; there is no image-file picker or upload
 service. Automatic restoration and LLM tool continuation remain unverified.

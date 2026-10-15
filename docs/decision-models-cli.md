@@ -1,4 +1,6 @@
-# Native decision models through llama-swap
+# Native decision models through llama-swap: CLI and keyboard workflow
+
+Model reference, latency and candidates: [decision-models.md](decision-models.md).
 
 The preferred local integration candidates are `vllm-d3-flash` (accuracy) and
 `cloudflare-clef-flash` (calibration and joint-question image work), following
