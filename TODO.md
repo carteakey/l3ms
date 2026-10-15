@@ -37,6 +37,9 @@ for scope and evidence.
 - [ ] Verify LTX and YuE2 ComfyUI workflow outputs with real weights;
   decode each artifact and retain settings/logs. Both share the existing ComfyUI
   engine; separate Python runtimes are not workbench prerequisites.
+  Blocked on this host (checked 2026-10-15): no LTX or YuE2 weights exist under
+  `~/models` or ComfyUI's model tree, and `/home` is 97% full (15 GB free), so
+  they cannot be installed here without freeing space first.
   Do not call the full port complete until these advertised paths pass.
 
 Optional follow-ups:
