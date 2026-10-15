@@ -27,18 +27,32 @@ runs under the root downloader.
 - `.agents/skills/media-gpu-self-preemption`: it documents the retired
   stop-and-hand-back GPU flow and a separate `l2m2-nsfw` runner.
 
-## Still on disk because something live depends on it
+## Runtime state moved (2026-10-15)
 
-| Path | Size | Dependency |
+On this btrfs host the environments were reflink-cloned instead of rebuilt (no
+extra disk, no network), and the embedded interpreter paths were rewritten in
+the clones only. The originals were not touched.
+
+| Cloned to | From | Verified |
 | --- | --- | --- |
-| `l2m2/.venv-comfy-mcp` | 228 MB | three running `comfy-mcp` processes |
-| `l2m2/.venv-comfy` | 6.5 GB | ComfyUI runtime |
-| `l2m2/vendor` | 370 MB | `toolkits/l2m2/vendor` symlink; `audio.cpp` points at `~/repos/audio.cpp` |
-| `l3ds/.venv` | 5.1 GB | local decision runner |
-| `~/repos/l2m2-nsfw` runners | n/a | hardcode `~/repos/l2m2` paths |
+| `toolkits/l2m2/.venv-comfy` | `l2m2/.venv-comfy` (6.5 GB) | torch 2.14+cu130 sees CUDA; ComfyUI `6bfaacc67` starts; `comfyui_auto` launched it through an isolated router (HTTP 200, `/system_stats`) |
+| `toolkits/l2m2/.venv-comfy-mcp` | `l2m2/.venv-comfy-mcp` | `comfy-mcp --help`; MCP `initialize` handshake through `maintenance/run-comfy-mcp.sh` |
+| `toolkits/l2m2/vendor/ComfyUI`, `vendor/comfy-mcp`, `.toolkit/comfyui/user` | `l2m2/vendor/*`, `.toolkit/comfyui/user` | same commit as the source |
+| `toolkits/l3ds/.venv` | `l3ds/.venv` (5.1 GB) | torch 2.6+cu124 sees CUDA; L3DS Python suites 38 + 17 pass |
 
-Virtual environments embed absolute paths, so they must be rebuilt at the new
-location rather than moved, and L3DS's setup installs unpinned packages. Finish
-the retirement by rebuilding both environments under `toolkits/`, repointing
-`l2m2-nsfw`, restarting the MCP servers, and only then removing the sibling
-directories. Until then the siblings are read-only fallbacks.
+`llama-swap.yaml` now sets `comfy_root` to `${env.L3MS_ROOT}/toolkits/l2m2`.
+Codex's `comfy-local` MCP server was repointed to the monorepo launcher (backup
+in `_backups/siblings-20261015/codex-config.toml.bak`).
+
+## Remaining before the sibling directories can be deleted
+
+- Three `comfy-mcp` processes started by the Codex app-server and `agy` still
+  run from `~/repos/l2m2/.venv-comfy-mcp`. They exit when those clients restart
+  their MCP servers; `agy`'s own MCP config was not found and still needs the
+  same one-line repoint.
+- `~/repos/l2m2-nsfw` runners hardcode `~/repos/l2m2` paths (separate repo; not
+  edited here).
+- `l2m2/vendor/audio.cpp` is a dangling symlink; the pinned binaries now live in
+  `vendor/audio.cpp-955c872/` (git-ignored) in the deployed checkout.
+- Then, with approval, remove `~/repos/l2m2` and `~/repos/l3ds`. The bundles in
+  `_backups/siblings-20261015/` hold their full history and uncommitted files.
