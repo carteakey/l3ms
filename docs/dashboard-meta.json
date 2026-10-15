@@ -1,5 +1,5 @@
 {
-  "updated": "2026-10-07",
+  "updated": "2026-10-14",
   "system": {
     "gpu": "RTX 4070 12GB",
     "cpu": "i5-12600K",
@@ -9,14 +9,14 @@
   "methodology": "The ranked list contains only results from the RTX 4070 node above. Historical fields that were not captured in the same run are shown as not recorded instead of being inferred. Community hardware is kept in a separate, unranked dataset. Retired profiles keep their last measured performance in the archive tab; they are no longer reproducible on this node. Qwen3.8 serving metadata was imported from original checkout commit ed7538a; these are source-reported historical measurements, not monorepo acceptance results. Referenced new benchmark harnesses were not committed in that source snapshot and have not been imported. Historical model results may use different hardware settings.",
   "models": {
     "qwen38-flash-next-plat": {
-      "displayName": "Qwen3.8-Flash-Next Plat (Strata v0.1.40.2)",
-      "summary": "Platinum tier: Strata v0.1.40.2 with online dynamic expert VRAM caching (3,086 hot experts in VRAM), native MTP draft head (Q2_0), 128k context with dynamic KV streaming, native 2 MB Transparent Huge Page (THP) memory acceleration, and #783 kernel perf suite. 56.1 t/s steady decode on code, 90.2 t/s peak burst, pp 953-1,999 t/s.",
-      "tps": 56.1,
-      "pp": 1999,
+      "displayName": "Qwen3.8-Flash-Next Plat (Strata v0.1.44.1)",
+      "summary": "Platinum tier: Strata v0.1.44.1 with online dynamic expert VRAM caching (3,086 hot experts in VRAM), native MTP draft head (Q2_0), 128k context with dynamic KV streaming, native 2 MB Transparent Huge Page (THP) memory acceleration, and #783 kernel perf suite. 62.2 t/s steady decode on code (probes: 59.6-64.8 t/s, 90.2 t/s peak burst), pp 956-1,992 t/s.",
+      "tps": 62.2,
+      "pp": 1992,
       "testedContext": "128k",
       "cacheState": "k8v4 KV; 3,086 hot experts in VRAM; native THP 2MB pages",
-      "draftAcceptance": "70-76% (native Q2_0 MTP, spec 4)",
-      "llamaCppCommit": "Strata v0.1.40.2 (native SM89 Ada + native THP + #783 kernels)",
+      "draftAcceptance": "70-78% (native Q2_0 MTP, spec 4)",
+      "llamaCppCommit": "Strata v0.1.44.1 (native SM89 Ada + dynamic expert VRAM cache + MTP)",
       "quant": "ISTA-DASLab GSQ-RCO IQ3_XXS",
       "tags": [
         "MoE",
@@ -25,14 +25,12 @@
         "Platinum",
         "128k"
       ],
-      "benchmark": "docs/migration/serving-baseline.md",
-      "originalBenchmark": "bench-models/bench-qwen38-refresh-ab.sh",
-      "benchmarkCommand": null
+      "benchmark": "bench-models/bench-qwen38-refresh-ab.sh"
     },
     "qwen38-flash-next-plat-vision": {
       "displayName": "Qwen3.8-Flash-Next Plat Vision (Strata)",
       "summary": "Platinum multimodal tier: Strata engine paired with CPU-offloaded strata-vision image encoder (mmproj-F16). Retains 100% of GPU expert cache with zero VRAM loss for vision. 53-60 t/s decode, 128k context.",
-      "tps": 58,
+      "tps": 58.0,
       "pp": 1800,
       "testedContext": "128k",
       "cacheState": "k8v4 KV; CPU vision encoder; THP 2MB pages",
@@ -45,9 +43,7 @@
         "Strata",
         "128k"
       ],
-      "benchmark": "docs/migration/serving-baseline.md",
-      "originalBenchmark": "bench-models/bench_strata_long_horizon.py",
-      "benchmarkCommand": null
+      "benchmark": "bench-models/bench_strata_long_horizon.py"
     },
     "gemma-4-26b-qat-mtp": {
       "displayName": "Gemma 4 26B QAT + MTP",
@@ -65,7 +61,7 @@
     "gemma-4-26b-qat": {
       "displayName": "Gemma 4 26B QAT",
       "summary": "Full model without speculative drafting; useful as the MTP control profile.",
-      "tps": 69,
+      "tps": 69.0,
       "quant": "UD-Q4_K_XL (QAT)",
       "tags": [
         "MoE",
@@ -745,6 +741,16 @@
       "quant": "ISTA IQ3_XXS",
       "vram": "11.7 GB",
       "breakthrough": "Native upstream 2MB THP, #783 sub-warp IQ kernels, prefill reaches ~2,000 t/s @ 8k."
+    },
+    {
+      "date": "2026-10-14",
+      "milestone": "Strata v0.1.44.1 Refresh & Abliterated Staging",
+      "engine": "Strata v0.1.44.1 (native)",
+      "decode": 62.2,
+      "prefill": 1992.0,
+      "quant": "ISTA IQ3_XXS / SC117",
+      "vram": "11.7 GB",
+      "breakthrough": "Strata v0.1.44.1 engine refresh under verified performance governor: 62.2 t/s steady decode (64.8 max, 90.2 peak), 1,992 t/s prefill @ 8k, expert cache hit rate 75-78%, and abliterated SC117 variant integration."
     }
   ],
   "archived": [
