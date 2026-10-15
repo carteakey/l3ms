@@ -11,6 +11,30 @@ runtime check.
 
 ## Upstream-first retirement and acceptance — 2026-10-15
 
+### Main-checkout reconciliation
+
+Integrated the pending FLUX.3 media source and ComfyUI pin `20b46065` from the
+dirty main checkout into this branch. Resolved the three overlaps explicitly:
+append FLUX.3 without replacing the LTX/YuE2 ComfyUI profiles; retain both
+changelog entries; retain the Turbo downloader fix while advancing its pin.
+The new setup script also preserves unrelated VAE aliases instead of overwriting
+them. Standalone FLUX.3 scripts/UI workflow remain source-compatible; root
+workflow input still requires the documented API JSON, not a UI export.
+
+Validation: 568 root Rust tests (four ignored), six standalone media Rust tests,
+44 media Python tests, and 20 maintenance/workflow tests pass; build, clippy, formatting, shell syntax and
+whitespace checks pass. All captured source and dirty tracked-file hashes in
+main still match the pre-reconciliation snapshot, and its HEAD is unchanged.
+Backups/fingerprints are under root `.toolkit/reconcile-main-20261015/`.
+
+This is a branch integration, not a write or merge into the dirty main checkout.
+Its unrelated language downloads, benchmark logs/scripts and private tooling
+were deliberately not imported or committed. No setup/download/model inference
+or live service/configuration change was performed. Live model acceptance stays
+pending.
+
+### Shared-engine implementation
+
 Current shared-engine policy supersedes the direct LTX/YuE2 implementation
 below: both profiles use ComfyUI workflows and the root Python adapters have
 been removed. ComfyUI defaults to llama-swap's `/comfyui` route (confirmed Chat

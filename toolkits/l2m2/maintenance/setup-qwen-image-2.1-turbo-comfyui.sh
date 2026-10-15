@@ -10,7 +10,7 @@ fi
 [[ -f "$downloader" ]] || { echo "Model downloader missing: $downloader" >&2; exit 1; }
 workspace="$root/vendor/ComfyUI"
 manifest="$root/models/qwen-image-2.1-turbo-comfyui-files.txt"
-comfy_revision="6bfaacc67c2103481e5f0c84d75257cd0581d86a"
+comfy_revision="20b46065ef7f34fa21e8abebe8d0cca90a904d6d"
 hf="$root/.venv-comfy/bin/hf"
 
 model_root="$(printenv L2M2_QWEN_IMAGE_21_TURBO_ROOT || printenv L2M2_QWEN_IMAGE_21_ROOT || true)"

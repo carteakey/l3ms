@@ -168,7 +168,7 @@ not GPU ownership. By default the CLI uses `LLAMA_SWAP_URL/comfyui` and
 `L2M2_COMFY_URL` selects a separate server and receives only
 `L3MS_COMFY_API_KEY`, never the router key.
 
-The toolkit setup pin (`6bfaacc`) implements this contract natively; no custom
+The toolkit setup pin (`20b46065`) implements this contract natively; no custom
 server patch is required. Its generated job snapshots pass the adapter parser
 checks. This does not verify the version or behavior of a running endpoint.
 A cancelled pending job is removed without terminal history, so it can remain

@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -149,6 +150,8 @@ fi
         self.assertNotEqual(self.run_script("restore-media-model.sh", "../local").returncode, 0)
 
     def test_turbo_downloader_monorepo_and_standalone_paths(self):
+        revision = re.search(r"^comfy_ref=([0-9a-f]{40})$",
+                             (HERE / "setup-comfyui.sh").read_text(), re.M).group(1)
         for layout in ("monorepo", "standalone"):
             with self.subTest(layout=layout):
                 base = self.root / layout
@@ -172,7 +175,7 @@ target = pathlib.Path(sys.argv[sys.argv.index('--local-dir') + 1])
 (target / 'weights.bin').write_bytes(b'fixture')
 ''')
                 fake_python.chmod(0o755)
-                self.executable("git", "#!/bin/bash\nprintf 6bfaacc67c2103481e5f0c84d75257cd0581d86a\n")
+                self.executable("git", f"#!/bin/bash\nprintf '%s' {revision}\n")
                 (toolkit / "models").mkdir()
                 (toolkit / "models/qwen-image-2.1-turbo-comfyui-files.txt").write_text(
                     f"fixture/repo revision weights.bin diffusion_models/weights.bin 7 {hashlib.sha256(b'fixture').hexdigest()}\n")
@@ -182,6 +185,43 @@ target = pathlib.Path(sys.argv[sys.argv.index('--local-dir') + 1])
                                         text=True, capture_output=True)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertTrue((toolkit / "vendor/ComfyUI/models/diffusion_models/weights.bin").is_symlink())
+
+    def test_shared_comfy_setup_pins_are_consistent(self):
+        revision = re.search(r"^comfy_ref=([0-9a-f]{40})$",
+                             (HERE / "setup-comfyui.sh").read_text(), re.M).group(1)
+        for model in ("flux-2-klein-9b", "flux-3-klein", "krea-2",
+                      "qwen-image-2.1", "qwen-image-2.1-turbo", "z-image-turbo"):
+            with self.subTest(model=model):
+                script = (HERE / f"setup-{model}-comfyui.sh").read_text()
+                self.assertIn(f'comfy_revision="{revision}"', script)
+
+    def test_flux3_setup_preserves_unrelated_vae_alias(self):
+        toolkit = self.root / "flux-toolkit"
+        script = toolkit / "maintenance/setup-flux-3-klein-comfyui.sh"
+        script.parent.mkdir(parents=True)
+        shutil.copy2(HERE / script.name, script)
+        (toolkit / "vendor/ComfyUI/.git").mkdir(parents=True)
+        python = toolkit / ".venv-comfy/bin/python"
+        python.parent.mkdir(parents=True)
+        python.write_text("#!/bin/bash\nexit 99\n")
+        python.chmod(0o755)
+        revision = re.search(r'^comfy_revision="([0-9a-f]{40})"$',
+                             script.read_text(), re.M).group(1)
+        self.executable("git", f"#!/bin/bash\nprintf '%s' {revision}\n")
+        model_root = self.root / "flux-weights"
+        (model_root / "vae").mkdir(parents=True)
+        (model_root / "vae/flux2-vae.safetensors").write_bytes(b"fixture")
+        alias = model_root / "vae/full_encoder_small_decoder.safetensors"
+        alias.write_bytes(b"unrelated user weights")
+        (toolkit / "models").mkdir()
+        (toolkit / "models/flux-3-klein-comfyui-files.txt").write_text(
+            f"fixture/repo revision vae/flux2-vae.safetensors vae/flux2-vae.safetensors 7 {hashlib.sha256(b'fixture').hexdigest()}\n")
+        result = subprocess.run(["bash", str(script)],
+                                env=dict(self.env, L2M2_FLUX_3_KLEIN_ROOT=str(model_root)),
+                                cwd=self.root, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(alias.is_symlink())
+        self.assertEqual(alias.read_bytes(), b"unrelated user weights")
 
     def test_external_rubric_sent_without_network_or_credentials(self):
         spec = importlib.util.spec_from_file_location("grader", HERE / "grade-images-with-vision-tier.py")

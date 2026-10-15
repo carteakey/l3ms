@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### Changed
+- Reconcile pending main-checkout media changes: retain FLUX.3 support and its
+  shared ComfyUI pin while preserving LTX/YuE2 workflow routing and the Turbo
+  downloader fix. Preserve unrelated VAE aliases during FLUX.3 setup.
 - Prefer shared engines: LTX and YuE2 use the existing ComfyUI workflow runner
   instead of root Python executors. ComfyUI defaults to llama-swap's `/comfyui`
   route, preserving confirmed TUI credentials and isolating custom-endpoint keys.

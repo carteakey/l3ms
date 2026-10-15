@@ -219,6 +219,28 @@
         "The CLI default is 1024x1024 (or up to 1024x1536), 12 Euler/simple steps, and CFG 1.5. Keep dimensions divisible by 32 and resolutions <= 1024x1536 on 12 GiB GPUs.",
         "Import workflows/krea-2/image_krea2_turbo_t2i_int8.json for native ComfyUI workflow usage."
       ]
+    },
+    {
+      "id": "flux-3-klein",
+      "name": "FLUX.3 Image Klein text-to-image",
+      "runtime": "ComfyUI",
+      "variant": "INT8 ConvRot diffusion model, Qwen3-VL 4B encoder, Flux2 VAE, 16 steps",
+      "tasks": ["image"],
+      "inputs": ["text"],
+      "status": "local",
+      "script": "media-models/generate-flux-3-klein.sh",
+      "description": "Text-to-image and layout-guided generation through the local ComfyUI API using Black Forest Labs' FLUX.3 Image Klein (5.6B) in official INT8 ConvRot format with Qwen3-VL 4B text encoder and Flux2 VAE. Native 16-step distilled inference optimized for 12 GB VRAM on Yeti.",
+      "requirements": [
+        "ComfyUI pinned to commit 20b46065ef7f34fa21e8abebe8d0cca90a904d6d (FLUX.3 support)",
+        "FLUX.3 Image Klein ComfyUI files installed by maintenance/setup-flux-3-klein-comfyui.sh",
+        "Exclusive GPU time; stop llama-swap before starting ComfyUI in GPU mode"
+      ],
+      "notes": [
+        "Uses the official INT8 ConvRot distilled 5.6B DiT model (flux3_image_klein_int8_convrot.safetensors) and Qwen3-VL 4B INT8 text encoder (qwen3vl_4b_int8_convrot.safetensors) with the shared Flux2 VAE (flux2-vae.safetensors).",
+        "Distilled model default: 1024x1024, 16 steps, CFG 1.0, euler sampler with simple scheduler.",
+        "Supports bounding box spatial layout control via --boxes JSON (bounding box coordinates normalized 0-1).",
+        "Workflow JSON available at workflows/flux-3-klein/image_flux_3_klein_t2i.json."
+      ]
     }
   ]
 }

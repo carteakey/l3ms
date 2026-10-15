@@ -3,7 +3,7 @@
 set -euo pipefail
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 uv="${L2M2_UV:-$HOME/.local/bin/uv}"
-comfy_ref=6bfaacc67c2103481e5f0c84d75257cd0581d86a
+comfy_ref=20b46065ef7f34fa21e8abebe8d0cca90a904d6d
 mcp_ref=eb8ea47397fb13cdcf0a818b83bfba48bd4ff236
 checkout() {
     local url="$1" dir="$2" ref="$3"

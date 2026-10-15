@@ -1,0 +1,5 @@
+# Pinned official FLUX.3-Image-Klein int8_convrot and ComfyUI weights (verified bit-for-bit SHA-256)
+# repo revision repo_file relative_path bytes sha256
+ml-resources/flux-3-image-klein-comfy 496984d46f5ceeeb519b4d09a12cc0e58c0d6003 diffusion_models/flux3_image_klein_int8_convrot.safetensors diffusion_models/flux3_image_klein_int8_convrot.safetensors 5807427339 8949ecfc1bf3871b08be02cf43ec7276a4914e1a86eade6b5eb8f4204426bc92
+ml-resources/flux-3-image-klein-comfy 496984d46f5ceeeb519b4d09a12cc0e58c0d6003 text_encoders/qwen3vl_4b_int8_convrot.safetensors text_encoders/qwen3vl_4b_int8_convrot.safetensors 4858559240 32de113cbf8282b02cbff0794b637b9d6676da09314a1db5a30bcea9bf4ee01c
+ml-resources/flux-3-image-klein-comfy 496984d46f5ceeeb519b4d09a12cc0e58c0d6003 vae/flux2-vae.safetensors vae/flux2-vae.safetensors 336211292 868fe7b343cc8f3a19dbcfcafbc3d5f888802be3f89bd81b65b3621a066ce8f3

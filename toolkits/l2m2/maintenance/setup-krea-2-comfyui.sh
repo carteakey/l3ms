@@ -5,7 +5,7 @@ set -euo pipefail
 root="$(cd -- "$(dirname -- "$BASH_SOURCE")/.." && pwd)"
 workspace="$root/vendor/ComfyUI"
 manifest="$root/models/krea-2-comfyui-files.txt"
-comfy_revision="6bfaacc67c2103481e5f0c84d75257cd0581d86a"
+comfy_revision="20b46065ef7f34fa21e8abebe8d0cca90a904d6d"
 workflow_revision="a7acaf8cee9ccccdaf4b26ce04a9fced4c4d13de"
 workflow_dir="$root/workflows/krea-2"
 hf="$root/.venv-comfy/bin/hf"

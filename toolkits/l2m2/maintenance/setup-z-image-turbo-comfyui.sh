@@ -5,7 +5,7 @@ set -euo pipefail
 root="$(cd -- "$(dirname -- "$BASH_SOURCE")/.." && pwd)"
 workspace="$root/vendor/ComfyUI"
 manifest="$root/models/z-image-turbo-comfyui-files.txt"
-comfy_revision="6bfaacc67c2103481e5f0c84d75257cd0581d86a"
+comfy_revision="20b46065ef7f34fa21e8abebe8d0cca90a904d6d"
 workflow_dir="$root/workflows/z-image-turbo"
 py="$root/.venv-comfy/bin/python"
 

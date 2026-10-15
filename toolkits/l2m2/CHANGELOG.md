@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Reconcile the shared ComfyUI pin with root workflow routing and the consolidated
+  Turbo downloader. FLUX.3 setup no longer replaces unrelated VAE aliases; fixture
+  tests cover preservation and consistency of the shared installer revisions.
+
+- Add FLUX.3 Image Klein text-to-image and layout-guided generation profile
+  (`flux-3-klein`) with official INT8 ConvRot weights (5.6B DiT and Qwen3-VL 4B
+  encoder) and shared Flux2 VAE. Includes `maintenance/setup-flux-3-klein-comfyui.sh`,
+  CLI generator `media-models/generate-flux-3-klein.sh`, Python module
+  `media-models/flux_3_klein.py`, UI workflow `workflows/flux-3-klein/image_flux_3_klein_t2i.json`,
+  unit tests `media-models/test_flux_3_klein.py`, and ComfyUI pin update to
+  commit `20b46065ef7f34fa21e8abebe8d0cca90a904d6d` (official FLUX.3 support).
+
 - Root LTX/YuE2 profiles now use shared ComfyUI workflows, not the standalone
   Python runners. Add native API recipes and documented preview/acceptance limits;
   standalone scripts remain compatible and model data is unchanged.
