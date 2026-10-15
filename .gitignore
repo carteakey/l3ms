@@ -1,5 +1,16 @@
-# Ignore downloaded models
-/models/
+# Ignore downloaded models (tracked file lists such as models/*-files.txt stay)
+/models/**
+!/models/
+!/models/*-files.txt
+
+# Isolated Python runtimes (rebuilt or cloned per host)
+/.venv
+/.venv-comfy
+/.venv-comfy-mcp
+/.venv-decisions
+/.venv-hosted
+.nagi-smol-env.*/
+*.pyc
 
 # Ignore cloned and built vendor dependencies
 /vendor/
