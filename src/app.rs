@@ -1350,7 +1350,7 @@ impl App {
         let mut app = Self {
             root,
             data_root,
-            tab: Tab::Workbench,
+            tab: Tab::StackCatalog,
             input_mode: InputMode::Normal,
             should_quit: false,
             show_quit_confirmation: false,
@@ -13624,7 +13624,7 @@ mod tests {
     fn contextual_palette_actions_cannot_create_hidden_editors() {
         let fixture = AppFixture::new();
         let mut app = fixture.app();
-        assert_eq!(app.tab, Tab::Workbench);
+        app.tab = Tab::Workbench;
         app.execute_command(CommandId::MaintenanceFocusEditor)
             .unwrap();
         assert_eq!(app.script_input_target, None);

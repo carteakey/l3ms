@@ -11,6 +11,7 @@
   key still loads (unknown fields are ignored) and drops it on the next save.
 
 ### Changed
+- L3MS now opens on the Stack tab (the unified lane inventory with live router state).
 - Flatter, denser chrome: the boxed three-row tab strip is now a single row of
   numbered chips (selected tab filled), returning two rows to every screen, and
   the header shows the currently loaded model. Model and router states carry a
