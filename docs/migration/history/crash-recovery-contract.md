@@ -1,6 +1,6 @@
 # Mixed-runtime crash recovery: remaining implementation contract
 
-**Deferred:** the user-approved [simplification plan](simplification-plan.md)
+**Deferred:** the user-approved [simplification plan](../simplification-plan.md)
 replaces hardened automatic recovery as a delivery requirement. Retain this
 contract as design history for the existing gated managed path; do not implement
 the Stop journal next or mistake this document for current completion criteria.

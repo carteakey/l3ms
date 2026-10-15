@@ -1,7 +1,7 @@
 # Managed foreground session: remaining integration contract
 
 Historical managed-platform contract. The 2026-10-15 upstream-first revision in
-[simplification-plan.md](simplification-plan.md) supersedes this delivery path.
+[simplification-plan.md](../simplification-plan.md) supersedes this delivery path.
 The generic lifecycle protocol, managed runtime/server and private-engine
 transport have now been retired. The old launch commands and implementation
 names below describe historical evidence, not supported current entrypoints.

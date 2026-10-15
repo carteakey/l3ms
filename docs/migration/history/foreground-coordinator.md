@@ -1,7 +1,7 @@
 # Explicit foreground CPU coordinator
 
 **Historical, retired.** `--coordinator-cpu-daemon` is no longer accepted.
-Use [native CPU workflows](../cpu-native-workflows.md) through `--run-profile`
+Use [native CPU workflows](../../cpu-native-workflows.md) through `--run-profile`
 or the Stack typed form instead. The material below records the old branch
 contract, not current setup instructions. Existing history is left untouched.
 
@@ -140,9 +140,9 @@ This CPU workflow does not establish GPU release, fence standalone engine
 clients, launch a managed llama/Comfy engine, expose HTTP ingress, or complete the
 managed-engine/GPU acceptance gates. A real offline CPU Nagi coordinator request
 passed with a private copied CPU profile, native output, durable terminal history
-and verified process cleanup; see [measured evidence](nagi-acceptance.md).
+and verified process cleanup; see [measured evidence](../nagi-acceptance.md).
 Original checkouts and runtime rollback paths remain in place.
 
 Embedding profiles now use the direct batch form and existing Chat connection,
 not this coordinator submission path. Remote HTTP cancellation does not prove
-server termination; see [the current checkpoint](status.md).
+server termination; see [the current checkpoint](../status.md).

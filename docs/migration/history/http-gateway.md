@@ -1,7 +1,7 @@
 # Retired HTTP gateway — historical contract
 
 `--coordinator-http-gateway` is no longer accepted. Its CLI launcher and custom
-HTTP transport modules were removed under the [simplification plan](simplification-plan.md).
+HTTP transport modules were removed under the [simplification plan](../simplification-plan.md).
 Native workflows use their configured engine endpoints; no replacement proxy is
 provided. Retained private coordinator actions, original standalone commands and
 live services are unchanged. Earlier implementation remains recoverable in Git.
@@ -69,4 +69,4 @@ not active-child cleanup proof; observe terminal status independently.
 
 This ingress does not satisfy managed-engine fencing, asynchronous backend drain,
 GPU release, full native task-form parity or real-model acceptance. Those gates
-remain in the [migration status](status.md).
+remain in the [migration status](../status.md).

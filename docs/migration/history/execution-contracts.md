@@ -1,7 +1,7 @@
 # Native execution contracts
 
 These are branch-local implementation contracts, not a deployed coordinator or
-live acceptance record. See [status.md](status.md) for phase gates and evidence.
+live acceptance record. See [status.md](../status.md) for phase gates and evidence.
 
 ## Direct CPU operation
 
@@ -9,7 +9,7 @@ CPU-local decisions and Breeze speech use `--run-profile` or the Stack typed for
 with the shared native runner and foreground owner. No listener, daemon,
 installation or download is required. A CUDA profile is never silently converted
 to CPU. Cancellation/timeout perform bounded owned-child cleanup; uncertainty
-closes foreground admission. See [native CPU workflows](../cpu-native-workflows.md).
+closes foreground admission. See [native CPU workflows](../../cpu-native-workflows.md).
 The branch-added CPU daemon launcher is retired; its
 [historical contract](foreground-coordinator.md) is retained only as evidence.
 
