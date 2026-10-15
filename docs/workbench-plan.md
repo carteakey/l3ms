@@ -3,6 +3,16 @@
 Implementation plan for [workbench design](workbench-design.md). Written
 2026-10-15 so work can resume after a context reset.
 
+## Finish line
+
+**The release is steps 1 and 2.** It is done when a user can: select a model →
+bench, tune or run a media task → inspect the output and history → safely
+revert. One sidebar, one pane, useful utilities, compact readiness monitoring.
+
+Steps 3–7 (core extraction as a project, folding every view, crate split, tabs
+and splits, GPUI) are optional follow-ups, not completion requirements. Logic
+leaves `app.rs` incrementally, as each action moves, not as a separate step.
+
 ## Starting point
 
 - Dev worktree `~/repos/l3ms-monorepo` (branch `feature/l3ms-monorepo`);
@@ -20,7 +30,9 @@ Implementation plan for [workbench design](workbench-design.md). Written
   `l3ms --list stack` still lists 44 profiles in the deployed tree.
 - Screen check: a temporary `#[ignore]` test that draws each view to a
   `TestBackend` at 110×30 and 80×24 and writes the rows to a scratch file
-  (pattern used on 2026-10-15; delete it before committing).
+  (pattern used on 2026-10-15; delete it before committing). Permanent tests
+  assert the shell and every view render readably at 80×24 and 60×18, not just
+  without panicking.
 - Live router: llama-swap v265 on `:8080`, `llama-swap.service`. Never reload
   or swap models without asking; a reload evicts the resident model and kills
   in-flight requests (check `/running` and the journal first).
@@ -49,9 +61,10 @@ Three UIs on this machine set the bar (screenshots shared 2026-10-15):
   table (time, status, prompt, reused, output, prefill t/s, decode t/s, VRAM hit
   rate, duration) with a since-start summary.
 
-Consequence: L3MS does not rebuild a playground, log viewer or hardware page.
-Its views read llama-swap's and the engine's own data, link out to their web UI
-(`o` opens the matching page in the browser), and spend effort on what neither
+Consequence: these are references, not things to copy. L3MS does not rebuild a
+playground, log viewer or hardware page. Its views read llama-swap's data and
+link out to the web UI: `o` opens the matching page in a local browser, or
+prints and copies the URL when there is none (SSH). L3MS spends effort on what neither
 has: bench with readiness gating and history, tune with snapshot and revert,
 engine updates, downloads with preflight, media workflows with artifacts, job
 history across lanes, and keyboard-first use over SSH.
@@ -69,8 +82,23 @@ Read-only APIs verified on the live router (2026-10-15, no model dispatched):
 | Strata `/metrics`, `/metrics/prometheus`, `/api/requests` (path under `/upstream/<id>/` to be confirmed; `/api/requests` returned 404 there) | engine counters and recent requests |
 
 Hazard: any `/upstream/<id>/…` request for a model that is not running makes
-llama-swap load it, evicting the resident model. Only query upstream paths for
-models `/running` reports as ready.
+llama-swap load it, evicting the resident model. Checking `/running` first is
+not enough: the model can unload (TTL, another client) between the check and
+the request. Rules:
+
+- No automatic polling of `/upstream/…` paths. Monitoring uses only router
+  endpoints that never load a model (`/running`, `/api/events`,
+  `/api/performance`, `/api/hardware`, `/logs`) until a genuinely
+  non-autoloading engine route exists.
+- Engine detail (Strata status) is fetched only on an explicit user action,
+  behind the same warning as a model switch.
+- Opening an engine's web page (`o` on Strata's monitor) can load the model too
+  and carries the same warning.
+
+Privacy: Strata `status` exposed live conversation text (`tail`). Telemetry is
+whitelisted: read phase, counts, timings and states only; never store or show
+prompts, output tails or tool arguments in monitoring or history. Every value
+shows its source host and age; a stale or remote reading is labelled as such.
 
 ## Step 1 — shell
 
@@ -88,12 +116,13 @@ working inside the pane.
    sections collapse with `Space` on the header.
 3. Toolbar row: buttons for the toolbar utilities (step 2 fills them in;
    initially reload, bench, tune map to existing commands). Keys shown on the
-   buttons; mouse clicks optional.
+   buttons; mouse clicks optional. Buttons are `commands.rs` entries rendered
+   in a row, not a separate list.
 4. Status bar: see System monitoring below.
 5. View routing: Enter on a model opens its default view (Chat for language
    models, task form for media and decisions); Enter on a job opens its output.
    The old tabs remain reachable as views from the palette (`Ctrl+P` → "open
-   view") until step 4 folds them.
+   view"); folding them all is optional (step 4).
 6. Delete the Workbench and Model Ops tabs and their commands once each command
    they offered maps to a sidebar row action, toolbar button or palette entry.
 7. Open on the shell with the Models section focused.
@@ -103,28 +132,34 @@ command formerly in `Workbench`/`ModelOps` contexts is still reachable.
 
 ## Step 2 — toolbar utilities
 
-1. `src/utilities.rs`: a declaration per utility — id, label, key, inputs
-   (typed fields reusing `control/task_form.rs` field kinds), preconditions
-   ("router stopped", "model selected", "no job running"), what it writes, and
-   the command it runs. One declaration serves the toolbar, palette and a new
-   CLI verb `l3ms do <utility> [--field value]`.
+1. Extend the existing `src/commands.rs` registry, not a competing framework:
+   add to `CommandSpec` the inputs (typed fields reusing `control/task_form.rs`
+   field kinds), preconditions ("router stopped", "model selected", "no job
+   running"), what it writes, and how it executes. The same entry serves the
+   toolbar, palette, help and a new CLI verb `l3ms do <command> [--field
+   value]`. Move each action's logic out of `app.rs` when its utility is built.
 2. Every run is a job in the sidebar with live output in a pane, a dry-run
    preview before anything is written, and the exit recorded in history.
 3. Order:
    - **Reload router**: shows the resident model and in-flight requests from
      `/running` before confirming; SIGHUP; waits for `configuration reloaded`.
-   - **Bench**: on a model; ladder choice (tg, pp, ctx sweep); stops llama-swap
-     when the ladder needs the full card and restarts it after; wraps the
+   - **Bench**: on a model; ladder choice (tg, pp, ctx sweep); when the ladder
+     needs the full card, record whether llama-swap was running, stop it, and
+     afterwards restore that prior state (do not blindly start it); wraps the
      existing `bench-models/run-*.sh` runners and `bench-env.sh`; result view
-     compares steady state with earlier runs in `logs/results`.
+     compares steady state only with earlier runs in `logs/results` whose
+     model, build, settings and system conditions match.
    - **Tune**: on a language model; curated flags from `param_registry.rs`;
-     snapshot `llama-swap.yaml.bak-*`, write via `param_builder.rs`, reload
-     (with the Reload router warning), smoke chat with `max_tokens >= 64`,
-     one-key revert to the snapshot.
+     snapshot `llama-swap.yaml.bak-*` and record its hash; write via
+     `param_builder.rs` only if the file still matches what was read; reload
+     (with the Reload router warning), smoke chat with `max_tokens >= 64`.
+     Revert restores the snapshot only if the file still matches what Tune
+     wrote; if someone edited it in between, show the diff and ask.
    - **Update engines**: llama.cpp master, ik_llama.cpp, Strata, audio.cpp,
-     ComfyUI; fetch, build with house flags, smoke test, then repoint the
-     macro in `llama-swap.yaml` (snapshot first). Check `git status` of the
-     vendor clone first; refuse on dirty trees unless confirmed.
+     ComfyUI; check `git status` of the vendor clone first and refuse on dirty
+     trees unless confirmed; build beside the active installation (new
+     directory), smoke test it, then repoint the macro in `llama-swap.yaml`
+     (snapshot and conflict check as in Tune). The old build stays for revert.
    - **Download model**: wraps `model_downloader`; header preflight
      (`download_preflight.rs`) and disk check before starting.
    - **Health**: the System monitoring checks below, on demand.
@@ -132,6 +167,8 @@ command formerly in `Workbench`/`ModelOps` contexts is still reachable.
      (`setup-*.sh check`), install missing pieces after confirmation.
 4. Remove the Maintenance script editor once every script it served is behind
    a utility or confirmed unused (list them first; ask the user).
+
+## Optional follow-ups (not part of the release)
 
 ## Step 3 — extract the core
 
@@ -188,22 +225,30 @@ only for when the router is down.
 
 **Where it shows:**
 
+Monitoring in the release is compact: the status bar plus the Health checks.
+The full System view below is optional.
+
 - **Status bar** (always): resident model, VRAM bar, RAM bar, CPU %, governor,
   disk free of the fullest watched mount, router endpoint. Values go amber at
   their warning threshold and red at the critical one, always with the number.
-- **System view** (pane, toolbar button `♥`), laid out like the Strata
+- **System view** (optional; pane, toolbar button `♥`), laid out like the Strata
   monitor: a model state strip (idle, reading, generating, queued, error, with
   the current activity), metric cards with a value and sparkline (decode and
   prefill t/s, GPU load, VRAM, GPU temperature, power, CPU, disk read, RAM),
   context fill, a recent-requests table, and the bench-readiness checklist. In
   the TUI the cards are compact rows with braille sparklines.
 - **Alerts** become entries in the sidebar Jobs section (kind `alert`) so they
-  are seen and dismissible: hot-expert spill (read rate over 1 MB/s for 10 s
-  after warm-up), RAM available under 4 GiB, governor not `performance`,
-  disk under 10 % free, GPU over 85 °C.
-- **Bench gate**: the Bench utility runs the Health checks first and refuses on
-  failures that invalidate numbers (governor, spill, low RAM) unless the user
-  overrides; the override is recorded in the bench row's `sys` frontmatter.
+  are seen and dismissible: sustained hot-expert spill after warm-up, low
+  available RAM, disk nearly full, GPU running hot.
+- **Bench readiness** is contextual, not one fixed rule. Each check returns
+  **fail** (numbers would be meaningless: router serving another request on the
+  card, disk full), **warn** (numbers are comparable only to runs with the same
+  condition: governor not `performance`, spill above the model's own baseline,
+  low RAM) or **unknown** (signal unavailable, stale, or from a remote router
+  host — local checks never judge a remote router). Fails block unless
+  overridden; warns and unknowns are shown and recorded. Every override and
+  condition goes into the bench row's `sys` frontmatter, and comparisons only
+  pair rows with matching conditions.
 
 Thresholds live in one table in code with tests; no thresholds in the views.
 
