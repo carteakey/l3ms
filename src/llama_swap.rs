@@ -436,10 +436,10 @@ pub(crate) fn auth_headers(api_key: Option<&str>) -> Result<HeaderMap> {
 }
 
 pub(crate) fn parse_models(body: &str) -> Result<Vec<SwapModel>> {
-    parse_models_with_decisions(body).map(|(models, _)| models)
+    parse_models_with_non_chat_ids(body).map(|(models, _)| models)
 }
 
-pub(crate) fn parse_models_with_decisions(body: &str) -> Result<(Vec<SwapModel>, Vec<String>)> {
+pub(crate) fn parse_models_with_non_chat_ids(body: &str) -> Result<(Vec<SwapModel>, Vec<String>)> {
     let payload: Value = serde_json::from_str(body)?;
     let entries = payload
         .get("data")
@@ -448,7 +448,7 @@ pub(crate) fn parse_models_with_decisions(body: &str) -> Result<(Vec<SwapModel>,
         .unwrap_or_default();
 
     let mut models = Vec::new();
-    let mut decision_model_ids = Vec::new();
+    let mut non_chat_model_ids = Vec::new();
     for entry in entries {
         let Some(entry) = entry.as_object() else {
             continue;
@@ -462,17 +462,8 @@ pub(crate) fn parse_models_with_decisions(body: &str) -> Result<(Vec<SwapModel>,
             continue;
         };
 
-        if entry
-            .get("architecture")
-            .and_then(|architecture| architecture.get("output_modalities"))
-            .and_then(Value::as_array)
-            .is_some_and(|modalities| {
-                modalities
-                    .iter()
-                    .any(|modality| modality.as_str() == Some("decisions"))
-            })
-        {
-            decision_model_ids.push(id.to_owned());
+        if has_known_non_chat_output_modalities(entry) {
+            non_chat_model_ids.push(id.to_owned());
         }
 
         models.push(SwapModel {
@@ -487,9 +478,28 @@ pub(crate) fn parse_models_with_decisions(body: &str) -> Result<(Vec<SwapModel>,
     }
 
     models.sort_by(|left, right| left.id.cmp(&right.id));
-    decision_model_ids.sort();
-    decision_model_ids.dedup();
-    Ok((models, decision_model_ids))
+    non_chat_model_ids.sort();
+    non_chat_model_ids.dedup();
+    Ok((models, non_chat_model_ids))
+}
+
+fn has_known_non_chat_output_modalities(entry: &serde_json::Map<String, Value>) -> bool {
+    let Some(modalities) = entry
+        .get("architecture")
+        .and_then(|architecture| architecture.get("output_modalities"))
+        .and_then(Value::as_array)
+    else {
+        return false;
+    };
+    !modalities
+        .iter()
+        .any(|modality| modality.as_str() == Some("text"))
+        && modalities.iter().any(|modality| {
+            matches!(
+                modality.as_str(),
+                Some("audio" | "decisions" | "embeddings" | "image" | "video")
+            )
+        })
 }
 
 fn text_field(entry: &serde_json::Map<String, Value>, key: &str) -> String {
@@ -835,18 +845,39 @@ mod tests {
     }
 
     #[test]
-    fn parses_decision_output_modality_without_dropping_models() {
+    fn excludes_known_non_chat_outputs_without_dropping_inventory_models() {
         let body = r#"{
             "data": [
-                {"id":"decision", "state":"loaded", "architecture":{"output_modalities":["decisions"]}},
-                {"id":"text", "state":"loaded", "architecture":{"output_modalities":["text"]}},
-                {"id":"unknown", "state":"unloaded"}
+                {"id":"decision", "architecture":{"output_modalities":["decisions"]}},
+                {"id":"image", "architecture":{"output_modalities":["image"]}},
+                {"id":"audio", "architecture":{"output_modalities":["audio"]}},
+                {"id":"embeddings", "architecture":{"output_modalities":["embeddings"]}},
+                {"id":"multiple-non-chat", "architecture":{"output_modalities":["audio","video"]}},
+                {"id":"text-image", "architecture":{"input_modalities":["text","image"],"output_modalities":["text"]}},
+                {"id":"text-and-audio", "architecture":{"output_modalities":["text","audio"]}},
+                {"id":"mixed-unknown", "architecture":{"output_modalities":["image","custom"]}},
+                {"id":"unknown-output", "architecture":{"output_modalities":["custom"]}},
+                {"id":"legacy"}
             ]
         }"#;
 
-        let (models, decision_model_ids) = parse_models_with_decisions(body).unwrap();
-        assert_eq!(models.len(), 3);
-        assert_eq!(decision_model_ids, ["decision"]);
+        let (models, non_chat_model_ids) = parse_models_with_non_chat_ids(body).unwrap();
+        assert_eq!(models.len(), 10);
+        assert_eq!(
+            non_chat_model_ids,
+            [
+                "audio",
+                "decision",
+                "embeddings",
+                "image",
+                "mixed-unknown",
+                "multiple-non-chat"
+            ]
+        );
+        assert!(models.iter().any(|model| model.id == "text-image"));
+        assert!(models.iter().any(|model| model.id == "unknown-output"));
+        assert!(!non_chat_model_ids.iter().any(|id| id == "unknown-output"));
+        assert!(models.iter().any(|model| model.id == "legacy"));
     }
 
     #[test]

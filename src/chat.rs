@@ -15,7 +15,9 @@ use reqwest::{
 };
 use serde_json::{json, Value};
 
-use crate::llama_swap::{auth_headers, normalize_base_url, parse_models_with_decisions, SwapModel};
+use crate::llama_swap::{
+    auth_headers, normalize_base_url, parse_models_with_non_chat_ids, SwapModel,
+};
 
 const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
 const MAX_MODEL_BODY_BYTES: usize = 1024 * 1024;
@@ -82,13 +84,12 @@ pub struct ChatCompletion {
     pub elapsed: Duration,
 }
 
-/// Models returned by `/v1/models`, retaining the llama-swap decision-route
-/// metadata separately so decision models remain available to native forms
-/// without becoming ordinary Chat choices.
+/// Models returned by `/v1/models`, retaining known non-chat output IDs so
+/// native tasks can still see the full inventory while Chat filters its picker.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ChatModelInventory {
     pub models: Vec<SwapModel>,
-    pub decision_model_ids: Vec<String>,
+    pub non_chat_model_ids: Vec<String>,
 }
 
 impl ChatCompletion {
@@ -188,11 +189,11 @@ impl ChatClient {
             "chat model response exceeds {MAX_MODEL_BODY_BYTES} bytes"
         );
         let body = String::from_utf8(body).context("chat model response is not UTF-8")?;
-        let (models, decision_model_ids) =
-            parse_models_with_decisions(&body).context("failed to parse chat model response")?;
+        let (models, non_chat_model_ids) =
+            parse_models_with_non_chat_ids(&body).context("failed to parse chat model response")?;
         Ok(ChatModelInventory {
             models,
-            decision_model_ids,
+            non_chat_model_ids,
         })
     }
 
@@ -258,7 +259,12 @@ pub struct DetectedServer {
 pub fn detected_servers() -> Vec<DetectedServer> {
     #[cfg(unix)]
     {
-        if let Ok(output) = Command::new("pgrep").args(["-fa", "llama-server"]).output() {
+        let output = {
+            #[cfg(test)]
+            let _fixture_guard = crate::control::process::executable_fixture_guard();
+            Command::new("pgrep").args(["-fa", "llama-server"]).output()
+        };
+        if let Ok(output) = output {
             return parse_detected_servers(&String::from_utf8_lossy(&output.stdout));
         }
     }
@@ -282,10 +288,12 @@ pub fn terminate_detected_server(pid: u32) -> Result<()> {
     );
     #[cfg(unix)]
     {
-        let status = Command::new("kill")
-            .arg(pid.to_string())
-            .status()
-            .with_context(|| format!("signal llama-server PID {pid}"))?;
+        let status = {
+            #[cfg(test)]
+            let _fixture_guard = crate::control::process::executable_fixture_guard();
+            Command::new("kill").arg(pid.to_string()).status()
+        }
+        .with_context(|| format!("signal llama-server PID {pid}"))?;
         anyhow::ensure!(status.success(), "kill returned {status}");
         Ok(())
     }
@@ -785,7 +793,7 @@ mod tests {
         let client = ChatClient::new(format!("http://{address}"), Some("test-token")).unwrap();
         let inventory = client.list_model_inventory().unwrap();
         server.join().unwrap();
-        assert_eq!(inventory.decision_model_ids, ["decision-a"]);
+        assert_eq!(inventory.non_chat_model_ids, ["decision-a"]);
         assert_eq!(inventory.models.len(), 2);
         let model = inventory
             .models

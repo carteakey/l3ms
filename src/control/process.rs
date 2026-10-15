@@ -33,9 +33,9 @@ const POLL_QUANTUM: Duration = Duration::from_millis(25);
 const POST_EXIT_DRAIN: Duration = Duration::from_millis(200);
 const IO_CHUNK_BYTES: usize = 16 * 1024;
 
-// Parallel fixture writers must not overlap this runner's fork/exec window:
-// a fork can inherit another thread's writable script descriptor until exec,
-// making an otherwise closed fixture executable fail with ETXTBSY.
+// All test-process child creation must share this guard with executable-fixture
+// writers: a fork can inherit another thread's writable script descriptor
+// until exec, making the fixture fail with ETXTBSY.
 #[cfg(test)]
 pub(crate) fn executable_fixture_guard() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

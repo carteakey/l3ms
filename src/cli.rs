@@ -1190,11 +1190,15 @@ fn interactive_bench(filter: &str, extra: &str) -> Result<u8> {
 
     let command = command_for_script(&scripts[index], &extra_args);
     println!("$ {}", format_command(&command));
-    let status = Command::new(&command.program)
-        .args(&command.args)
-        .current_dir(&root)
-        .status()
-        .with_context(|| format!("failed to execute {}", scripts[index].display()))?;
+    let status = {
+        #[cfg(test)]
+        let _fixture_guard = crate::control::process::executable_fixture_guard();
+        Command::new(&command.program)
+            .args(&command.args)
+            .current_dir(&root)
+            .status()
+    }
+    .with_context(|| format!("failed to execute {}", scripts[index].display()))?;
     let code = status.code().unwrap_or(1);
     println!("Exited with code {code}");
     Ok(u8::try_from(code).unwrap_or(1))

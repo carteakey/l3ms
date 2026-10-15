@@ -116,13 +116,17 @@ pub fn find_process_named(name: &str) -> Result<Option<u32>> {
 }
 
 fn read_process_table() -> Result<Vec<ProcessSample>> {
-    let output = Command::new("ps")
-        .args(["-axo", "pid=,ppid=,pgid=,pcpu=,rss=,comm="])
-        .env("LC_ALL", "C")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .context("run ps for resource telemetry")?;
+    let output = {
+        #[cfg(test)]
+        let _fixture_guard = crate::control::process::executable_fixture_guard();
+        Command::new("ps")
+            .args(["-axo", "pid=,ppid=,pgid=,pcpu=,rss=,comm="])
+            .env("LC_ALL", "C")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+    }
+    .context("run ps for resource telemetry")?;
     anyhow::ensure!(output.status.success(), "ps exited with {}", output.status);
     Ok(parse_process_table(&String::from_utf8_lossy(
         &output.stdout,
@@ -195,16 +199,20 @@ fn gpu_memory_mib(pids: &HashSet<u32>) -> Option<u64> {
     if pids.is_empty() {
         return None;
     }
-    let output = Command::new("nvidia-smi")
-        .args([
-            "--query-compute-apps=pid,used_memory",
-            "--format=csv,noheader,nounits",
-        ])
-        .env("LC_ALL", "C")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
+    let output = {
+        #[cfg(test)]
+        let _fixture_guard = crate::control::process::executable_fixture_guard();
+        Command::new("nvidia-smi")
+            .args([
+                "--query-compute-apps=pid,used_memory",
+                "--format=csv,noheader,nounits",
+            ])
+            .env("LC_ALL", "C")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+    }
+    .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -231,13 +239,17 @@ fn command_name(command: &str) -> &str {
 }
 
 fn disk_free_mib(path: &str) -> Option<u64> {
-    let output = Command::new("df")
-        .args(["-k", path])
-        .env("LC_ALL", "C")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
+    let output = {
+        #[cfg(test)]
+        let _fixture_guard = crate::control::process::executable_fixture_guard();
+        Command::new("df")
+            .args(["-k", path])
+            .env("LC_ALL", "C")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+    }
+    .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -285,16 +297,20 @@ fn parse_proc_net_dev(text: &str) -> Option<(u64, u64)> {
 }
 
 pub fn query_gpu_telemetry() -> Option<GpuTelemetry> {
-    let output = Command::new("nvidia-smi")
-        .args([
-            "--query-gpu=gpu_name,memory.total,memory.used,memory.free,utilization.gpu,utilization.memory,temperature.gpu,power.draw",
-            "--format=csv,noheader,nounits",
-        ])
-        .env("LC_ALL", "C")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
+    let output = {
+        #[cfg(test)]
+        let _fixture_guard = crate::control::process::executable_fixture_guard();
+        Command::new("nvidia-smi")
+            .args([
+                "--query-gpu=gpu_name,memory.total,memory.used,memory.free,utilization.gpu,utilization.memory,temperature.gpu,power.draw",
+                "--format=csv,noheader,nounits",
+            ])
+            .env("LC_ALL", "C")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+    }
+    .ok()?;
     if !output.status.success() {
         return None;
     }

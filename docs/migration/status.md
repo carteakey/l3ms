@@ -11,6 +11,28 @@ runtime check.
 
 ## Upstream-first retirement and acceptance — 2026-10-15
 
+Follow-up discovery fix: Chat now excludes explicit known non-chat outputs
+(decision, image, audio, video or embeddings) when no text output is declared.
+Text-output vision models, unknown-only metadata and older servers stay usable.
+The same complete inventory remains available to native forms and model actions;
+an all-non-chat endpoint has no Chat selection or fallback. No new registry,
+discovery probe, engine launch or inference retry was added.
+
+Fixture reliability follow-up: the parallel fresh-executable test reproduced
+`ETXTBSY` alongside job-history tests. Its fixture-write/runner lock did not
+coordinate other subprocess creation in the same test process. Test builds now
+use that existing mutex at direct child-creation sites, including clock and
+other utility commands; production behavior is unchanged. The paired repro
+passed 30 repetitions, the all-targets suite at 16 test threads passed 20, and
+the default-thread all-targets command passed five. Temporary diagnostics were
+removed; these are bounded stress checks, not an exhaustive concurrency proof.
+
+Standalone import audit: all 30 committed paths from L2M2 `39e4d40` and all
+15 from L3DS `4716ddf` are present in the child toolkits. The independent review
+found no missing committed standalone source or accidentally broken original
+CLI/root/profile contract. Newer unrelated dirty work in the originals was not
+silently imported. Runtime acceptance remains separate from source parity.
+
 Post-retirement keyboard check: the release binary ran in a real 80×24 PTY with
 isolated data/settings and a private loopback fixture, not the live router. Chat
 selected the sole text model despite two advertised loaded decision models.

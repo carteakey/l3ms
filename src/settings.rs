@@ -898,17 +898,20 @@ mod tests {
             return;
         }
         let temp = TempDir::new().unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "settings::tests::current_control_settings_read_environment_in_an_isolated_process",
-            ])
-            .env(MARKER, temp.path())
-            .env("L3MS_COORDINATOR_SOCKET_DIR", temp.path().join("socket"))
-            .env("L3MS_ARTIFACT_ROOT", temp.path().join("artifacts"))
-            .env_remove("L3MS_HOST_SETTINGS_DIR")
-            .output()
-            .unwrap();
+        let output = {
+            let _fixture_guard = crate::control::process::executable_fixture_guard();
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "settings::tests::current_control_settings_read_environment_in_an_isolated_process",
+                ])
+                .env(MARKER, temp.path())
+                .env("L3MS_COORDINATOR_SOCKET_DIR", temp.path().join("socket"))
+                .env("L3MS_ARTIFACT_ROOT", temp.path().join("artifacts"))
+                .env_remove("L3MS_HOST_SETTINGS_DIR")
+                .output()
+                .unwrap()
+        };
         assert!(
             output.status.success(),
             "isolated settings test failed: {}",

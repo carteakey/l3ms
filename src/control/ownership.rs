@@ -206,15 +206,18 @@ mod tests {
     fn independent_process_cannot_acquire_held_host_lock() {
         let directory = private_directory();
         let _guard = CoordinatorLock::acquire(directory.path(), [0]).unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "control::ownership::tests::child_process_probe",
-                "--nocapture",
-            ])
-            .env("L3MS_TEST_LOCK_DIRECTORY", directory.path())
-            .output()
-            .unwrap();
+        let output = {
+            let _fixture_guard = crate::control::process::executable_fixture_guard();
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "control::ownership::tests::child_process_probe",
+                    "--nocapture",
+                ])
+                .env("L3MS_TEST_LOCK_DIRECTORY", directory.path())
+                .output()
+                .unwrap()
+        };
         assert!(
             output.status.success(),
             "{}",

@@ -478,9 +478,12 @@ fn run_capped_command(
         command.process_group(0);
     }
 
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("spawn child command {:?}", program))?;
+    let spawned = {
+        #[cfg(test)]
+        let _fixture_guard = crate::control::process::executable_fixture_guard();
+        command.spawn()
+    };
+    let mut child = spawned.with_context(|| format!("spawn child command {:?}", program))?;
     let stdout = child
         .stdout
         .take()
@@ -633,12 +636,16 @@ fn finish_terminated_pipe_readers(
 #[cfg(unix)]
 fn terminate_process_group(process_id: u32) {
     let group = format!("-{process_id}");
-    let _ = Command::new("/bin/kill")
-        .args(["-KILL", "--", group.as_str()])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    let _ = {
+        #[cfg(test)]
+        let _fixture_guard = crate::control::process::executable_fixture_guard();
+        Command::new("/bin/kill")
+            .args(["-KILL", "--", group.as_str()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+    };
 }
 
 fn utf8_safe_preview(bytes: &[u8], limit: usize) -> String {
@@ -1026,11 +1033,14 @@ mod tests {
 
     #[cfg(unix)]
     fn process_exists(process_id: &str) -> bool {
-        Command::new("/bin/kill")
-            .args(["-0", process_id])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
+        {
+            let _fixture_guard = crate::control::process::executable_fixture_guard();
+            Command::new("/bin/kill")
+                .args(["-0", process_id])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+        }
+        .is_ok_and(|status| status.success())
     }
 }

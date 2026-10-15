@@ -587,6 +587,8 @@ fn clock_label(now: SystemTime) -> String {
 fn current_clock_label() -> String {
     #[cfg(unix)]
     {
+        #[cfg(test)]
+        let _fixture_guard = crate::control::process::executable_fixture_guard();
         if let Ok(output) = Command::new("date").arg("+%H:%M:%S").output() {
             let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
             if output.status.success()

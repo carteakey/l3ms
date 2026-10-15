@@ -438,10 +438,12 @@ fn format_utc_timestamp(seconds: u64) -> String {
 
 /// SIGHUP the running llama-swap router so config edits hot-reload.
 pub fn reload_router() -> Result<usize> {
-    let output = Command::new("pgrep")
-        .args(["-x", "llama-swap"])
-        .output()
-        .context("failed to run pgrep")?;
+    let output = {
+        #[cfg(test)]
+        let _fixture_guard = crate::control::process::executable_fixture_guard();
+        Command::new("pgrep").args(["-x", "llama-swap"]).output()
+    }
+    .context("failed to run pgrep")?;
     let text = String::from_utf8_lossy(&output.stdout);
     let mut signalled = 0;
     for pid in text
@@ -449,10 +451,14 @@ pub fn reload_router() -> Result<usize> {
         .filter_map(|line| line.trim().parse::<i32>().ok())
         .filter(|pid| *pid > 1)
     {
-        Command::new("kill")
-            .args(["-HUP", &pid.to_string()])
-            .output()
-            .context("failed to run kill")?;
+        {
+            #[cfg(test)]
+            let _fixture_guard = crate::control::process::executable_fixture_guard();
+            Command::new("kill")
+                .args(["-HUP", &pid.to_string()])
+                .output()
+        }
+        .context("failed to run kill")?;
         signalled += 1;
     }
     if signalled == 0 {

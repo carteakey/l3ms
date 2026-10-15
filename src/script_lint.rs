@@ -44,11 +44,15 @@ impl LintReport {
 }
 
 pub fn lint_shell_script(path: impl AsRef<Path>) -> Result<LintReport> {
-    let output = match Command::new("shellcheck")
-        .args(["--format=json1", "--severity=warning"])
-        .arg(path.as_ref())
-        .output()
-    {
+    let output = {
+        #[cfg(test)]
+        let _fixture_guard = crate::control::process::executable_fixture_guard();
+        Command::new("shellcheck")
+            .args(["--format=json1", "--severity=warning"])
+            .arg(path.as_ref())
+            .output()
+    };
+    let output = match output {
         Ok(output) => output,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(LintReport {

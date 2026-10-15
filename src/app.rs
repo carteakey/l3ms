@@ -1241,7 +1241,7 @@ struct App {
     chat_endpoint_committed: Option<String>,
     chat_client: Option<ChatClient>,
     chat_models: Vec<SwapModel>,
-    chat_decision_model_ids: Vec<String>,
+    chat_non_chat_model_ids: Vec<String>,
     chat_model_state: TableState,
     chat_connection_pending: bool,
     chat_connection_request_id: u64,
@@ -1428,7 +1428,7 @@ impl App {
             chat_endpoint_committed: None,
             chat_client: None,
             chat_models: Vec::new(),
-            chat_decision_model_ids: Vec::new(),
+            chat_non_chat_model_ids: Vec::new(),
             chat_model_state: TableState::default().with_selected(Some(0)),
             chat_connection_pending: false,
             chat_connection_request_id: 0,
@@ -1666,7 +1666,7 @@ impl App {
                 self.push_log(format!("Stopped externally-started llama-server PID {pid}"));
                 self.chat_client = None;
                 self.chat_models.clear();
-                self.chat_decision_model_ids.clear();
+                self.chat_non_chat_model_ids.clear();
             }
             Err(error) => {
                 self.status = format!("Could not stop detected server PID {pid}");
@@ -1723,9 +1723,9 @@ impl App {
             .enumerate()
             .filter(|(_, model)| {
                 !self
-                    .chat_decision_model_ids
+                    .chat_non_chat_model_ids
                     .iter()
-                    .any(|decision_id| decision_id == &model.id)
+                    .any(|non_chat_id| non_chat_id == &model.id)
             })
             .map(|(index, _)| index)
             .collect()
@@ -1836,7 +1836,7 @@ impl App {
                     self.chat_endpoint_committed = Some(endpoint.clone());
                     self.chat_client = Some(client);
                     self.chat_models = inventory.models;
-                    self.chat_decision_model_ids = inventory.decision_model_ids;
+                    self.chat_non_chat_model_ids = inventory.non_chat_model_ids;
                     self.initialize_chat_model_selection();
                     self.status = format!(
                         "Connected to {endpoint} · {} model(s)",
@@ -4757,7 +4757,7 @@ impl App {
             .position(|&index| index == model_index)
         else {
             self.status = format!(
-                "Route model {} is decision-capable and cannot be selected for Chat",
+                "Route model {} advertises non-chat output and cannot be selected for Chat",
                 model_id
             );
             return true;
@@ -6225,7 +6225,12 @@ impl App {
         #[cfg(unix)]
         command.process_group(0);
 
-        let mut child = match command.spawn() {
+        let spawned = {
+            #[cfg(test)]
+            let _fixture_guard = crate::control::process::executable_fixture_guard();
+            command.spawn()
+        };
+        let mut child = match spawned {
             Ok(child) => child,
             Err(error) => {
                 self.status = format!("Could not start {name}");
@@ -9303,16 +9308,20 @@ fn append_bounded_text(target: &mut String, addition: &str, max_bytes: usize) {
 
 #[cfg(unix)]
 fn signal_process_group(process_group: u32, signal: &str) -> std::result::Result<(), String> {
-    let status = Command::new("/bin/kill")
-        .args([
-            format!("-{signal}"),
-            "--".into(),
-            format!("-{process_group}"),
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|error| error.to_string())?;
+    let status = {
+        #[cfg(test)]
+        let _fixture_guard = crate::control::process::executable_fixture_guard();
+        Command::new("/bin/kill")
+            .args([
+                format!("-{signal}"),
+                "--".into(),
+                format!("-{process_group}"),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+    }
+    .map_err(|error| error.to_string())?;
     if status.success() {
         Ok(())
     } else {
@@ -10481,7 +10490,7 @@ mod tests {
         app.chat_endpoint_committed = Some(endpoint.into());
         app.chat_client = Some(ChatClient::new(endpoint, api_key).unwrap());
         app.chat_models = models;
-        app.chat_decision_model_ids.clear();
+        app.chat_non_chat_model_ids.clear();
         app.chat_model_state.select(Some(0));
     }
 
@@ -11449,7 +11458,7 @@ mod tests {
                 test_chat_model(router_model, "unloaded", false),
             ],
         );
-        app.chat_decision_model_ids = vec![router_model.into()];
+        app.chat_non_chat_model_ids = vec![router_model.into()];
         assert_eq!(app.selected_chat_model().unwrap().id, "another-model");
         assert!(app.chat_models.iter().any(|model| model.id == router_model));
         open_direct_decision_form_for_profile(&mut app, router_model);
@@ -13484,7 +13493,7 @@ mod tests {
                         disabled: false,
                         size_bytes: None,
                     }],
-                    decision_model_ids: Vec::new(),
+                    non_chat_model_ids: Vec::new(),
                 },
             })
             .unwrap();
@@ -13527,6 +13536,10 @@ mod tests {
         connect_test_chat(
             &mut app,
             vec![
+                test_chat_model("decision-engine", "loaded", false),
+                test_chat_model("image-engine", "loaded", false),
+                test_chat_model("audio-engine", "loaded", false),
+                test_chat_model("embeddings-engine", "loaded", false),
                 test_chat_model("other-loaded-model", "loaded", false),
                 test_chat_model("local-chat", "unloaded", false),
             ],
@@ -13546,11 +13559,17 @@ mod tests {
         let previous_sessions = app.chat_sessions.clone();
         let previous_stream_id = app.chat_stream_request_id;
 
-        assert_eq!(app.selected_chat_model().unwrap().id, "other-loaded-model");
         assert!(app.stack_coordinator_socket_dir.is_none());
-        // A decision-only model before the chat route must not shift the
-        // filtered Chat picker index when the route is selected.
-        app.chat_decision_model_ids = vec!["other-loaded-model".into()];
+        // Non-chat models before the Chat route must not shift the filtered
+        // picker index when the exact route is selected.
+        app.chat_non_chat_model_ids = vec![
+            "decision-engine".into(),
+            "image-engine".into(),
+            "audio-engine".into(),
+            "embeddings-engine".into(),
+        ];
+        app.initialize_chat_model_selection();
+        assert_eq!(app.selected_chat_model().unwrap().id, "other-loaded-model");
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
             .unwrap();
 
@@ -13584,7 +13603,7 @@ mod tests {
             MissingModel,
             DisabledProfile,
             DisabledModel,
-            DecisionModel,
+            NonChatModel,
             Disconnected,
             EndpointMismatch,
             ActiveRequest,
@@ -13598,7 +13617,7 @@ mod tests {
             (Refusal::MissingModel, "not advertised"),
             (Refusal::DisabledProfile, "profile is disabled"),
             (Refusal::DisabledModel, "disabled in Chat"),
-            (Refusal::DecisionModel, "decision-capable"),
+            (Refusal::NonChatModel, "advertises non-chat output"),
             (Refusal::Disconnected, "Connect Chat"),
             (Refusal::EndpointMismatch, "not a confirmed connection"),
             (Refusal::ActiveRequest, "active Chat response"),
@@ -13631,8 +13650,8 @@ mod tests {
                 vec![test_chat_model("local-chat", "loaded", false)]
             };
             connect_test_chat(&mut app, advertised_models);
-            if matches!(case, Refusal::DecisionModel) {
-                app.chat_decision_model_ids = vec!["local-chat".into()];
+            if matches!(case, Refusal::NonChatModel) {
+                app.chat_non_chat_model_ids = vec!["local-chat".into()];
             }
             match case {
                 Refusal::Disconnected => {
@@ -13656,7 +13675,7 @@ mod tests {
                 Refusal::MissingModel
                 | Refusal::DisabledProfile
                 | Refusal::DisabledModel
-                | Refusal::DecisionModel => {}
+                | Refusal::NonChatModel => {}
             }
             let input_before = app.chat_input.clone();
             app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
@@ -13766,24 +13785,45 @@ mod tests {
     }
 
     #[test]
-    fn chat_picker_skips_loaded_decision_models_but_keeps_them_in_the_inventory() {
+    fn chat_picker_skips_known_non_chat_models_but_preserves_unknown_and_text_models() {
         let fixture = AppFixture::new();
         let mut app = fixture.app();
         app.chat_models = vec![
             test_chat_model("loaded-decision", "loaded", false),
+            test_chat_model("image-output", "loaded", false),
+            test_chat_model("audio-output", "loaded", false),
+            test_chat_model("embedding-output", "loaded", false),
+            // This model accepts image input but returns text, so it remains a
+            // valid Chat choice.
+            test_chat_model("text-image", "loaded", false),
+            // Unknown output metadata and older metadata-less entries fail open.
+            test_chat_model("custom-output", "loaded", false),
+            test_chat_model("legacy-model", "unloaded", false),
             test_chat_model("chat-loaded", "loaded", false),
             test_chat_model("chat-unloaded", "unloaded", false),
         ];
-        app.chat_decision_model_ids = vec!["loaded-decision".into()];
+        app.chat_non_chat_model_ids = vec![
+            "loaded-decision".into(),
+            "image-output".into(),
+            "audio-output".into(),
+            "embedding-output".into(),
+        ];
 
         app.initialize_chat_model_selection();
-        assert_eq!(app.selected_chat_model().unwrap().id, "chat-loaded");
-        assert_eq!(app.chat_models.len(), 3);
+        assert_eq!(app.selected_chat_model().unwrap().id, "text-image");
+        assert_eq!(app.chat_models.len(), 9);
+        assert_eq!(app.chat_picker_model_indices(), [4, 5, 6, 7, 8]);
 
         app.select_previous_chat_model();
         assert_eq!(app.selected_chat_model().unwrap().id, "chat-unloaded");
         app.select_next_chat_model();
-        assert_eq!(app.selected_chat_model().unwrap().id, "chat-loaded");
+        assert_eq!(app.selected_chat_model().unwrap().id, "text-image");
+
+        app.chat_models.truncate(4);
+        app.initialize_chat_model_selection();
+        app.select_next_chat_model();
+        assert!(app.selected_chat_model().is_none());
+        assert_eq!(app.chat_models.len(), 4);
     }
 
     #[test]
@@ -14324,7 +14364,11 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .process_group(0);
-        let mut child = command.spawn().expect("spawn isolated shell");
+        let mut child = {
+            let _fixture_guard = crate::control::process::executable_fixture_guard();
+            command.spawn()
+        }
+        .expect("spawn isolated shell");
         let process_group = child.id();
         thread::sleep(Duration::from_millis(50));
         signal_process_group(process_group, "TERM").expect("signal process group");

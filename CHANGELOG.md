@@ -45,7 +45,9 @@
 ### Changed
 - Exclude explicitly advertised decision models from Chat's default and picker,
   while preserving them for native decision forms and general model actions.
-  Unknown/older-server capabilities remain selectable; no model probe is added.
+  Apply the same filter to explicitly non-text media/embedding outputs; retain
+  text-output vision models and unknown/older-server capabilities. No model probe
+  or separate registry is added.
 - Add bounded optional image data URLs to native d3/Clef decisions in CLI, UI
   and standalone L3DS, refusing unsupported profiles without dispatch. Account
   for the complete input envelope and preflight Clef's required instructions.
