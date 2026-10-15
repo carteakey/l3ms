@@ -11,10 +11,10 @@ Unlike autoregressive LLMs (System 2) that generate token-by-token JSON, decisio
 
 For the current llama.cpp-backed local candidates, prefer the separately named
 `vllm-d3-flash` and `cloudflare-clef-flash` profiles. They send native typed
-questions through the existing local llama-swap endpoint using only Python's
-standard library; they do not require a Nagi/Laya environment or silently fall
-back to those models. See [native decision routing](../../docs/decision-models.md)
-for recipes, environment variables, live-use restrictions and unfinished gates.
+questions through llama-swap v262 or newer using only Python's standard
+library; they do not require a Nagi/Laya environment or silently fall back to
+those models. See [native decision routing](../../docs/decision-models.md) for
+recipes, environment variables, live-use restrictions and unfinished gates.
 
 | Profile | Engine | Architecture / tier | Declared deployment | Manifest expected latency | Readiness |
 |---|---|---|---|---:|---|

@@ -42,11 +42,13 @@ listener or run a Python model environment. Standalone L3DS uses its stdlib HTTP
 bridge with the same environment variables or `--base-url`/`--api-key` options.
 Prefer environment credentials over command-line keys.
 
-Requests go once to `/upstream/<router-id>/v1/systemone`. The original router
-version does not route the unsuffixed `/v1/systemone`; no fallback is attempted.
-Native answers and usage remain typed. Cancellation, timeout or malformed
-completion after dispatch is uncertain: inspect the endpoint before retrying.
-Closing the client connection does not prove server cancellation or GPU release.
+Local decisions use one `POST /v1/systemone` with the selected router model ID
+in the JSON `model` field. This requires llama-swap v262 or newer, which added
+model-body routing for this endpoint. The configured base path and bearer
+credential are retained. Native answers and usage remain typed. Cancellation,
+timeout or malformed completion after dispatch is uncertain: inspect the
+endpoint before retrying. Closing the client connection does not prove server
+cancellation or GPU release.
 
 These are router-owned CUDA models. The router performs its normal model swap;
 do not apply the external-media service-stop path to a decision request served

@@ -16,6 +16,15 @@ the [simplification plan](docs/migration/simplification-plan.md) defines scope,
 replacement order and acceptance gates. Linear remains authoritative for
 committed work.
 
+- [ ] Upstream-first gap audit against llama-swap v265, before further custom
+  engine expansion. Follow the superseding 2026-10-15 revision in the
+  [simplification plan](docs/migration/simplification-plan.md): native routing,
+  caller-by-caller replacement and net deletion first. Keep the live service and
+  parked Pi window untouched. Custom service switching is a retirement candidate,
+  not a mandatory feature to finish; prove any remaining tool-loop gap first.
+  The [source/caller audit](docs/migration/upstream-first-audit.md) records the
+  first native decision replacement, orphan-protocol deletion and next media
+  checks. Live upgrade/config compatibility is not yet accepted.
 - [ ] Complete the full Blender contract: headless Python rendering and the
   distinct interactive external GUI/MCP workflow. The wrapper's `--prompt`
   currently prints MCP guidance only. The opt-in single-action headless wrapper
@@ -23,7 +32,9 @@ committed work.
   shares the native runner/admission guard (six Rust checks); real rendering,
   interactive handoff and device acceptance remain pending. Do not invent inference, output artifacts, or a
   CPU/CUDA device declaration.
-- [ ] Add the small operator-owned native service handoff/restoration path.
+- [ ] Reassess whether the existing native service handoff/restoration path is
+  needed after native llama-swap serving acceptance. Do not expand or finish it
+  as a prerequisite to the upstream-first path. Earlier evidence follows.
   **Parked at the user's request while Pi uses Strata.** Do not preempt Pi or
   resume the live switching test without arranging the quiet window. The private
   bounded test harness is prepared; capture fresh state when returning to it.
@@ -31,7 +42,8 @@ committed work.
   fixed-unit/config/cgroup checks and one-shot ready-model restoration; default
   behavior stays operator-managed idle admission. Eight unit checks and strict
   lint/build pass; the unrestricted transport suite now passes. Finish the
-  real approved language -> media/TTS -> language cycle. The live unit uses
+  real approved language -> media/TTS -> language cycle only if that custom
+  path remains necessary. The last observed live unit uses
   KillMode=process; the tracked control-group template has not been
   installed. A persistent live-unit change requires separate authorization.
   Endpoint identity/client/manager quiescence remain operator assertions, not

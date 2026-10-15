@@ -6,7 +6,7 @@ Supports:
   - Laya (ModernBERT-large) via laya
   - SemIf (OpenJev) via semif-phase1 direct logit extraction
   - Jev 1.13 via typesafe-sdk (or WAN emulation fallback)
-  - llama.cpp native System One via local llama-swap HTTP passthrough
+  - llama.cpp native System One via local llama-swap model routing
 """
 
 import argparse
@@ -18,7 +18,7 @@ import re
 import sys
 import time
 from typing import Any, Dict, List, Tuple
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 
@@ -47,10 +47,8 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
-def _llamacpp_endpoint(base_url: str, model: str) -> str:
-    """Build the llama-swap passthrough URL for one local decision model."""
-    if not isinstance(model, str) or not _ROUTER_MODEL_ID.fullmatch(model):
-        raise ValueError("invalid router model id")
+def _llamacpp_endpoint(base_url: str) -> str:
+    """Build the llama-swap native System One URL."""
     if not isinstance(base_url, str):
         raise ValueError("invalid endpoint")
 
@@ -75,8 +73,7 @@ def _llamacpp_endpoint(base_url: str, model: str) -> str:
     if ":" in host:
         netloc = f"[{host}]" if port is None else f"[{host}]:{port}"
     base_path = parsed.path.rstrip("/")
-    model_segment = quote(model, safe="")
-    path = f"{base_path}/upstream/{model_segment}/v1/systemone"
+    path = f"{base_path}/v1/systemone"
     return urlunsplit(("http", netloc, path, "", ""))
 
 
@@ -93,7 +90,9 @@ class LlamaCppSystemOneEngine(BaseDecisionEngine):
         self.endpoint = None
         self.opener = None
         try:
-            self.endpoint = _llamacpp_endpoint(configured_url, model)
+            if not isinstance(model, str) or not _ROUTER_MODEL_ID.fullmatch(model):
+                raise ValueError("invalid router model id")
+            self.endpoint = _llamacpp_endpoint(configured_url)
             if self.api_key is not None and any(char in self.api_key for char in "\r\n"):
                 raise ValueError("invalid credential")
             # Do not route local credentials through environment-configured proxies, and do not
@@ -107,7 +106,7 @@ class LlamaCppSystemOneEngine(BaseDecisionEngine):
             raise InferenceUnavailable(self.initialization_error) from None
         try:
             body = json.dumps(
-                {"state": state, "questions": questions},
+                {"model": self.model, "state": state, "questions": questions},
                 allow_nan=False,
                 separators=(",", ":"),
             ).encode("utf-8")

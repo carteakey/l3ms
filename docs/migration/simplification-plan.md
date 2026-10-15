@@ -7,6 +7,65 @@ real-model acceptance. Linear remains the committed-work tracking authority.
 
 ## Product stays; implementation gets smaller
 
+### Upstream-first revision — 2026-10-15
+
+User-approved direction: L3MS is a workbench for llama-swap, not another
+inference platform. This revision takes precedence over the custom GPU queue,
+service handoff and adapter expansion proposed below. Those sections record the
+earlier implementation path; they are not requirements to finish that machinery.
+
+```text
+L3MS CLI / keyboard-first UI + editable recipes / scripts
+                         |
+                 native llama-swap routes
+                         |
+             language / decisions / media / TTS
+
+Existing standalone scripts remain available for workflows not served there.
+```
+
+llama-swap should own supported inference routing, process lifecycle, swapping
+policy and capability discovery. L3MS keeps useful operator workflows: setup,
+downloads, benchmarks, task inputs, results/history and artifact presentation.
+Do not introduce another universal engine interface, scheduler or service manager.
+
+Verified upstream changes remove reasons for custom bridging:
+
+- [v262](https://github.com/mostlygeek/llama-swap/releases/tag/v262) adds native
+  POST `/v1/systemone`, selecting the model from the JSON body.
+- [v264](https://github.com/mostlygeek/llama-swap/releases/tag/v264) adds decision
+  capability discovery and reserved `audiocpp_auto` passthrough.
+- [v265](https://github.com/mostlygeek/llama-swap/releases/tag/v265) supports
+  reverse-proxy subpaths and explicit TTS voice capability overrides.
+
+Next sequence, before adding more runtime code:
+
+1. Audit v265 source/contracts against actual CLI/UI callers. For each workflow,
+   record the native route, remaining gap, displaced code and acceptance check.
+   Include Comfy jobs/cancellation/artifacts, audio tasks, discovery, auth,
+   reverse-proxy prefixes and log events. Passthrough alone is not task acceptance.
+2. Prepare an isolated version-pinned upgrade/config compatibility check. Do not
+   change the live v247 service or dispatch models while Pi's window is parked.
+   In particular, verify the newer `/api/events/logs` contract against callers.
+3. Move decision callers to native `/v1/systemone` once the selected runtime
+   version supports it. Remove the old `/upstream/<id>/v1/systemone` bridge when
+   its callers are migrated; do not add ambiguous inference retry/fallback.
+4. Prefer native media/TTS serving where its tested contract fits. Keep existing
+   standalone recipes where it does not; do not recreate missing upstream features
+   preemptively. Delete displaced custom ownership, transport and configuration
+   code only after caller replacement, preserving existing results and originals.
+5. Test whether native swapping plus an external conversation/tool loop achieves
+   LLM -> GPU tool -> LLM. Preserve messages/tool results outside the model
+   process. Routing does not prove job completion, cancellation, GPU release or
+   prior-model restoration; neither a continuous stream nor KV preservation is
+   promised. Implement only demonstrated missing glue.
+
+The prepared custom service-stop/restoration harness remains parked, not the
+default next task. Retain safeguards for surviving direct workflows until they
+are replaced. Measure real net code removal; moving modules or increasing test
+counts does not satisfy the simplification target. No upgrade, live cutover or
+new seamless-tool-loop acceptance is implied by this planning revision.
+
 Current CUDA slice: direct Nagi/Laya and Breeze use the same foreground owner,
 existing advisory locks/device probe, and one interruption marker. This is an
 explicit idle operator window, not live-service takeover. The displaced CPU

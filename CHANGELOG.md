@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Breaking changes
+- Router-native d3/Clef decisions now require llama-swap v262+ and use its
+  `/v1/systemone` endpoint with the model in JSON. Remove the legacy per-model
+  passthrough path; no fallback or inference retry is introduced.
+- Remove the unused generic runtime-switching protocol and simulated adapters.
+  Keep the cancellation, deadlines and cleanup bounds used by actual workflows;
+  no live GPU guard or service control is removed.
 - Retire the branch-added, unused control-only `ControlDaemon::run` Rust method
   and its duplicate request/results handlers. CLI managed sessions still use
   their existing managed loop; shared handler and transport coverage is retained.
@@ -36,6 +42,9 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Revise the simplification plan toward llama-swap-native routing and lifecycle
+  ownership. Prioritize a v265 compatibility/gap audit and caller-first deletion
+  over expanding custom switching infrastructure; no live service is changed.
 - Port d3-flash and Clef-Flash decision recipes and standalone profiles. Shared
   CLI/UI decisions reuse the configured authenticated llama-swap connection,
   native typed responses and remote-uncertainty handling without a new worker.

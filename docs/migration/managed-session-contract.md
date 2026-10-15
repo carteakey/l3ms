@@ -1,5 +1,11 @@
 # Managed foreground session: remaining integration contract
 
+Historical managed-platform contract. The 2026-10-15 upstream-first revision in
+[simplification-plan.md](simplification-plan.md) supersedes this delivery path.
+The unused generic `RuntimeAdapter`/`switch_exclusive` protocol has been retired;
+remaining managed callers retain their concrete ownership and cleanup safeguards
+until replacement. This document does not require rebuilding that abstraction.
+
 This records the managed integration contract, not deployed functionality or live
 acceptance. The branch has a concrete managed-language executor with opt-in
 allowlisted local-job composition under verification, alongside the existing
@@ -35,9 +41,9 @@ not prove native completion or GPU release. Interrupted history without a durabl
 original runtime binding conservatively blocks drain for every bound runtime.
 Uncertain start, inference, cancellation or cleanup never permits automatic replay.
 
-The existing `RuntimeAdapter` lifecycle protocol and concrete service owner,
-transport, GPU probe and native execution adapters should be composed rather than
-replaced by another general service manager. Recovery gets an independent bounded
+Surviving managed execution uses the concrete service owner, transport, GPU probe
+and native execution adapters. Do not add another general service manager.
+Recovery gets an independent bounded
 deadline and does not inherit caller cancellation. Failed restoration quarantines
 conflicting work and retains ownership records.
 

@@ -265,7 +265,7 @@ class LlamaCppSystemOneTest(unittest.TestCase):
         response.read.return_value = json.dumps(payload, allow_nan=False).encode("utf-8")
         return response
 
-    def test_one_post_uses_passthrough_and_preserves_native_probabilities(self):
+    def test_one_post_uses_native_route_and_preserves_native_probabilities(self):
         body = {"model": "vllm-d3-flash", "answers": self.answers, "usage": {"tokens": 84}}
         response = self._response(body)
         opener = MagicMock()
@@ -286,10 +286,13 @@ class LlamaCppSystemOneTest(unittest.TestCase):
         request = opener.open.call_args.args[0]
         self.assertEqual(
             request.full_url,
-            "http://127.0.0.1:8080/custom/proxy/upstream/vllm-d3-flash/v1/systemone",
+            "http://127.0.0.1:8080/custom/proxy/v1/systemone",
         )
         self.assertEqual(request.get_method(), "POST")
-        self.assertEqual(json.loads(request.data), {"state": STATE, "questions": QUESTIONS})
+        self.assertEqual(
+            json.loads(request.data),
+            {"model": "vllm-d3-flash", "state": STATE, "questions": QUESTIONS},
+        )
         self.assertEqual(request.get_header("Authorization"), "Bearer fixture-secret")
         self.assertEqual(request.get_header("Content-type"), "application/json")
         self.assertEqual(opener.open.call_args.kwargs, {"timeout": runner.LLAMACPP_TIMEOUT_SECONDS})
@@ -361,7 +364,7 @@ class LlamaCppSystemOneTest(unittest.TestCase):
 
         self.assertEqual(
             engine.endpoint,
-            "http://localhost:8080/router-prefix/upstream/cloudflare-clef-flash/v1/systemone",
+            "http://localhost:8080/router-prefix/v1/systemone",
         )
         self.assertEqual(engine.api_key, "environment-secret")
         self.assertIs(engine.opener, opener)

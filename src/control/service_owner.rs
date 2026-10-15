@@ -1,7 +1,7 @@
 //! Persist-before-dispatch ownership of coordinator-created services.
 //!
 //! This composes the real intent store and controller under a retained host
-//! guard. It is not an admission barrier or RuntimeAdapter. Restored intents
+//! guard. It is not an admission barrier or generic lifecycle adapter. Restored intents
 //! are observed, never replayed; neither stop acknowledgment nor an absent
 //! unit retires its record or proves resource release.
 //! A lifecycle executor must reconcile retained intents and separately own

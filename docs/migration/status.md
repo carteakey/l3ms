@@ -9,6 +9,37 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
+## Upstream-first replacement and deletion — 2026-10-15
+
+The user approved llama-swap owning supported serving, routing and swapping,
+with L3MS retaining a thin keyboard-first workbench and scripts. Three agents
+audited native routes, media contracts and deletion dependencies. Findings and
+next replacements are in [upstream-first-audit.md](upstream-first-audit.md).
+Linear access requires reauthentication; no tracking update was posted.
+
+Root CLI/UI and standalone L3DS now POST once to `/v1/systemone`, selecting the
+catalog-pinned model in JSON. These new decision integrations require v262+;
+there is no legacy passthrough fallback, inference retry or extra routing mode.
+Auth, reverse-proxy prefix, loopback restriction, typed answers and uncertain
+post-dispatch cancellation remain covered. Per-model health routes are unrelated
+and remain intact. The user is updating the live router independently; this
+slice does not establish its installed version or real-model acceptance.
+
+Removed the uncalled generic `RuntimeAdapter`/`switch_exclusive` implementation
+and simulated adapters. The surviving runtime primitives still supply actual
+callers with resource claims, cancellation, deadlines and bounded cleanup.
+Managed-session and retained-ID observe/cancel/results still have callers and
+are not silently removed. Direct GPU guards and resident-unit controls remain.
+
+Verification: **937 root Rust tests passed, 4 existing ignores**; strict Clippy
+and format checks and root build pass. **32 L3DS runner Python tests, 17
+maintenance Python tests and 2 standalone Rust tests passed.** The lower root
+count reflects removal of the orphan protocol's simulation tests, not disabling
+tests for surviving behavior. Control source is **65,584 lines**, down **788**
+from `ffdf1a7` in the same tracked-file scope. The half-source reduction remains
+unmet. No live service control, model load, download or original checkout change
+was performed. Seamless LLM tool continuation and GPU acceptance remain open.
+
 ## Router-native d3/Clef decision port — 2026-10-14
 
 Ported the original checkout's uncommitted d3-flash and Clef-Flash serving

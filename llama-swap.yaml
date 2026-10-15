@@ -53,7 +53,7 @@ macros:
 
 models:
 
-  # Native typed decisions, not chat. Served through /upstream/<id>/v1/systemone.
+  # Native typed decisions, not chat. POST /v1/systemone with model (swap v262+).
   "vllm-d3-flash":
     name: "vLLM-SR d3-flash 9B Decision (Q8_0 + mmproj-BF16, text+image)"
     description: "Native typed decisions via llama.cpp. Accuracy-priority local candidate; live branch acceptance pending."

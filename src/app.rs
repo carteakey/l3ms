@@ -11263,9 +11263,7 @@ mod tests {
                 .set_write_timeout(Some(Duration::from_secs(3)))
                 .unwrap();
             let request = read_http_request(&mut stream);
-            assert!(
-                request.starts_with(&format!("POST /gateway/upstream/{model_id}/v1/systemone "))
-            );
+            assert!(request.starts_with("POST /gateway/v1/systemone "));
             let (headers, body) = request.split_once("\r\n\r\n").unwrap();
             if let Some(expected) = expected_authorization {
                 assert!(headers.lines().any(|line| {
@@ -11277,6 +11275,7 @@ mod tests {
             assert_eq!(
                 request,
                 serde_json::json!({
+                    "model": model_id,
                     "state": expected_state,
                     "questions": expected_questions
                 })

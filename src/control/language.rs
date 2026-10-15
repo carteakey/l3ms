@@ -339,7 +339,7 @@ impl LanguageAdapter {
                 LanguageErrorKind::InvalidRequest,
             ));
         }
-        let url = self.systemone_url(&model_id)?;
+        let url = self.systemone_url()?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -349,12 +349,13 @@ impl LanguageAdapter {
                     LanguageErrorKind::Configuration,
                 )
             })?;
-        runtime.block_on(self.execute_decisions_async(&url, request, context))
+        runtime.block_on(self.execute_decisions_async(&url, &model_id, request, context))
     }
 
     async fn execute_decisions_async(
         &self,
         url: &reqwest::Url,
+        model_id: &str,
         request: &InferenceRequest,
         context: &OperationContext<'_>,
     ) -> Result<NativeDecisionResult, LanguageFailure> {
@@ -372,13 +373,17 @@ impl LanguageAdapter {
         let http = client
             .post(url.clone())
             .header(reqwest::header::ACCEPT, "application/json")
-            .json(&NativeSystemOneRequest { state, questions });
+            .json(&NativeSystemOneRequest {
+                model: model_id,
+                state,
+                questions,
+            });
         let body = send_json_body(http, context, MAX_OUTPUT_BYTES).await?;
         decode_systemone_response(request, &body)
             .map_err(|_| failure(DispatchDisposition::Uncertain, LanguageErrorKind::Protocol))
     }
 
-    fn systemone_url(&self, model_id: &str) -> Result<reqwest::Url, LanguageFailure> {
+    fn systemone_url(&self) -> Result<reqwest::Url, LanguageFailure> {
         let configuration = failure(
             DispatchDisposition::NoDispatch,
             LanguageErrorKind::Configuration,
@@ -388,12 +393,7 @@ impl LanguageAdapter {
             return Err(configuration);
         }
         let mut segments = url.path_segments_mut().map_err(|_| configuration)?;
-        segments
-            .pop_if_empty()
-            .push("upstream")
-            .push(model_id)
-            .push("v1")
-            .push("systemone");
+        segments.pop_if_empty().push("v1").push("systemone");
         drop(segments);
         Ok(url)
     }
@@ -895,6 +895,7 @@ struct NativeEmbeddingsRequest {
 
 #[derive(Serialize)]
 struct NativeSystemOneRequest<'a> {
+    model: &'a str,
     state: &'a Value,
     questions: &'a serde_json::Map<String, Value>,
 }
@@ -1548,8 +1549,8 @@ mod tests {
     #[test]
     fn ipv6_loopback_preserves_base_path_without_network_access() {
         let adapter = LanguageAdapter::new("http://[::1]:8080/base/path", None).unwrap();
-        let url = adapter.systemone_url("router-model").unwrap();
-        assert_eq!(url.path(), "/base/path/upstream/router-model/v1/systemone");
+        let url = adapter.systemone_url().unwrap();
+        assert_eq!(url.path(), "/base/path/v1/systemone");
         assert!(is_loopback_url(&url));
     }
 
@@ -1636,11 +1637,7 @@ mod tests {
     }
 
     fn read_systemone_request(stream: &mut impl Read) -> (String, Value) {
-        read_http_json_with_headers(
-            stream,
-            "/upstream/router-decision_2.0/v1/systemone",
-            MAX_OUTPUT_BYTES,
-        )
+        read_http_json_with_headers(stream, "/v1/systemone", MAX_OUTPUT_BYTES)
     }
 
     fn run_embedding_fixture(
@@ -1701,6 +1698,7 @@ mod tests {
                 .set_write_timeout(Some(Duration::from_secs(2)))
                 .unwrap();
             let (_, payload) = read_systemone_request(&mut stream);
+            assert_eq!(payload["model"], "router-decision_2.0");
             assert_eq!(payload["state"], serde_json::json!({"severity":"high"}));
             assert_eq!(payload["questions"]["route"]["type"], "choice");
             let _ = write!(
@@ -1748,7 +1746,7 @@ mod tests {
                 .unwrap();
             let (headers, payload) = read_http_json_with_headers(
                 &mut stream,
-                "/base/path/upstream/router-decision_2.0/v1/systemone",
+                "/base/path/v1/systemone",
                 MAX_OUTPUT_BYTES,
             );
             assert!(headers
@@ -1760,6 +1758,7 @@ mod tests {
             assert_eq!(
                 payload,
                 serde_json::json!({
+                    "model": "router-decision_2.0",
                     "state": {"severity":"high"},
                     "questions": {
                         "route": {"type":"choice", "criteria":{"proceed":"Proceed", "stop":"Stop"}}

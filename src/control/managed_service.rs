@@ -1,7 +1,7 @@
 //! Conservative ownership of one coordinator-created Linux transient service.
 //!
-//! This is intentionally not a RuntimeAdapter and is not wired into the
-//! daemon. Callers persist the prepared intent before dispatch. A local
+//! This is a concrete service owner, not a generic lifecycle adapter. Callers
+//! persist the prepared intent before dispatch. A local
 //! systemd-run timeout can happen after the manager accepted the start, so all
 //! post-spawn failures retain that intent for explicit reconciliation. No
 //! failure path stops a unit by name.
@@ -1304,7 +1304,7 @@ impl ManagedServiceController {
 
     /// Prepare an intent bound to a catalog runtime identity. The binding is
     /// persisted with the start intent and included in manager reconciliation;
-    /// it is metadata, not standalone RuntimeAdapter ownership proof.
+    /// it is metadata, not standalone admission or resource ownership proof.
     pub fn prepare_start_for_runtime(
         &self,
         runtime_identity: RuntimeIdentity,
