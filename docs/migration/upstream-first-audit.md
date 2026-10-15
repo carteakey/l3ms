@@ -50,15 +50,14 @@ replacement demonstrates output and honest cancellation semantics.
 
 ## Remaining checks
 
-1. Rerun the corrected Clef image case in the isolated CPU setup; do not interpret
-   the prior HTTP 400 as model output.
-2. Recheck Comfy cancellation without the observed system load if safe, and test
-   any learned-model/GPU workflow only in an approved quiet window. Do not change
-   serving config or live service state as part of this audit.
-3. Verify end-to-end live task and restoration behavior only in an approved
-   window after Pi's GPU work is clear. No automatic inference retries,
-   stop/start experiments or permanent cutover are authorized here.
-4. Reassess tool-loop glue only if an accepted native workflow demonstrates a
+The Clef image rerun, Comfy cancellation and learned GPU graph, and live task and
+restoration checks passed in the approved window; see
+[live acceptance](live-port-acceptance.md). Open:
+
+1. Decide whether to declare `comfyui_auto` and `audiocpp_auto` in the serving
+   YAML so llama-swap owns media swapping, and delete the custom GPU guard and
+   resident handoff if the pinned audio.cpp server covers all four Breeze modes.
+2. Reassess tool-loop glue only if an accepted native workflow demonstrates a
    specific missing conversation behavior.
 
 The retired source is an actual deletion, not code relocation. Keep historical
