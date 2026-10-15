@@ -25,6 +25,10 @@ committed work.
   The [source/caller audit](docs/migration/upstream-first-audit.md) records the
   first native decision replacement, orphan-protocol deletion and next media
   checks. Live upgrade/config compatibility is not yet accepted.
+  [Comfy router serving](docs/migration/comfy-router-serving.md) is prepared as
+  an opt-in recipe; client prefix/auth tests pass. Real endpoint/async-job and
+  GPU acceptance remain open. Audio server cancellation/output parity is not
+  established, so keep the working speech CLI rather than adding a second path.
 - [ ] Complete the full Blender contract: headless Python rendering and the
   distinct interactive external GUI/MCP workflow. The wrapper's `--prompt`
   currently prints MCP guidance only. The opt-in single-action headless wrapper

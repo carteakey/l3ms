@@ -2691,11 +2691,16 @@ mod tests {
     fn native_http_routes_preserve_graph_and_scope_cancel_to_owned_job() {
         let mut output = terminal("completed");
         output["outputs"] = serde_json::json!({"9":{"images":[{"filename":"out.png","subfolder":"run","type":"output"}],"audio":[{"filename":"out.wav","subfolder":"","type":"output"}],"video":[{"filename":"out.mp4","subfolder":"","type":"temp"}]}});
-        let (endpoint, server) = fixture(vec![
+        let mut replies = vec![
             reply(serde_json::json!({"prompt_id":ID})),
             reply(output),
             reply(serde_json::json!({"cancelled":true})),
-        ]);
+        ];
+        if cfg!(target_os = "linux") {
+            replies.push((200, "fixture-artifact-bytes".into(), Duration::ZERO));
+        }
+        let (endpoint, server) = fixture(replies);
+        let endpoint = format!("{endpoint}/stack/comfyui");
         let adapter = adapter(&endpoint);
         let mut job = prepared(&adapter);
         assert_eq!(job.id(), ID);
@@ -2711,12 +2716,38 @@ mod tests {
         assert!(!format!("{snapshot:?}").contains("out.png"));
         assert!(!format!("{snapshot:?}").contains("MUST_NOT_LEAK"));
         assert!(adapter.cancel(&job, &context()).unwrap());
+        #[cfg(target_os = "linux")]
+        {
+            let mut artifact = tempfile::tempfile().unwrap();
+            let image = snapshot
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.filename == "out.png")
+                .unwrap();
+            let artifact_url = adapter.view_path(image).unwrap();
+            assert!(artifact_url.starts_with(&format!("{endpoint}/view?")));
+            assert!(artifact_url.contains("filename=out.png"));
+            assert!(artifact_url.contains("subfolder=run"));
+            assert!(artifact_url.contains("type=output"));
+            assert_eq!(
+                adapter
+                    .http_download_to(&artifact_url, &mut artifact, 1024, &context())
+                    .unwrap(),
+                b"fixture-artifact-bytes".len() as u64
+            );
+            artifact.seek(std::io::SeekFrom::Start(0)).unwrap();
+            let mut bytes = Vec::new();
+            artifact.read_to_end(&mut bytes).unwrap();
+            assert_eq!(bytes, b"fixture-artifact-bytes");
+        }
         let recorded = server.join().unwrap();
-        assert!(recorded[0].0.starts_with("POST /prompt HTTP/1.1"));
+        assert_eq!(
+            recorded.len(),
+            if cfg!(target_os = "linux") { 4 } else { 3 }
+        );
         assert!(recorded[0]
             .0
-            .to_lowercase()
-            .contains("authorization: bearer fixture"));
+            .starts_with("POST /stack/comfyui/prompt HTTP/1.1"));
         assert_eq!(recorded[0].1["prompt_id"], ID);
         assert_eq!(
             recorded[0].1["prompt"]["1"]["inputs"]["text"],
@@ -2724,10 +2755,19 @@ mod tests {
         );
         assert!(recorded[1]
             .0
-            .starts_with(&format!("GET /api/jobs/{ID} HTTP/1.1")));
-        assert!(recorded[2]
-            .0
-            .starts_with(&format!("POST /api/jobs/{ID}/cancel HTTP/1.1")));
+            .starts_with(&format!("GET /stack/comfyui/api/jobs/{ID} HTTP/1.1")));
+        assert!(recorded[2].0.starts_with(&format!(
+            "POST /stack/comfyui/api/jobs/{ID}/cancel HTTP/1.1"
+        )));
+        #[cfg(target_os = "linux")]
+        assert!(recorded[3].0.starts_with(
+            "GET /stack/comfyui/view?filename=out.png&subfolder=run&type=output HTTP/1.1"
+        ));
+        assert!(recorded.iter().all(|(header, _)| {
+            header
+                .to_lowercase()
+                .contains("authorization: bearer fixture")
+        }));
         assert!(recorded
             .iter()
             .all(|(header, _)| !header.contains("/interrupt")));

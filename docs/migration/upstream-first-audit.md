@@ -28,15 +28,18 @@ safe deletion; it is not the live GPU guard or resident-unit implementation.
 ## Media details that affect the next replacement
 
 Tagged v265 [Comfy passthrough](https://github.com/mostlygeek/llama-swap/blob/v265/internal/server/comfyui.go)
-uses reserved `comfyui_auto`, strips the prefix and prevents GET cold-starts
-(409); POST can start the backend. Auth middleware still applies. Our serving
+uses reserved `comfyui_auto` and strips the prefix. Only GETs matching its
+ignored static/websocket/job-list paths refuse cold-starts (409); other paths
+can start the backend. Auth middleware still applies. Our serving
 YAML does not declare that reserved model. A UI URL alone cannot enable it.
 
 Our `ComfyAdapter` uses caller-owned IDs with `/prompt`, `/api/jobs/{id}`,
 `/api/jobs/{id}/cancel` and `/view`. Preserve its actual backend contract rather
 than assuming passthrough supplies completion, scoped cancellation or outputs.
 Its configured base URL can carry `/comfyui`; verify all paths and credentials
-with an isolated fixture before migrating serving ownership.
+with an isolated fixture before migrating serving ownership. Built-in exclusions
+match `/api/jobs` exactly, not `/api/jobs/{id}` or `/view`; do not assume polling
+or artifact downloads are passive after another model has swapped Comfy out.
 
 Tagged v265 [audio passthrough](https://github.com/mostlygeek/llama-swap/blob/v265/internal/server/audiocpp.go)
 uses reserved `audiocpp_auto`. The separate model-routed task endpoint is
@@ -45,11 +48,23 @@ POST `/audioapi/v1/tasks/run`, forwarding `/v1/tasks/run` upstream—not
 Neither reserved model is configured in this branch. Do not silently replace
 speech CLI execution with an unconfigured server route.
 
+Offline inspection of audio.cpp pin `955c8725c611d511774e6be132aff6609163b2d2`
+finds server synthesis support but no inference-cancel endpoint. Its busy timeout
+bounds waiting, not a running inference; model unload takes the same run lock.
+Offline speech returns WAV bytes, while incremental speech returns PCM SSE
+events rather than the current CLI's WAV/chunk files. The client would still
+need explicit output handling and honest cancellation semantics. Server modes
+are configured per registered model. Do not replace the working four-mode CLI
+path solely because HTTP routing exists. Evidence: pinned `app/server/README.md`
+(busy timeout), `app/server/runtime.cpp` (speech, streaming and unload handlers)
+and `app/server/busy_guard.h`; no model execution was performed.
+
 ## Ordered follow-up
 
 1. Finish offline native decision route checks and unused protocol deletion.
-2. Prepare Comfy's explicit router serving recipe and prefix/auth fixtures,
-   reusing its native job client. Keep standalone commands and originals.
+2. The [opt-in Comfy recipe](comfy-router-serving.md) and client prefix/auth
+   fixtures are prepared. Verify them with the real configured router/backend
+   before cutover. Keep standalone commands and originals.
 3. Check the pinned audio.cpp server against each existing speech mode and
    cancellation/output requirement before choosing a server-backed replacement.
 4. After the user's update and an arranged quiet window, verify exact installed

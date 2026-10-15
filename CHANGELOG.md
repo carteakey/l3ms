@@ -42,6 +42,9 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Prepare opt-in native Comfy serving guidance without changing the live config
+  or adding a launcher. Verify existing job-client proxy-prefix/auth behavior
+  offline; passthrough remains distinct from GPU and real-job acceptance.
 - Revise the simplification plan toward llama-swap-native routing and lifecycle
   ownership. Prioritize a v265 compatibility/gap audit and caller-first deletion
   over expanding custom switching infrastructure; no live service is changed.

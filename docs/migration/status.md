@@ -11,6 +11,31 @@ runtime check.
 
 ## Upstream-first replacement and deletion — 2026-10-15
 
+Follow-up offline media checks: the existing Comfy HTTP fixture now verifies a
+`/stack/comfyui` base prefix and bearer credentials on submission, per-job status,
+scoped cancellation and artifact-byte download. No new transport or dispatcher
+was introduced. Artifact content validation remains separately covered; these
+synthetic bytes are not an actual generated image. **937 root tests pass with
+4 existing ignores**, with strict Clippy and format checks. This extends one
+test rather than adding duplicate fixture infrastructure; control source is now
+**65,624 lines** (40 added test lines, no new production code).
+
+The tagged proxy source only prevents cold-starts for its matching ignored GET
+paths, not all reads. Specific-job status and `/view` are not in its built-in
+exclusions. The audit now states this explicitly: no promise of passive polling
+after a swap or safe concurrent model clients. The pinned audio.cpp server has
+no inference-cancel endpoint and emits different streaming outputs, so its HTTP
+route is not a drop-in replacement for the working four-mode speech CLI. Keep
+that implementation until an explicit replacement meets the required behavior.
+All checks stayed offline; the user's live update and parked GPU work were not
+probed or changed.
+
+The [opt-in serving recipe](comfy-router-serving.md) uses native `comfyui_auto`,
+the router's `${PORT}`, explicit Comfy paths and `/system_stats` readiness,
+without enabling a model in the tracked serving YAML. YAML parsing and shell
+argument structure pass with the existing environment; no installation or
+process launch was needed. This is a prepared recipe, not a validated deployment.
+
 The user approved llama-swap owning supported serving, routing and swapping,
 with L3MS retaining a thin keyboard-first workbench and scripts. Three agents
 audited native routes, media contracts and deletion dependencies. Findings and
