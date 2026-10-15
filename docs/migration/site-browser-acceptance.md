@@ -1,5 +1,22 @@
 # Local dashboard browser acceptance
 
+## Current manifest recheck — 2026-10-15
+
+At `98d58b4`, regenerated the payload and reran the existing browser probe with
+`LIBGL_ALWAYS_SOFTWARE=1 MOZ_WEBRENDER_SOFTWARE=1 CUDA_VISIBLE_DEVICES=`.
+All **8 media/TTS and 9 decision cards** matched their native manifests.
+Pointer clicks, ArrowRight/Home/End and focus assertions passed at 1440px and
+390px; no horizontal overflow or dashboard console errors were reported. Root
+visually inspected the four screenshots in ignored
+`.toolkit/dashboard-probe-o7O0Tm/`: headings, navigation, badges and profile links
+remain readable, with single-column mobile cards. The probe verified child and
+process-group cleanup and removed its disposable profile. It did not use the
+operator's browser profile or alter any inference service. This closes this
+current layout/keyboard recheck, not screen-reader certification, public-link
+deployment or model/runtime acceptance.
+
+## Earlier checks
+
 The connected browser surface was unavailable, but read-only host discovery on
 2026-10-07 found Firefox 157.0.1. Isolated headless Firefox profiles rendered the
 actual local dashboard at desktop 1440×1600 and mobile 390×1400 without using the

@@ -32,7 +32,10 @@ for scope and evidence.
   not full-port acceptance. See the [speech record](docs/migration/direct-speech-acceptance.md).
   The post-retirement 80×24 decision-image form, Chat capability selection and
   metadata-only history pass against a private synthetic endpoint; real Clef
-  image inference and comprehensive visual/accessibility checks remain open.
+  image inference and comprehensive accessibility checks remain open. The current
+  site passes real desktop/mobile pointer, keyboard, focus and overflow checks
+  with all 8 media and 9 decision cards; see the
+  [browser record](docs/migration/site-browser-acceptance.md).
 - [ ] Audit the exact outgoing history/export, endpoints, host paths, secrets and
   large files before publication. Publication remains **NO-GO**; no push or
   history rewrite without authorization.
