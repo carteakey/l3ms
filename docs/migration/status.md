@@ -66,6 +66,16 @@ GPU workflow, Pi handoff, live model task or complete all-lane acceptance has
 been established. Read-only router version/catalog visibility is verified; Pi's
 GPU window remains parked.
 
+Tracked-source recheck: exported `914afa8` with `git archive` to
+`/tmp/l3ms-native-source-mkQ3UC`, without ignored vendors, models or environments.
+Using cached dependencies/build artifacts, the root source recompiled there and
+passed **645 tests, 4 ignored**; standalone toolkit source builds and **6 + 2**
+tests passed. Copied binaries launched from `/tmp` list all 34 root profiles and
+both standalone catalogs. Toolkit Python suites (38 + 17 + 22 + 14), root
+downloader (14), dashboard generator (11) and DOM fixtures pass from the export.
+This is source portability evidence, not fresh dependency acquisition or runtime
+installation. No live services or models were touched by these checks.
+
 ## Router-native d3/Clef decision port — 2026-10-14
 
 Ported the original checkout's uncommitted d3-flash and Clef-Flash serving
