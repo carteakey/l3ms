@@ -173,3 +173,5 @@ What each frontend adds:
   mode, NAS archive, PR-stack builds via `llama-test-pr.sh`)?
 - Should Tune expose every flag or only a curated set per engine (today's
   `param_registry.rs` is the curated set)?
+
+Implementation steps, gates and system monitoring: [workbench plan](workbench-plan.md).
