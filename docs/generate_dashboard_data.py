@@ -365,6 +365,8 @@ def main() -> None:
         # profiles remain discoverable through llama-swap but do not have TPS.
         and "--embedding" not in model.get("cmd", "")
         and model_id not in native_decision_ids
+        # llama-swap-managed media engines (reserved *_auto ids) are not LLMs.
+        and not model_id.endswith("_auto")
     }
     metadata_ids = set(meta["models"])
     if active_ids != metadata_ids:

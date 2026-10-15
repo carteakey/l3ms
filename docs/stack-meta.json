@@ -22,6 +22,14 @@
       "experiment": "docs/cpu-native-workflows.md",
       "modes": ["Standard TTS (CPU)", "Offline voice design (CPU)", "Voice cloning (CPU)", "TTS chunks after completion (CPU)"]
     },
+    "yue2-music": {
+      "guide": "toolkits/l2m2/docs/yue2-setup.md",
+      "experiment": null
+    },
+    "qwen-image-2.1-turbo": {
+      "guide": "toolkits/l2m2/docs/qwen-image-2.1-turbo-setup.md",
+      "experiment": "toolkits/l2m2/docs/experiments/qwen-image-2.1-turbo-vs-base.md"
+    },
     "blender-3d": {
       "guide": "toolkits/l2m2/docs/blender-mcp-setup.md",
       "experiment": null
@@ -36,8 +44,8 @@
     }
   },
   "decisions": {
-    "vllm-d3-flash": {"guide": "docs/decision-models.md", "experiment": null},
-    "cloudflare-clef-flash": {"guide": "docs/decision-models.md", "experiment": null},
+    "vllm-d3-flash": {"guide": "docs/decision-models-cli.md", "experiment": null},
+    "cloudflare-clef-flash": {"guide": "docs/decision-models-cli.md", "experiment": null},
     "nagi-smol": {"guide": "toolkits/l3ds/README.md", "experiment": null},
     "nagi-smol-cpu": {"guide": "docs/cpu-native-workflows.md", "experiment": "docs/cpu-native-workflows.md"},
     "nagi-big": {"guide": "toolkits/l3ds/README.md", "experiment": null},

@@ -49,6 +49,10 @@ macros:
   # humanizer: master binary with full Gemma 4 support & jinja chat template
   "humanizer_server":      "${env.L3MS_ROOT}/vendor/llama.cpp-master/build/bin/llama-server"
 
+  # media engines owned by llama-swap (reserved model ids audiocpp_auto / comfyui_auto)
+  "audiocpp_server":       "${env.L3MS_ROOT}/vendor/audio.cpp-955c872/build/bin/audiocpp_server"
+  "comfy_root":            "/home/kchauhan/repos/l2m2"
+
   # --- shared paths ---
   "chat_template": "${env.L3MS_ROOT}/chat-template.jinja"
 
@@ -89,6 +93,33 @@ models:
       -b 8192 -ub 8192
       -t 10 --threads-batch 12 --prio 2
       --host 0.0.0.0 --port ${PORT}
+
+  # ===========================================================================
+  # Media engines. llama-swap swaps these like any model: /audiocpp/ and
+  # /comfyui/ route to the reserved ids. See docs/migration/media-through-llama-swap.md.
+  # ===========================================================================
+
+  "audiocpp_auto":
+    name: "audio.cpp (Breeze-TTS-2: tts, design, clone, streaming)"
+    description: "Native audio.cpp server on CUDA. /audiocpp/v1/audio/speech with model breeze-tts (standard or options.instruction design), breeze-clone (voice_ref + reference_text) and breeze-stream (SSE)."
+    cmd: >-
+      ${audiocpp_server} --config ${env.L3MS_ROOT}/toolkits/l2m2/audiocpp-server.json
+      --host 127.0.0.1 --port ${PORT} --no-ui
+    proxy: http://127.0.0.1:${PORT}
+    checkEndpoint: /health
+
+  "comfyui_auto":
+    name: "ComfyUI (image and workflow engine)"
+    description: "ComfyUI via /comfyui/. Low-VRAM flags; job submit, status, cancel and artifact routes are used by the l2m2 adapter."
+    cmd: >-
+      /usr/bin/bash -c 'cd ${comfy_root}/vendor/ComfyUI &&
+      exec ${comfy_root}/.venv-comfy/bin/python ${comfy_root}/vendor/ComfyUI/main.py
+      --listen 127.0.0.1 --port ${PORT} --disable-auto-launch --disable-api-nodes
+      --lowvram --reserve-vram 1.0
+      --user-directory ${comfy_root}/.toolkit/comfyui/user
+      --output-directory ${env.HOME}/media-output/comfyui'
+    proxy: http://127.0.0.1:${PORT}
+    checkEndpoint: /system_stats
 
   # ===========================================================================
   # Embeddings
