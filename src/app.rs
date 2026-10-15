@@ -12211,6 +12211,53 @@ mod tests {
     }
 
     #[test]
+    fn every_tab_and_overlay_renders_at_awkward_terminal_sizes_without_panicking() {
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        let mut app = fixture.app();
+        app.refresh_stack_catalog();
+        app.models = vec![
+            test_chat_model(
+                "a-model-with-a-rather-long-identifier-for-wrapping",
+                "loaded",
+                false,
+            ),
+            test_chat_model("short", "unloaded", false),
+        ];
+        let tabs = [
+            Tab::Workbench,
+            Tab::ModelOps,
+            Tab::Chat,
+            Tab::Browser,
+            Tab::Download,
+            Tab::Jobs,
+            Tab::Maintenance,
+            Tab::StackCatalog,
+        ];
+        for (width, height) in [
+            (1, 1),
+            (10, 3),
+            (20, 8),
+            (40, 10),
+            (60, 18),
+            (80, 24),
+            (200, 60),
+        ] {
+            for tab in tabs {
+                for overlay in [0, 1, 2] {
+                    app.tab = tab;
+                    app.show_palette = overlay == 1;
+                    app.show_help = overlay == 2;
+                    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                    terminal
+                        .draw(|frame| app.draw(frame))
+                        .unwrap_or_else(|_| panic!("draw failed at {width}x{height}"));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn byte_formatter_is_readable() {
         assert_eq!(format_bytes(10), "10 B");
         assert_eq!(format_bytes(1536), "1.5 KiB");
