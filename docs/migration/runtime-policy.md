@@ -9,7 +9,8 @@ Prefer a smaller supported scope over another orchestration layer.
 | Language, embeddings, native decisions | llama-swap native endpoints |
 | Breeze speech, HeartMuLa music, H3 audio | Shared `audiocpp_auto` process |
 | Images, LTX video/audio, YuE2 music | Shared `comfyui_auto` process |
-| Advanced H3 video and Blender | Existing opt-in direct workflows; separate acceptance |
+| Blender headless | Existing opt-in direct workflow in an idle-GPU window; separate acceptance |
+| H3 video, CUDA Nagi/Laya decisions | Retired from the root workbench; standalone toolkit scripts only |
 
 LTX and YuE2 use the existing ComfyUI workflow interface, cancellation, downloads
 and history. There are no model-specific root Python executors or fallback
