@@ -16,6 +16,10 @@
   surface fill, phosphor-mint focus and selection, readable secondary text
   (contrast-tested at 4.5:1), and a header that shows the language, media and
   decisions lane signatures. Remove the unused falling-trail boot animation.
+  The Stack tab now colours each profile's lane (language mint, media cyan,
+  decisions amber) and its selected-profile panel border, and no longer advertises
+  the removed `o observe` key; README and palette keywords no longer describe the
+  deleted coordinator commands.
 
 ### Breaking changes
 - Remove the opt-in resident llama-swap pause/restore handoff

@@ -7049,7 +7049,7 @@ impl App {
                 .count()
         };
         let title = format!(
-            "{} profile(s) · language {} · media {} · decisions {} · r refresh · f Chat/task · o observe · c cancel",
+            "{} profile(s) · language {} · media {} · decisions {} · r refresh · f Chat/task · c cancel",
             profiles.len(),
             count_for(Lane::Language),
             count_for(Lane::Media),
@@ -7057,7 +7057,7 @@ impl App {
         );
         let rows = profiles.iter().map(|profile| {
             Row::new(vec![
-                Cell::from(profile.key.lane.as_str()),
+                Cell::from(profile.key.lane.as_str()).style(lane_style(profile.key.lane)),
                 Cell::from(profile.key.profile_id.to_string()),
                 Cell::from(profile.name.as_str()),
                 Cell::from(readiness_label(profile.readiness)),
@@ -7091,11 +7091,17 @@ impl App {
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
             .split(sections[1]);
+        let selected_lane = self
+            .stack_catalog_state
+            .selected()
+            .and_then(|index| profiles.get(index))
+            .map(|profile| lane_style(profile.key.lane));
         frame.render_widget(
             Paragraph::new(details)
                 .style(theme::text())
                 .block(
                     theme::block()
+                        .border_style(selected_lane.unwrap_or_else(theme::border))
                         .title("Selected profile · ↑/↓ or j/k select")
                         .borders(Borders::ALL),
                 )
@@ -7930,6 +7936,15 @@ impl App {
             .wrap(Wrap { trim: false }),
             area,
         );
+    }
+}
+
+/// Lane signature colour: marks where a profile lives, never its runtime state.
+fn lane_style(lane: Lane) -> Style {
+    match lane {
+        Lane::Language => theme::lane_language(),
+        Lane::Media => theme::lane_media(),
+        Lane::Decisions => theme::lane_decisions(),
     }
 }
 
@@ -12068,6 +12083,37 @@ mod tests {
         assert_eq!(buffer[(find("language"), 0)].fg, theme::PHOSPHOR);
         assert_eq!(buffer[(find("media"), 0)].fg, theme::CYAN);
         assert_eq!(buffer[(find("decisions"), 0)].fg, theme::AMBER);
+    }
+
+    #[test]
+    fn stack_catalog_marks_lanes_and_advertises_only_live_keys() {
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        let mut app = fixture.app();
+        app.refresh_stack_catalog();
+        app.tab = Tab::StackCatalog;
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let text = terminal_text(&terminal);
+        assert!(!text.contains("observe"), "removed key still advertised");
+        assert!(text.contains("c cancel"));
+        let buffer = terminal.backend().buffer();
+        let fg_of = |word: &str| {
+            for y in 0..buffer.area.height {
+                let row: Vec<String> = (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect();
+                let line = row.concat();
+                // Table rows start with the lane after the border and highlight gutter.
+                if let Some(x) = line.find(word).filter(|x| *x < 12) {
+                    return Some(buffer[(x as u16, y)].fg);
+                }
+            }
+            None
+        };
+        // The first row is selected, which restyles it; the others keep lane colour.
+        assert_eq!(fg_of("media"), Some(theme::CYAN));
+        assert_eq!(fg_of("decisions"), Some(theme::AMBER));
     }
 
     #[test]

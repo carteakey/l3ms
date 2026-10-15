@@ -291,39 +291,24 @@ cancellation (`c`) and results; the TUI allocates a fresh private output directo
 under its data root. History stores metadata and relative artifact references,
 not text or audio bytes. See [real CPU speech evidence](docs/migration/direct-speech-acceptance.md).
 
-### Retained coordinator compatibility clients
+### Native tasks and routed engines
 
-The branch-added coordinator server and managed-session creator are retired.
-Only compatibility clients for an explicitly supplied older server remain;
-existing disk records are preserved. See the
-[simplification plan](docs/migration/simplification-plan.md).
-On Linux, observe or cancel a coordinator request using an explicitly
-configured private socket directory:
+Speech, images, embeddings, language and decisions go through llama-swap: Breeze
+TTS (`audiocpp_auto`) and ComfyUI (`comfyui_auto`) are declared in
+`llama-swap.yaml`, so the router swaps them like any model; see
+[media through llama-swap](docs/migration/media-through-llama-swap.md). The
+earlier coordinator, its retained-ID `--coordinator-*`/`--request-*` commands and
+the resident pause/restore handoff were removed; there is nothing to observe by
+request ID.
 
-```bash
-l3ms --coordinator-status request-123 --coordinator-socket-dir /path/to/private/socket-dir
-l3ms --coordinator-cancel request-123 --coordinator-socket-dir /path/to/private/socket-dir
-l3ms --request-output request-123 --request-lane decisions --coordinator-socket-dir /path/to/private/socket-dir
-```
-
-These commands use a three-second IPC deadline and return compact JSON. They do
-not start a daemon or fall back to a direct engine. Generic envelope-file
-submission and the coordinator task-form fallback have been retired. Stack
-forms (`f`) run supported tasks directly; profiles without a native runner
-refuse instead of submitting through a second execution mode. A lost reply from
-an external coordinator means query the original ID, not resubmit. A missing
-coordinator fails explicitly. Cancellation acceptance is not proof that active
-work has finished; query the same request ID for its terminal status. Service
-installation is not provided by these compatibility commands.
-CPU-local decisions use `--run-profile` or the Stack Catalog typed form (`f`)
-directly, without a daemon; see [native CPU workflows](docs/cpu-native-workflows.md).
-Declared CUDA Nagi/Laya, Breeze, HeartMuLa, H3 and LTX use the same runner with an
-[explicit operator-managed idle GPU window](docs/native-gpu-workflows.md),
-not automatic takeover of a live service.
-Stack observe/output (`o`) and cancel (`c`) remain available for retained jobs.
-Native output is sensitive and should not enter shared logs.
-The branch-added HTTP gateway and CPU daemon launcher have been retired; use
-native engine endpoints and direct workflows. No replacement proxy is installed.
+In Stack Catalog (`F8`), `f` opens Chat or a typed native task form and `c`
+cancels the active foreground task. CPU-local decisions use `--run-profile` or
+the form directly, without a daemon; see
+[native CPU workflows](docs/cpu-native-workflows.md). Scripts that llama-swap
+cannot host (LTX, YuE2, HeartMuLa, H3, Blender) run in an
+[explicit operator-managed idle GPU window](docs/native-gpu-workflows.md), never
+by taking over the live service. Native output is sensitive and should not enter
+shared logs.
 
 Show quick-start instructions without opening TUI:
 

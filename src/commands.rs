@@ -673,16 +673,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Open native task",
         "Stack Catalog: open Chat for language chat or compose a native task form",
         true,
-        [
-            "coordinator",
-            "request",
-            "form",
-            "language",
-            "chat",
-            "media",
-            "speech",
-            "decision"
-        ]
+        ["task", "form", "language", "chat", "media", "speech", "decision"]
     ),
     command!(
         StackCatalogCancel,
