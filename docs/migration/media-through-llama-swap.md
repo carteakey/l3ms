@@ -62,7 +62,20 @@ execution through this route were verified earlier; see
 
 The resident pause/restore handoff (the opt-in stop-and-restore of
 `llama-swap.service`, about 1,700 lines of service management plus its tests) is
-removed. The idle-GPU window, the KDE desktop baseline and the recovery marker
-stay for the direct scripts that still bypass the router (LTX, YuE2, Blender,
-HeartMuLa). Moving those lanes onto routed engines would let the rest of the
-window code go too, and is the next simplification.
+removed.
+
+## Lanes that stay direct, and why
+
+The idle-GPU window (locks, idle observation, recovery marker, KDE desktop
+baseline) remains for scripts that llama-swap cannot host. This is the minimal
+end state for them, not unfinished work:
+
+| Lane | Engine | Why it is not routed |
+| --- | --- | --- |
+| `ltx-2.5` (video, music) | LTX-2 Python via `uv` | A script, not an inference server. Nothing for llama-swap to start, health-check or proxy. |
+| `yue2-music` | YuE2 Python | Same. The pinned audio.cpp build also has no `yue2` loader (built with `minimax_h3,heartmula,breeze_tts`). |
+| `blender-3d` | Blender 5.2 / blender-mcp | An application, not a model engine. CPU renders need no GPU window. |
+| `minimax-h3`, `heartmula-music` | audio.cpp | **Routable.** Both are audio.cpp families, so `audiocpp_auto` could serve them. Not done: their 12 GB profiles use staged, layerwise weights, and a server entry needs its own CUDA run before it replaces the verified scripts. |
+
+If H3 and HeartMuLa move to `audiocpp_auto`, the window code shrinks but cannot
+disappear while LTX and YuE2 exist.

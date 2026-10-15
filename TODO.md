@@ -17,31 +17,35 @@ for scope and evidence.
   ([Blender record](docs/migration/blender-acceptance.md)).
 - [x] Live language → CUDA speech → language continuation passed in the approved
   window; service and model restored.
-- [ ] Finish remaining cross-lane runtime and keyboard/visual checks, including
-  Comfy and GPU workflows. Committed standalone-source parity, source-export
-  builds and toolkit tests pass; remaining runtime checks are separate. Remote
-  CI and comprehensive accessibility remain release/quality checks. Cached CPU
-  speech and embedding acceptance cover those paths only,
-  not full-port acceptance. See the [speech record](docs/migration/direct-speech-acceptance.md).
-  The post-retirement 80×24 decision-image form, Chat capability selection and
-  metadata-only history pass against a private synthetic endpoint; comprehensive
-  accessibility checks remain open. The current
-  site passes real desktop/mobile pointer, keyboard, focus and overflow checks
-  with all 8 media and 9 decision cards; see the
-  [browser record](docs/migration/site-browser-acceptance.md).
+- [x] llama-swap owns language, embeddings, decisions, speech (`audiocpp_auto`)
+  and images (`comfyui_auto`); a full chat → Breeze on CUDA → ComfyUI → chat cycle
+  passed on the live router ([evidence](docs/migration/media-through-llama-swap.md)).
+- [x] Sibling repos `l2m2` and `l3ds` imported, repointed and moved to
+  `~/repos/_retired/` ([record](docs/migration/sibling-retirement.md)).
+
+Optional follow-ups, none blocking:
+
+- [ ] Route `minimax-h3` and `heartmula-music` through `audiocpp_auto` (they are
+  audio.cpp families). Needs its own CUDA run before replacing the verified
+  scripts. LTX, YuE2 and Blender stay direct by design (see the same doc).
+- [ ] Measure `qwen38-flash-next-plat-abliterated-vision` so it can join the
+  ranking; until then the site lists it as not measured.
+- [ ] Delete `~/repos/_retired/` once you are satisfied; history is bundled in
+  `~/repos/_backups/siblings-20261015/`.
+- [ ] Comprehensive accessibility checks; the site already passes real
+  desktop/mobile keyboard, focus and overflow checks
+  ([browser record](docs/migration/site-browser-acceptance.md)).
 - [ ] Audit the exact outgoing history/export, endpoints, host paths, secrets and
   large files before publication. Publication remains **NO-GO**; no push or
   history rewrite without authorization.
 
 ## Retired prototype scope
 
-The branch-added managed session, daemon/worker, private-engine transport and
-duplicate chat dispatch were retired in the 2026-10-15 upstream-first reduction.
-This is not a pending implementation task. Retained-ID observe/cancel/results
-and history/artifact reads remain compatibility clients for explicitly supplied
-older servers; direct-workflow safety and on-disk records remain. Older status
-entries are historical implementation evidence, not a plan to revive the retired
-platform.
+The branch-added managed session, daemon/worker, private-engine transport,
+duplicate chat dispatch, retained-ID coordinator clients and the resident
+pause/restore handoff were all removed in the 2026-10-15 upstream-first
+reduction. None is a pending task. Older status entries and
+`docs/migration/history/` are historical evidence, not a plan to revive them.
 
 ## Speculative / research
 
