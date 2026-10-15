@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Changed
+- Stack tab gains a **Router** column with the live llama-swap state (`loaded`,
+  `loading`, `unloaded`) for profiles the router serves, and `—` for everything
+  it does not list (never guessed). `r` now refreshes the router state as well as
+  the manifests, so one screen shows what is loaded across lanes.
 - Command palette (`Ctrl+P`) lists the current screen's commands and global ones
   first instead of one flat list of all 102, keeps every other command searchable,
   and is wide enough that descriptions no longer truncate at 80 columns.

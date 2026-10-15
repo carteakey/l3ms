@@ -3145,7 +3145,11 @@ impl App {
                     .map_or(0, |catalog| catalog.list().len());
                 select_next_table(&mut self.stack_catalog_state, count);
             }
-            StackCatalogRefresh => self.refresh_stack_catalog(),
+            StackCatalogRefresh => {
+                // Router state in the Router column comes from the model list.
+                self.refresh_models();
+                self.refresh_stack_catalog();
+            }
             StackCatalogForm => self.begin_task_form(),
             StackCatalogCancel => {
                 #[cfg(target_os = "linux")]
@@ -7067,25 +7071,31 @@ impl App {
             count_for(Lane::Media),
             count_for(Lane::Decisions),
         );
+        let models = &self.models;
         let rows = profiles.iter().map(|profile| {
+            let (router, router_style) = router_state(models, profile.key.profile_id.as_str());
             Row::new(vec![
                 Cell::from(profile.key.lane.as_str()).style(lane_style(profile.key.lane)),
                 Cell::from(profile.key.profile_id.to_string()),
                 Cell::from(profile.name.as_str()),
                 Cell::from(readiness_label(profile.readiness)),
+                Cell::from(router).style(router_style),
             ])
         });
         let table = Table::new(
             rows,
             [
+                Constraint::Percentage(12),
+                Constraint::Percentage(28),
+                Constraint::Percentage(30),
+                Constraint::Percentage(16),
                 Constraint::Percentage(14),
-                Constraint::Percentage(32),
-                Constraint::Percentage(34),
-                Constraint::Percentage(20),
             ],
         )
         .style(theme::text())
-        .header(Row::new(["Lane", "Profile ID", "Name", "Readiness"]).style(theme::title()))
+        .header(
+            Row::new(["Lane", "Profile ID", "Name", "Readiness", "Router"]).style(theme::title()),
+        )
         .block(theme::block().title(title).borders(Borders::ALL))
         .row_highlight_style(theme::selected())
         .highlight_symbol("▶ ");
@@ -7952,6 +7962,22 @@ fn lane_style(lane: Lane) -> Style {
         Lane::Language => theme::lane_language(),
         Lane::Media => theme::lane_media(),
         Lane::Decisions => theme::lane_decisions(),
+    }
+}
+
+/// Live llama-swap state for a profile the router serves under the same id.
+/// Anything the router does not list is shown as unknown, never guessed.
+fn router_state(models: &[SwapModel], profile_id: &str) -> (&'static str, Style) {
+    match models
+        .iter()
+        .find(|model| model.id == profile_id)
+        .map(|model| model.state.as_str())
+    {
+        Some("loaded") => ("loaded", theme::title()),
+        Some("loading") => ("loading", theme::warning()),
+        Some("unloaded") => ("unloaded", theme::dim()),
+        Some(_) => ("unknown", theme::dim()),
+        None => ("—", theme::dim()),
     }
 }
 
@@ -12097,6 +12123,47 @@ mod tests {
             .palette_commands()
             .iter()
             .any(|spec| spec.id == CommandId::StackCatalogForm));
+    }
+
+    #[test]
+    fn stack_catalog_shows_live_router_state_and_dashes_for_everything_else() {
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        let mut app = fixture.app();
+        app.refresh_stack_catalog();
+        app.tab = Tab::StackCatalog;
+        app.models = vec![test_chat_model("local-chat", "loaded", false)];
+        let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let rows: Vec<String> = {
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol().to_string())
+                        .collect()
+                })
+                .collect()
+        };
+        let row_of = |id: &str| rows.iter().find(|row| row.contains(id)).unwrap().clone();
+        assert!(rows.iter().any(|row| row.contains("Router")));
+        assert!(
+            row_of("local-chat").contains("loaded"),
+            "{}",
+            row_of("local-chat")
+        );
+        // Profiles the router does not list are unknown, not guessed.
+        assert!(row_of("breeze").contains('—'));
+        assert!(row_of("nagi").contains('—'));
+
+        app.models = vec![test_chat_model("local-chat", "unloaded", false)];
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let text: String = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
+            .map(|(x, y)| buffer[(x, y)].symbol().to_string())
+            .collect();
+        assert!(text.contains("unloaded"));
     }
 
     #[test]
