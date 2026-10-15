@@ -26,6 +26,10 @@
       "guide": "toolkits/l2m2/docs/yue2-setup.md",
       "experiment": null
     },
+    "flux-3-klein": {
+      "guide": "toolkits/l2m2/docs/comfyui-setup.md",
+      "experiment": null
+    },
     "qwen-image-2.1-turbo": {
       "guide": "toolkits/l2m2/docs/qwen-image-2.1-turbo-setup.md",
       "experiment": "toolkits/l2m2/docs/experiments/qwen-image-2.1-turbo-vs-base.md"
