@@ -29,12 +29,12 @@ the shared engine and declared task; the graph selects actual model files and
 settings. Use the toolkit's ComfyUI recipes with filenames matching installed
 assets. Real-model/codec/VRAM acceptance remains separate from fixture coverage.
 
-`toolkits/l2m2` and `toolkits/l3ds` are compatibility/source locations, not the
-target product architecture. The root owns the shared UI, routing and history.
-After runtime acceptance, useful source can move into ordinary media and
-decision modules, with caller updates and compatibility retirement reviewed
-separately. Preserve weights, private state and external callers during cleanup;
-a directory rename alone is not integration.
+The former `toolkits/l2m2` and `toolkits/l3ds` trees were folded into the
+repository root on 2026-10-15: manifests, wrappers, workflows and setup scripts sit
+beside `src/`, and their separate Rust crates were retired in favour of the root CLI.
+The root owns the shared UI, routing and history. Preserve weights, private state
+and external callers (MCP client configs, `l2m2-nsfw`) when paths change; a
+directory move alone is not integration.
 
 The branch YAML labels describe all declared shared-engine capabilities.
 Editing them does not reload the live router: reload can evict a resident model

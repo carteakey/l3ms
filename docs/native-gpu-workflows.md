@@ -164,7 +164,7 @@ establish ownership/release of a multi-GPU scene.
 
 The existing GUI/MCP commands remain standalone and externally owned. They are
 not adopted, stopped, or counted as completed headless jobs; `--prompt` still only
-prints guidance. See [Blender workflow](../toolkits/l2m2/docs/blender-mcp-setup.md).
+prints guidance. See [Blender workflow](../docs/blender-mcp-setup.md).
 Standalone and root CLI CPU headless rendering and a real software-rendered
 GUI/MCP scene round trip have passed, but the GUI crashed during shutdown.
 Manual Stack rendering, clean interactive lifecycle and other GPU/device

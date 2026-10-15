@@ -10,10 +10,10 @@ not start, stop or fence engines for these lanes.
 
 | Reserved id | Engine | Launch | Health |
 | --- | --- | --- | --- |
-| `audiocpp_auto` | audio.cpp `955c872` | `vendor/audio.cpp-955c872/build/bin/audiocpp_server --config toolkits/l2m2/audiocpp-server.json` | `/health` |
+| `audiocpp_auto` | audio.cpp `955c872` | `vendor/audio.cpp-955c872/build/bin/audiocpp_server --config audiocpp-server.json` | `/health` |
 | `comfyui_auto` | ComfyUI (low-VRAM flags) | `${comfy_root}/.venv-comfy` + `${comfy_root}/vendor/ComfyUI` | `/system_stats` |
 
-`comfy_root` is `${env.L3MS_ROOT}/toolkits/l2m2` (the ComfyUI checkout, its
+`comfy_root` is `${env.L3MS_ROOT}` (the repository root: the ComfyUI checkout in `vendor/ComfyUI`, its
 Python environment and user data were reflink-cloned there; see
 [sibling retirement](sibling-retirement.md)).
 
@@ -37,7 +37,7 @@ translated to native request fields. Use the same `LLAMA_SWAP_URL` and
 `LLAMA_SWAP_API_KEY`, or a confirmed TUI Chat connection. Output remains
 `result.wav`. H3 video was removed from the root workbench (it needed RGB24-to-MP4
 post-processing; the standalone script remains). Server model paths, threads and session options now belong in
-`toolkits/l2m2/audiocpp-server.json`; shell-wrapper environment overrides do not
+`audiocpp-server.json`; shell-wrapper environment overrides do not
 configure routed jobs. The native `options.duration_seconds` is normalized to
 HeartMuLa's `duration_sec` by the pinned engine.
 
@@ -47,7 +47,7 @@ absent, and `/mnt/storage` was only an autofs mount without mounted storage.
 No model download, NAS mutation, live config reload or engine eviction was
 performed for this follow-up. Live acceptance remains a required TODO gate.
 
-`toolkits/l2m2/maintenance/test-audiocpp-via-llama-swap.sh [cpu|cuda]` starts an
+`maintenance/test-audiocpp-via-llama-swap.sh [cpu|cuda]` starts an
 isolated router on port 18932 (never the live service), runs the four modes,
 and checks that `/unload` stops the audio.cpp process.
 

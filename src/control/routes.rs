@@ -166,7 +166,7 @@ mod tests {
         );
         write(
             root.path(),
-            "toolkits/l2m2/media-runtimes.json",
+            "media-runtimes.json",
             r#"{
               "schema_version": 1,
               "profiles": [{
@@ -180,7 +180,7 @@ mod tests {
         );
         write(
             root.path(),
-            "toolkits/l3ds/decision-runtimes.json",
+            "decision-runtimes.json",
             r#"{
               "version": "1.0",
               "profiles": [{
@@ -232,7 +232,7 @@ mod tests {
         assert_eq!(
             media.native_route,
             NativeRoute::MediaScript {
-                path: root_path.join("toolkits/l2m2/media-models/not-installed.sh"),
+                path: root_path.join("media-models/not-installed.sh"),
             }
         );
         assert_eq!(media.profile.lane, Lane::Media);
@@ -250,7 +250,7 @@ mod tests {
         assert_eq!(
             decision.native_route,
             NativeRoute::DecisionRunner {
-                entrypoint: root_path.join("toolkits/l3ds/decision-models/not-installed.py"),
+                entrypoint: root_path.join("decision-models/not-installed.py"),
                 model: "org/model-name".into(),
                 profile_type: "local".into(),
                 tier: Some("smol".into()),
@@ -265,7 +265,7 @@ mod tests {
     #[test]
     fn hosted_decision_type_and_tier_are_preserved_verbatim() {
         let root = fixture_root();
-        let decision_path = root.path().join("toolkits/l3ds/decision-runtimes.json");
+        let decision_path = root.path().join("decision-runtimes.json");
         let decision_manifest = fs::read_to_string(&decision_path)
             .expect("read fixture decision manifest")
             .replace("\"type\": \"local\"", "\"type\": \"api\"")

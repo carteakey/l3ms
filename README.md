@@ -90,17 +90,17 @@ The script derives the service port, API key, Rust toolchain environment, and
 downloader Python interpreter. Arguments are passed through to the Rust binary,
 for example `./maintenance/run-l3ms-kpc.sh --list run`.
 
-## Toolkit Sources
+## Media and decision lanes
 
-The toolkits retain their own setup, runtime manifests, and task-specific
-behavior:
+The media and decision lanes live in this tree (they were separate `l2m2` and
+`l3ds` repositories until 2026-10-15). Their guides:
 
-- [L2M2 — media models](toolkits/l2m2/README.md)
-- [L3DS — decision models](toolkits/l3ds/README.md)
+- [Media models](docs/media-models.md)
+- [Decision models](docs/decision-toolkit.md)
 
-Their source imports and standalone checks are tracked separately from L3MS's
-existing runtime. These links point to the imported sources; they do not imply
-that L3MS already routes inference across all three lanes.
+Setup scripts are in `maintenance/`, runtime manifests are `media-runtimes.json`
+and `decision-runtimes.json`, and model-specific wrappers are in `media-models/`
+and `decision-models/`.
 
 List the three native manifest catalogs without starting a model or contacting
 llama-swap:
@@ -111,8 +111,8 @@ l3ms --list stack
 
 This reports `language:`, `media:`, and `decisions:` profile IDs. Its
 `manifest-only` label means a profile is declared, not that its weights,
-dependencies, or service are ready. Toolkit roots default to `toolkits/l2m2`
-and `toolkits/l3ds`; layered settings can override them with
+dependencies, or service are ready. Both manifests default to the repository root; layered settings can override
+them with
 `L3MS_MEDIA_TOOLKIT_ROOT` and `L3MS_DECISIONS_TOOLKIT_ROOT`. An optional
 `L3MS_HOST_SETTINGS_DIR` selects a host settings directory before user
 settings are applied.
@@ -181,7 +181,7 @@ L3MS_COMFY_SCOPED_JOBS=1 l3ms --run-profile media:your-comfy-profile --task imag
 Input is `{"graph":{...}}` containing a native API workflow, not a UI export.
 The selected profile must declare the image/video/music task and ComfyUI runtime.
 LTX and YuE2 use this same path; start with the bundled
-[workflow recipes and model requirements](toolkits/l2m2/docs/comfyui-ltx-yue2.md).
+[workflow recipes and model requirements](docs/comfyui-ltx-yue2.md).
 The output directory must already exist, be empty, owned by you and mode `0700`.
 Stack `f` uses the same graph form and foreground worker, with a fresh private
 output directory; history stores job metadata and relative artifact references,
@@ -222,7 +222,7 @@ for example:
 {"state":{"ready":true},"questions":{"route":{"type":"choice","criteria":{"accept":"The worker is ready.","reject":"The worker is not ready."}}}}
 ```
 
-Install the [decision toolkit runtime](toolkits/l3ds/README.md) and model weights
+Install the [decision toolkit runtime](docs/decision-toolkit.md) and model weights
 first; this command does not download them, start services, or fall back from
 CUDA to CPU. It returns native `answers` and optional `native_latency_ns` and
 `native_usage`. Input files are bounded to 1 MiB; Ctrl-C and the task timeout
@@ -240,7 +240,7 @@ metadata only, while native answers stay in the in-memory result panel.
 
 ### Hosted decisions (Linux, live acceptance pending)
 
-Prepare the [TypeSafe SDK runtime](toolkits/l3ds/README.md#prepare-the-hosted-typesafe-runtime)
+Prepare the [TypeSafe SDK runtime](README.md#prepare-the-hosted-typesafe-runtime)
 first. It is separate from the local Nagi environment; alternatively configure
 `L3MS_HOSTED_DECISIONS_PYTHON` with an absolute, prepared Python executable.
 Provide `TYPESAFE_API_KEY` through the environment, never argv or committed files.
@@ -331,14 +331,14 @@ cargo run --locked -- --quickstart
 List llama-swap models and benchmark entry points:
 
 ```bash
-cargo run --locked -- --list all
+l3ms --list stack all
 ```
 
 Inspect benchmark history and compare two result files without opening the
 TUI:
 
 ```bash
-cargo run --locked -- --list results
+l3ms --list stack results
 cargo run --locked -- --compare-results bench-results/left.md bench-results/right.md
 ```
 

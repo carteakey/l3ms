@@ -438,9 +438,9 @@ window.L3MS_DASHBOARD = {
         "tts"
       ],
       "modes": [],
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L5",
-      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/media-generation-runbook.md",
-      "experimentUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/experiments/h3-reference-baseline.md"
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L5",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/media-generation-runbook.md",
+      "experimentUrl": "https://github.com/carteakey/l3ms/blob/main/docs/experiments/h3-reference-baseline.md"
     },
     {
       "id": "ltx-2.5",
@@ -452,8 +452,8 @@ window.L3MS_DASHBOARD = {
         "music"
       ],
       "modes": [],
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L28",
-      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/media-generation-runbook.md",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L28",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/media-generation-runbook.md",
       "experimentUrl": null
     },
     {
@@ -465,8 +465,8 @@ window.L3MS_DASHBOARD = {
         "music"
       ],
       "modes": [],
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L50",
-      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/yue2-setup.md",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L50",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/yue2-setup.md",
       "experimentUrl": null
     },
     {
@@ -478,8 +478,8 @@ window.L3MS_DASHBOARD = {
         "music"
       ],
       "modes": [],
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L72",
-      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/audio-cpp-runtimes.md",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L72",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/audio-cpp-runtimes.md",
       "experimentUrl": null
     },
     {
@@ -498,9 +498,9 @@ window.L3MS_DASHBOARD = {
         "Voice cloning",
         "Streaming"
       ],
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L94",
-      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/audio-cpp-runtimes.md",
-      "experimentUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/experiments/breeze-tts-2-baseline.md"
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L94",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/audio-cpp-runtimes.md",
+      "experimentUrl": "https://github.com/carteakey/l3ms/blob/main/docs/experiments/breeze-tts-2-baseline.md"
     },
     {
       "id": "breeze-tts-2-cpu",
@@ -518,7 +518,7 @@ window.L3MS_DASHBOARD = {
         "Voice cloning (CPU)",
         "TTS chunks after completion (CPU)"
       ],
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L119",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L119",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/cpu-native-workflows.md",
       "experimentUrl": "https://github.com/carteakey/l3ms/blob/main/docs/cpu-native-workflows.md"
     },
@@ -533,8 +533,8 @@ window.L3MS_DASHBOARD = {
         "image"
       ],
       "modes": [],
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L139",
-      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/blender-mcp-setup.md",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L139",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/blender-mcp-setup.md",
       "experimentUrl": null
     },
     {
@@ -546,9 +546,9 @@ window.L3MS_DASHBOARD = {
         "image"
       ],
       "modes": [],
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L161",
-      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/qwen-image-2.1-setup.md",
-      "experimentUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/experiments/qwen-vs-krea2-comparison.md"
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L161",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/qwen-image-2.1-setup.md",
+      "experimentUrl": "https://github.com/carteakey/l3ms/blob/main/docs/experiments/qwen-vs-krea2-comparison.md"
     },
     {
       "id": "qwen-image-2.1-turbo",
@@ -559,9 +559,9 @@ window.L3MS_DASHBOARD = {
         "image"
       ],
       "modes": [],
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L182",
-      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/qwen-image-2.1-turbo-setup.md",
-      "experimentUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/experiments/qwen-image-2.1-turbo-vs-base.md"
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L182",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/qwen-image-2.1-turbo-setup.md",
+      "experimentUrl": "https://github.com/carteakey/l3ms/blob/main/docs/experiments/qwen-image-2.1-turbo-vs-base.md"
     },
     {
       "id": "krea-2",
@@ -572,9 +572,9 @@ window.L3MS_DASHBOARD = {
         "image"
       ],
       "modes": [],
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L203",
-      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/krea-2-setup.md",
-      "experimentUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/experiments/qwen-vs-krea2-comparison.md"
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L203",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/krea-2-setup.md",
+      "experimentUrl": "https://github.com/carteakey/l3ms/blob/main/docs/experiments/qwen-vs-krea2-comparison.md"
     },
     {
       "id": "flux-3-klein",
@@ -585,8 +585,8 @@ window.L3MS_DASHBOARD = {
         "image"
       ],
       "modes": [],
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/media-runtimes.json#L224",
-      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l2m2/docs/comfyui-setup.md",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L224",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/comfyui-setup.md",
       "experimentUrl": null
     }
   ],
@@ -598,7 +598,7 @@ window.L3MS_DASHBOARD = {
       "kind": "local",
       "device": "cuda",
       "declaredLatencyMs": 110,
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l3ds/decision-runtimes.json#L6",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/decision-runtimes.json#L6",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/decision-models-cli.md",
       "experimentUrl": null
     },
@@ -609,7 +609,7 @@ window.L3MS_DASHBOARD = {
       "kind": "local",
       "device": "cuda",
       "declaredLatencyMs": 65,
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l3ds/decision-runtimes.json#L21",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/decision-runtimes.json#L21",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/decision-models-cli.md",
       "experimentUrl": null
     },
@@ -620,8 +620,8 @@ window.L3MS_DASHBOARD = {
       "kind": "local",
       "device": "cuda",
       "declaredLatencyMs": 17,
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l3ds/decision-runtimes.json#L36",
-      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l3ds/README.md",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/decision-runtimes.json#L36",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/README.md",
       "experimentUrl": null
     },
     {
@@ -631,7 +631,7 @@ window.L3MS_DASHBOARD = {
       "kind": "local",
       "device": "cpu",
       "declaredLatencyMs": 1600,
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l3ds/decision-runtimes.json#L51",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/decision-runtimes.json#L51",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/cpu-native-workflows.md",
       "experimentUrl": "https://github.com/carteakey/l3ms/blob/main/docs/cpu-native-workflows.md"
     },
@@ -642,8 +642,8 @@ window.L3MS_DASHBOARD = {
       "kind": "local",
       "device": "cuda",
       "declaredLatencyMs": 70,
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l3ds/decision-runtimes.json#L66",
-      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l3ds/README.md",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/decision-runtimes.json#L66",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/README.md",
       "experimentUrl": null
     },
     {
@@ -653,8 +653,8 @@ window.L3MS_DASHBOARD = {
       "kind": "local",
       "device": "cuda",
       "declaredLatencyMs": 13,
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l3ds/decision-runtimes.json#L81",
-      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l3ds/README.md",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/decision-runtimes.json#L81",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/README.md",
       "experimentUrl": null
     },
     {
@@ -664,8 +664,8 @@ window.L3MS_DASHBOARD = {
       "kind": "local",
       "device": "cuda",
       "declaredLatencyMs": 51,
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l3ds/decision-runtimes.json#L96",
-      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l3ds/README.md",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/decision-runtimes.json#L96",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/README.md",
       "experimentUrl": null
     },
     {
@@ -675,8 +675,8 @@ window.L3MS_DASHBOARD = {
       "kind": "hosted",
       "device": "remote",
       "declaredLatencyMs": 350,
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l3ds/decision-runtimes.json#L111",
-      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l3ds/README.md",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/decision-runtimes.json#L111",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/README.md",
       "experimentUrl": null
     },
     {
@@ -686,8 +686,8 @@ window.L3MS_DASHBOARD = {
       "kind": "hosted",
       "device": "remote",
       "declaredLatencyMs": 300,
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l3ds/decision-runtimes.json#L125",
-      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/toolkits/l3ds/README.md",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/decision-runtimes.json#L125",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/README.md",
       "experimentUrl": null
     }
   ],

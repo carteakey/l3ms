@@ -413,15 +413,15 @@ mod tests {
     fn cpu_breeze_catalog() -> (TempDir, Catalog) {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path();
-        fs::create_dir_all(root.join("toolkits/l2m2")).unwrap();
-        fs::create_dir_all(root.join("toolkits/l3ds")).unwrap();
+        fs::create_dir_all(root).unwrap();
+        fs::create_dir_all(root).unwrap();
         fs::write(
             root.join("llama-swap.yaml"),
             "models:\n  fixture-chat:\n    cmd: server\n",
         )
         .unwrap();
         fs::write(
-            root.join("toolkits/l2m2/media-runtimes.json"),
+            root.join("media-runtimes.json"),
             serde_json::json!({
                 "schema_version": 1,
                 "profiles": [{
@@ -444,7 +444,7 @@ mod tests {
         )
         .unwrap();
         fs::write(
-            root.join("toolkits/l3ds/decision-runtimes.json"),
+            root.join("decision-runtimes.json"),
             r#"{"version":"1.0","profiles":[]}"#,
         )
         .unwrap();
@@ -455,20 +455,20 @@ mod tests {
     fn embedding_catalog() -> (TempDir, Catalog) {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path();
-        fs::create_dir_all(root.join("toolkits/l2m2")).unwrap();
-        fs::create_dir_all(root.join("toolkits/l3ds")).unwrap();
+        fs::create_dir_all(root).unwrap();
+        fs::create_dir_all(root).unwrap();
         fs::write(
             root.join("llama-swap.yaml"),
             "models:\n  fixture-embeddings:\n    cmd: |\n      llama-server --embedding\n",
         )
         .unwrap();
         fs::write(
-            root.join("toolkits/l2m2/media-runtimes.json"),
+            root.join("media-runtimes.json"),
             r#"{"schema_version":1,"profiles":[]}"#,
         )
         .unwrap();
         fs::write(
-            root.join("toolkits/l3ds/decision-runtimes.json"),
+            root.join("decision-runtimes.json"),
             r#"{"version":"1.0","profiles":[]}"#,
         )
         .unwrap();
@@ -479,15 +479,15 @@ mod tests {
     fn comfy_workflow_catalog() -> (TempDir, Catalog) {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path();
-        fs::create_dir_all(root.join("toolkits/l2m2")).unwrap();
-        fs::create_dir_all(root.join("toolkits/l3ds")).unwrap();
+        fs::create_dir_all(root).unwrap();
+        fs::create_dir_all(root).unwrap();
         fs::write(
             root.join("llama-swap.yaml"),
             "models:\n  fixture-chat:\n    cmd: server\n",
         )
         .unwrap();
         fs::write(
-            root.join("toolkits/l2m2/media-runtimes.json"),
+            root.join("media-runtimes.json"),
             serde_json::json!({
                 "schema_version": 1,
                 "profiles": [{
@@ -502,7 +502,7 @@ mod tests {
         )
         .unwrap();
         fs::write(
-            root.join("toolkits/l3ds/decision-runtimes.json"),
+            root.join("decision-runtimes.json"),
             r#"{"version":"1.0","profiles":[]}"#,
         )
         .unwrap();
@@ -965,19 +965,19 @@ mod tests {
     fn direct_native_builder_rejects_catalog_route_drift() {
         let temporary = TempDir::new().unwrap();
         let root = temporary.path();
-        fs::create_dir_all(root.join("toolkits/l2m2")).unwrap();
-        fs::create_dir_all(root.join("toolkits/l3ds")).unwrap();
+        fs::create_dir_all(root).unwrap();
+        fs::create_dir_all(root).unwrap();
         fs::write(
             root.join("llama-swap.yaml"),
             "models:\n  fixture-chat:\n    cmd: server\n",
         )
         .unwrap();
         fs::write(
-            root.join("toolkits/l2m2/media-runtimes.json"),
+            root.join("media-runtimes.json"),
             r#"{"schema_version":1,"profiles":[]}"#,
         )
         .unwrap();
-        let decision_manifest = root.join("toolkits/l3ds/decision-runtimes.json");
+        let decision_manifest = root.join("decision-runtimes.json");
         fs::write(
             &decision_manifest,
             r#"{"version":"1.0","profiles":[{"id":"fixture-decision","name":"Fixture","engine":"nagi","type":"local","device":"cpu","model":"fixture","entrypoint":"run.py"}]}"#,

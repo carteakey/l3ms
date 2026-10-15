@@ -1442,11 +1442,11 @@ mod tests {
         response: &str,
     ) -> (TempDir, Catalog, InferenceRequest, std::path::PathBuf) {
         let root = tempfile::tempdir().unwrap();
-        let media = root.path().join("toolkits/l2m2");
-        let decisions = root.path().join("toolkits/l3ds");
+        let media = root.path().to_path_buf();
+        let decisions = root.path().to_path_buf();
         fs::create_dir_all(&media).unwrap();
         fs::create_dir_all(decisions.join("decision-models")).unwrap();
-        fs::create_dir_all(decisions.join(".venv/bin")).unwrap();
+        fs::create_dir_all(decisions.join(".venv-decisions/bin")).unwrap();
         fs::create_dir_all(decisions.join(".venv-hosted/bin")).unwrap();
         fs::write(
             root.path().join("llama-swap.yaml"),
@@ -1476,7 +1476,7 @@ mod tests {
         )
         .unwrap();
 
-        let interpreter = decisions.join(".venv/bin/python");
+        let interpreter = decisions.join(".venv-decisions/bin/python");
         let hosted_interpreter = decisions.join(".venv-hosted/bin/python");
         let fixture_guard = super::super::process::executable_fixture_guard();
         fs::write(&interpreter, "#!/bin/sh\nexec /bin/sh \"$@\"\n").unwrap();
@@ -1521,8 +1521,8 @@ mod tests {
 
     fn breeze_fixture(profile_id: &str, device: &str) -> (TempDir, Catalog) {
         let root = tempfile::tempdir().unwrap();
-        let media = root.path().join("toolkits/l2m2");
-        let decisions = root.path().join("toolkits/l3ds");
+        let media = root.path().to_path_buf();
+        let decisions = root.path().to_path_buf();
         fs::create_dir_all(media.join("media-models")).unwrap();
         fs::create_dir_all(&decisions).unwrap();
         fs::write(
@@ -1640,20 +1640,20 @@ fi
 
     fn embedding_fixture() -> (TempDir, Catalog, InferenceRequest) {
         let root = tempfile::tempdir().unwrap();
-        fs::create_dir_all(root.path().join("toolkits/l2m2")).unwrap();
-        fs::create_dir_all(root.path().join("toolkits/l3ds")).unwrap();
+        fs::create_dir_all(root.path()).unwrap();
+        fs::create_dir_all(root.path()).unwrap();
         fs::write(
             root.path().join("llama-swap.yaml"),
             "models:\n  fixture-embeddings:\n    cmd: |\n      llama-server --embedding\n",
         )
         .unwrap();
         fs::write(
-            root.path().join("toolkits/l2m2/media-runtimes.json"),
+            root.path().join("media-runtimes.json"),
             r#"{"schema_version":1,"profiles":[]}"#,
         )
         .unwrap();
         fs::write(
-            root.path().join("toolkits/l3ds/decision-runtimes.json"),
+            root.path().join("decision-runtimes.json"),
             r#"{"version":"1.0","profiles":[]}"#,
         )
         .unwrap();
@@ -1865,7 +1865,7 @@ fi
         }
         let response = native_response("systemone-official-api");
         let (root, catalog, request, launch_marker) = fixture("jev", "api", "remote", &response);
-        let runner = root.path().join("toolkits/l3ds/decision-models/runner.py");
+        let runner = root.path().join("decision-models/runner.py");
         let script = format!(
             "#!/bin/sh\nprintf x >> \"$0.calls\"\n[ \"$PYTHONDONTWRITEBYTECODE\" = 1 ] || exit 8\n[ -z \"${{TYPESAFE_LOG_LEVEL+x}}\" ] || exit 9\ncase \" $* \" in *\" --single-attempt \"*) ;; *) exit 10;; esac\ninput=$(/bin/cat)\ncase \"$input\" in *'\"state\"'*'\"questions\"'*) ;; *) exit 11;; esac\nprintf '%s\\n' '{}'\n",
             response.replace('\'', "'\\''")
@@ -1895,7 +1895,7 @@ fi
             "remote",
             &native_response("systemone-official-api"),
         );
-        let runner = root.path().join("toolkits/l3ds/decision-models/runner.py");
+        let runner = root.path().join("decision-models/runner.py");
         fs::write(
             runner,
             "#!/bin/sh\nprintf x >> \"$0.calls\"\n/bin/cat >/dev/null\nsleep 30\n",
@@ -2048,7 +2048,7 @@ fi
         assert_eq!(error.kind(), DirectRunErrorKind::InvalidRequest);
         assert!(!root
             .path()
-            .join("toolkits/l2m2/media-models/generate-breeze-tts-2.sh.calls")
+            .join("media-models/generate-breeze-tts-2.sh.calls")
             .exists());
         assert!(!output.join("result.wav").exists());
 
@@ -2072,7 +2072,7 @@ fi
     fn direct_runner_rejects_catalog_drift_before_launch() {
         let (root, catalog, request, launch_marker) =
             fixture("nagi", "local", "cpu", &native_response("nagi-native"));
-        let manifest_path = root.path().join("toolkits/l3ds/decision-runtimes.json");
+        let manifest_path = root.path().join("decision-runtimes.json");
         let mut manifest: serde_json::Value =
             serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
         manifest["profiles"][0]["device"] = json!("cuda");
@@ -2157,7 +2157,7 @@ fi
         // No script ran and nothing else was written.
         assert!(!root
             .path()
-            .join("toolkits/l2m2/media-models/generate-breeze-tts-2.sh.calls")
+            .join("media-models/generate-breeze-tts-2.sh.calls")
             .exists());
         server.join().unwrap();
     }
@@ -2433,16 +2433,16 @@ fi
         task: &str,
     ) -> (TempDir, Catalog, InferenceRequest) {
         let root = tempfile::tempdir().unwrap();
-        let media = root.path().join("toolkits/l2m2");
+        let media = root.path().to_path_buf();
         fs::create_dir_all(media.join("media-models")).unwrap();
-        fs::create_dir_all(root.path().join("toolkits/l3ds")).unwrap();
+        fs::create_dir_all(root.path()).unwrap();
         fs::write(
             root.path().join("llama-swap.yaml"),
             "models:\n  fixture-chat:\n    cmd: server\n",
         )
         .unwrap();
         fs::write(
-            root.path().join("toolkits/l3ds/decision-runtimes.json"),
+            root.path().join("decision-runtimes.json"),
             r#"{"version":"1.0","profiles":[]}"#,
         )
         .unwrap();

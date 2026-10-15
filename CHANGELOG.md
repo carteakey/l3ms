@@ -45,6 +45,20 @@
   deleted coordinator commands.
 
 ### Breaking changes
+- **Fold the `l2m2` and `l3ds` toolkits into the repository root** (`toolkits/` is
+  gone). Same relative layout, so wrapper scripts and manifests keep working:
+  `media-runtimes.json`, `decision-runtimes.json`, `audiocpp-server.json`,
+  `media-models/`, `decision-models/`, `workflows/`, `suites/`, `maintenance/`,
+  `prompts/`, `runtime-locks/`, `requirements/`, `models/*-files.txt`; the media
+  downloads config is `model_downloader/media_models_config.json`; l2m2's docs are
+  flat in `docs/` (start at `docs/media-models.md`, `docs/decision-toolkit.md`).
+  The two standalone Rust CLIs (`l2m2`, `l3ds`) and their CI job are removed: use
+  `l3ms --list stack`, `l3ms --run-profile …`, the wrapper scripts directly, and the
+  new `decision-models/bench_profile.py` (replaces `l3ds --bench`). The decisions
+  Python environment is now `.venv-decisions` (the root `.venv` belongs to the
+  downloader). Python and shell checks for both lanes run in the root CI. Their old
+  CHANGELOGs, AGENTS and READMEs are archived in `docs/migration/history/`. Retired
+  with the fold: the `l3ds` Nagi coordinator probe and its test.
 - Retire two more direct lanes from the root workbench (standalone toolkit scripts
   are untouched): CUDA Nagi/Laya local decisions (`nagi-smol`, `nagi-big`, `laya-en`;
   use `vllm-d3-flash` or `cloudflare-clef-flash`, or `nagi-smol-cpu`) and H3

@@ -42,7 +42,7 @@ connection in the TUI), with explicit standalone endpoint override. Native
 SaveVideo MP4 and SaveAudio WAV/FLAC use the existing bounded download path.
 Engine labels now cover HeartMuLa/H3 audio and LTX/YuE2 instead of implying only
 Breeze/images. See [runtime policy](runtime-policy.md) and the toolkit's
-[recipes and limitations](../../toolkits/l2m2/docs/comfyui-ltx-yue2.md).
+[recipes and limitations](../comfyui-ltx-yue2.md).
 
 No separate LTX/YuE2 runtime installation is needed for root execution. Their
 weights and real-model workflow acceptance are still pending; template/schema
@@ -691,7 +691,7 @@ do not add a CUDA manifest field or supply a fake CUDA connection. Keep CUDA
 device selection separate from GPU admission in UI labels/recovery state,
 exclude Blender image tasks from Comfy parsing, and validate render paths before
 publishing artifacts. All headless Python/render and external GUI/MCP workflows
-remain in scope. See [native wrapper contract](../../toolkits/l2m2/docs/blender-mcp-setup.md).
+remain in scope. See [native wrapper contract](../blender-mcp-setup.md).
 
 The managed-service audit found no safe drop-in original-unit pause/restore:
 that module owns only transient services it created. A small configured native

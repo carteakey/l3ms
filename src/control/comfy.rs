@@ -2259,10 +2259,9 @@ mod tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let media = tempfile::tempdir().unwrap();
         let manifest = media.path().join("media-runtimes.json");
-        let original = std::fs::read(root.join("toolkits/l2m2/media-runtimes.json")).unwrap();
+        let original = std::fs::read(root.join("media-runtimes.json")).unwrap();
         std::fs::write(&manifest, &original).unwrap();
-        let catalog =
-            Catalog::load_from_roots(root, media.path(), root.join("toolkits/l3ds")).unwrap();
+        let catalog = Catalog::load_from_roots(root, media.path(), root).unwrap();
         let request = request();
         let route = resolve_profile_route(&catalog, request.profile()).unwrap();
         let adapter = adapter("http://127.0.0.1:9");
@@ -2303,13 +2302,11 @@ mod tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let media = tempfile::tempdir().unwrap();
         let manifest = media.path().join("media-runtimes.json");
-        let mut native: Value = serde_json::from_slice(
-            &std::fs::read(root.join("toolkits/l2m2/media-runtimes.json")).unwrap(),
-        )
-        .unwrap();
+        let mut native: Value =
+            serde_json::from_slice(&std::fs::read(root.join("media-runtimes.json")).unwrap())
+                .unwrap();
         std::fs::write(&manifest, native.to_string()).unwrap();
-        let catalog =
-            Catalog::load_from_roots(root, media.path(), root.join("toolkits/l3ds")).unwrap();
+        let catalog = Catalog::load_from_roots(root, media.path(), root).unwrap();
         let adapter = adapter("http://127.0.0.1:9");
         let mut job = adapter.prepare(&catalog, &request(), ID).unwrap();
         let profile = native["profiles"]

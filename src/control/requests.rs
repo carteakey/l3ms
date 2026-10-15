@@ -644,12 +644,7 @@ mod tests {
         )
         .unwrap();
         let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let catalog = Catalog::load_from_roots(
-            language_root.path(),
-            repo.join("toolkits/l2m2"),
-            repo.join("toolkits/l3ds"),
-        )
-        .unwrap();
+        let catalog = Catalog::load_from_roots(language_root.path(), repo, repo).unwrap();
         (language_root, catalog)
     }
 

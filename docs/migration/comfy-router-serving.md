@@ -6,7 +6,7 @@ Recipe only: this does not enable ComfyUI in the tracked root
 ID is `comfyui_auto`; `/comfyui/` is not enabled by adding only a UI URL.
 
 The existing standalone launch reference is
-[`run-comfyui.sh`](../../toolkits/l2m2/maintenance/run-comfyui.sh#L18): it uses
+[`run-comfyui.sh`](../../maintenance/run-comfyui.sh#L18): it uses
 `toolkits/l2m2/vendor/ComfyUI` and `toolkits/l2m2/.venv-comfy/bin/python`; the
 snippet uses its common startup flags but not its standalone CPU/GPU mode
 switch. Do not invoke that script as llama-swap's `cmd`: its GPU mode requires

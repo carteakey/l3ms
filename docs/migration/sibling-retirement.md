@@ -1,7 +1,7 @@
 # Sibling repository retirement — 2026-10-15
 
 `~/repos/l2m2` and `~/repos/l3ds` are retired as sources of truth. Their work
-lives under `toolkits/l2m2` and `toolkits/l3ds`. The monorepo is the only place
+lives in this repository (folded from `toolkits/l2m2` and `toolkits/l3ds` into the root on 2026-10-15). The monorepo is the only place
 to make new changes.
 
 ## Archived (outside Git, `~/repos/_backups/siblings-20261015/`)
@@ -16,7 +16,7 @@ L3DS: nothing left; every file was already present. L2M2: the Qwen Image 2.1
 Turbo and YuE2 runtimes with their setup guides and tests, the ComfyUI MCP
 Tailscale notes, media archive/restore and vision-grading scripts, the newer
 Krea 2 and Qwen Image 2.1 wrappers, and the merged manifest, README and
-CHANGELOG. The copied `model_downloader/` stays retired; `toolkits/l2m2/models_config.json`
+CHANGELOG. The copied `model_downloader/` stays retired; `models_config.json`
 runs under the root downloader.
 
 ## Deliberately not imported (kept in the archive)
@@ -35,12 +35,12 @@ the clones only. The originals were not touched.
 
 | Cloned to | From | Verified |
 | --- | --- | --- |
-| `toolkits/l2m2/.venv-comfy` | `l2m2/.venv-comfy` (6.5 GB) | torch 2.14+cu130 sees CUDA; ComfyUI `6bfaacc67` starts; `comfyui_auto` launched it through an isolated router (HTTP 200, `/system_stats`) |
-| `toolkits/l2m2/.venv-comfy-mcp` | `l2m2/.venv-comfy-mcp` | `comfy-mcp --help`; MCP `initialize` handshake through `maintenance/run-comfy-mcp.sh` |
-| `toolkits/l2m2/vendor/ComfyUI`, `vendor/comfy-mcp`, `.toolkit/comfyui/user` | `l2m2/vendor/*`, `.toolkit/comfyui/user` | same commit as the source |
-| `toolkits/l3ds/.venv` | `l3ds/.venv` (5.1 GB) | torch 2.6+cu124 sees CUDA; L3DS Python suites 38 + 17 pass |
+| `.venv-comfy` | `l2m2/.venv-comfy` (6.5 GB) | torch 2.14+cu130 sees CUDA; ComfyUI `6bfaacc67` starts; `comfyui_auto` launched it through an isolated router (HTTP 200, `/system_stats`) |
+| `.venv-comfy-mcp` | `l2m2/.venv-comfy-mcp` | `comfy-mcp --help`; MCP `initialize` handshake through `maintenance/run-comfy-mcp.sh` |
+| `vendor/ComfyUI`, `vendor/comfy-mcp`, `.toolkit/comfyui/user` | `l2m2/vendor/*`, `.toolkit/comfyui/user` | same commit as the source |
+| `.venv` | `l3ds/.venv` (5.1 GB) | torch 2.6+cu124 sees CUDA; L3DS Python suites 38 + 17 pass |
 
-`llama-swap.yaml` now sets `comfy_root` to `${env.L3MS_ROOT}/toolkits/l2m2`.
+`llama-swap.yaml` sets `comfy_root` to `${env.L3MS_ROOT}` (the repository root).
 Codex's `comfy-local` MCP server was repointed to the monorepo launcher (backup
 in `_backups/siblings-20261015/codex-config.toml.bak`).
 
@@ -51,9 +51,9 @@ Before the move every consumer was repointed and nothing was running from the
 old paths:
 
 - Codex's and `agy`'s `comfy-local` MCP servers now launch
-  `toolkits/l2m2/maintenance/run-comfy-mcp.sh` (backups in
+  `maintenance/run-comfy-mcp.sh` (backups in
   `_backups/siblings-20261015/`).
-- `~/repos/l2m2-nsfw` runners default `L2M2_ROOT` to `~/repos/l3ms/toolkits/l2m2`
+- `~/repos/l2m2-nsfw` runners default `L2M2_ROOT` to `~/repos/l3ms`
   (uncommitted edits in that repo for the owner to review).
 - The dev worktree's `.toolkit`, `vendor` and `.venv-comfy` symlinks point at the
   deployed clones.

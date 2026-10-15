@@ -58,7 +58,7 @@ class DashboardDataTest(unittest.TestCase):
 
     def test_served_generation_profiles_match_dashboard_metadata(self):
         parsed = dashboard.parse_models((ROOT / "llama-swap.yaml").read_text())
-        decisions = json.loads((ROOT / "toolkits/l3ds/decision-runtimes.json").read_text())
+        decisions = json.loads((ROOT / "decision-runtimes.json").read_text())
         native_ids = {p["model"] for p in decisions["profiles"] if p["engine"] == "llamacpp"}
         self.assertTrue(native_ids <= set(parsed))
         active = {
@@ -134,11 +134,11 @@ class DashboardDataTest(unittest.TestCase):
     def test_media_and_decision_views_keep_separate_evidence(self):
         metadata = json.loads((ROOT / "docs" / "stack-meta.json").read_text())
         media = dashboard.media_public_profiles(
-            json.loads((ROOT / "toolkits" / "l2m2" / "media-runtimes.json").read_text()),
+            json.loads((ROOT / "media-runtimes.json").read_text()),
             metadata["media"],
         )
         decisions = dashboard.decision_public_profiles(
-            json.loads((ROOT / "toolkits" / "l3ds" / "decision-runtimes.json").read_text()),
+            json.loads((ROOT / "decision-runtimes.json").read_text()),
             metadata["decisions"],
         )
         self.assertEqual(len(media), 11)
@@ -172,7 +172,7 @@ class DashboardDataTest(unittest.TestCase):
 
     def test_stack_metadata_must_match_native_manifests_and_safe_paths(self):
         manifest = json.loads(
-            (ROOT / "toolkits" / "l2m2" / "media-runtimes.json").read_text()
+            (ROOT / "media-runtimes.json").read_text()
         )
         metadata = json.loads((ROOT / "docs" / "stack-meta.json").read_text())["media"]
         missing = dict(metadata)

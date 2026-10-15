@@ -1,6 +1,6 @@
 # Monorepo consolidation plan
 
-> **Historical.** Superseded by [migration/simplification-plan.md](migration/simplification-plan.md): L3MS is a workbench for llama-swap, not a second inference platform. Phases 4–7 (coordinator, gateway) are not requirements.
+> **Historical.** The `toolkits/` layout described below was folded into the repository root on 2026-10-15. Superseded by [migration/simplification-plan.md](migration/simplification-plan.md): L3MS is a workbench for llama-swap, not a second inference platform. Phases 4–7 (coordinator, gateway) are not requirements.
 
 ## Current direction — simplicity first, 2026-10-09
 
@@ -149,8 +149,8 @@ src/
     language.rs            # language adapter and language-specific UI logic
     media.rs               # L2M2 adapter and media-specific UI logic
     decisions.rs           # L3DS adapter and decision-specific UI logic
-toolkits/l2m2/             # media inference, scripts, manifests, standalone CLI
-toolkits/l3ds/             # decision inference, suites, manifests, standalone CLI
+             # media inference, scripts, manifests, standalone CLI
+             # decision inference, suites, manifests, standalone CLI
 llama-swap.yaml            # authoritative language config; deployed path preserved
 bench-models/              # language scripts; deployed paths preserved
 ```
@@ -313,8 +313,8 @@ to coordinator-owned writes, not a shared file path.
 | Responsibility | Owner and source of truth | What L3MS shares |
 | --- | --- | --- |
 | Language profiles and serving | Root `llama-swap.yaml`; llama-swap owns live model state and chat/embedding routes. | Catalog display, health, load/unload controls, telemetry, jobs. |
-| Media profiles and generation | `toolkits/l2m2/media-runtimes.json`, scripts, ComfyUI workflows, and audio.cpp. | Catalog display, task-aware launch forms, supervised jobs, output/artifact links, runtime status. |
-| Decision profiles and evaluation | `toolkits/l3ds/decision-runtimes.json`, Python runner, and suites. | Catalog display, bounded decision runs, latency/option-flip results, jobs. |
+| Media profiles and generation | `media-runtimes.json`, scripts, ComfyUI workflows, and audio.cpp. | Catalog display, task-aware launch forms, supervised jobs, output/artifact links, runtime status. |
+| Decision profiles and evaluation | `decision-runtimes.json`, Python runner, and suites. | Catalog display, bounded decision runs, latency/option-flip results, jobs. |
 | Operator preferences | Existing non-secret L3MS settings store, extended only for cross-toolkit defaults and endpoint locations. | One settings view and consistent validation; secrets stay in environment or existing service configuration. |
 | Resource and route state | Actual systemd services, runtime health endpoints, GPU telemetry, and host route configuration. | Read-only status first; manual and request-driven switching through the same coordinator later. |
 
@@ -395,7 +395,7 @@ Rollback: no deployment changes; retain the original checkouts and verified back
    branches in the dirty deployed checkout. Use temporary clones of L2M2 and
    L3DS containing their selected migration snapshots.
 2. In those temporary clones only, rewrite each source history under
-   `toolkits/l2m2/` or `toolkits/l3ds/` with `git filter-repo
+   `` or `` with `git filter-repo
    --to-subdirectory-filter`. Merge the rewritten histories into the L3MS
    integration branch with unrelated histories allowed. Never rewrite the
    original repositories or L3MS history. Select the branches and tags to retain,
@@ -427,8 +427,8 @@ Rollback: discard the isolated integration worktree; originals remain intact.
 
 **Depends on:** Phase 1.
 
-1. From `toolkits/l2m2/`, run its existing build, tests, manifest list, Python
-   tests, and shell syntax checks. From `toolkits/l3ds/`, build and list
+1. From ``, run its existing build, tests, manifest list, Python
+   tests, and shell syntax checks. From ``, build and list
    profiles. Verify each binary's compiled default `--root` points to its new
    folder. Test explicit `--root` against a separate checkout as a compatibility
    check.

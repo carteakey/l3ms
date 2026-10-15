@@ -3,8 +3,8 @@
 These Linux profiles use installed native runtimes and cached weights. They
 do not install models, start services, silently substitute CPU for a CUDA
 profile, or retry inference. The original CUDA profiles remain separate.
-See the [decision setup](../toolkits/l3ds/README.md) and
-[audio.cpp setup](../toolkits/l2m2/docs/audio-cpp-runtimes.md).
+See the [decision setup](../README.md) and
+[audio.cpp setup](../docs/audio-cpp-runtimes.md).
 
 ## Nagi-Smol CPU decisions
 

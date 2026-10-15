@@ -183,8 +183,8 @@ pub fn resolve_stack_settings(
     invocation_dir: &Path,
 ) -> Result<ResolvedStackSettings> {
     let mut resolved = ResolvedStackSettings {
-        media_toolkit_root: repo_root.join("toolkits/l2m2"),
-        decisions_toolkit_root: repo_root.join("toolkits/l3ds"),
+        media_toolkit_root: repo_root.to_path_buf(),
+        decisions_toolkit_root: repo_root.to_path_buf(),
         artifact_root: None,
         gpu_policy: GpuPolicy::Manual,
         task_defaults: BTreeMap::new(),

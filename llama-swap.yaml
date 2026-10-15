@@ -51,7 +51,7 @@ macros:
 
   # media engines owned by llama-swap (reserved model ids audiocpp_auto / comfyui_auto)
   "audiocpp_server":       "${env.L3MS_ROOT}/vendor/audio.cpp-955c872/build/bin/audiocpp_server"
-  "comfy_root":            "${env.L3MS_ROOT}/toolkits/l2m2"
+  "comfy_root":            "${env.L3MS_ROOT}"
 
   # --- shared paths ---
   "chat_template": "${env.L3MS_ROOT}/chat-template.jinja"
@@ -103,7 +103,7 @@ models:
     name: "audio.cpp (Breeze TTS · HeartMuLa · MiniMax H3 audio)"
     description: "Shared CUDA audio engine. Breeze standard/design, clone and streaming use /audiocpp/v1/audio/speech; HeartMuLa music and H3 audio use /audiocpp/v1/tasks/run. Model ids and weights are configured in audiocpp-server.json."
     cmd: >-
-      ${audiocpp_server} --config ${env.L3MS_ROOT}/toolkits/l2m2/audiocpp-server.json
+      ${audiocpp_server} --config ${env.L3MS_ROOT}/audiocpp-server.json
       --host 127.0.0.1 --port ${PORT} --no-ui
     proxy: http://127.0.0.1:${PORT}
     checkEndpoint: /health

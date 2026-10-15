@@ -26,7 +26,20 @@ jobs:
         run: cargo test --all-targets --locked
       - name: List the imported stack without starting a runtime
         run: cargo run --offline --locked -- --list stack
-      - name: Check Python downloader syntax
-        run: python3 -m compileall -q model_downloader
+      - name: Check Python syntax
+        run: python3 -m compileall -q model_downloader media-models decision-models maintenance
       - name: Test Python downloader boundary
         run: python3 -m unittest discover -s model_downloader -p 'test_*.py'
+      - name: Test media wrappers and workflows
+        run: |
+          python3 -m unittest discover -s media-models -p 'test_*.py'
+          python3 -m unittest discover -s maintenance -p 'test_*.py'
+      - name: Test decision runner and benchmark wrapper (fail-closed, offline)
+        run: python3 -m unittest discover -s decision-models -p 'test_*.py'
+      - name: Check bounded acceptance harness without services or models
+        run: python3 maintenance/probe-breeze-acceptance.py --self-test
+      - name: Check shell syntax
+        run: |
+          for script in media-models/*.sh maintenance/*.sh; do
+            bash -n "$script"
+          done

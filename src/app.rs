@@ -9786,8 +9786,8 @@ mod tests {
             "models:\n  local-chat:\n    cmd: server\n",
         )
         .unwrap();
-        let media = fixture.root.join("toolkits/l2m2");
-        let decisions = fixture.root.join("toolkits/l3ds");
+        let media = fixture.root.to_path_buf();
+        let decisions = fixture.root.to_path_buf();
         fs::create_dir_all(&media).unwrap();
         fs::create_dir_all(&decisions).unwrap();
         fs::write(media.join("media-runtimes.json"), r#"{"schema_version":1,"profiles":[{"id":"breeze","name":"Speech fixture","runtime":"audio.cpp","tasks":["tts","clon","design"],"script":"media-models/speech.sh"}]}"#).unwrap();
@@ -9797,7 +9797,7 @@ mod tests {
     fn write_hosted_jev_decision_stack_fixture(fixture: &AppFixture) {
         write_stack_fixture(fixture);
         fs::write(
-            fixture.root.join("toolkits/l3ds/decision-runtimes.json"),
+            fixture.root.join("decision-runtimes.json"),
             r#"{"version":"1.0","profiles":[{"id":"jev-api","name":"Hosted Jev SystemOne fixture","engine":"jev","tier":"hosted","type":"api","model":"typesafe/jev-latest","device":"remote","entrypoint":"decision-models/runner.py"}]}"#,
         )
         .unwrap();
@@ -9814,7 +9814,7 @@ mod tests {
         )
         .unwrap();
         fs::write(
-            fixture.root.join("toolkits/l3ds/decision-runtimes.json"),
+            fixture.root.join("decision-runtimes.json"),
             format!(
                 r#"{{"version":"1.0","profiles":[{{"id":"{model_id}","name":"llama.cpp decision fixture","engine":"llamacpp","type":"local","model":"{model_id}","device":"cuda","tasks":["decision"],"entrypoint":"decision-models/runner.py"}}]}}"#
             ),
@@ -9834,7 +9834,7 @@ mod tests {
     fn write_cuda_decision_stack_fixture(fixture: &AppFixture) {
         write_stack_fixture(fixture);
         fs::write(
-            fixture.root.join("toolkits/l3ds/decision-runtimes.json"),
+            fixture.root.join("decision-runtimes.json"),
             r#"{"version":"1.0","profiles":[{"id":"nagi-cuda","name":"CUDA decision fixture","engine":"nagi","type":"local","model":"org/nagi","device":"cuda","entrypoint":"decision-models/runner.py"}]}"#,
         )
         .unwrap();
@@ -9843,7 +9843,7 @@ mod tests {
     fn write_coordinator_decision_stack_fixture(fixture: &AppFixture) {
         write_stack_fixture(fixture);
         fs::write(
-            fixture.root.join("toolkits/l3ds/decision-runtimes.json"),
+            fixture.root.join("decision-runtimes.json"),
             r#"{"version":"1.0","profiles":[{"id":"semif-fixture","name":"Coordinator decision fixture","engine":"semif","type":"local","model":"org/semif","device":"cpu","entrypoint":"decision-models/runner.py"}]}"#,
         )
         .unwrap();
@@ -9852,7 +9852,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn write_cuda_breeze_media_manifest(fixture: &AppFixture) {
         fs::write(
-            fixture.root.join("toolkits/l2m2/media-runtimes.json"),
+            fixture.root.join("media-runtimes.json"),
             r#"{"schema_version":1,"profiles":[{"id":"breeze-tts-2","name":"CUDA Breeze fixture","runtime":"audio.cpp","device":"cuda","tasks":["tts","clon","design"],"script":"media-models/generate-breeze-tts-2.sh"}]}"#,
         )
         .unwrap();
@@ -9862,7 +9862,7 @@ mod tests {
     fn write_heartmula_music_media_manifest(fixture: &AppFixture) {
         write_stack_fixture(fixture);
         fs::write(
-            fixture.root.join("toolkits/l2m2/media-runtimes.json"),
+            fixture.root.join("media-runtimes.json"),
             r#"{"schema_version":1,"profiles":[{"id":"heartmula-music","name":"HeartMuLa music fixture","runtime":"audio.cpp","device":"cuda","tasks":["music"],"script":"media-models/generate-heartmula-music.sh"}]}"#,
         )
         .unwrap();
@@ -9872,7 +9872,7 @@ mod tests {
     fn write_minimax_h3_media_manifest(fixture: &AppFixture) {
         write_stack_fixture(fixture);
         fs::write(
-            fixture.root.join("toolkits/l2m2/media-runtimes.json"),
+            fixture.root.join("media-runtimes.json"),
             r#"{"schema_version":1,"profiles":[{"id":"minimax-h3","name":"MiniMax H3 fixture","runtime":"audio.cpp","device":"cuda","tasks":["music","video","tts"],"script":"media-models/generate-minimax-h3.sh"}]}"#,
         )
         .unwrap();
@@ -9882,7 +9882,7 @@ mod tests {
     fn write_blender_headless_media_manifest(fixture: &AppFixture) {
         write_stack_fixture(fixture);
         fs::write(
-            fixture.root.join("toolkits/l2m2/media-runtimes.json"),
+            fixture.root.join("media-runtimes.json"),
             r#"{"schema_version":1,"profiles":[{"id":"blender-3d","name":"Blender fixture","runtime":"Blender 5.2 / blender-mcp","tasks":["3d","render","image"],"script":"media-models/generate-blender-3d.sh"}]}"#,
         )
         .unwrap();
@@ -9892,7 +9892,7 @@ mod tests {
     fn write_comfy_stack_fixture(fixture: &AppFixture) {
         write_stack_fixture(fixture);
         fs::write(
-            fixture.root.join("toolkits/l2m2/media-runtimes.json"),
+            fixture.root.join("media-runtimes.json"),
             r#"{"schema_version":1,"profiles":[{"id":"comfy-workflow","name":"Comfy workflow fixture","runtime":"ComfyUI","tasks":["image"],"script":"media-models/workflow.json"}]}"#,
         )
         .unwrap();
@@ -9974,11 +9974,11 @@ mod tests {
     fn write_direct_decision_runner(fixture: &AppFixture, marker: &Path, wait: bool) {
         use std::os::unix::fs::PermissionsExt;
 
-        let decisions = fixture.root.join("toolkits/l3ds");
-        fs::create_dir_all(decisions.join(".venv/bin")).unwrap();
+        let decisions = fixture.root.to_path_buf();
+        fs::create_dir_all(decisions.join(".venv-decisions/bin")).unwrap();
         fs::create_dir_all(decisions.join("decision-models")).unwrap();
         let guard = crate::control::process::executable_fixture_guard();
-        let interpreter = decisions.join(".venv/bin/python");
+        let interpreter = decisions.join(".venv-decisions/bin/python");
         fs::write(&interpreter, "#!/bin/sh\nexec /bin/sh \"$@\"\n").unwrap();
         fs::set_permissions(&interpreter, fs::Permissions::from_mode(0o700)).unwrap();
         let response = serde_json::json!({
@@ -10013,7 +10013,7 @@ mod tests {
     fn write_direct_cpu_tts_runner(fixture: &AppFixture, marker: &Path, wait: bool) {
         use std::os::unix::fs::PermissionsExt;
 
-        let media = fixture.root.join("toolkits/l2m2");
+        let media = fixture.root.to_path_buf();
         fs::create_dir_all(media.join("media-models")).unwrap();
         fs::write(
             media.join("media-runtimes.json"),
@@ -10515,7 +10515,7 @@ mod tests {
         for (profile_id, task) in [("ltx-2.5", "video"), ("yue2-music", "music")] {
             let fixture = AppFixture::new();
             write_comfy_stack_fixture(&fixture);
-            let manifest = fixture.root.join("toolkits/l2m2/media-runtimes.json");
+            let manifest = fixture.root.join("media-runtimes.json");
             let text = fs::read_to_string(&manifest)
                 .unwrap()
                 .replace("comfy-workflow", profile_id)

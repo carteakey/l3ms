@@ -1,20 +1,20 @@
 {
   "media": {
     "minimax-h3": {
-      "guide": "toolkits/l2m2/docs/media-generation-runbook.md",
-      "experiment": "toolkits/l2m2/docs/experiments/h3-reference-baseline.md"
+      "guide": "docs/media-generation-runbook.md",
+      "experiment": "docs/experiments/h3-reference-baseline.md"
     },
     "ltx-2.5": {
-      "guide": "toolkits/l2m2/docs/media-generation-runbook.md",
+      "guide": "docs/media-generation-runbook.md",
       "experiment": null
     },
     "heartmula-music": {
-      "guide": "toolkits/l2m2/docs/audio-cpp-runtimes.md",
+      "guide": "docs/audio-cpp-runtimes.md",
       "experiment": null
     },
     "breeze-tts-2": {
-      "guide": "toolkits/l2m2/docs/audio-cpp-runtimes.md",
-      "experiment": "toolkits/l2m2/docs/experiments/breeze-tts-2-baseline.md",
+      "guide": "docs/audio-cpp-runtimes.md",
+      "experiment": "docs/experiments/breeze-tts-2-baseline.md",
       "modes": ["Standard TTS", "Voice design", "Voice cloning", "Streaming"]
     },
     "breeze-tts-2-cpu": {
@@ -23,39 +23,39 @@
       "modes": ["Standard TTS (CPU)", "Offline voice design (CPU)", "Voice cloning (CPU)", "TTS chunks after completion (CPU)"]
     },
     "yue2-music": {
-      "guide": "toolkits/l2m2/docs/yue2-setup.md",
+      "guide": "docs/yue2-setup.md",
       "experiment": null
     },
     "flux-3-klein": {
-      "guide": "toolkits/l2m2/docs/comfyui-setup.md",
+      "guide": "docs/comfyui-setup.md",
       "experiment": null
     },
     "qwen-image-2.1-turbo": {
-      "guide": "toolkits/l2m2/docs/qwen-image-2.1-turbo-setup.md",
-      "experiment": "toolkits/l2m2/docs/experiments/qwen-image-2.1-turbo-vs-base.md"
+      "guide": "docs/qwen-image-2.1-turbo-setup.md",
+      "experiment": "docs/experiments/qwen-image-2.1-turbo-vs-base.md"
     },
     "blender-3d": {
-      "guide": "toolkits/l2m2/docs/blender-mcp-setup.md",
+      "guide": "docs/blender-mcp-setup.md",
       "experiment": null
     },
     "qwen-image-2.1": {
-      "guide": "toolkits/l2m2/docs/qwen-image-2.1-setup.md",
-      "experiment": "toolkits/l2m2/docs/experiments/qwen-vs-krea2-comparison.md"
+      "guide": "docs/qwen-image-2.1-setup.md",
+      "experiment": "docs/experiments/qwen-vs-krea2-comparison.md"
     },
     "krea-2": {
-      "guide": "toolkits/l2m2/docs/krea-2-setup.md",
-      "experiment": "toolkits/l2m2/docs/experiments/qwen-vs-krea2-comparison.md"
+      "guide": "docs/krea-2-setup.md",
+      "experiment": "docs/experiments/qwen-vs-krea2-comparison.md"
     }
   },
   "decisions": {
     "vllm-d3-flash": {"guide": "docs/decision-models-cli.md", "experiment": null},
     "cloudflare-clef-flash": {"guide": "docs/decision-models-cli.md", "experiment": null},
-    "nagi-smol": {"guide": "toolkits/l3ds/README.md", "experiment": null},
+    "nagi-smol": {"guide": "README.md", "experiment": null},
     "nagi-smol-cpu": {"guide": "docs/cpu-native-workflows.md", "experiment": "docs/cpu-native-workflows.md"},
-    "nagi-big": {"guide": "toolkits/l3ds/README.md", "experiment": null},
-    "laya-en": {"guide": "toolkits/l3ds/README.md", "experiment": null},
-    "semif-openjev": {"guide": "toolkits/l3ds/README.md", "experiment": null},
-    "jev-api": {"guide": "toolkits/l3ds/README.md", "experiment": null},
-    "systemone": {"guide": "toolkits/l3ds/README.md", "experiment": null}
+    "nagi-big": {"guide": "README.md", "experiment": null},
+    "laya-en": {"guide": "README.md", "experiment": null},
+    "semif-openjev": {"guide": "README.md", "experiment": null},
+    "jev-api": {"guide": "README.md", "experiment": null},
+    "systemone": {"guide": "README.md", "experiment": null}
   }
 }

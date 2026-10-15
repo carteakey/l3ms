@@ -280,11 +280,7 @@ impl Catalog {
     /// toolkit locations should use [`Self::load_from_roots`].
     pub fn load(repo_root: impl AsRef<Path>) -> Result<Self> {
         let repo_root = repo_root.as_ref();
-        Self::load_from_roots(
-            repo_root,
-            repo_root.join("toolkits/l2m2"),
-            repo_root.join("toolkits/l3ds"),
-        )
+        Self::load_from_roots(repo_root, repo_root, repo_root)
     }
 
     /// Read manifests from explicit language, media, and decisions roots.
@@ -628,12 +624,8 @@ mod tests {
     fn fixture_root() -> TempDir {
         let root = tempfile::tempdir().expect("create fixture root");
         write(root.path(), "llama-swap.yaml", YAML);
-        write(root.path(), "toolkits/l2m2/media-runtimes.json", MEDIA_JSON);
-        write(
-            root.path(),
-            "toolkits/l3ds/decision-runtimes.json",
-            DECISION_JSON,
-        );
+        write(root.path(), "media-runtimes.json", MEDIA_JSON);
+        write(root.path(), "decision-runtimes.json", DECISION_JSON);
         root
     }
 
@@ -741,7 +733,7 @@ mod tests {
     #[test]
     fn missing_manifest_reports_its_source_path() {
         let root = fixture_root();
-        fs::remove_file(root.path().join("toolkits/l3ds/decision-runtimes.json"))
+        fs::remove_file(root.path().join("decision-runtimes.json"))
             .expect("remove decision manifest fixture");
 
         let error = Catalog::load(root.path()).expect_err("missing manifest must fail");
@@ -753,7 +745,7 @@ mod tests {
         let root = fixture_root();
         write(
             root.path(),
-            "toolkits/l2m2/media-runtimes.json",
+            "media-runtimes.json",
             r#"{"schema_version":1,"profiles":[]}"#,
         );
         let catalog = Catalog::load(root.path()).unwrap();
@@ -763,7 +755,7 @@ mod tests {
             .any(|profile| profile.key.lane == Lane::Media));
         write(
             root.path(),
-            "toolkits/l2m2/media-runtimes.json",
+            "media-runtimes.json",
             r#"{"schema_version":1,"profiles":[{"id":"added","name":"Added","runtime":"audio.cpp","tasks":["tts"],"script":"media-models/added.sh"}]}"#,
         );
         let refreshed = catalog.refresh().unwrap();
@@ -779,11 +771,7 @@ mod tests {
     #[test]
     fn malformed_manifest_reports_its_source_path() {
         let root = fixture_root();
-        write(
-            root.path(),
-            "toolkits/l2m2/media-runtimes.json",
-            "{ malformed",
-        );
+        write(root.path(), "media-runtimes.json", "{ malformed");
 
         let error = Catalog::load(root.path()).expect_err("malformed manifest must fail");
         assert!(error.to_string().contains("media-runtimes.json"));
@@ -805,7 +793,7 @@ mod tests {
                 .inspect(&key("media:shared-id"))
                 .unwrap()
                 .source_path,
-            root_path.join("toolkits/l2m2/media-runtimes.json")
+            root_path.join("media-runtimes.json")
         );
         assert_ne!(root_path, PathBuf::from(env!("CARGO_MANIFEST_DIR")));
     }
@@ -861,8 +849,8 @@ mod tests {
         let root = fixture_root();
         let paths = [
             root.path().join("llama-swap.yaml"),
-            root.path().join("toolkits/l2m2/media-runtimes.json"),
-            root.path().join("toolkits/l3ds/decision-runtimes.json"),
+            root.path().join("media-runtimes.json"),
+            root.path().join("decision-runtimes.json"),
         ];
         let before = paths
             .iter()
@@ -890,14 +878,14 @@ mod tests {
         );
         assert!(!root
             .path()
-            .join("toolkits/l3ds/decision-models/not-installed.py")
+            .join("decision-models/not-installed.py")
             .exists());
     }
 
     #[test]
     fn oversized_manifest_is_rejected_before_parsing() {
         let root = fixture_root();
-        let source_path = root.path().join("toolkits/l2m2/media-runtimes.json");
+        let source_path = root.path().join("media-runtimes.json");
         fs::write(
             &source_path,
             " ".repeat((super::MAX_MANIFEST_BYTES + 1) as usize),

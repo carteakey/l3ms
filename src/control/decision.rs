@@ -727,11 +727,11 @@ mod tests {
     ) -> (tempfile::TempDir, Catalog, InferenceRequest) {
         use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
-        let media = root.path().join("toolkits/l2m2");
-        let decisions = root.path().join("toolkits/l3ds");
+        let media = root.path().to_path_buf();
+        let decisions = root.path().to_path_buf();
         std::fs::create_dir_all(&media).unwrap();
         std::fs::create_dir_all(decisions.join("decision-models")).unwrap();
-        std::fs::create_dir_all(decisions.join(".venv/bin")).unwrap();
+        std::fs::create_dir_all(decisions.join(".venv-decisions/bin")).unwrap();
         std::fs::write(
             root.path().join("llama-swap.yaml"),
             "models:\n  fixture:\n    cmd: fixture\n",
@@ -749,7 +749,7 @@ mod tests {
         )
         .unwrap();
         // A harmless shell stand-in, not a model or Python environment.
-        let interpreter = decisions.join(".venv/bin/python");
+        let interpreter = decisions.join(".venv-decisions/bin/python");
         let fixture_guard = super::super::process::executable_fixture_guard();
         std::fs::write(&interpreter, "#!/bin/sh\nexec /bin/sh \"$@\"\n").unwrap();
         std::fs::set_permissions(&interpreter, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -797,7 +797,7 @@ mod tests {
                 .unwrap(),
             DecisionExecutionError::InvalidResult(DecisionDecodeError::UnexpectedEngine)
         );
-        std::fs::remove_file(root.path().join("toolkits/l3ds/.venv/bin/python")).unwrap();
+        std::fs::remove_file(root.path().join(".venv-decisions/bin/python")).unwrap();
         assert_eq!(
             execute_native_decision(&catalog, &request, &context, recovery)
                 .err()

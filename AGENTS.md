@@ -7,19 +7,22 @@ Agent and contributor guide for `L3MS`.
 Build a keyboard-first, script-first homelab model stack with strong operational
 ergonomics.
 
-Scope: this repository contains three independently operated inference lanes:
+Scope: one product, three lanes, served by a few shared engines. The former `l2m2`
+(media) and `l3ds` (decisions) toolkits were folded into this tree on 2026-10-15;
+their old guides are kept in `docs/migration/history/`.
 
-- Language: the existing root L3MS Rust package, llama-swap service, vision-capable
-  LLMs, and embeddings.
-- Media: `toolkits/l2m2` (Local Latent Media Machine), including image, audio,
-  speech, music, and video workflows.
-- Decisions: `toolkits/l3ds` (Local Low-latency Decision System), including its local
-  and hosted decision runners.
+- Language: the Rust workbench (`src/`), llama-swap, llama.cpp, vision-capable
+  LLMs and embeddings. `llama-swap.yaml` is the serving source of truth.
+- Media: `media-runtimes.json`, `media-models/`, `workflows/` and `maintenance/`.
+  Images and LTX/YuE2 run on ComfyUI (`comfyui_auto`), speech and music on audio.cpp
+  (`audiocpp_auto`), both through llama-swap. Setup guides are in `docs/`
+  (start at `docs/media-models.md`).
+- Decisions: `decision-runtimes.json`, `decision-models/` and `suites/`. The
+  preferred local models run on llama.cpp through llama-swap; the Python runner
+  serves the CPU and hosted profiles (`docs/decision-toolkit.md`).
 
-The first import preserves the existing L3MS package and runtime behavior. The
-root guide governs repository-level work; keep each toolkit's setup, runtime,
-and task-specific instructions in its local `AGENTS.md`. Do not add media or
-decision runtime dependencies to the root L3MS package as part of source import.
+Direct scripts are a last resort (today only Blender headless). Prefer a shared
+engine route over a new executor; see `docs/migration/runtime-policy.md`.
 
 ## Engineering Rules
 
@@ -172,8 +175,8 @@ not route `/v1/systemone` directly). They need `-c = -b = -ub` (whole prompt in 
 ubatch). Before downloading, verify `<arch>.decision.type` with
 `maintenance/gguf-decision-check.py`: most community GGUFs of leaderboard models
 are plain LLM conversions. Onboard with `/add-decision-model`. Latency, leaderboard
-snapshot and candidates: `docs/decision-models.md`. The decision toolkit itself is
-L3DS (`~/repos/l3ds`, moving to `toolkits/l3ds/`).
+snapshot and candidates: `docs/decision-models.md`. The decision code (the former L3DS repo) lives in
+`decision-models/`, `decision-runtimes.json` and `suites/`.
 
 ## Structure
 
@@ -188,6 +191,14 @@ L3DS (`~/repos/l3ds`, moving to `toolkits/l3ds/`).
 - `src/script_store.rs`: script CRUD + snapshots
 - `l3ms/` and `l3ms.py`: legacy Python TUI retained during parity work
 - `model_downloader/`: Python downloader compatibility boundary
+  (`media_models_config.json` lists the media downloads)
+- `media-runtimes.json`, `media-models/`, `workflows/`, `models/*-files.txt`,
+  `prompts/`, `runtime-locks/`: the media lane (former `l2m2`)
+- `decision-runtimes.json`, `decision-models/`, `suites/`, `requirements/`: the
+  decision lane (former `l3ds`)
+- `audiocpp-server.json`: audio.cpp models served as `audiocpp_auto`
+- `.venv` (downloader), `.venv-comfy*`, `.venv-decisions`, `.venv-hosted`, `vendor/`,
+  `.toolkit/`: ignored per-host runtime state; clone or rebuild, never commit
 - `maintenance/codemode/`: pi `codemode` scripts — Jev classifier triage for bench
   results and serving logs (`/jev-bench`, `/jev-log`)
 

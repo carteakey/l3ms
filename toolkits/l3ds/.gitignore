@@ -1,8 +1,0 @@
-target/
-.venv/
-.venv-hosted/
-.nagi-smol-env.*/
-__pycache__/
-*.pyc
-.cache/
-*.log

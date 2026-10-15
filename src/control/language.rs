@@ -813,7 +813,7 @@ fn parse_routed_audio_response(body: &[u8]) -> Result<SpeechAudio, LanguageFailu
 /// Breeze-TTS-2 streams raw signed 16-bit little-endian mono PCM at 24 kHz.
 const SPEECH_SAMPLE_RATE: u32 = 24_000;
 
-/// Server model ids registered in `toolkits/l2m2/audiocpp-server.json`.
+/// Server model ids registered in `audiocpp-server.json`.
 fn speech_model_id(mode: SpeechMode) -> &'static str {
     match mode {
         SpeechMode::Standard | SpeechMode::VoiceDesign => "breeze-tts",
@@ -1088,19 +1088,14 @@ mod tests {
         )
         .unwrap();
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let catalog = Catalog::load_from_roots(
-            language_root.path(),
-            repo.join("toolkits/l2m2"),
-            repo.join("toolkits/l3ds"),
-        )
-        .unwrap();
+        let catalog = Catalog::load_from_roots(language_root.path(), repo, repo).unwrap();
         (language_root, catalog)
     }
 
     fn systemone_catalog() -> (tempfile::TempDir, Catalog, InferenceRequest) {
         let root = tempfile::tempdir().unwrap();
-        let media = root.path().join("toolkits/l2m2");
-        let decisions = root.path().join("toolkits/l3ds");
+        let media = root.path().to_path_buf();
+        let decisions = root.path().to_path_buf();
         fs::create_dir_all(&media).unwrap();
         fs::create_dir_all(&decisions).unwrap();
         fs::write(
@@ -1617,7 +1612,7 @@ mod tests {
         listener.set_nonblocking(true).unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let adapter = LanguageAdapter::new(&endpoint, None).unwrap();
-        let manifest_path = root.path().join("toolkits/l3ds/decision-runtimes.json");
+        let manifest_path = root.path().join("decision-runtimes.json");
         let yaml_path = root.path().join("llama-swap.yaml");
         let manifest = fs::read_to_string(&manifest_path).unwrap();
         let yaml = fs::read_to_string(&yaml_path).unwrap();

@@ -1868,10 +1868,8 @@ mod tests {
     #[test]
     fn bundled_ltx_and_yue2_inputs_match_the_shared_workflow_contract() {
         for input in [
-            include_bytes!("../toolkits/l2m2/workflows/yue2/audio_yue2_text2music_api.json")
-                .as_slice(),
-            include_bytes!("../toolkits/l2m2/workflows/ltx-2.5/video_ltx2_5_t2v_preview_api.json")
-                .as_slice(),
+            include_bytes!("../workflows/yue2/audio_yue2_text2music_api.json").as_slice(),
+            include_bytes!("../workflows/ltx-2.5/video_ltx2_5_t2v_preview_api.json").as_slice(),
         ] {
             let graph = parse_direct_comfy_input(input).unwrap();
             assert!(graph
