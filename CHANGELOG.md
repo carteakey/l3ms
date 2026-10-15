@@ -3,36 +3,37 @@
 ## [Unreleased]
 
 ### Breaking changes
+- Retire the branch-added `--coordinator-managed-session` server and hidden
+  engine/job helper entrypoints, with their private transport, ownership stores
+  and duplicate chat implementation. Native CLI/UI execution, the actual Chat
+  client, legacy retained-result queries and existing disk records remain.
+  Remove the two prototype isolation probes; their history and snapshots remain
+  recoverable. No installed runtime or original checkout is removed.
 - Router-native d3/Clef decisions now require llama-swap v262+ and use its
   `/v1/systemone` endpoint with the model in JSON. Remove the legacy per-model
   passthrough path; no fallback or inference retry is introduced.
 - Remove the unused generic runtime-switching protocol and simulated adapters.
   Keep the cancellation, deadlines and cleanup bounds used by actual workflows;
   no live GPU guard or service control is removed.
-- Retire the branch-added, unused control-only `ControlDaemon::run` Rust method
-  and its duplicate request/results handlers. CLI managed sessions still use
-  their existing managed loop; shared handler and transport coverage is retained.
-  No original standalone command, live engine or stored history is removed.
 - Retire the branch-added Stack coordinator task-form submission fallback and
   its envelope builder. Supported forms use the foreground native runner;
   unsupported profiles refuse without dispatch. Keep retained-ID observation,
   cancellation, results/history and original standalone commands. No external
   engine or stored request is changed; no replacement daemon is introduced.
 - Remove the retired CPU coordinator's dispatch loop, worker module and their
-  private helpers. Direct CPU execution remains; retain managed-session lifecycle
-  coverage and original tools. This removes code rather than disabling tests for
-  a still-supported workflow.
+  private helpers. Direct CPU execution and original tools remain. This removes
+  code rather than disabling tests for a still-supported workflow.
 - Retire branch-added `--coordinator-cpu-daemon` and its CPU-only configuration/
   launcher. CPU-local decisions already share the direct CLI/UI native runner;
-  no listener or daemon is needed. Retain managed-session workflows and original
+  no listener or daemon is needed. Retain native workflows and original
   standalone tools; no running service or stored history is changed.
 - Retire branch-added `--coordinator-http-gateway`, its launcher and custom HTTP
   transport. Direct workflows use native engine endpoints; retained private
   coordinator actions and original standalone tools are unchanged. No proxy
   replacement, service change or permanent cutover is introduced.
 - Retire branch-added generic `--request-submit` envelope-file submission and
-  the Stack Catalog `s` action. Use typed forms (`f`) for remaining coordinator
-  tasks or `--run-profile` for supported direct CPU tasks. Keep observe/cancel,
+  the Stack Catalog `s` action. Use typed forms (`f`) or `--run-profile` for
+  supported native tasks. Keep retained-ID observe/cancel,
   native tasks and original standalone workflows. The historical file-submit
   Nagi probe now refuses `--run` before any daemon/model work.
 - Extracted image/audio/video tooling into the standalone `l2m2` repository.
@@ -42,6 +43,14 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Exclude explicitly advertised decision models from Chat's default and picker,
+  while preserving them for native decision forms and general model actions.
+  Unknown/older-server capabilities remain selectable; no model probe is added.
+- Add bounded optional image data URLs to native d3/Clef decisions in CLI, UI
+  and standalone L3DS, refusing unsupported profiles without dispatch. Account
+  for the complete input envelope and preflight Clef's required instructions.
+- Handle a closed stdout pipe locally in `--list stack`; preserve other output
+  errors and leave inference/process signal behavior unchanged.
 - Prepare opt-in native Comfy serving guidance without changing the live config
   or adding a launcher. Verify existing job-client proxy-prefix/auth behavior
   offline; passthrough remains distinct from GPU and real-job acceptance.

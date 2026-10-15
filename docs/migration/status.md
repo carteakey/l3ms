@@ -9,61 +9,62 @@ This record tracks implementation evidence. A phase is complete only after its
 gate in the plan is met; a passed offline test does not stand in for a live
 runtime check.
 
-## Upstream-first replacement and deletion — 2026-10-15
+## Upstream-first retirement and acceptance — 2026-10-15
 
-Follow-up offline media checks: the existing Comfy HTTP fixture now verifies a
-`/stack/comfyui` base prefix and bearer credentials on submission, per-job status,
-scoped cancellation and artifact-byte download. No new transport or dispatcher
-was introduced. Artifact content validation remains separately covered; these
-synthetic bytes are not an actual generated image. **937 root tests pass with
-4 existing ignores**, with strict Clippy and format checks. This extends one
-test rather than adding duplicate fixture infrastructure; control source is now
-**65,624 lines** (40 added test lines, no new production code).
+The branch-added managed-session creator and its daemon/worker/server/private-
+engine vertical are retired; the duplicate language chat dispatch/SSE facade is
+also removed. Do not treat these as unfinished implementation tasks or revive
+them from the historical entries below. Existing Chat uses `ChatClient`.
+Retained-ID observe/cancel/results and history/artifact reads remain compatibility
+clients for an explicitly supplied older server. On-disk records were not
+deleted or migrated. Direct-workflow cancellation/deadline/recovery behavior,
+GPU guards and resident-unit controls remain with their actual callers.
 
-The tagged proxy source only prevents cold-starts for its matching ignored GET
-paths, not all reads. Specific-job status and `/view` are not in its built-in
-exclusions. The audit now states this explicitly: no promise of passive polling
-after a swap or safe concurrent model clients. The pinned audio.cpp server has
-no inference-cancel endpoint and emits different streaming outputs, so its HTTP
-route is not a drop-in replacement for the working four-mode speech CLI. Keep
-that implementation until an explicit replacement meets the required behavior.
-All checks stayed offline; the user's live update and parked GPU work were not
-probed or changed.
+Root and standalone L3DS route decisions through one authenticated, prefixed
+`/v1/systemone` request; there is no retry or passthrough fallback. Isolated CPU
+text sanity cases passed for d3 and Clef. The d3 image case passed; the Clef
+image attempt returned HTTP 400 because its question was invalid. The preflight
+was corrected, but that Clef image inference has not been rerun. None of these
+cases establishes quality or live-router compatibility.
 
-The [opt-in serving recipe](comfy-router-serving.md) uses native `comfyui_auto`,
-the router's `${PORT}`, explicit Comfy paths and `/system_stats` readiness,
-without enabling a model in the tracked serving YAML. YAML parsing and shell
-argument structure pass with the existing environment; no installation or
-process launch was needed. This is a prepared recipe, not a validated deployment.
+The v265 Comfy recipe remains opt-in. A bounded CPU `EmptyImage` → `SaveImage`
+job and artifact passed in `.toolkit/comfy-native-acceptance-fFidtt/run-06530039`,
+including a completed cancellation. A later run returned an artifact, but its
+cancellation observation remained `in_progress` under load. Treat the latest
+cancellation gate as open; no learned-model or GPU workflow was tested. The
+recipe does not alter tracked serving configuration or prove deployment.
 
-The user approved llama-swap owning supported serving, routing and swapping,
-with L3MS retaining a thin keyboard-first workbench and scripts. Three agents
-audited native routes, media contracts and deletion dependencies. Findings and
-next replacements are in [upstream-first-audit.md](upstream-first-audit.md).
-Linear access requires reauthentication; no tracking update was posted.
+A separate read-only check verified the installed/running llama-swap as v265
+`d1e743f` via `/api/version`, `/v1/models` and `/running`; no model was
+dispatched by that check. This establishes version/route visibility, not live
+task, GPU or restoration acceptance. The release-profile `--list stack | head`
+smoke now exits 0 and lists 34 profiles.
 
-Root CLI/UI and standalone L3DS now POST once to `/v1/systemone`, selecting the
-catalog-pinned model in JSON. These new decision integrations require v262+;
-there is no legacy passthrough fallback, inference retry or extra routing mode.
-Auth, reverse-proxy prefix, loopback restriction, typed answers and uncertain
-post-dispatch cancellation remain covered. Per-model health routes are unrelated
-and remain intact. The user is updating the live router independently; this
-slice does not establish its installed version or real-model acceptance.
+Four real CPU speech modes (standard, design, clone and streaming) passed after
+the platform retirement using the existing audio.cpp pin and weights. Each
+receipt verified child-process cleanup; no quality or GPU claim follows. A
+standalone CPU-only Blender headless render and child cleanup also passed; root
+CLI dispatch, GPU, external GUI and MCP handoff remain unverified. See the
+[decision and media audit](upstream-first-audit.md),
+[speech evidence](direct-speech-acceptance.md), and
+[simplification plan](simplification-plan.md) for current gates.
 
-Removed the uncalled generic `RuntimeAdapter`/`switch_exclusive` implementation
-and simulated adapters. The surviving runtime primitives still supply actual
-callers with resource claims, cancellation, deadlines and bounded cleanup.
-Managed-session and retained-ID observe/cancel/results still have callers and
-are not silently removed. Direct GPU guards and resident-unit controls remain.
-
-Verification: **937 root Rust tests passed, 4 existing ignores**; strict Clippy
-and format checks and root build pass. **32 L3DS runner Python tests, 17
-maintenance Python tests and 2 standalone Rust tests passed.** The lower root
-count reflects removal of the orphan protocol's simulation tests, not disabling
-tests for surviving behavior. Control source is **65,584 lines**, down **788**
-from `ffdf1a7` in the same tracked-file scope. The half-source reduction remains
-unmet. No live service control, model load, download or original checkout change
-was performed. Seamless LLM tool continuation and GPU acceptance remain open.
+Latest root suite: **645 passed, 4 ignored** (offline, single build worker),
+including the Chat capability fix. Strict all-target Clippy, formatting and the
+final offline release build pass. The final release listing smoke
+(`--list stack | head -n1`, with pipefail) exits 0 with 34 profiles.
+Chat excludes explicitly advertised decision models from selection, retaining
+the complete inventory for native decision forms and unknown capabilities for
+older servers. No discovery-time model probe or load is added.
+Standalone Rust checks (6 and 2), L3DS Python suites (38 runner and 17
+maintenance), root downloader tests (14), and dashboard tests (11 plus DOM
+fixtures) passed at the latest reported check. The tracked `src/control` source
+count is currently 30,414 lines (65,624 at the 2c checkpoint); historical
+measurement baselines differ, so no exact half-reduction claim is made.
+These checks and CPU receipts are bounded evidence, not full acceptance. No live
+GPU workflow, Pi handoff, live model task or complete all-lane acceptance has
+been established. Read-only router version/catalog visibility is verified; Pi's
+GPU window remains parked.
 
 ## Router-native d3/Clef decision port — 2026-10-14
 
@@ -1556,7 +1557,13 @@ CAR-220 Phase 9, and CAR-221 Phase 10.
 | 2026-09-30 | Supervised local decision execution | Added a Linux child-group runner with bounded nonblocking stdin/output, distinct stdout/stderr under one shared cap, deadline/cancellation checks, and independently bounded recovery. The leader stays unreaped until the final owned-group signal; after reaping only a non-signalling absence probe is used. Nine runner tests pass. The concrete local decision adapter prepares/executes/decodes harmless fixtures with offline model flags, validates native engine labels/answers, and preserves native latency/usage; five decoder/execution tests pass. Escaped/daemonized descendants remain outside the process-group proof; local cleanup cannot establish remote Comfy cancellation or GPU release. Hosted execution remains gated by SDK retry/auth verification; standalone hosted CLI is unaffected. |
 | 2026-09-30 | Combined adapter checkpoint | Root full suite: **373 passed, 1 ignored**, plus fmt, Clippy, and whitespace checks. Changes are committed locally on `feature/l3ms-monorepo`; no migration service switch, real model pilot, endpoint cutover, push, or publication occurred. Pi delegation was attempted with a read-only task and timed out; further Pi use is deferred at the user's request. Implementation assumptions and release gates are documented in [execution-contracts.md](execution-contracts.md). |
 
-## Open decisions
+## Historical coordinator prototype archive — superseded 2026-10-15
+
+The remaining entries below document the former managed coordinator prototype.
+They are retained as historical implementation evidence, not current work items:
+the managed-session/server/worker/private-engine vertical was retired in the
+2026-10-15 simplification. The current acceptance gates are at the beginning of
+this file and in the [upstream-first audit](upstream-first-audit.md).
 
 Latest offline adapter/transport/control/safety checkpoint: **429 root tests passed, 1
 ignored**, with fmt, Clippy, and whitespace checks passing. A deterministic

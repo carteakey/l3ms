@@ -2,9 +2,9 @@
 //!
 //! Callers must assert support for canonical client prompt IDs and atomic
 //! scoped jobs cancellation. No legacy/global interrupt fallback is allowed.
-//! Allocate a fresh UUID and persist it before submission; native ComfyUI does
-//! not deduplicate IDs. Tokens are single-use and adapter-local, not a fence
-//! against direct clients or a durable ownership registry after restart.
+//! Callers supply fresh UUIDs; native ComfyUI does not deduplicate them. The
+//! adapter uses one-shot tokens but does not persist jobs, manage the ComfyUI
+//! process, or fence separate direct clients.
 
 use std::{collections::BTreeMap, error::Error, fmt, path::PathBuf, sync::Arc, time::Duration};
 
@@ -96,484 +96,13 @@ pub struct PreparedComfyJob {
     attempted: bool,
 }
 impl PreparedComfyJob {
-    /// Candidate native prompt ID. Persist it as a dispatch intent before
-    /// submit; it is not an acknowledged backend ID until native acceptance.
+    /// Native prompt ID used for this one-shot direct workflow. It is not an
+    /// acknowledged backend ID until native acceptance.
     pub fn id(&self) -> &str {
         &self.id
     }
     pub fn submission_attempted(&self) -> bool {
         self.attempted
-    }
-}
-
-/// A managed job cannot be handed to the legacy HTTP adapter: its inner
-/// preparation is private and its exact owned generation stays attached.
-#[cfg(target_os = "linux")]
-pub struct PreparedManagedComfyJob {
-    inner: PreparedComfyJob,
-    generation: super::managed_service::OwnedServiceGenerationIdentity,
-    coordinator_job_id: Option<u64>,
-    coordinator_request_id: Option<String>,
-    cancel_attempted: bool,
-}
-
-#[cfg(target_os = "linux")]
-impl PreparedManagedComfyJob {
-    pub fn id(&self) -> &str {
-        self.inner.id()
-    }
-
-    pub fn submission_attempted(&self) -> bool {
-        self.inner.submission_attempted()
-    }
-}
-
-/// Transient evidence that Comfy positively acknowledged this exact managed
-/// candidate. It is intentionally neither cloneable nor restorable; its
-/// request/route/generation binding is consumed by the owner thread before
-/// backend identity is persisted.
-#[cfg(target_os = "linux")]
-pub(crate) struct ManagedComfyBackendAcknowledgement {
-    job_id: u64,
-    request_id: String,
-    candidate_id: String,
-    backend_id: String,
-    request: InferenceRequest,
-    route: ResolvedProfileRoute,
-    generation: super::managed_service::OwnedServiceGenerationIdentity,
-    generation_reference: Option<crate::state_store::ComfyServiceGenerationReference>,
-}
-
-#[cfg(target_os = "linux")]
-impl ManagedComfyBackendAcknowledgement {
-    pub(crate) fn job_id(&self) -> u64 {
-        self.job_id
-    }
-
-    pub(crate) fn request_id(&self) -> &str {
-        &self.request_id
-    }
-
-    pub(crate) fn candidate_id(&self) -> &str {
-        &self.candidate_id
-    }
-
-    pub(crate) fn backend_id(&self) -> &str {
-        &self.backend_id
-    }
-
-    pub(crate) fn generation_reference(
-        &self,
-    ) -> Option<crate::state_store::ComfyServiceGenerationReference> {
-        self.generation_reference.clone()
-    }
-
-    pub(crate) fn matches_generation(
-        &self,
-        generation: &super::managed_service::OwnedServiceGenerationIdentity,
-    ) -> bool {
-        let Ok(reference) = generation.comfy_service_generation_reference() else {
-            return false;
-        };
-        self.generation == *generation && self.generation_reference.as_ref() == Some(&reference)
-    }
-
-    pub(crate) fn matches_active(
-        &self,
-        job_id: u64,
-        request_id: &str,
-        request: &InferenceRequest,
-        route: &ResolvedProfileRoute,
-    ) -> bool {
-        self.job_id == job_id
-            && self.request_id == request_id
-            && self.candidate_id == self.backend_id
-            && same_comfy_request(&self.request, request)
-            && self.route == *route
-    }
-
-    pub(crate) fn matches_ticket(&self, ticket: &super::inference::DispatchTicket) -> bool {
-        self.matches_active(
-            ticket.job_id,
-            &ticket.request_id,
-            &ticket.request,
-            &ticket.route,
-        )
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl fmt::Debug for ManagedComfyBackendAcknowledgement {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("ManagedComfyBackendAcknowledgement([redacted])")
-    }
-}
-
-/// Build in-memory evidence for coordinator association unit tests only. This
-/// is not reachable in production and makes no claim that a native request or
-/// acknowledgment occurred.
-#[cfg(all(test, target_os = "linux"))]
-pub(crate) fn test_managed_comfy_acknowledgement(
-    ticket: &super::inference::DispatchTicket,
-    generation: super::managed_service::OwnedServiceGenerationIdentity,
-    candidate_id: &str,
-) -> Option<ManagedComfyBackendAcknowledgement> {
-    if !canonical_uuid(candidate_id)
-        || !same_comfy_request(&ticket.request, &ticket.request)
-        || ticket.route.profile.lane != Lane::Media
-        || ticket.route.runtime.lane != Lane::Media
-        || ticket.route.runtime.as_str() != "ComfyUI"
-    {
-        return None;
-    }
-    let generation_reference = generation.comfy_service_generation_reference().ok()?;
-    let acknowledgement = ManagedComfyBackendAcknowledgement {
-        job_id: ticket.job_id,
-        request_id: ticket.request_id.clone(),
-        candidate_id: candidate_id.to_owned(),
-        backend_id: candidate_id.to_owned(),
-        request: ticket.request.clone(),
-        route: ticket.route.clone(),
-        generation,
-        generation_reference: Some(generation_reference),
-    };
-    acknowledgement
-        .matches_generation(&acknowledgement.generation)
-        .then_some(acknowledgement)
-}
-
-/// Exact-generation native operations, not lifecycle/admission or release
-/// proof. Every operation revalidates the owner and actual socket peer. No
-/// legacy reqwest/TCP/auth fallback can receive this session's managed jobs.
-#[cfg(target_os = "linux")]
-pub struct OwnedComfySession<'session, 'host> {
-    adapter: &'session ComfyAdapter,
-    owner: &'session super::service_owner::ManagedRuntimeOwner<'host>,
-    service: &'session super::managed_service::OwnedService,
-    socket_directory: &'session std::path::Path,
-    generation: super::managed_service::OwnedServiceGenerationIdentity,
-}
-
-#[cfg(target_os = "linux")]
-impl<'session, 'host> OwnedComfySession<'session, 'host> {
-    pub fn new(
-        adapter: &'session ComfyAdapter,
-        owner: &'session super::service_owner::ManagedRuntimeOwner<'host>,
-        service: &'session super::managed_service::OwnedService,
-        socket_directory: &'session std::path::Path,
-        context: &OperationContext<'_>,
-    ) -> Result<Self, ComfyFailure> {
-        active(context, DispatchDisposition::NoDispatch)?;
-        if adapter.api_key.is_some()
-            || !service
-                .intent_record()
-                .runtime_identity()
-                .is_some_and(|runtime| runtime.lane == Lane::Media && runtime.as_str() == "ComfyUI")
-            || service.supervisor_peer_identity().is_none()
-        {
-            return Err(no_dispatch(ComfyErrorKind::InvalidOwnership));
-        }
-        let generation = owner
-            .running_generation_identity(service, context)
-            .map_err(owned_generation_failure)?;
-        Ok(Self {
-            adapter,
-            owner,
-            service,
-            socket_directory,
-            generation,
-        })
-    }
-
-    pub fn prepare_for_route(
-        &self,
-        catalog: &Catalog,
-        request: &InferenceRequest,
-        accepted_route: &ResolvedProfileRoute,
-        fresh_uuid: &str,
-    ) -> Result<PreparedManagedComfyJob, ComfyFailure> {
-        if self.service.intent_record().runtime_identity() != Some(&accepted_route.runtime) {
-            return Err(no_dispatch(ComfyErrorKind::InvalidOwnership));
-        }
-        Ok(PreparedManagedComfyJob {
-            inner: self
-                .adapter
-                .prepare_for_route(catalog, request, accepted_route, fresh_uuid)?,
-            generation: self.generation.clone(),
-            coordinator_job_id: None,
-            coordinator_request_id: None,
-            cancel_attempted: false,
-        })
-    }
-
-    pub fn status(
-        &self,
-        job: &PreparedManagedComfyJob,
-        context: &OperationContext<'_>,
-    ) -> Result<ComfySnapshot, ComfyFailure> {
-        self.check_job(job)?;
-        self.adapter
-            .status_using_http(&job.inner, context, &|path, payload, context| {
-                self.http(path, payload, context)
-            })
-    }
-
-    /// Observe a submitted candidate in the context of its exact original
-    /// ticket. Only a successful non-404 snapshot with a validated identical
-    /// native ID produces backend-acknowledgment evidence. Unknown/404 and
-    /// cancellation responses are not acknowledgment evidence.
-    pub(crate) fn status_with_acknowledgement(
-        &self,
-        job: &PreparedManagedComfyJob,
-        ticket: &super::inference::DispatchTicket,
-        context: &OperationContext<'_>,
-    ) -> Result<(ComfySnapshot, Option<ManagedComfyBackendAcknowledgement>), ComfyFailure> {
-        self.check_job(job)?;
-        if !managed_job_matches_ticket(job, ticket) {
-            return Err(no_dispatch(ComfyErrorKind::InvalidOwnership));
-        }
-        let snapshot =
-            self.adapter
-                .status_using_http(&job.inner, context, &|path, payload, context| {
-                    self.http(path, payload, context)
-                })?;
-        let acknowledgement = if snapshot.state == ComfyJobState::Unknown {
-            None
-        } else {
-            Some(managed_comfy_acknowledgement(
-                job,
-                ticket.job_id,
-                &ticket.request_id,
-            )?)
-        };
-        if acknowledgement
-            .as_ref()
-            .is_some_and(|proof| !proof.matches_ticket(ticket))
-        {
-            return Err(uncertain(ComfyErrorKind::InvalidOwnership));
-        }
-        Ok((snapshot, acknowledgement))
-    }
-
-    /// Main-thread handoff: prepare one job and atomically persist its fresh
-    /// candidate plus exact generation before returning a one-shot permit.
-    /// Losing this handoff never authorizes a second candidate or submission.
-    pub fn prepare_dispatch(
-        &self,
-        coordinator: &mut super::inference::CoordinatorCore,
-        catalog: &Catalog,
-        ticket: &super::inference::DispatchTicket,
-        context: &OperationContext<'_>,
-    ) -> Result<
-        (
-            PreparedManagedComfyJob,
-            super::inference::ManagedComfyDispatchPermit,
-        ),
-        ComfyFailure,
-    > {
-        let (job, permit) =
-            self.prepare_dispatch_using(catalog, ticket, context, |candidate, generation| {
-                coordinator
-                    .record_managed_comfy_dispatch_candidate(
-                        ticket,
-                        candidate,
-                        generation,
-                        std::time::Instant::now(),
-                    )
-                    .map_err(|_| no_dispatch(ComfyErrorKind::InvalidOwnership))
-            })?;
-        if !coordinator.accepts_managed_comfy_dispatch_permit(&permit) {
-            return Err(no_dispatch(ComfyErrorKind::InvalidOwnership));
-        }
-        Ok((job, permit))
-    }
-
-    /// Prepare a single-use managed candidate while letting the owner thread
-    /// perform the durable handoff. The callback receives only this freshly
-    /// generated candidate and its owner-minted exact generation. Its returned
-    /// permit is checked against the full accepted ticket before this method
-    /// returns, and the live generation is re-read after callback completion.
-    pub(crate) fn prepare_dispatch_using<F>(
-        &self,
-        catalog: &Catalog,
-        ticket: &super::inference::DispatchTicket,
-        context: &OperationContext<'_>,
-        record_candidate: F,
-    ) -> Result<
-        (
-            PreparedManagedComfyJob,
-            super::inference::ManagedComfyDispatchPermit,
-        ),
-        ComfyFailure,
-    >
-    where
-        F: FnOnce(
-            String,
-            super::managed_service::OwnedServiceGenerationIdentity,
-        ) -> Result<super::inference::ManagedComfyDispatchPermit, ComfyFailure>,
-    {
-        active(context, DispatchDisposition::NoDispatch)?;
-        let current = self
-            .owner
-            .running_generation_identity(self.service, context)
-            .map_err(owned_generation_failure)?;
-        if current != self.generation {
-            return Err(no_dispatch(ComfyErrorKind::InvalidOwnership));
-        }
-        let candidate = fresh_comfy_candidate(context)?;
-        let mut job =
-            self.prepare_for_route(catalog, &ticket.request, &ticket.route, &candidate)?;
-        let permit = record_candidate(candidate.clone(), current)?;
-        if permit.job_id() != ticket.job_id
-            || permit.request_id() != ticket.request_id
-            || !permit.matches_generation(&self.generation)
-            || !permit.matches_candidate(&candidate, &ticket.route)
-            || !permit.matches_request(&ticket.request_id, &ticket.request, &ticket.route)
-            || candidate != job.id()
-        {
-            return Err(no_dispatch(ComfyErrorKind::InvalidOwnership));
-        }
-        active(context, DispatchDisposition::NoDispatch)?;
-        let after = self
-            .owner
-            .running_generation_identity(self.service, context)
-            .map_err(owned_generation_failure)?;
-        if after != self.generation || !permit.matches_generation(&after) {
-            return Err(no_dispatch(ComfyErrorKind::InvalidOwnership));
-        }
-        job.coordinator_job_id = Some(ticket.job_id);
-        job.coordinator_request_id = Some(ticket.request_id.clone());
-        Ok((job, permit))
-    }
-
-    pub fn submit_with_dispatch_permit(
-        &self,
-        job: &mut PreparedManagedComfyJob,
-        permit: super::inference::ManagedComfyDispatchPermit,
-        context: &OperationContext<'_>,
-    ) -> Result<(), ComfyFailure> {
-        self.submit_with_acknowledgement(job, permit, context)
-            .map(drop)
-    }
-
-    /// Consume one exact pre-dispatch permit and return native acknowledgment
-    /// evidence only after the success response names the candidate ID exactly.
-    pub(crate) fn submit_with_acknowledgement(
-        &self,
-        job: &mut PreparedManagedComfyJob,
-        permit: super::inference::ManagedComfyDispatchPermit,
-        context: &OperationContext<'_>,
-    ) -> Result<ManagedComfyBackendAcknowledgement, ComfyFailure> {
-        self.check_job(job)?;
-        if !permit.matches_generation(&self.generation)
-            || !permit.matches_candidate(job.id(), &job.inner.accepted_route)
-            || !permit.matches_request(
-                permit.request_id(),
-                &job.inner.request,
-                &job.inner.accepted_route,
-            )
-        {
-            return Err(no_dispatch(ComfyErrorKind::InvalidOwnership));
-        }
-        if job
-            .coordinator_job_id
-            .is_some_and(|job_id| job_id != permit.job_id())
-            || job
-                .coordinator_request_id
-                .as_deref()
-                .is_some_and(|request_id| request_id != permit.request_id())
-        {
-            return Err(no_dispatch(ComfyErrorKind::InvalidOwnership));
-        }
-        job.coordinator_job_id = Some(permit.job_id());
-        job.coordinator_request_id = Some(permit.request_id().to_owned());
-        let route = job.inner.accepted_route.clone();
-        self.adapter.submit_using_http(
-            &mut job.inner,
-            &route,
-            context,
-            &|path, payload, context| self.http(path, payload, context),
-        )?;
-        managed_comfy_acknowledgement(job, permit.job_id(), permit.request_id())
-    }
-
-    /// A single scoped cancel attempt. Its acknowledgment is not terminal
-    /// evidence; uncertainty never authorizes another cancellation or POST.
-    pub fn cancel(
-        &self,
-        job: &mut PreparedManagedComfyJob,
-        context: &OperationContext<'_>,
-    ) -> Result<bool, ComfyFailure> {
-        self.check_job(job)?;
-        self.adapter.check_owner(&job.inner, true)?;
-        if job.cancel_attempted {
-            return Err(no_dispatch(ComfyErrorKind::AlreadyAttempted));
-        }
-        job.cancel_attempted = true;
-        self.adapter
-            .cancel_using_http(&job.inner, context, &|path, payload, context| {
-                self.http(path, payload, context)
-            })
-    }
-
-    fn check_job(&self, job: &PreparedManagedComfyJob) -> Result<(), ComfyFailure> {
-        if job.generation != self.generation {
-            return Err(no_dispatch(ComfyErrorKind::InvalidOwnership));
-        }
-        self.adapter.check_owner(&job.inner, false)
-    }
-
-    fn http(
-        &self,
-        path: &str,
-        payload: Option<&Value>,
-        context: &OperationContext<'_>,
-    ) -> Result<(reqwest::StatusCode, Vec<u8>), ComfyFailure> {
-        use super::engine_health::{OwnedComfyFailureKind, OwnedComfyOperation};
-        let invalid = || no_dispatch(ComfyErrorKind::InvalidRequest);
-        let operation = if path == "/prompt" {
-            let payload = payload.ok_or_else(invalid)?;
-            OwnedComfyOperation::Submit {
-                prompt_id: payload
-                    .get("prompt_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(invalid)?,
-                graph: payload.get("prompt").ok_or_else(invalid)?,
-            }
-        } else if let Some(prompt_id) = path.strip_prefix("/api/jobs/") {
-            match prompt_id.strip_suffix("/cancel") {
-                Some(prompt_id) if payload == Some(&serde_json::json!({})) => {
-                    OwnedComfyOperation::Cancel { prompt_id }
-                }
-                None if payload.is_none() => OwnedComfyOperation::Status { prompt_id },
-                _ => return Err(invalid()),
-            }
-        } else {
-            return Err(invalid());
-        };
-        let response = super::engine_health::request_owned_comfy_json(
-            self.owner,
-            self.service,
-            self.socket_directory,
-            &self.generation,
-            operation,
-            context,
-        )
-        .map_err(|failure| ComfyFailure {
-            disposition: failure.disposition,
-            kind: match failure.kind {
-                OwnedComfyFailureKind::Configuration => ComfyErrorKind::Configuration,
-                OwnedComfyFailureKind::Ownership => ComfyErrorKind::InvalidOwnership,
-                OwnedComfyFailureKind::Cancelled => ComfyErrorKind::Cancelled,
-                OwnedComfyFailureKind::Deadline => ComfyErrorKind::Deadline,
-                OwnedComfyFailureKind::Transport => ComfyErrorKind::Transport,
-                OwnedComfyFailureKind::Protocol => ComfyErrorKind::Protocol,
-                OwnedComfyFailureKind::TooLarge => ComfyErrorKind::TooLarge,
-            },
-        })?;
-        let status = reqwest::StatusCode::from_u16(response.status)
-            .map_err(|_| uncertain(ComfyErrorKind::Protocol))?;
-        Ok((status, response.body))
     }
 }
 
@@ -614,87 +143,6 @@ pub(crate) fn fresh_comfy_candidate(
         write!(id, "{byte:02x}").map_err(|_| no_dispatch(ComfyErrorKind::Configuration))?;
     }
     Ok(id)
-}
-
-#[cfg(target_os = "linux")]
-fn managed_job_matches_ticket(
-    job: &PreparedManagedComfyJob,
-    ticket: &super::inference::DispatchTicket,
-) -> bool {
-    job.coordinator_job_id == Some(ticket.job_id)
-        && job.coordinator_request_id.as_deref() == Some(ticket.request_id.as_str())
-        && job.inner.accepted_route == ticket.route
-        && same_comfy_request(&job.inner.request, &ticket.request)
-}
-
-#[cfg(target_os = "linux")]
-fn same_comfy_request(left: &InferenceRequest, right: &InferenceRequest) -> bool {
-    match (left, right) {
-        (
-            InferenceRequest::Media {
-                profile: left_profile,
-                input:
-                    MediaInput::Workflow {
-                        task: left_task,
-                        graph: left_graph,
-                    },
-            },
-            InferenceRequest::Media {
-                profile: right_profile,
-                input:
-                    MediaInput::Workflow {
-                        task: right_task,
-                        graph: right_graph,
-                    },
-            },
-        ) => left_profile == right_profile && left_task == right_task && left_graph == right_graph,
-        _ => false,
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn managed_comfy_acknowledgement(
-    job: &PreparedManagedComfyJob,
-    job_id: u64,
-    request_id: &str,
-) -> Result<ManagedComfyBackendAcknowledgement, ComfyFailure> {
-    if !job.inner.attempted
-        || job.coordinator_job_id != Some(job_id)
-        || job.coordinator_request_id.as_deref() != Some(request_id)
-        || !canonical_uuid(job.id())
-    {
-        return Err(uncertain(ComfyErrorKind::InvalidOwnership));
-    }
-    let generation_reference = job.generation.comfy_service_generation_reference().ok();
-    if generation_reference.is_none() {
-        return Err(uncertain(ComfyErrorKind::InvalidOwnership));
-    }
-    let acknowledgement = ManagedComfyBackendAcknowledgement {
-        job_id,
-        request_id: request_id.to_owned(),
-        candidate_id: job.id().to_owned(),
-        backend_id: job.id().to_owned(),
-        request: job.inner.request.clone(),
-        route: job.inner.accepted_route.clone(),
-        generation: job.generation.clone(),
-        generation_reference,
-    };
-    if !acknowledgement.matches_generation(&job.generation) {
-        return Err(uncertain(ComfyErrorKind::InvalidOwnership));
-    }
-    Ok(acknowledgement)
-}
-
-#[cfg(target_os = "linux")]
-fn owned_generation_failure(
-    error: super::managed_service::ManagedServiceErrorKind,
-) -> ComfyFailure {
-    use super::managed_service::ManagedServiceErrorKind;
-    no_dispatch(match error {
-        ManagedServiceErrorKind::Cancelled => ComfyErrorKind::Cancelled,
-        ManagedServiceErrorKind::DeadlineExceeded => ComfyErrorKind::Deadline,
-        _ => ComfyErrorKind::InvalidOwnership,
-    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -759,8 +207,6 @@ pub struct ComfyAdapter {
     endpoint: String,
     api_key: Option<String>,
     owner: Arc<()>,
-    #[cfg(target_os = "linux")]
-    private_engine: Option<super::native_http::PinnedEngineSocket>,
 }
 impl ComfyAdapter {
     pub fn new(
@@ -782,24 +228,7 @@ impl ComfyAdapter {
             endpoint,
             api_key: api_key.map(str::to_owned),
             owner: Arc::new(()),
-            #[cfg(target_os = "linux")]
-            private_engine: None,
         })
-    }
-
-    /// Explicit private helper selection, not lifecycle/admission proof.
-    #[cfg(target_os = "linux")]
-    pub fn new_private_engine(
-        directory: &std::path::Path,
-        api_key: Option<&str>,
-        contract: ComfyContract,
-    ) -> Result<Self, ComfyFailure> {
-        let mut adapter = Self::new("http://127.0.0.1", api_key, contract)?;
-        adapter.private_engine = Some(
-            super::native_http::PinnedEngineSocket::open(directory)
-                .map_err(|_| no_dispatch(ComfyErrorKind::Configuration))?,
-        );
-        Ok(adapter)
     }
 
     pub fn prepare(
@@ -811,8 +240,8 @@ impl ComfyAdapter {
         self.prepare_inner(catalog, request, None, fresh_uuid)
     }
 
-    /// Prepare against the exact route already accepted by the coordinator.
-    /// The full route is retained and checked again immediately before POST.
+    /// Prepare against the exact route selected for this native task. The full
+    /// route is retained and checked again immediately before POST.
     pub fn prepare_for_route(
         &self,
         catalog: &Catalog,
@@ -844,8 +273,8 @@ impl ComfyAdapter {
         })
     }
 
-    /// Blocking-executor thread only. A token becomes used before HTTP work
-    /// starts and stays used on every failure. There is no automatic replay.
+    /// A token becomes used before HTTP work starts and stays used on every
+    /// failure. There is no automatic replay.
     pub fn submit(
         &self,
         job: &mut PreparedComfyJob,
@@ -864,25 +293,6 @@ impl ComfyAdapter {
         context: &OperationContext<'_>,
     ) -> Result<(), ComfyFailure> {
         self.submit_inner(job, accepted_route, context)
-    }
-
-    /// Coordinator dispatch: consume the one-shot permit returned only after
-    /// the candidate UUID was durably recorded for the active accepted route.
-    /// Consuming a permit is not a native acknowledgment. Route/transport
-    /// failures never manufacture another permit or retry the POST.
-    pub fn submit_with_dispatch_permit(
-        &self,
-        job: &mut PreparedComfyJob,
-        permit: super::inference::ComfyDispatchPermit,
-        context: &OperationContext<'_>,
-    ) -> Result<(), ComfyFailure> {
-        if !permit.matches_candidate(job.id(), &job.accepted_route)
-            || !permit.matches_request(permit.request_id(), &job.request, &job.accepted_route)
-        {
-            return Err(no_dispatch(ComfyErrorKind::InvalidOwnership));
-        }
-        let route = job.accepted_route.clone();
-        self.submit_inner(job, &route, context)
     }
 
     fn submit_inner(
@@ -1284,13 +694,6 @@ impl ComfyAdapter {
                 auth_headers(self.api_key.as_deref())
                     .map_err(|_| no_dispatch(ComfyErrorKind::Configuration))?,
             );
-        #[cfg(target_os = "linux")]
-        let builder = match &self.private_engine {
-            Some(socket) => socket
-                .configure(builder)
-                .map_err(|_| no_dispatch(ComfyErrorKind::Configuration))?,
-            None => builder,
-        };
         Ok(builder)
     }
 }
@@ -2031,7 +1434,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn managed_candidate_is_canonical_v4_and_respects_cancelled_context() {
+    fn direct_candidate_is_canonical_v4_and_respects_cancelled_context() {
         let id = fresh_comfy_candidate(&context()).unwrap();
         assert!(canonical_uuid(&id));
         assert_eq!(id.as_bytes()[14], b'4');
@@ -2047,93 +1450,6 @@ mod tests {
             fresh_comfy_candidate(&cancelled),
             Err(no_dispatch(ComfyErrorKind::Cancelled))
         );
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn managed_backend_acknowledgement_is_exact_and_redacted() {
-        use super::super::catalog::RuntimeIdentity;
-        use super::super::inference::CoordinatorCore;
-        use super::super::managed_service::OwnedServiceGenerationIdentity;
-        use super::super::runtime::ResourceClaim;
-
-        let data = tempfile::tempdir().unwrap();
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let catalog = Catalog::load(root).unwrap();
-        let mut core = CoordinatorCore::load(
-            catalog.clone(),
-            BTreeMap::from([(
-                RuntimeIdentity::new(Lane::Media, "ComfyUI").unwrap(),
-                ResourceClaim::ExclusiveGpu(0),
-            )]),
-            data.path(),
-            root,
-            8,
-        )
-        .unwrap();
-        core.confirm_reconciled().unwrap();
-        core.submit(
-            "managed-comfy-ack".into(),
-            request(),
-            Duration::from_secs(10),
-            Instant::now(),
-        )
-        .unwrap();
-        let ticket = core.reserve_next(Instant::now()).unwrap().unwrap();
-        core.begin_dispatch(&ticket, Instant::now()).unwrap();
-
-        let generation = OwnedServiceGenerationIdentity::for_test_comfy_supervisor().unwrap();
-        let adapter = adapter("http://127.0.0.1:1");
-        let mut inner = adapter
-            .prepare_for_route(&catalog, &ticket.request, &ticket.route, ID)
-            .unwrap();
-        inner.attempted = true;
-        let job = PreparedManagedComfyJob {
-            inner,
-            generation: generation.clone(),
-            coordinator_job_id: Some(ticket.job_id),
-            coordinator_request_id: Some(ticket.request_id.clone()),
-            cancel_attempted: false,
-        };
-        let acknowledgement =
-            managed_comfy_acknowledgement(&job, ticket.job_id, &ticket.request_id).unwrap();
-
-        assert!(acknowledgement.matches_ticket(&ticket));
-        assert!(acknowledgement.matches_generation(&generation));
-        assert_eq!(acknowledgement.job_id(), ticket.job_id);
-        assert_eq!(acknowledgement.request_id(), ticket.request_id);
-        assert_eq!(acknowledgement.candidate_id(), ID);
-        assert_eq!(acknowledgement.backend_id(), ID);
-        assert!(acknowledgement.generation_reference().is_some());
-        assert!(!format!("{acknowledgement:?}").contains("SENSITIVE_PROMPT"));
-
-        let mut other_request = request();
-        let InferenceRequest::Media {
-            input: MediaInput::Workflow { graph, .. },
-            ..
-        } = &mut other_request
-        else {
-            panic!("fixture request must be a workflow")
-        };
-        *graph = serde_json::json!({"1":{"class_type":"Changed","inputs":{}}});
-        assert!(!acknowledgement.matches_active(
-            ticket.job_id,
-            &ticket.request_id,
-            &other_request,
-            &ticket.route,
-        ));
-
-        let mut other_route = ticket.route.clone();
-        other_route.profile = ProfileKey::new(Lane::Media, "another-profile").unwrap();
-        assert!(!acknowledgement.matches_active(
-            ticket.job_id,
-            &ticket.request_id,
-            &ticket.request,
-            &other_route,
-        ));
-        let other_generation =
-            OwnedServiceGenerationIdentity::for_test_comfy_supervisor_with_main_pid(2346).unwrap();
-        assert!(!acknowledgement.matches_generation(&other_generation));
     }
 
     #[test]
@@ -2299,12 +1615,6 @@ mod tests {
     fn fixture(
         replies: Vec<(u16, String, Duration)>,
     ) -> (String, std::thread::JoinHandle<Recorded>) {
-        fixture_with_history(replies, None)
-    }
-    fn fixture_with_history(
-        replies: Vec<(u16, String, Duration)>,
-        history: Option<std::path::PathBuf>,
-    ) -> (String, std::thread::JoinHandle<Recorded>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         listener.set_nonblocking(true).unwrap();
@@ -2333,21 +1643,6 @@ mod tests {
                     assert!(header.len() < 16384);
                 }
                 let header = String::from_utf8(header).unwrap();
-                if header.starts_with("POST /prompt ") {
-                    if let Some(history) = &history {
-                        let rows: Value =
-                            serde_json::from_slice(&std::fs::read(history).unwrap()).unwrap();
-                        let row = rows
-                            .as_array()
-                            .unwrap()
-                            .iter()
-                            .find(|row| row["request_id"] == "durable-comfy")
-                            .unwrap();
-                        assert_eq!(row["comfy_dispatch_candidate"], ID);
-                        assert!(row.get("backend_id").is_none());
-                        assert!(!rows.to_string().contains("SENSITIVE_PROMPT"));
-                    }
-                }
                 let length = header
                     .lines()
                     .find_map(|line| {
@@ -2380,311 +1675,6 @@ mod tests {
     }
     fn reply(body: Value) -> (u16, String, Duration) {
         (200, body.to_string(), Duration::ZERO)
-    }
-
-    #[test]
-    fn coordinator_candidate_is_durable_before_post_and_lost_ack_is_not_replayed() {
-        use super::super::catalog::RuntimeIdentity;
-        use super::super::inference::CoordinatorCore;
-        use super::super::runtime::ResourceClaim;
-
-        for lost_ack in [false, true] {
-            let data = tempfile::tempdir().unwrap();
-            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-            let catalog = Catalog::load(root).unwrap();
-            let mut core = CoordinatorCore::load(
-                catalog.clone(),
-                BTreeMap::from([(
-                    RuntimeIdentity::new(Lane::Media, "ComfyUI").unwrap(),
-                    ResourceClaim::ExclusiveGpu(0),
-                )]),
-                data.path(),
-                root,
-                8,
-            )
-            .unwrap();
-            // Fixture reconciliation is not a native owner/readiness proof.
-            core.confirm_reconciled().unwrap();
-            let job_id = core
-                .submit(
-                    "durable-comfy".into(),
-                    request(),
-                    Duration::from_secs(10),
-                    Instant::now(),
-                )
-                .unwrap();
-            let ticket = core.reserve_next(Instant::now()).unwrap().unwrap();
-            core.begin_dispatch(&ticket, Instant::now()).unwrap();
-            let permit = core
-                .record_comfy_dispatch_candidate(&ticket, ID.into(), Instant::now())
-                .unwrap();
-            let replies = if lost_ack {
-                vec![
-                    reply(serde_json::json!({"prompt_id":"wrong-ack"})),
-                    reply(serde_json::json!({"id":ID,"status":"pending"})),
-                ]
-            } else {
-                vec![reply(serde_json::json!({"prompt_id":ID}))]
-            };
-            let (endpoint, server) =
-                fixture_with_history(replies, Some(data.path().join("jobs.json")));
-            let adapter = adapter(&endpoint);
-            let mut prepared = adapter
-                .prepare_for_route(&catalog, &ticket.request, &ticket.route, ID)
-                .unwrap();
-            let outcome = adapter.submit_with_dispatch_permit(&mut prepared, permit, &context());
-            if lost_ack {
-                assert_eq!(
-                    outcome.unwrap_err().disposition,
-                    DispatchDisposition::Uncertain
-                );
-                let observation = adapter.status(&prepared, &context()).unwrap();
-                assert_eq!(observation.state, ComfyJobState::Pending);
-            } else {
-                outcome.unwrap();
-            }
-            // Candidate persistence alone never sets an acknowledged backend ID.
-            let rows: Value =
-                serde_json::from_slice(&std::fs::read(data.path().join("jobs.json")).unwrap())
-                    .unwrap();
-            assert!(rows.as_array().unwrap()[0].get("backend_id").is_none());
-            core.attach_backend(job_id, ID.into()).unwrap();
-            assert!(core
-                .record_comfy_dispatch_candidate(&ticket, ID.into(), Instant::now())
-                .is_err());
-            assert_eq!(
-                adapter.submit(&mut prepared, &context()).unwrap_err().kind,
-                ComfyErrorKind::AlreadyAttempted
-            );
-            let recorded = server.join().unwrap();
-            assert_eq!(
-                recorded
-                    .iter()
-                    .filter(|(header, _)| header.starts_with("POST /prompt "))
-                    .count(),
-                1
-            );
-            assert_eq!(recorded.len(), if lost_ack { 2 } else { 1 });
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn coordinator_permit_cannot_submit_another_workflow_or_candidate() {
-        use super::super::catalog::RuntimeIdentity;
-        use super::super::inference::CoordinatorCore;
-        use super::super::runtime::ResourceClaim;
-
-        for changed_graph in [false, true] {
-            let data = tempfile::tempdir().unwrap();
-            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-            let catalog = Catalog::load(root).unwrap();
-            let mut core = CoordinatorCore::load(
-                catalog.clone(),
-                BTreeMap::from([(
-                    RuntimeIdentity::new(Lane::Media, "ComfyUI").unwrap(),
-                    ResourceClaim::ExclusiveGpu(0),
-                )]),
-                data.path(),
-                root,
-                8,
-            )
-            .unwrap();
-            core.confirm_reconciled().unwrap();
-            core.submit(
-                "durable-comfy".into(),
-                request(),
-                Duration::from_secs(10),
-                Instant::now(),
-            )
-            .unwrap();
-            let ticket = core.reserve_next(Instant::now()).unwrap().unwrap();
-            core.begin_dispatch(&ticket, Instant::now()).unwrap();
-            let permit = core
-                .record_comfy_dispatch_candidate(&ticket, ID.into(), Instant::now())
-                .unwrap();
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.set_nonblocking(true).unwrap();
-            let adapter = adapter(&format!("http://{}", listener.local_addr().unwrap()));
-            let mut other_request = request();
-            if changed_graph {
-                let InferenceRequest::Media {
-                    input: MediaInput::Workflow { graph, .. },
-                    ..
-                } = &mut other_request
-                else {
-                    panic!("fixture must be a workflow")
-                };
-                *graph = serde_json::json!({"2":{"class_type":"Other","inputs":{}}});
-            }
-            let other_id = if changed_graph {
-                ID
-            } else {
-                "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-            };
-            let mut prepared = adapter
-                .prepare_for_route(&catalog, &other_request, &ticket.route, other_id)
-                .unwrap();
-            let error = adapter
-                .submit_with_dispatch_permit(&mut prepared, permit, &context())
-                .unwrap_err();
-            assert_eq!(error.disposition, DispatchDisposition::NoDispatch);
-            assert_eq!(error.kind, ComfyErrorKind::InvalidOwnership);
-            assert!(!prepared.submission_attempted());
-            assert_eq!(
-                listener.accept().unwrap_err().kind(),
-                std::io::ErrorKind::WouldBlock
-            );
-            assert!(core
-                .record_comfy_dispatch_candidate(&ticket, ID.into(), Instant::now())
-                .is_err());
-            assert_eq!(core.active_count(), 1);
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn coordinator_permit_is_revoked_before_post_when_its_owner_or_reservation_ends() {
-        use super::super::catalog::RuntimeIdentity;
-        use super::super::inference::{Completion, CoordinatorCore};
-        use super::super::runtime::ResourceClaim;
-
-        for action in ["drop", "quarantine", "cancel", "complete", "deadline"] {
-            let data = tempfile::tempdir().unwrap();
-            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-            let catalog = Catalog::load(root).unwrap();
-            let mut core = CoordinatorCore::load(
-                catalog.clone(),
-                BTreeMap::from([(
-                    RuntimeIdentity::new(Lane::Media, "ComfyUI").unwrap(),
-                    ResourceClaim::ExclusiveGpu(0),
-                )]),
-                data.path(),
-                root,
-                8,
-            )
-            .unwrap();
-            core.confirm_reconciled().unwrap();
-            let job_id = core
-                .submit(
-                    "durable-comfy".into(),
-                    request(),
-                    Duration::from_secs(1),
-                    Instant::now(),
-                )
-                .unwrap();
-            let ticket = core.reserve_next(Instant::now()).unwrap().unwrap();
-            core.begin_dispatch(&ticket, Instant::now()).unwrap();
-            let permit = core
-                .record_comfy_dispatch_candidate(&ticket, ID.into(), Instant::now())
-                .unwrap();
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.set_nonblocking(true).unwrap();
-            let adapter = adapter(&format!("http://{}", listener.local_addr().unwrap()));
-            let mut prepared = adapter
-                .prepare_for_route(&catalog, &ticket.request, &ticket.route, ID)
-                .unwrap();
-            match action {
-                "drop" => drop(core),
-                "quarantine" => core.quarantine(),
-                "cancel" => core.cancel_request("durable-comfy").unwrap(),
-                "complete" => {
-                    core.complete(job_id, Completion::Failed, Vec::new(), Instant::now())
-                        .unwrap();
-                }
-                "deadline" => std::thread::sleep(
-                    ticket.deadline.saturating_duration_since(Instant::now())
-                        + Duration::from_millis(5),
-                ),
-                _ => unreachable!(),
-            }
-            let error = adapter
-                .submit_with_dispatch_permit(&mut prepared, permit, &context())
-                .unwrap_err();
-            assert_eq!(
-                error.disposition,
-                DispatchDisposition::NoDispatch,
-                "{action}"
-            );
-            assert!(!prepared.submission_attempted(), "{action}");
-            assert_eq!(
-                listener.accept().unwrap_err().kind(),
-                std::io::ErrorKind::WouldBlock
-            );
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn private_socket_submission_keeps_owned_native_id_and_one_shot_semantics() {
-        use std::os::unix::fs::PermissionsExt;
-        use std::os::unix::net::UnixListener;
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let path = directory
-            .path()
-            .join(super::super::engine_transport::ENGINE_SOCKET_NAME);
-        let listener = UnixListener::bind(&path).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let adapter = ComfyAdapter::new_private_engine(
-            directory.path(),
-            None,
-            ComfyContract::CanonicalIdsAndAtomicScopedCancellation,
-        )
-        .unwrap();
-        let mut job = prepared(&adapter);
-        let server = std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(3);
-            let mut stream = loop {
-                match listener.accept() {
-                    Ok((stream, _)) => break stream,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        assert!(Instant::now() < deadline, "private submission not received");
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(_) => panic!("private fixture accept failed"),
-                }
-            };
-            stream
-                .set_read_timeout(Some(Duration::from_secs(3)))
-                .unwrap();
-            stream
-                .set_write_timeout(Some(Duration::from_secs(3)))
-                .unwrap();
-            let mut header = Vec::new();
-            let mut byte = [0];
-            while !header.ends_with(b"\r\n\r\n") {
-                stream.read_exact(&mut byte).unwrap();
-                header.push(byte[0]);
-                assert!(header.len() <= 16 * 1024);
-            }
-            let header = String::from_utf8(header).unwrap();
-            assert!(header.starts_with("POST /prompt HTTP/1.1\r\n"));
-            let length = header
-                .lines()
-                .find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("content-length")
-                        .then(|| value.trim().parse::<usize>().unwrap())
-                })
-                .unwrap();
-            assert!(length <= 1024 * 1024 + 256);
-            let mut body = vec![0; length];
-            stream.read_exact(&mut body).unwrap();
-            let payload: Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(payload["prompt_id"], ID);
-            assert_eq!(payload["prompt"]["1"]["inputs"]["text"], "SENSITIVE_PROMPT");
-            let response = serde_json::json!({"prompt_id":ID}).to_string();
-            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response).unwrap();
-        });
-        adapter.submit(&mut job, &context()).unwrap();
-        assert!(job.submission_attempted());
-        assert_eq!(
-            adapter.submit(&mut job, &context()).unwrap_err(),
-            no_dispatch(ComfyErrorKind::AlreadyAttempted)
-        );
-        server.join().unwrap();
     }
 
     #[test]

@@ -1,80 +1,65 @@
 # llama-swap-native replacement audit
 
-2026-10-15, branch `feature/l3ms-monorepo`, starting at `ffdf1a7`.
-Scope: tagged v265 source and local callers, not live endpoint acceptance.
-The user is updating llama-swap independently; no installed version is assumed
-verified here. Do not probe or control the router during that update or Pi's
-parked GPU window. Linear sync currently requires reauthentication.
+Updated 2026-10-15 for the `feature/l3ms-monorepo` source tree. The source/caller
+audit is against tagged llama-swap v265. A separate read-only live check verified
+the installed/running build as v265 `d1e743f` through `/api/version`,
+`/v1/models` and `/running`; no model was dispatched. This does not establish
+end-to-end task, GPU or restoration acceptance. Pi's GPU window remains parked.
 
-## Decisions and first deletion
+## Current decisions
 
-| Workflow | Native replacement / retained behavior | Acceptance and deletion |
+| Area | Current source choice | Evidence and remaining limit |
 | --- | --- | --- |
-| d3/Clef decisions | POST `/v1/systemone`, with `model`, `state`, `questions`; require v262+ for this newly added integration | Root and standalone callers use one request, retaining auth, URL prefix, typed results and uncertainty. Delete the per-model passthrough URL construction; no retry or dual routing mode. |
-| Generic cross-engine switching | No production caller or concrete implementation of the old `RuntimeAdapter` protocol | Remove the orphan protocol and simulated switching implementation from `runtime.rs`. Keep real cancellation/deadline/recovery primitives and direct-workflow safety. |
-| Live discovery | Existing `/v1/models` client remains | Upstream capabilities do not yet feed our `SwapModel` parser. Prefer consuming native capabilities over new discovery infrastructure; local recipes remain necessary for offline setup and scripts. |
-| Logs | No root Rust `/api/events` consumer was found | No log transport migration needed in current root callers. Check external clients before any deployment claim; don't build a new event bridge. |
-| Comfy | Native `/comfyui/` is a possible serving path, not a replacement job protocol | Retain scoped submit/status/cancel and artifact checks pending tests through the proxy. No global-interrupt fallback. |
-| Speech | Keep existing four-mode audio.cpp CLI recipes until server equivalence is demonstrated | Native audio routes alone do not replace owned child cleanup, output receipts, cloning inputs or streaming-mode behavior. |
-| LLM tool continuation | Conversation/tool-result history must live outside the model process | Prove native swapping and task completion first. Add only missing conversation glue, not another scheduler or supervisor. |
+| d3/Clef decisions | Root and standalone callers POST once to `/v1/systemone` with the pinned model, state and questions; this integration requires llama-swap v262+. Keep auth, URL-prefix handling, typed answers and uncertain post-dispatch behavior; no retry or passthrough fallback. | In isolated v265 CPU runs, d3 and Clef text sanity cases passed (`.toolkit/native-decision-acceptance-CgGCvU/run-eb534949`). The d3 image case passed in `run-4ebbef8a`; Clef returned HTTP 400 because that attempt's question was invalid. Its preflight is corrected, but the Clef image inference has not been rerun. No quality or live-router claim. |
+| Managed execution platform | Retire the branch-added managed-session creator, daemon/worker/server/private-engine vertical and duplicate language chat facade. Do not implement a replacement coordinator. | Explicit older-server clients for retained-ID observe/cancel/results and history/artifact reads remain; no on-disk records were removed or migrated. Actual Chat uses `ChatClient`. Direct cancellation/deadline/recovery and GPU safeguards remain with their callers. |
+| Discovery and logs | Reuse `/v1/models` and its `architecture.output_modalities`. Do not add a log bridge. | Explicit decision models are excluded from Chat selection but retained in the complete inventory for native task forms; unknown capabilities remain selectable. No root Rust `/api/events` consumer remains. Check external clients before deployment. |
+| Comfy | Keep the native scoped submit/status/cancel/artifact contract; the opt-in router recipe is not an implicit config change. | A bounded CPU `EmptyImage` → `SaveImage` job returned an artifact through v265 (`run-06530039`); its scoped cancellation completed. A later run (`run-8b6bdda7`) returned an artifact, but cancellation was still `in_progress` under load. Treat latest cancellation acceptance as unresolved; no learned-model or GPU workflow was tested. |
+| Speech | Keep the existing four-mode audio.cpp CLI workflow; do not add a parallel server-backed path on route availability alone. | All four real CPU modes and process-identity cleanup passed after platform retirement; see [speech acceptance](direct-speech-acceptance.md). This establishes execution/artifacts, not voice quality or GPU acceptance. The pinned server still lacks an inference-cancel endpoint and has different streaming output semantics. |
+| LLM tool continuation | Keep conversation/tool-result history outside the model process. | No evidence currently justifies a second scheduler or supervisor. Prove a concrete gap after native routing and task acceptance before adding glue. |
 
-The main managed platform still has callers: `--coordinator-managed-session`
-launches the session owner, while retained-ID observe/cancel/results and artifact
-reads use private IPC. Removing that entire cluster without a deliberate caller
-transition would break advertised commands. It remains a removal candidate, not
-an excuse to expand it. The isolated unused switching protocol is the immediate
-safe deletion; it is not the live GPU guard or resident-unit implementation.
-
-## Media details that affect the next replacement
+## Comfy route constraints
 
 Tagged v265 [Comfy passthrough](https://github.com/mostlygeek/llama-swap/blob/v265/internal/server/comfyui.go)
-uses reserved `comfyui_auto` and strips the prefix. Only GETs matching its
-ignored static/websocket/job-list paths refuse cold-starts (409); other paths
-can start the backend. Auth middleware still applies. Our serving
-YAML does not declare that reserved model. A UI URL alone cannot enable it.
+uses reserved model `comfyui_auto` and strips the prefix. Only matching ignored
+static/websocket/job-list GET paths refuse cold starts with 409; specific-job
+status and `/view` are not passive exclusions. Auth still applies. The tracked
+serving YAML does not declare this reserved model; the [recipe](comfy-router-serving.md)
+is opt-in and has not been deployed against the user's live service.
 
-Our `ComfyAdapter` uses caller-owned IDs with `/prompt`, `/api/jobs/{id}`,
-`/api/jobs/{id}/cancel` and `/view`. Preserve its actual backend contract rather
-than assuming passthrough supplies completion, scoped cancellation or outputs.
-Its configured base URL can carry `/comfyui`; verify all paths and credentials
-with an isolated fixture before migrating serving ownership. Built-in exclusions
-match `/api/jobs` exactly, not `/api/jobs/{id}` or `/view`; do not assume polling
-or artifact downloads are passive after another model has swapped Comfy out.
+The native adapter uses caller-owned IDs with `/prompt`,
+`/api/jobs/{id}`, `/api/jobs/{id}/cancel` and `/view`. Preserve this backend
+contract rather than assuming passthrough supplies completion, scoped
+cancellation or outputs. Prefix/auth HTTP fixtures pass. The latest isolated
+router run's cancellation observation remained `in_progress`; repeat only in a
+quiet, bounded fixture before claiming reliable proxy cancellation. Do not add a
+global-interrupt fallback.
+
+## Speech route constraints
 
 Tagged v265 [audio passthrough](https://github.com/mostlygeek/llama-swap/blob/v265/internal/server/audiocpp.go)
-uses reserved `audiocpp_auto`. The separate model-routed task endpoint is
-POST `/audioapi/v1/tasks/run`, forwarding `/v1/tasks/run` upstream—not
-`/v1/task/run`. See the [tagged route definitions](https://github.com/mostlygeek/llama-swap/blob/v265/internal/server/server.go).
-Neither reserved model is configured in this branch. Do not silently replace
-speech CLI execution with an unconfigured server route.
+uses reserved model `audiocpp_auto`. The separate model-routed task endpoint is
+POST `/audioapi/v1/tasks/run`, forwarding `/v1/tasks/run` upstream. Neither
+reserved model is declared in the branch serving YAML.
 
-Offline inspection of audio.cpp pin `955c8725c611d511774e6be132aff6609163b2d2`
-finds server synthesis support but no inference-cancel endpoint. Its busy timeout
-bounds waiting, not a running inference; model unload takes the same run lock.
-Offline speech returns WAV bytes, while incremental speech returns PCM SSE
-events rather than the current CLI's WAV/chunk files. The client would still
-need explicit output handling and honest cancellation semantics. Server modes
-are configured per registered model. Do not replace the working four-mode CLI
-path solely because HTTP routing exists. Evidence: pinned `app/server/README.md`
-(busy timeout), `app/server/runtime.cpp` (speech, streaming and unload handlers)
-and `app/server/busy_guard.h`; no model execution was performed.
+Offline inspection of audio.cpp pin
+`955c8725c611d511774e6be132aff6609163b2d2` found synthesis support but no
+inference-cancel endpoint: busy timeout bounds waiting, not running inference.
+Its offline route returns WAV bytes, while incremental speech emits PCM SSE
+events rather than the CLI's WAV/chunk files. Keep current CLI behavior until a
+replacement demonstrates output and honest cancellation semantics.
 
-## Ordered follow-up
+## Remaining checks
 
-1. Finish offline native decision route checks and unused protocol deletion.
-2. The [opt-in Comfy recipe](comfy-router-serving.md) and client prefix/auth
-   fixtures are prepared. Verify them with the real configured router/backend
-   before cutover. Keep standalone commands and originals.
-3. Check the pinned audio.cpp server against each existing speech mode and
-   cancellation/output requirement before choosing a server-backed replacement.
-4. After the user's update and an arranged quiet window, verify exact installed
-   version/config compatibility and real decision/media requests. No automatic
-   inference retries, stop/start experiments or permanent cutover here.
-5. Delete each displaced caller cluster, including obsolete flags/configs/docs,
-   once its replacement is usable. Keep historical results readable. Reassess
-   whether any custom service-stop/restoration path is needed at all.
+1. Rerun the corrected Clef image case in the isolated CPU setup; do not interpret
+   the prior HTTP 400 as model output.
+2. Recheck Comfy cancellation without the observed system load if safe, and test
+   any learned-model/GPU workflow only in an approved quiet window. Do not change
+   serving config or live service state as part of this audit.
+3. Verify end-to-end live task and restoration behavior only in an approved
+   window after Pi's GPU work is clear. No automatic inference retries,
+   stop/start experiments or permanent cutover are authorized here.
+4. Reassess tool-loop glue only if an accepted native workflow demonstrates a
+   specific missing conversation behavior.
 
-Source reduction is measured against the same tracked `src/control/*.rs` scope,
-including tests/comments/blanks. Retired simulation tests are removed with their
-unused implementation; retained runtime primitives keep direct unit coverage.
-Live switching, task quality and seamless tool-loop acceptance remain open.
+The retired source is an actual deletion, not code relocation. Keep historical
+records readable; do not revive managed-platform tasks from older status entries.

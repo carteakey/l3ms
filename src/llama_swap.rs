@@ -436,6 +436,10 @@ pub(crate) fn auth_headers(api_key: Option<&str>) -> Result<HeaderMap> {
 }
 
 pub(crate) fn parse_models(body: &str) -> Result<Vec<SwapModel>> {
+    parse_models_with_decisions(body).map(|(models, _)| models)
+}
+
+pub(crate) fn parse_models_with_decisions(body: &str) -> Result<(Vec<SwapModel>, Vec<String>)> {
     let payload: Value = serde_json::from_str(body)?;
     let entries = payload
         .get("data")
@@ -444,6 +448,7 @@ pub(crate) fn parse_models(body: &str) -> Result<Vec<SwapModel>> {
         .unwrap_or_default();
 
     let mut models = Vec::new();
+    let mut decision_model_ids = Vec::new();
     for entry in entries {
         let Some(entry) = entry.as_object() else {
             continue;
@@ -457,6 +462,19 @@ pub(crate) fn parse_models(body: &str) -> Result<Vec<SwapModel>> {
             continue;
         };
 
+        if entry
+            .get("architecture")
+            .and_then(|architecture| architecture.get("output_modalities"))
+            .and_then(Value::as_array)
+            .is_some_and(|modalities| {
+                modalities
+                    .iter()
+                    .any(|modality| modality.as_str() == Some("decisions"))
+            })
+        {
+            decision_model_ids.push(id.to_owned());
+        }
+
         models.push(SwapModel {
             id: id.to_owned(),
             state: normalize_state(entry).to_owned(),
@@ -469,7 +487,9 @@ pub(crate) fn parse_models(body: &str) -> Result<Vec<SwapModel>> {
     }
 
     models.sort_by(|left, right| left.id.cmp(&right.id));
-    Ok(models)
+    decision_model_ids.sort();
+    decision_model_ids.dedup();
+    Ok((models, decision_model_ids))
 }
 
 fn text_field(entry: &serde_json::Map<String, Value>, key: &str) -> String {
@@ -812,6 +832,21 @@ mod tests {
         assert_eq!(models[4].state, "unloaded");
         assert_eq!(models[5].created, Some(1_788_318_354));
         assert_eq!(models[6].name, "Zeta");
+    }
+
+    #[test]
+    fn parses_decision_output_modality_without_dropping_models() {
+        let body = r#"{
+            "data": [
+                {"id":"decision", "state":"loaded", "architecture":{"output_modalities":["decisions"]}},
+                {"id":"text", "state":"loaded", "architecture":{"output_modalities":["text"]}},
+                {"id":"unknown", "state":"unloaded"}
+            ]
+        }"#;
+
+        let (models, decision_model_ids) = parse_models_with_decisions(body).unwrap();
+        assert_eq!(models.len(), 3);
+        assert_eq!(decision_model_ids, ["decision"]);
     }
 
     #[test]

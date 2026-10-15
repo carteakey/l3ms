@@ -44,8 +44,9 @@ Next sequence, before adding more runtime code:
    record the native route, remaining gap, displaced code and acceptance check.
    Include Comfy jobs/cancellation/artifacts, audio tasks, discovery, auth,
    reverse-proxy prefixes and log events. Passthrough alone is not task acceptance.
-2. Prepare an isolated version-pinned upgrade/config compatibility check. Do not
-   change the live v247 service or dispatch models while Pi's window is parked.
+2. Prepare an isolated version-pinned upgrade/config compatibility check. The
+   user upgraded the live service to v265; read-only version/catalog checks pass.
+   Do not change that service or dispatch models while Pi's window is parked.
    In particular, verify the newer `/api/events/logs` contract against callers.
 3. Move decision callers to native `/v1/systemone` once the selected runtime
    version supports it. Remove the old `/upstream/<id>/v1/systemone` bridge when
@@ -69,8 +70,10 @@ new seamless-tool-loop acceptance is implied by this planning revision.
 Current CUDA slice: direct Nagi/Laya and Breeze use the same foreground owner,
 existing advisory locks/device probe, and one interruption marker. This is an
 explicit idle operator window, not live-service takeover. The displaced CPU
-daemon loop/worker is deleted; remaining managed code must likewise be retired
-as its actual callers move. See [operator workflow](../native-gpu-workflows.md).
+daemon and managed-session runtime, private-engine transport and duplicate chat
+implementation are deleted. Retained-ID clients remain for explicit legacy
+records, not a replacement server. See the current [evidence](status.md) and
+[operator workflow](../native-gpu-workflows.md).
 
 Implementation rule: prefer a deletion or an existing native command over a new
 abstraction. Each new slice must identify the caller it replaces and the code

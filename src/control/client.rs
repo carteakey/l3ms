@@ -27,8 +27,6 @@ pub enum ClientError {
     TimedOut,
     InvalidResponse,
     PeerUnauthorized,
-    OwnershipUnavailable,
-    EndpointUnavailable,
     ExchangeFailed,
 }
 
@@ -42,8 +40,6 @@ impl fmt::Display for ClientError {
             Self::TimedOut => "coordinator operation timed out",
             Self::InvalidResponse => "coordinator response is invalid",
             Self::PeerUnauthorized => "coordinator peer is not authorized",
-            Self::OwnershipUnavailable => "coordinator ownership is unavailable",
-            Self::EndpointUnavailable => "coordinator endpoint is unavailable",
             Self::ExchangeFailed => "coordinator exchange failed",
         })
     }
@@ -368,8 +364,6 @@ fn fixed_transport_error(error: LocalIpcError, phase: Phase) -> ClientError {
         }
         LocalIpcError::Protocol(_) => ClientError::InvalidRequest,
         LocalIpcError::PeerDenied => ClientError::PeerUnauthorized,
-        LocalIpcError::OwnershipUnavailable => ClientError::OwnershipUnavailable,
-        LocalIpcError::ExistingSocket => ClientError::EndpointUnavailable,
         LocalIpcError::Io | LocalIpcError::OutOfOrder | LocalIpcError::ResponseMismatch => {
             ClientError::ExchangeFailed
         }

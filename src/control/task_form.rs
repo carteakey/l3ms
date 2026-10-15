@@ -14,7 +14,7 @@ use serde_json::{Map, Value};
 
 use super::catalog::{Catalog, Lane, ProfileKey, Task};
 use super::native_commands::{is_supported_cpu_breeze_speech, CPU_BREEZE_PROFILE_ID};
-use super::requests::{InferenceRequest, SpeechInput, SpeechMode};
+use super::requests::{validate_decision_images, InferenceRequest, SpeechInput, SpeechMode};
 
 const MAX_DIRECT_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;
 /// Maximum UTF-8 bytes accepted into one editable native field.
@@ -44,6 +44,7 @@ pub enum TaskFields {
     Decisions {
         state: Value,
         questions: Map<String, Value>,
+        images: Vec<String>,
     },
 }
 
@@ -123,15 +124,20 @@ pub fn build_direct_native(
         return Err(TaskFormError::InvalidRequest);
     }
     let request = match fields {
-        TaskFields::Decisions { state, questions } => {
+        TaskFields::Decisions {
+            state,
+            questions,
+            images,
+        } => {
             if selected_profile.lane != Lane::Decisions || declared_task.as_str() != "decision" {
                 return Err(TaskFormError::ProfileTaskMismatch);
             }
-            preflight_direct_decision_fields(&state, &questions)?;
+            preflight_direct_decision_fields(&state, &questions, &images)?;
             InferenceRequest::Decision {
                 profile: selected_profile.clone(),
                 state,
                 questions,
+                images,
             }
         }
         TaskFields::LanguageEmbeddings { input } => {
@@ -310,12 +316,19 @@ fn preflight_direct_speech_fields(
 fn preflight_direct_decision_fields(
     state: &Value,
     questions: &Map<String, Value>,
+    images: &[String],
 ) -> Result<(), TaskFormError> {
     let state_bytes = bounded_json_len(state)?;
     let question_bytes = bounded_json_len(questions)?;
+    let image_bytes = bounded_json_len(&images)?;
+    validate_decision_images(images).map_err(|_| TaskFormError::InvalidNativeFields)?;
     if state_bytes > MAX_TASK_FORM_FIELD_BYTES
         || question_bytes > MAX_TASK_FORM_FIELD_BYTES
-        || state_bytes.saturating_add(question_bytes) > MAX_TASK_FORM_TOTAL_BYTES
+        || image_bytes > MAX_TASK_FORM_FIELD_BYTES
+        || state_bytes
+            .saturating_add(question_bytes)
+            .saturating_add(image_bytes)
+            > MAX_TASK_FORM_TOTAL_BYTES
     {
         return Err(TaskFormError::FrameTooLarge);
     }
@@ -554,6 +567,7 @@ mod tests {
             TaskFields::Decisions {
                 state: json!({"ready": true}),
                 questions,
+                images: Vec::new(),
             },
         );
 
@@ -563,6 +577,7 @@ mod tests {
             profile: selected,
             state,
             questions,
+            images,
         } = request
         else {
             panic!("direct decision fields build an inference request")
@@ -573,6 +588,7 @@ mod tests {
         );
         assert_eq!(state, json!({"ready": true}));
         assert_eq!(questions["route"]["type"], "choice");
+        assert!(images.is_empty());
     }
 
     #[test]
@@ -807,6 +823,7 @@ mod tests {
         let fields = || TaskFields::Decisions {
             state: json!({"ready": true}),
             questions: Map::from_iter([("route".into(), json!({"type": "rank"}))]),
+            images: Vec::new(),
         };
 
         assert_eq!(
@@ -869,6 +886,7 @@ mod tests {
                     TaskFields::Decisions {
                         state: json!([]),
                         questions: Map::from_iter([("route".into(), json!({"type": "rank"}))]),
+                        images: Vec::new(),
                     },
                 ),
             )),
@@ -915,6 +933,7 @@ mod tests {
                     TaskFields::Decisions {
                         state: json!({"ready": true}),
                         questions: Map::from_iter([("route".into(), json!({"type": "rank"}))]),
+                        images: Vec::new(),
                     },
                 ),
             )),

@@ -889,19 +889,6 @@ impl ResultBuffer {
         Ok(())
     }
 
-    /// Retention state without copying events or exposing their payloads.
-    #[cfg(target_os = "linux")]
-    pub(crate) fn availability(&self, request_id: &str) -> Result<Availability, ResultBufferError> {
-        validate_id(request_id)?;
-        Ok(if self.jobs.contains_key(request_id) {
-            Availability::Available
-        } else if self.tombstones.contains_key(request_id) {
-            Availability::Expired
-        } else {
-            Availability::Unknown
-        })
-    }
-
     /// Returns an immutable bounded page. A repeated cursor returns the same
     /// events and is safe to retry after a lost acknowledgement.
     pub fn page(

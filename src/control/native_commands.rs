@@ -1927,6 +1927,7 @@ mod tests {
             .as_object()
             .unwrap()
             .clone(),
+            images: Vec::new(),
         }
     }
 
@@ -2383,6 +2384,7 @@ mod tests {
             profile: key(Lane::Decisions, "nagi-smol"),
             state: state.clone(),
             questions: questions.clone(),
+            images: Vec::new(),
         };
         let recipe = prepare_native_command(&catalog, &request).unwrap();
         let args = argv_strings(&recipe);
@@ -2574,6 +2576,7 @@ mod tests {
             .as_object()
             .unwrap()
             .clone(),
+            images: Vec::new(),
         };
 
         let error = prepare_native_command(&catalog, &request)
@@ -2596,25 +2599,23 @@ mod tests {
         .unwrap()
         .clone();
         let question_bytes = serde_json::to_vec(&questions).unwrap().len();
-        let mut valid_request = None;
-
-        // Request validation budgets state+questions, while the native stdin
-        // protocol also needs an envelope. Find a valid input at that boundary
-        // and ensure envelope overhead is checked before returning a recipe.
-        for padding_len in (0..MAX_DECISION_STDIN_BYTES - question_bytes).rev() {
-            let state = serde_json::json!({"padding": "x".repeat(padding_len)});
-            let request = InferenceRequest::Decision {
-                profile: key(Lane::Decisions, "nagi-smol"),
-                state,
-                questions: questions.clone(),
-            };
-            if request.validate(&catalog).is_ok() {
-                valid_request = Some(request);
-                break;
-            }
-        }
-        let request = valid_request.expect("find an input within request budget");
-        let error = prepare_native_command(&catalog, &request)
+        let state_overhead = serde_json::to_vec(&serde_json::json!({"padding":""}))
+            .unwrap()
+            .len();
+        let state = serde_json::json!({
+            "padding": "x".repeat(MAX_DECISION_STDIN_BYTES - question_bytes - state_overhead)
+        });
+        // The separate values fit, but their wire envelope does not. Both
+        // shared validation and the encoder must account for that overhead.
+        let request = InferenceRequest::Decision {
+            profile: key(Lane::Decisions, "nagi-smol"),
+            state: state.clone(),
+            questions: questions.clone(),
+            images: Vec::new(),
+        };
+        assert!(request.validate(&catalog).is_err());
+        assert!(prepare_native_command(&catalog, &request).is_err());
+        let error = encode_decision_stdin_payload(&state, &questions)
             .unwrap_err()
             .to_string();
         assert!(error.contains("stdin envelope exceeds 1 MiB"));
@@ -2632,6 +2633,7 @@ mod tests {
                 .as_object()
                 .unwrap()
                 .clone(),
+            images: Vec::new(),
         };
         let error = prepare_native_command(&catalog, &request)
             .unwrap_err()

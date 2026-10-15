@@ -12,8 +12,8 @@ use anyhow::{Context, Result};
 use crate::{
     script_store::{command_for_script, resolve_script_in},
     state_store::{
-        self, ComfyServiceGenerationReference, JobHistoryLoad as PersistedLoad, JobMetadata,
-        JobRecord as PersistedJob, JOBS_MAX, JOB_INTERRUPTED_EXIT, JOB_RUNNING_EXIT,
+        self, JobHistoryLoad as PersistedLoad, JobMetadata, JobRecord as PersistedJob, JOBS_MAX,
+        JOB_INTERRUPTED_EXIT, JOB_RUNNING_EXIT,
     },
 };
 
@@ -138,24 +138,6 @@ impl JobHistory {
 
     pub fn load_in(data_root: &Path, repository_root: &Path) -> Result<(Self, LoadNotice)> {
         let loaded = state_store::load_jobs_in(data_root)?;
-        Self::load_from_loaded(data_root, repository_root, loaded)
-    }
-
-    /// Coordinator-only load that refuses malformed or truncated histories
-    /// before the standalone loader's legacy normalization can rewrite them.
-    pub(crate) fn load_in_strict(
-        data_root: &Path,
-        repository_root: &Path,
-    ) -> Result<(Self, LoadNotice)> {
-        let loaded = state_store::load_jobs_strict_in(data_root)?;
-        anyhow::ensure!(
-            loaded.truncated_rows == 0,
-            "coordinator refused truncated job history"
-        );
-        anyhow::ensure!(
-            loaded.issues.is_empty(),
-            "coordinator refused malformed job history"
-        );
         Self::load_from_loaded(data_root, repository_root, loaded)
     }
 
@@ -392,30 +374,13 @@ impl JobHistory {
         id: u64,
         candidate_id: String,
     ) -> Result<&JobRecord> {
-        self.record_comfy_dispatch_candidate_inner(id, candidate_id, None)
-    }
-
-    /// Persist one managed Comfy candidate together with the exact owned
-    /// supervisor-generation reference. Both fields are applied to the same
-    /// row before the caller's single atomic history save.
-    pub(crate) fn record_managed_comfy_dispatch_candidate(
-        &mut self,
-        id: u64,
-        candidate_id: String,
-        generation: ComfyServiceGenerationReference,
-    ) -> Result<&JobRecord> {
-        anyhow::ensure!(
-            generation.is_valid(),
-            "managed Comfy service-generation reference is invalid"
-        );
-        self.record_comfy_dispatch_candidate_inner(id, candidate_id, Some(generation))
+        self.record_comfy_dispatch_candidate_inner(id, candidate_id)
     }
 
     fn record_comfy_dispatch_candidate_inner(
         &mut self,
         id: u64,
         candidate_id: String,
-        generation: Option<ComfyServiceGenerationReference>,
     ) -> Result<&JobRecord> {
         let job_index = self
             .jobs
@@ -450,7 +415,6 @@ impl JobHistory {
 
         let mut metadata = job.metadata.clone();
         metadata.comfy_dispatch_candidate = Some(candidate_id);
-        metadata.comfy_service_generation = generation;
         let errors = state_store::validate_job_metadata(&metadata);
         anyhow::ensure!(
             errors.is_empty(),
@@ -661,8 +625,8 @@ mod tests {
 
     use super::*;
     use crate::state_store::{
-        ComfyManagerGenerationReference, ComfyServiceIntentReference,
-        ComfySupervisorCoordinatorReference,
+        ComfyManagerGenerationReference, ComfyServiceGenerationReference,
+        ComfyServiceIntentReference, ComfySupervisorCoordinatorReference,
     };
 
     fn comfy_generation_reference() -> ComfyServiceGenerationReference {
@@ -897,40 +861,35 @@ mod tests {
     }
 
     #[test]
-    fn managed_comfy_candidate_persists_exact_generation_with_no_recovery_capability() {
+    fn persisted_comfy_generation_metadata_remains_readable_after_restart() {
         const CANDIDATE: &str = "123e4567-e89b-12d3-a456-426614174000";
         let data = TempDir::new().unwrap();
-        let mut history = JobHistory::default();
-        let id = running_comfy_job(&mut history, "req-managed-comfy");
         let generation = comfy_generation_reference();
-
-        history
-            .record_managed_comfy_dispatch_candidate(id, CANDIDATE.into(), generation.clone())
-            .unwrap();
-        let row = history.records().iter().find(|job| job.id == id).unwrap();
-        assert_eq!(
-            row.metadata.comfy_dispatch_candidate.as_deref(),
-            Some(CANDIDATE)
-        );
-        assert_eq!(
-            row.metadata.comfy_service_generation,
-            Some(generation.clone())
-        );
-        assert!(row.metadata.backend_id.is_none());
-
-        history.persist_in(data.path()).unwrap();
-        let raw = fs::read_to_string(state_store::jobs_path_in(data.path())).unwrap();
-        assert!(raw.contains("\"comfy_dispatch_candidate\""));
-        assert!(raw.contains("\"comfy_service_generation\""));
-        assert!(raw.contains("\"supervisor_coordinator\""));
-        assert!(!raw.contains("workflow-payload-secret"));
-        assert!(!raw.contains("argv"));
-        assert!(!raw.contains("environment"));
+        let persisted_row = serde_json::json!([{
+            "name": "managed-comfy",
+            "started": "12:34:56",
+            "elapsed": "-",
+            "exit": JOB_RUNNING_EXIT,
+            "mode": "cross-toolkit",
+            "script_path": "",
+            "toolkit": "l2m2",
+            "profile": "fixture-profile",
+            "task": "image",
+            "request_id": "req-managed-comfy",
+            "result_state": "running",
+            "comfy_dispatch_candidate": CANDIDATE,
+            "comfy_service_generation": serde_json::to_value(&generation).unwrap()
+        }]);
+        fs::write(
+            state_store::jobs_path_in(data.path()),
+            serde_json::to_vec(&persisted_row).unwrap(),
+        )
+        .unwrap();
 
         let (restarted, notice) =
-            JobHistory::load_in_strict(data.path(), repository_fixture().path()).unwrap();
+            JobHistory::load_in(data.path(), repository_fixture().path()).unwrap();
         assert_eq!(notice.reconciled_running, 1);
-        let row = restarted.records().iter().find(|job| job.id == id).unwrap();
+        let row = restarted.records().first().unwrap();
         assert_eq!(row.status, "interrupted");
         assert_eq!(row.metadata.result_state.as_deref(), Some("interrupted"));
         assert_eq!(
@@ -939,22 +898,6 @@ mod tests {
         );
         assert_eq!(row.metadata.comfy_service_generation, Some(generation));
         assert!(row.metadata.backend_id.is_none());
-    }
-
-    #[test]
-    fn managed_comfy_candidate_rejects_non_comfy_generation_before_mutation() {
-        const CANDIDATE: &str = "123e4567-e89b-12d3-a456-426614174000";
-        let mut history = JobHistory::default();
-        let id = running_comfy_job(&mut history, "req-managed-comfy");
-        let mut generation = comfy_generation_reference();
-        generation.intent.runtime_name = "OtherRuntime".to_owned();
-
-        assert!(history
-            .record_managed_comfy_dispatch_candidate(id, CANDIDATE.into(), generation)
-            .is_err());
-        let row = history.records().iter().find(|job| job.id == id).unwrap();
-        assert!(row.metadata.comfy_dispatch_candidate.is_none());
-        assert!(row.metadata.comfy_service_generation.is_none());
     }
 
     #[test]

@@ -1360,9 +1360,9 @@ fn remote_language_error(error: LanguageFailure) -> DirectRunError {
         LanguageErrorKind::Protocol | LanguageErrorKind::TooLarge => {
             DirectRunErrorKind::InvalidOutput
         }
-        LanguageErrorKind::Transport
-        | LanguageErrorKind::Rejected
-        | LanguageErrorKind::ResultPublication => DirectRunErrorKind::ExecutionFailed,
+        LanguageErrorKind::Transport | LanguageErrorKind::Rejected => {
+            DirectRunErrorKind::ExecutionFailed
+        }
     };
     DirectRunError::remote(kind, error.disposition)
 }
@@ -1791,6 +1791,7 @@ mod tests {
             profile,
             state: json!({"ready": true}),
             questions,
+            images: Vec::new(),
         };
         let launch_marker = decisions
             .join("decision-models/runner.py")

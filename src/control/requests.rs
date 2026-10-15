@@ -12,12 +12,13 @@ use std::path::PathBuf;
 use anyhow::{bail, ensure, Result};
 use serde_json::{Map, Value};
 
-use super::catalog::{Catalog, CatalogProfile, Lane, ProfileKey, Task};
+use super::catalog::{Catalog, CatalogProfile, Lane, NativeProfileSource, ProfileKey, Task};
 
 const MAX_TURNS: usize = 128;
 const MAX_QUESTIONS: usize = 128;
 const MAX_SCRIPT_ARGS: usize = 128;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_DECISION_IMAGES: usize = 8;
 pub const MAX_EMBEDDING_INPUTS: usize = 128;
 pub const MAX_EMBEDDING_DIMENSIONS: usize = 65_536;
 pub const MAX_EMBEDDING_JSON_BYTES: usize = 4 * 1024 * 1024;
@@ -36,6 +37,72 @@ fn ensure_json_budget(value: &Value) -> Result<()> {
         "request JSON exceeds 1 MiB"
     );
     Ok(())
+}
+
+pub(crate) fn decision_profile_supports_images(profile: &CatalogProfile) -> bool {
+    !profile.disabled
+        && profile.key.lane == Lane::Decisions
+        && profile.runtime.lane == Lane::Decisions
+        && profile.runtime.as_str() == "llamacpp"
+        && profile.tasks.iter().any(|task| task.as_str() == "decision")
+        && matches!(
+            &profile.native_source,
+            NativeProfileSource::Decisions {
+                model,
+                profile_type,
+                ..
+            } if profile_type == "local"
+                && matches!(model.as_str(), "vllm-d3-flash" | "cloudflare-clef-flash")
+        )
+}
+
+pub(crate) fn validate_decision_images(images: &[String]) -> Result<()> {
+    ensure!(
+        images.len() <= MAX_DECISION_IMAGES,
+        "decision image count exceeds the native limit"
+    );
+    ensure!(
+        images.iter().all(|image| valid_image_data_url(image)),
+        "decision images must be base64 data:image URLs"
+    );
+    Ok(())
+}
+
+fn valid_image_data_url(value: &str) -> bool {
+    let Some((metadata, encoded)) = value.split_once(',') else {
+        return false;
+    };
+    let Some(media_type) = metadata
+        .strip_prefix("data:")
+        .and_then(|value| value.strip_suffix(";base64"))
+    else {
+        return false;
+    };
+    let Some(subtype) = media_type.strip_prefix("image/") else {
+        return false;
+    };
+    if subtype.is_empty()
+        || !subtype.as_bytes()[0].is_ascii_alphanumeric()
+        || !subtype
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+        || encoded.is_empty()
+        || encoded.len() % 4 != 0
+    {
+        return false;
+    }
+    let bytes = encoded.as_bytes();
+    let padding_start = bytes
+        .iter()
+        .position(|byte| *byte == b'=')
+        .unwrap_or(bytes.len());
+    padding_start > 0
+        && bytes.len().saturating_sub(padding_start) <= 2
+        && padding_start >= bytes.len().saturating_sub(2)
+        && bytes[..padding_start]
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/'))
+        && bytes[padding_start..].iter().all(|byte| *byte == b'=')
 }
 
 /// A language turn. A chat adapter translates this to its native wire shape.
@@ -123,6 +190,8 @@ pub enum InferenceRequest {
         state: Value,
         /// Native `system_one` question definitions keyed by question ID.
         questions: Map<String, Value>,
+        /// Optional local llama.cpp image inputs as bounded base64 data URLs.
+        images: Vec<String>,
     },
 }
 
@@ -259,7 +328,10 @@ impl InferenceRequest {
                 }
             },
             Self::Decision {
-                state, questions, ..
+                state,
+                questions,
+                images,
+                ..
             } => {
                 ensure!(state.is_object(), "decision state must be an object");
                 ensure!(
@@ -274,6 +346,17 @@ impl InferenceRequest {
                     "decision questions must be named, non-empty objects and bounded"
                 );
                 for (id, question) in questions {
+                    if matches!(&profile.native_source,
+                        NativeProfileSource::Decisions { model, .. }
+                        if profile.runtime.as_str() == "llamacpp" && model == "cloudflare-clef-flash")
+                    {
+                        ensure!(
+                            question
+                                .get("instructions")
+                                .is_some_and(|value| !value.is_null()),
+                            "Clef question {id} requires instructions"
+                        );
+                    }
                     if question.get("type").and_then(Value::as_str) == Some("choice") {
                         let valid_criteria = question
                             .get("criteria")
@@ -297,13 +380,26 @@ impl InferenceRequest {
                         );
                     }
                 }
-                ensure!(
-                    serde_json::to_vec(state)?
-                        .len()
-                        .saturating_add(serde_json::to_vec(questions)?.len())
-                        <= MAX_REQUEST_BYTES,
-                    "decision request JSON exceeds 1 MiB"
-                );
+                validate_decision_images(images)?;
+                if !images.is_empty() {
+                    ensure!(
+                        decision_profile_supports_images(profile),
+                        "selected decision profile does not support image input"
+                    );
+                }
+                let mut payload = serde_json::json!({
+                    "state": state,
+                    "questions": questions,
+                });
+                if profile.runtime.as_str() == "llamacpp" {
+                    if let NativeProfileSource::Decisions { model, .. } = &profile.native_source {
+                        payload["model"] = Value::String(model.clone());
+                    }
+                }
+                if !images.is_empty() {
+                    payload["images"] = serde_json::to_value(images)?;
+                }
+                ensure_json_budget(&payload)?;
             }
         }
         Ok(profile)
@@ -586,6 +682,7 @@ mod tests {
             profile: key(Lane::Decisions, "nagi-smol"),
             state: serde_json::json!({"position": 1}),
             questions: serde_json::json!({"move": {"type":"choice", "criteria":{"yes":"Move", "no":"Stay"}}}).as_object().unwrap().clone(),
+            images: Vec::new(),
         };
         assert_eq!(chat.validate(&catalog).unwrap().key, *chat.profile());
         assert_eq!(speech.task(), "tts");
@@ -659,6 +756,7 @@ mod tests {
             profile: key(Lane::Decisions, "nagi-smol"),
             state: serde_json::json!({}),
             questions: serde_json::json!({"move": {"type":"choice", "criteria":{"yes":"Move", "no":"Stay"}}}).as_object().unwrap().clone(),
+            images: Vec::new(),
         };
         let valid = InferenceResult::Decision {
             answers: serde_json::json!({"move":{"choice":"yes","confidence":0.8,"probabilities":{"yes":0.8,"no":0.2}}}).as_object().unwrap().clone(),
@@ -730,6 +828,7 @@ mod tests {
             profile: key(Lane::Decisions, "nagi-smol"),
             state: serde_json::json!({"alert":"test"}),
             questions: questions.as_object().unwrap().clone(),
+            images: Vec::new(),
         };
         assert!(request.validate(&catalog).is_ok());
         let result = InferenceResult::Decision {
@@ -747,9 +846,96 @@ mod tests {
                 profile: key(Lane::Decisions, "nagi-smol"),
                 state: serde_json::json!({}),
                 questions: Map::from_iter([("question".into(), question)]),
+                images: Vec::new(),
             };
             assert!(invalid.validate(&catalog).is_err());
         }
+    }
+
+    #[test]
+    fn decision_images_are_bounded_base64_urls_and_profile_gated() {
+        let catalog = catalog();
+        let questions = serde_json::json!({
+            "route": {"type":"choice", "criteria":{"yes":"Proceed", "no":"Stop"}}
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let image = "data:image/png;base64,iVBORw0KGgo=".to_owned();
+        let request = InferenceRequest::Decision {
+            profile: key(Lane::Decisions, "vllm-d3-flash"),
+            state: serde_json::json!({"message":"inspect this"}),
+            questions: questions.clone(),
+            images: vec![image.clone()],
+        };
+        assert!(request.validate(&catalog).is_ok());
+
+        let unsupported = InferenceRequest::Decision {
+            profile: key(Lane::Decisions, "nagi-smol"),
+            state: serde_json::json!({"message":"inspect this"}),
+            questions: questions.clone(),
+            images: vec![image.clone()],
+        };
+        assert!(unsupported.validate(&catalog).is_err());
+
+        for invalid_image in [
+            "https://example.test/image.png".to_owned(),
+            "file:///tmp/image.png".to_owned(),
+            "data:image/png;base64,".to_owned(),
+            "data:image/png;base64,AAAA_=".to_owned(),
+            "data:audio/wav;base64,UklGRg==".to_owned(),
+            "data:image/png,AAAA".to_owned(),
+        ] {
+            let invalid = InferenceRequest::Decision {
+                profile: key(Lane::Decisions, "vllm-d3-flash"),
+                state: serde_json::json!({}),
+                questions: questions.clone(),
+                images: vec![invalid_image],
+            };
+            assert!(invalid.validate(&catalog).is_err());
+        }
+
+        let too_many = InferenceRequest::Decision {
+            profile: key(Lane::Decisions, "cloudflare-clef-flash"),
+            state: serde_json::json!({}),
+            questions: questions.clone(),
+            images: vec![image; MAX_DECISION_IMAGES + 1],
+        };
+        assert!(too_many.validate(&catalog).is_err());
+
+        let oversized = InferenceRequest::Decision {
+            profile: key(Lane::Decisions, "vllm-d3-flash"),
+            state: serde_json::json!({}),
+            questions,
+            images: vec![format!(
+                "data:image/png;base64,{}",
+                "A".repeat(MAX_REQUEST_BYTES)
+            )],
+        };
+        assert!(oversized.validate(&catalog).is_err());
+    }
+
+    #[test]
+    fn clef_requires_question_instructions_before_dispatch() {
+        let catalog = Catalog::load(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let mut request = InferenceRequest::Decision {
+            profile: key(Lane::Decisions, "cloudflare-clef-flash"),
+            state: serde_json::json!({}),
+            questions: serde_json::json!({"color": {
+                "type":"choice", "criteria":{"green":"Green", "red":"Red"}
+            }})
+            .as_object()
+            .unwrap()
+            .clone(),
+            images: Vec::new(),
+        };
+        assert!(request.validate(&catalog).is_err());
+        let InferenceRequest::Decision { questions, .. } = &mut request else {
+            unreachable!()
+        };
+        questions.get_mut("color").unwrap()["instructions"] =
+            Value::String("Which color is shown?".into());
+        assert!(request.validate(&catalog).is_ok());
     }
 
     #[test]

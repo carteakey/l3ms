@@ -1,5 +1,12 @@
 # Managed engine isolation: measured launch gate
 
+Historical investigation, not the current runtime design. The upstream-first
+port retires the branch-added managed supervisor and its two opt-in probe
+scripts. The old commands below are evidence from that investigation, not
+instructions supported by the current checkout. Source and probe history remain
+recoverable from Git; no live service, stored job or original checkout is removed.
+Use native llama-swap serving and existing native scripts instead.
+
 On this host's systemd 262 user manager, the proposed two-service topology fails
 the actual network-namespace identity gate. Both units report `PrivateNetwork=yes`
 and the bridge reports the exact `JoinsNamespaceOf` target, but the bridge process

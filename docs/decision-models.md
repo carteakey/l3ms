@@ -23,11 +23,27 @@ an equivalent substitute.
 
 ## Shared CLI and keyboard form
 
-The root CLI accepts the existing strict text/JSON input shape:
+The root CLI accepts the existing strict JSON input shape and an optional
+`images` array of base64 `data:image/...` URLs:
 
 ```json
 {"state":{"message":"I was charged twice."},"questions":{"route":{"type":"choice","instructions":"Which team?","criteria":{"billing":"Charges and refunds","technical":"Software faults"}}}}
 ```
+
+For an image-capable d3/Clef profile, add up to eight image data URLs at the
+top level (the full input remains limited to 1 MiB):
+
+```json
+{"state":{"message":"What is in this picture?"},"questions":{"route":{"type":"choice","instructions":"Classify the picture.","criteria":{"receipt":"A receipt","other":"Something else"}}},"images":["data:image/png;base64,..."]}
+```
+
+Image inputs are accepted only for the local `vllm-d3-flash` and
+`cloudflare-clef-flash` profiles and are forwarded unchanged in the native
+`images` field. URLs and filesystem paths are not fetched or opened. Nagi and
+hosted Jev reject image-bearing requests before dispatch; their existing
+text-only behavior is unchanged. The keyboard form exposes a JSON array field
+for these profiles, and standalone L3DS accepts the same optional field in its
+bounded `--input-stdin` envelope.
 
 ```sh
 l3ms --run-profile decisions:vllm-d3-flash --task decision --input input.json
@@ -57,7 +73,16 @@ is parked while Pi works: **do not run these commands against the live router
 until a quiet window is arranged**. No automatic restoration of the prior
 language model or seamless LLM tool-call continuation is claimed by this port.
 
-The current shared form/CLI carries `state` and `questions`, not image uploads.
-The model's image capability remains accessible through the native API with its
-top-level `images` data URLs; UI/CLI image-input wiring and real model acceptance
-are separate unfinished gates. Fixture success is not hardware or quality proof.
+The form/CLI and standalone runner carry optional bounded image data URLs, but
+do not decode, resize, or fetch them. A valid data URL does not establish that a
+particular model/projector accepts its image format or content. Fixture success
+is not hardware or quality proof.
+
+Clef requires `instructions` on every question; supply a meaningful instruction
+alongside native `criteria`. Missing/null instructions are refused before HTTP.
+
+On 2026-10-15 both profiles returned real typed billing decisions through a
+private v265 router with GPU offload disabled. d3 also identified a synthetic
+green PNG through the image input path. A Clef image fixture lacked required
+instructions and was rejected; its corrected image request remains unverified.
+These are narrow native CPU sanity checks, not GPU, quality or latency evidence.

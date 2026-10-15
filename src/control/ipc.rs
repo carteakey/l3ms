@@ -698,6 +698,7 @@ impl WireInferenceRequest {
                 profile: profile_key(Lane::Decisions, profile_id)?,
                 state,
                 questions,
+                images: Vec::new(),
             }),
         }
     }
@@ -2277,6 +2278,7 @@ mod tests {
             profile,
             state,
             questions,
+            images,
         } = request
         else {
             panic!("expected decision request")
@@ -2285,6 +2287,7 @@ mod tests {
         assert_eq!(state["position"]["x"], 2);
         assert_eq!(questions["move"]["criteria"]["left"], "Go left");
         assert_eq!(questions["urgency"]["range"][1], 100);
+        assert!(images.is_empty());
     }
 
     #[test]

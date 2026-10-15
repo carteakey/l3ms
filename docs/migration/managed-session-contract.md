@@ -2,9 +2,11 @@
 
 Historical managed-platform contract. The 2026-10-15 upstream-first revision in
 [simplification-plan.md](simplification-plan.md) supersedes this delivery path.
-The unused generic `RuntimeAdapter`/`switch_exclusive` protocol has been retired;
-remaining managed callers retain their concrete ownership and cleanup safeguards
-until replacement. This document does not require rebuilding that abstraction.
+The generic lifecycle protocol, managed runtime/server and private-engine
+transport have now been retired. The old launch commands and implementation
+names below describe historical evidence, not supported current entrypoints.
+Native workflows keep their own existing cleanup safeguards; old retained-result
+clients and persisted metadata remain readable. Do not rebuild this platform.
 
 This records the managed integration contract, not deployed functionality or live
 acceptance. The branch has a concrete managed-language executor with opt-in

@@ -1,30 +1,25 @@
-//! Linux-only private Unix-socket transport for IPC v1/v2, not an installed daemon.
+//! Linux-only client transport for compatibility with an explicitly supplied
+//! legacy local IPC server. It does not create or own a server.
 //!
-//! The caller supplies pre-existing private local directories and acquires this
-//! listener before loading/writing coordinator history. The host guard lives
-//! with the listener. Existing socket paths are never silently reclaimed. Same
-//! effective-UID peer checks are not isolation from other programs of that user.
-//! Trusted directories/ancestors must not be maliciously replaced concurrently.
-//!
-//! One connection carries one request/reply; v2 results are bounded pages, not
-//! a stream. Deadlines apply across each whole read/write, not separately to each byte. A transport
-//! failure after starting a request write is uncertain; clients must reconnect
-//! by request ID rather than resubmit. No retry or runtime operation occurs here.
+//! Same effective-UID peer checks are not isolation from other programs of
+//! that user. Trusted directories/ancestors must not be maliciously replaced
+//! concurrently. One connection carries one request/reply; v2 results are
+//! bounded pages, not a stream. Deadlines apply across each whole read/write,
+//! not separately to each byte. A transport failure after starting a request
+//! write is uncertain; clients must reconnect by request ID rather than
+//! resubmit. No retry or runtime operation occurs here.
 
 use std::error::Error;
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::ipc::{
-    self, ClientRequest, IncomingRequest, ProtocolError, RequestEnvelope, ResponseEnvelope,
-};
-use super::ownership::CoordinatorLock;
+use super::ipc::{self, ProtocolError, RequestEnvelope, ResponseEnvelope};
 use super::runtime::OperationContext;
 
 const SOCKET_NAME: &str = "coordinator.sock";
@@ -33,8 +28,6 @@ const POLL: Duration = Duration::from_millis(25);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LocalIpcError {
     UnsafePath,
-    ExistingSocket,
-    OwnershipUnavailable,
     PeerDenied,
     Unavailable,
     Io,
@@ -51,85 +44,6 @@ impl fmt::Display for LocalIpcError {
 }
 impl Error for LocalIpcError {}
 
-/// Owns the listening socket and host/device guard. Not Clone: only its owner
-/// may dispatch or mutate history. No service is started by constructing it.
-pub struct LocalListener {
-    listener: UnixListener,
-    path: PathBuf,
-    identity: (u64, u64),
-    uid: libc::uid_t,
-    _ownership: CoordinatorLock,
-}
-impl LocalListener {
-    pub fn bind(
-        socket_directory: &Path,
-        host_lock_directory: &Path,
-        gpus: impl IntoIterator<Item = u32>,
-    ) -> Result<Self, LocalIpcError> {
-        let path = socket_path(socket_directory)?;
-        private_directory(host_lock_directory)?;
-        let ownership = CoordinatorLock::acquire(host_lock_directory, gpus)
-            .map_err(|_| LocalIpcError::OwnershipUnavailable)?;
-        match path.symlink_metadata() {
-            Ok(_) => return Err(LocalIpcError::ExistingSocket),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(_) => return Err(LocalIpcError::UnsafePath),
-        }
-        let listener = UnixListener::bind(&path).map_err(|_| LocalIpcError::Unavailable)?;
-        let metadata = path.symlink_metadata().map_err(|_| LocalIpcError::Io)?;
-        let bound = Self {
-            listener,
-            path,
-            identity: (metadata.dev(), metadata.ino()),
-            uid: unsafe { libc::geteuid() },
-            _ownership: ownership,
-        };
-        // The 0700 parent protects the bind-to-chmod interval without changing
-        // process-global umask. RAII removes only our inode on setup failure.
-        std::fs::set_permissions(&bound.path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|_| LocalIpcError::Io)?;
-        bound
-            .listener
-            .set_nonblocking(true)
-            .map_err(|_| LocalIpcError::Io)?;
-        Ok(bound)
-    }
-
-    pub fn accept(&self, context: &OperationContext<'_>) -> Result<LocalConnection, LocalIpcError> {
-        loop {
-            active(context)?;
-            match self.listener.accept() {
-                Ok((stream, _)) => {
-                    return LocalConnection::authenticated(stream, self.uid, Phase::ServerRequest);
-                }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => pause(context)?,
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(_) => return Err(LocalIpcError::Io),
-            }
-        }
-    }
-
-    /// Borrow the host/device guard retained for this listener's full
-    /// lifetime. Managed execution owners must receive this exact guard;
-    /// acquiring a second lock would neither strengthen nor replace the
-    /// listener's ownership.
-    pub(crate) fn ownership_guard(&self) -> &CoordinatorLock {
-        &self._ownership
-    }
-}
-impl Drop for LocalListener {
-    fn drop(&mut self) {
-        // Do not delete an endpoint replaced by another writer or a symlink.
-        if self.path.symlink_metadata().is_ok_and(|entry| {
-            entry.file_type().is_socket()
-                && (entry.dev(), entry.ino()) == self.identity
-                && entry.uid() == self.uid
-        }) {
-            let _ = std::fs::remove_file(&self.path);
-        }
-    }
-}
-
 /// A checked, nonblocking peer connection. No Debug to discourage logging
 /// descriptors, endpoint paths, credentials or request payloads.
 pub struct LocalConnection {
@@ -144,23 +58,17 @@ pub struct LocalConnection {
 enum Phase {
     ClientRequest,
     ClientResponse,
-    ServerRequest,
-    ServerResponse,
     Done,
 }
 impl LocalConnection {
-    fn authenticated(
-        stream: UnixStream,
-        uid: libc::uid_t,
-        phase: Phase,
-    ) -> Result<Self, LocalIpcError> {
+    fn authenticated(stream: UnixStream, uid: libc::uid_t) -> Result<Self, LocalIpcError> {
         verify_peer(&stream, uid)?;
         stream
             .set_nonblocking(true)
             .map_err(|_| LocalIpcError::Io)?;
         Ok(Self {
             stream,
-            phase,
+            phase: Phase::ClientRequest,
             request_id: None,
             request_version: None,
             result_query: None,
@@ -208,7 +116,7 @@ impl LocalConnection {
                 unsafe { libc::connect(fd, (&address as *const libc::sockaddr_un).cast(), length) };
             if result == 0 {
                 active(context)?;
-                return Self::authenticated(stream, uid, Phase::ClientRequest);
+                return Self::authenticated(stream, uid);
             }
             let error = io::Error::last_os_error();
             match error.raw_os_error() {
@@ -239,7 +147,7 @@ impl LocalConnection {
                             return Err(LocalIpcError::Unavailable);
                         }
                         active(context)?;
-                        return Self::authenticated(stream, uid, Phase::ClientRequest);
+                        return Self::authenticated(stream, uid);
                     }
                 },
                 Some(libc::EINTR) => continue,
@@ -248,44 +156,6 @@ impl LocalConnection {
         }
     }
 
-    pub fn read_request(
-        &mut self,
-        context: &OperationContext<'_>,
-    ) -> Result<ClientRequest, LocalIpcError> {
-        self.start(Phase::ServerRequest)?;
-        let result = ipc::read_request(&mut BoundedIo {
-            stream: &mut self.stream,
-            context,
-        });
-        let request = checked(result, context)?;
-        self.request_id = Some(request.request_id().to_owned());
-        self.request_version = Some(ipc::PROTOCOL_VERSION);
-        self.phase = Phase::ServerResponse;
-        Ok(request)
-    }
-    pub fn read_incoming_request(
-        &mut self,
-        context: &OperationContext<'_>,
-    ) -> Result<IncomingRequest, LocalIpcError> {
-        self.start(Phase::ServerRequest)?;
-        let result = ipc::read_incoming_request(&mut BoundedIo {
-            stream: &mut self.stream,
-            context,
-        });
-        let request = checked(result, context)?;
-        self.request_id = Some(request.request_id().to_owned());
-        self.request_version = Some(request.version());
-        self.result_query = match &request {
-            IncomingRequest::Results(query) => Some((query.after_cursor, query.byte_budget)),
-            IncomingRequest::Control(_) | IncomingRequest::Artifact(_) => None,
-        };
-        self.artifact_query = match &request {
-            IncomingRequest::Artifact(query) => Some(query.clone()),
-            _ => None,
-        };
-        self.phase = Phase::ServerResponse;
-        Ok(request)
-    }
     pub fn write_request(
         &mut self,
         request: &RequestEnvelope,
@@ -349,23 +219,6 @@ impl LocalConnection {
         self.match_response(&response)?;
         Ok(response)
     }
-    pub fn write_response(
-        &mut self,
-        response: &ResponseEnvelope,
-        context: &OperationContext<'_>,
-    ) -> Result<(), LocalIpcError> {
-        self.start(Phase::ServerResponse)?;
-        self.match_response(response)?;
-        let result = ipc::write_response(
-            &mut BoundedIo {
-                stream: &mut self.stream,
-                context,
-            },
-            response,
-        );
-        checked(result, context)
-    }
-
     fn start(&mut self, expected: Phase) -> Result<(), LocalIpcError> {
         if self.phase != expected {
             return Err(LocalIpcError::OutOfOrder);
@@ -532,271 +385,71 @@ impl Write for BoundedIo<'_, '_> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::ipc::{RequestStatus, ResponseMessage, WireRequestMessage};
     use super::super::runtime::{Cancellation, NeverCancel};
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener;
     use std::time::Instant;
 
     fn context(ms: u64) -> OperationContext<'static> {
         OperationContext::new(Instant::now() + Duration::from_millis(ms), &NeverCancel)
     }
+
     fn private() -> tempfile::TempDir {
         let directory = tempfile::tempdir().unwrap();
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         directory
     }
-    fn status_request(id: &str) -> RequestEnvelope {
-        RequestEnvelope::v1(WireRequestMessage::Status {
-            request_id: id.into(),
-        })
-    }
-    fn response(id: &str) -> ResponseEnvelope {
-        ResponseEnvelope::v1(ResponseMessage::Status {
-            request_id: id.into(),
-            state: RequestStatus::NotFound,
-        })
-    }
-    fn pair() -> (LocalConnection, UnixStream) {
-        let (server, peer) = UnixStream::pair().unwrap();
-        (
-            LocalConnection::authenticated(
-                server,
-                unsafe { libc::geteuid() },
-                Phase::ServerRequest,
-            )
-            .unwrap(),
-            peer,
-        )
+
+    fn fixture_listener(directory: &Path) -> UnixListener {
+        let path = directory.join(SOCKET_NAME);
+        let listener = UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        listener
     }
 
     #[test]
-    fn private_listener_round_trip_holds_host_guard_and_cleans_its_socket() {
+    fn connect_rejects_unsafe_socket_entries() {
         let directory = private();
-        let locks = private();
-        let listener = LocalListener::bind(directory.path(), locks.path(), [0]).unwrap();
         let path = directory.path().join(SOCKET_NAME);
-        assert_eq!(path.metadata().unwrap().mode() & 0o777, 0o600);
-        assert!(CoordinatorLock::acquire(locks.path(), [0]).is_err());
-        let socket_directory = directory.path().to_owned();
-        let client = std::thread::spawn(move || {
-            let mut connection =
-                LocalConnection::connect(&socket_directory, &context(2000)).unwrap();
-            connection
-                .write_request(&status_request("client-a"), &context(2000))
-                .unwrap();
-            assert_eq!(
-                connection
-                    .write_request(&status_request("client-a"), &context(2000))
-                    .unwrap_err(),
-                LocalIpcError::OutOfOrder
-            );
-            let result = connection.read_response(&context(2000)).unwrap();
-            assert_eq!(result.message, response("client-a").message);
-            assert_eq!(
-                connection.read_response(&context(100)).err().unwrap(),
-                LocalIpcError::OutOfOrder
-            );
-        });
-        let mut connection = listener.accept(&context(2000)).unwrap();
-        let request = connection.read_request(&context(2000)).unwrap();
-        assert_eq!(request.request_id(), "client-a");
-        connection
-            .write_response(&response("client-a"), &context(2000))
-            .unwrap();
-        client.join().unwrap();
-        drop(listener);
-        assert!(!path.exists());
-        assert!(CoordinatorLock::acquire(locks.path(), [0]).is_ok());
-    }
 
-    #[test]
-    fn child_process_transport_probe() {
-        let Some(directory) = std::env::var_os("L3MS_TEST_LOCAL_IPC_DIRECTORY") else {
-            return;
-        };
-        let id = std::env::var("L3MS_TEST_LOCAL_IPC_REQUEST_ID").unwrap();
-        let ctx = context(3000);
-        let mut connection = LocalConnection::connect(Path::new(&directory), &ctx).unwrap();
-        connection
-            .write_request(&status_request(&id), &ctx)
-            .unwrap();
         assert_eq!(
-            connection.read_response(&ctx).unwrap().message,
-            response(&id).message
-        );
-    }
-
-    #[test]
-    fn two_independent_processes_use_the_same_private_listener() {
-        let directory = private();
-        let locks = private();
-        let listener = LocalListener::bind(directory.path(), locks.path(), []).unwrap();
-        let mut children = Vec::new();
-        for id in ["proc-a", "proc-b"] {
-            children.push(
-                std::process::Command::new(std::env::current_exe().unwrap())
-                    .args([
-                        "--exact",
-                        "control::local_ipc::tests::child_process_transport_probe",
-                        "--nocapture",
-                    ])
-                    .env("L3MS_TEST_LOCAL_IPC_DIRECTORY", directory.path())
-                    .env("L3MS_TEST_LOCAL_IPC_REQUEST_ID", id)
-                    .stdout(std::process::Stdio::null())
-                    .spawn()
-                    .unwrap(),
-            );
-        }
-        let mut ids = std::collections::BTreeSet::new();
-        for _ in 0..2 {
-            let ctx = context(3000);
-            let mut connection = listener.accept(&ctx).unwrap();
-            let request = connection.read_request(&ctx).unwrap();
-            let id = request.request_id().to_owned();
-            connection.write_response(&response(&id), &ctx).unwrap();
-            ids.insert(id);
-        }
-        for mut child in children {
-            assert!(child.wait().unwrap().success());
-        }
-        assert_eq!(
-            ids,
-            std::collections::BTreeSet::from(["proc-a".into(), "proc-b".into()])
-        );
-    }
-
-    #[test]
-    fn unsafe_paths_and_existing_entries_are_preserved() {
-        let directory = private();
-        let locks = private();
-        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert_eq!(
-            LocalListener::bind(directory.path(), locks.path(), [])
+            LocalConnection::connect(directory.path(), &context(100))
                 .err()
                 .unwrap(),
-            LocalIpcError::UnsafePath
+            LocalIpcError::Unavailable
         );
-        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let path = directory.path().join(SOCKET_NAME);
+
         std::fs::write(&path, "preserve").unwrap();
-        assert_eq!(
-            LocalListener::bind(directory.path(), locks.path(), [])
-                .err()
-                .unwrap(),
-            LocalIpcError::ExistingSocket
-        );
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "preserve");
         assert_eq!(
             LocalConnection::connect(directory.path(), &context(100))
                 .err()
                 .unwrap(),
             LocalIpcError::UnsafePath
         );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "preserve");
+
         std::fs::remove_file(&path).unwrap();
         std::os::unix::fs::symlink("missing", &path).unwrap();
         assert_eq!(
-            LocalListener::bind(directory.path(), locks.path(), [])
+            LocalConnection::connect(directory.path(), &context(100))
                 .err()
                 .unwrap(),
-            LocalIpcError::ExistingSocket
+            LocalIpcError::UnsafePath
         );
         assert!(path.symlink_metadata().unwrap().file_type().is_symlink());
     }
 
     #[test]
-    fn competitor_and_stale_socket_are_not_silently_reclaimed() {
-        let directory = private();
-        let other = private();
-        let locks = private();
-        let listener = LocalListener::bind(directory.path(), locks.path(), []).unwrap();
-        assert_eq!(
-            LocalListener::bind(other.path(), locks.path(), [])
-                .err()
-                .unwrap(),
-            LocalIpcError::OwnershipUnavailable
-        );
-        drop(listener);
-        let path = directory.path().join(SOCKET_NAME);
-        let stale = UnixListener::bind(&path).unwrap();
-        drop(stale);
-        assert_eq!(
-            LocalListener::bind(directory.path(), locks.path(), [])
-                .err()
-                .unwrap(),
-            LocalIpcError::ExistingSocket
-        );
-        assert!(path.symlink_metadata().unwrap().file_type().is_socket());
-    }
-
-    #[test]
-    fn drop_never_removes_a_replaced_entry() {
-        let directory = private();
-        let locks = private();
-        let listener = LocalListener::bind(directory.path(), locks.path(), []).unwrap();
-        let path = directory.path().join(SOCKET_NAME);
-        std::fs::remove_file(&path).unwrap();
-        std::fs::write(&path, "replacement").unwrap();
-        drop(listener);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "replacement");
-    }
-
-    #[test]
     fn peer_uid_mismatch_is_denied_before_payload_io() {
-        let (first, _second) = UnixStream::pair().unwrap();
+        let (stream, _peer) = UnixStream::pair().unwrap();
         assert_eq!(
-            LocalConnection::authenticated(
-                first,
-                unsafe { libc::geteuid() }.wrapping_add(1),
-                Phase::ServerRequest
-            )
-            .err()
-            .unwrap(),
+            LocalConnection::authenticated(stream, unsafe { libc::geteuid() }.wrapping_add(1))
+                .err()
+                .unwrap(),
             LocalIpcError::PeerDenied
         );
-    }
-
-    #[test]
-    fn trickling_header_does_not_reset_the_whole_read_deadline() {
-        let (mut connection, mut peer) = pair();
-        let trickle = std::thread::spawn(move || {
-            for byte in [0u8, 0, 1, 0] {
-                if peer.write_all(&[byte]).is_err() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(40));
-            }
-        });
-        let start = Instant::now();
-        assert_eq!(
-            connection.read_request(&context(90)).err().unwrap(),
-            LocalIpcError::Deadline
-        );
-        assert!(start.elapsed() < Duration::from_secs(1));
-        assert_eq!(
-            connection.read_request(&context(100)).err().unwrap(),
-            LocalIpcError::OutOfOrder
-        );
-        drop(connection);
-        trickle.join().unwrap();
-    }
-
-    #[test]
-    fn malformed_and_oversized_frames_are_bounded_and_redacted() {
-        for payload in [
-            (ipc::MAX_FRAME_BYTES as u32 + 1).to_be_bytes().to_vec(),
-            vec![0, 0, 0, 3, b'x', b'y', b'z'],
-        ] {
-            let (mut connection, mut peer) = pair();
-            peer.write_all(&payload).unwrap();
-            let error = connection.read_request(&context(100)).err().unwrap();
-            assert!(matches!(
-                error,
-                LocalIpcError::Protocol(
-                    ProtocolError::FrameTooLarge | ProtocolError::MalformedFrame
-                )
-            ));
-            assert!(!error.to_string().contains("xyz"));
-        }
     }
 
     #[test]
@@ -815,13 +468,9 @@ mod tests {
             },
             0
         );
-        let mut connection = LocalConnection::authenticated(
-            client,
-            unsafe { libc::geteuid() },
-            Phase::ClientRequest,
-        )
-        .unwrap();
-        let request = RequestEnvelope::v1(WireRequestMessage::Submit {
+        let mut connection =
+            LocalConnection::authenticated(client, unsafe { libc::geteuid() }).unwrap();
+        let request = RequestEnvelope::v1(ipc::WireRequestMessage::Submit {
             request_id: "large".into(),
             timeout_ms: 1000,
             request: ipc::WireInferenceRequest::Language {
@@ -855,26 +504,17 @@ mod tests {
             true
         }
     }
+
     #[test]
-    fn accept_and_connect_observe_deadline_cancellation_and_unavailability() {
+    fn connect_observes_deadline_cancellation_and_unavailability() {
         let directory = private();
-        let locks = private();
         assert_eq!(
             LocalConnection::connect(directory.path(), &context(100))
                 .err()
                 .unwrap(),
             LocalIpcError::Unavailable
         );
-        let listener = LocalListener::bind(directory.path(), locks.path(), []).unwrap();
-        assert_eq!(
-            listener.accept(&context(30)).err().unwrap(),
-            LocalIpcError::Deadline
-        );
         let cancelled = OperationContext::new(Instant::now() + Duration::from_secs(1), &Cancel);
-        assert_eq!(
-            listener.accept(&cancelled).err().unwrap(),
-            LocalIpcError::Cancelled
-        );
         assert_eq!(
             LocalConnection::connect(directory.path(), &cancelled)
                 .err()
@@ -886,9 +526,8 @@ mod tests {
     #[test]
     fn full_socket_backlog_does_not_create_an_unbounded_connect() {
         let directory = private();
-        let locks = private();
-        let listener = LocalListener::bind(directory.path(), locks.path(), []).unwrap();
-        assert_eq!(unsafe { libc::listen(listener.listener.as_raw_fd(), 1) }, 0);
+        let listener = fixture_listener(directory.path());
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 1) }, 0);
         let _first = LocalConnection::connect(directory.path(), &context(1000)).unwrap();
         let _second = LocalConnection::connect(directory.path(), &context(1000)).unwrap();
         let start = Instant::now();
@@ -904,9 +543,8 @@ mod tests {
     #[test]
     fn unix_backlog_eagain_is_not_a_connected_or_pending_socket() {
         let directory = private();
-        let locks = private();
-        let listener = LocalListener::bind(directory.path(), locks.path(), []).unwrap();
-        assert_eq!(unsafe { libc::listen(listener.listener.as_raw_fd(), 1) }, 0);
+        let listener = fixture_listener(directory.path());
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 1) }, 0);
         let _first = LocalConnection::connect(directory.path(), &context(1000)).unwrap();
         let _second = LocalConnection::connect(directory.path(), &context(1000)).unwrap();
         let fd = unsafe {
@@ -934,88 +572,18 @@ mod tests {
             io::Error::last_os_error().raw_os_error(),
             Some(libc::EAGAIN)
         );
-        // A zero SO_ERROR is not sufficient to establish this connection.
         assert!(raw.take_error().unwrap().is_none());
         assert_eq!(
             raw.peer_addr().unwrap_err().raw_os_error(),
             Some(libc::ENOTCONN)
         );
-        let _accepted = listener.accept(&context(100)).unwrap();
+        let _accepted = listener.accept().unwrap();
         std::thread::sleep(Duration::from_millis(25));
         assert_eq!(
             raw.peer_addr().unwrap_err().raw_os_error(),
             Some(libc::ENOTCONN)
         );
-        // Freeing backlog alone did not finish it; connect must be called again.
         assert_eq!(connect(), 0);
         assert!(raw.peer_addr().is_ok());
-    }
-
-    #[test]
-    fn artifact_response_must_match_reference_offset_and_budget() {
-        use super::super::result_buffer::{ArtifactKind, Availability, MediaArtifact};
-        let artifact = MediaArtifact::new(ArtifactKind::Backend, "job-1/image.png").unwrap();
-        for invalid in 0..3 {
-            let (mut connection, mut peer) = pair();
-            ipc::write_request(
-                &mut peer,
-                &RequestEnvelope::v3_artifact("artifact-job", artifact.clone(), 0, 2, None),
-            )
-            .unwrap();
-            connection.read_incoming_request(&context(100)).unwrap();
-            let mut wrong_ref = artifact.clone();
-            if invalid == 0 {
-                wrong_ref.relative_path = "job-2/image.png".into();
-            }
-            let offset = if invalid == 1 { 1 } else { 0 };
-            let bytes = if invalid == 2 {
-                b"abc".to_vec()
-            } else {
-                b"ab".to_vec()
-            };
-            let end = offset + bytes.len() as u64;
-            let response = ResponseEnvelope::v3_artifact(ipc::ResponseMessage::Artifact {
-                request_id: "artifact-job".into(),
-                artifact: wrong_ref,
-                availability: Availability::Available,
-                offset,
-                total_bytes: end,
-                next_offset: end,
-                end_of_file: true,
-                artifact_version: Some(ipc::ArtifactVersion::new(&"b".repeat(64)).unwrap()),
-                bytes,
-            });
-            assert_eq!(
-                connection
-                    .write_response(&response, &context(100))
-                    .unwrap_err(),
-                LocalIpcError::ResponseMismatch
-            );
-            assert_eq!(
-                connection
-                    .write_response(&response, &context(100))
-                    .unwrap_err(),
-                LocalIpcError::OutOfOrder
-            );
-        }
-    }
-
-    #[test]
-    fn mismatched_response_is_rejected_and_connection_cannot_be_reused() {
-        let (mut connection, mut peer) = pair();
-        ipc::write_request(&mut peer, &status_request("owned")).unwrap();
-        connection.read_request(&context(100)).unwrap();
-        assert_eq!(
-            connection
-                .write_response(&response("unrelated"), &context(100))
-                .unwrap_err(),
-            LocalIpcError::ResponseMismatch
-        );
-        assert_eq!(
-            connection
-                .write_response(&response("owned"), &context(100))
-                .unwrap_err(),
-            LocalIpcError::OutOfOrder
-        );
     }
 }

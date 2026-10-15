@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use serde::de::value::MapAccessDeserializer;
-use serde::de::{Error as DeError, MapAccess, SeqAccess, Visitor};
+use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
@@ -428,22 +428,6 @@ pub fn load_jobs_in(data_root: impl AsRef<Path>) -> Result<JobHistoryLoad> {
     load_jobs_from_value(raw, &path)
 }
 
-/// Coordinator-only strict load. Unlike legacy normalization, this rejects
-/// duplicate object keys before serde_json::Value can collapse them.
-pub(crate) fn load_jobs_strict_in(data_root: impl AsRef<Path>) -> Result<JobHistoryLoad> {
-    let path = jobs_path_in(data_root);
-    let Some(bytes) = read_bounded_optional(&path, JOBS_MAX_FILE_BYTES)? else {
-        return Ok(JobHistoryLoad::default());
-    };
-    let mut deserializer = serde_json::Deserializer::from_slice(&bytes);
-    let StrictJsonValue(raw) = StrictJsonValue::deserialize(&mut deserializer)
-        .with_context(|| format!("failed to parse strict job history {}", path.display()))?;
-    deserializer
-        .end()
-        .with_context(|| format!("failed to parse strict job history {}", path.display()))?;
-    load_jobs_from_value(raw, &path)
-}
-
 fn load_jobs_from_value(raw: Value, path: &Path) -> Result<JobHistoryLoad> {
     let rows = raw
         .as_array()
@@ -509,86 +493,6 @@ fn load_jobs_from_value(raw: Value, path: &Path) -> Result<JobHistoryLoad> {
     }
 
     Ok(result)
-}
-
-struct StrictJsonValue(Value);
-
-impl<'de> Deserialize<'de> for StrictJsonValue {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        deserializer.deserialize_any(StrictJsonValueVisitor)
-    }
-}
-
-struct StrictJsonValueVisitor;
-
-impl<'de> Visitor<'de> for StrictJsonValueVisitor {
-    type Value = StrictJsonValue;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a JSON value without duplicate object keys")
-    }
-
-    fn visit_bool<E>(self, value: bool) -> std::result::Result<Self::Value, E> {
-        Ok(StrictJsonValue(Value::Bool(value)))
-    }
-
-    fn visit_i64<E>(self, value: i64) -> std::result::Result<Self::Value, E> {
-        Ok(StrictJsonValue(Value::Number(value.into())))
-    }
-
-    fn visit_u64<E>(self, value: u64) -> std::result::Result<Self::Value, E> {
-        Ok(StrictJsonValue(Value::Number(value.into())))
-    }
-
-    fn visit_f64<E>(self, value: f64) -> std::result::Result<Self::Value, E>
-    where
-        E: DeError,
-    {
-        serde_json::Number::from_f64(value)
-            .map(|number| StrictJsonValue(Value::Number(number)))
-            .ok_or_else(|| E::custom("invalid JSON number"))
-    }
-
-    fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E> {
-        Ok(StrictJsonValue(Value::String(value.to_owned())))
-    }
-
-    fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E> {
-        Ok(StrictJsonValue(Value::String(value)))
-    }
-
-    fn visit_unit<E>(self) -> std::result::Result<Self::Value, E> {
-        Ok(StrictJsonValue(Value::Null))
-    }
-
-    fn visit_seq<A>(self, mut sequence: A) -> std::result::Result<Self::Value, A::Error>
-    where
-        A: SeqAccess<'de>,
-    {
-        let mut values = Vec::new();
-        while let Some(StrictJsonValue(value)) = sequence.next_element()? {
-            values.push(value);
-        }
-        Ok(StrictJsonValue(Value::Array(values)))
-    }
-
-    fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        let mut values = serde_json::Map::new();
-        while let Some(key) = map.next_key::<String>()? {
-            if values.contains_key(&key) {
-                return Err(A::Error::custom("duplicate JSON object key"));
-            }
-            let StrictJsonValue(value) = map.next_value()?;
-            values.insert(key, value);
-        }
-        Ok(StrictJsonValue(Value::Object(values)))
-    }
 }
 
 /// Persist the configured job history atomically, retaining its most recent
@@ -1589,7 +1493,7 @@ mod tests {
     }
 
     #[test]
-    fn comfy_generation_reference_is_additive_redacted_and_strictly_shaped() {
+    fn comfy_generation_reference_is_additive_redacted_and_object_shaped() {
         const CANDIDATE: &str = "123e4567-e89b-12d3-a456-426614174000";
         let reference = comfy_generation_reference();
         let metadata = JobMetadata {
@@ -1683,7 +1587,7 @@ mod tests {
         tuple_coordinator["comfy_service_generation"]["intent"]["supervisor_coordinator"] =
             serde_json::json!([]);
         malformed.push(tuple_coordinator);
-        let mut unknown_nested = base_row;
+        let mut unknown_nested = base_row.clone();
         unknown_nested["comfy_service_generation"]["generation"]["unexpected"] =
             serde_json::json!("not allowed");
         malformed.push(unknown_nested);
@@ -1695,20 +1599,29 @@ mod tests {
                 serde_json::to_vec(&serde_json::json!([row])).unwrap(),
             )
             .unwrap();
-            let loaded = load_jobs_strict_in(temp.path()).unwrap();
+            let loaded = load_jobs_in(temp.path()).unwrap();
             assert!(loaded.jobs.is_empty());
             assert_eq!(loaded.issues.len(), 1);
             assert_eq!(loaded.reconciled_running, 0);
         }
 
-        let encoded_reference = serde_json::to_string(&reference).unwrap();
-        let duplicate_nested_field =
-            encoded_reference.replace("\"main_pid\":2345", "\"main_pid\":2345,\"main_pid\":2346");
-        let duplicate_row = format!(
-            r#"[{{"name":"duplicate-generation-key","started":"12:34:56","elapsed":"-","exit":"…","mode":"cross-toolkit","script_path":"","toolkit":"l2m2","profile":"fixture-profile","task":"image","request_id":"req-duplicate","result_state":"running","comfy_dispatch_candidate":"{CANDIDATE}","comfy_service_generation":{duplicate_nested_field}}}]"#
+        fs::write(
+            jobs_path_in(temp.path()),
+            serde_json::to_vec(&serde_json::json!([base_row])).unwrap(),
+        )
+        .unwrap();
+        let loaded = load_jobs_in(temp.path()).unwrap();
+        assert!(loaded.issues.is_empty());
+        assert_eq!(loaded.jobs.len(), 1);
+        assert_eq!(loaded.jobs[0].exit, JOB_INTERRUPTED_EXIT);
+        assert_eq!(
+            loaded.jobs[0].metadata.comfy_dispatch_candidate.as_deref(),
+            Some(CANDIDATE)
         );
-        fs::write(jobs_path_in(temp.path()), duplicate_row).unwrap();
-        assert!(load_jobs_strict_in(temp.path()).is_err());
+        assert_eq!(
+            loaded.jobs[0].metadata.comfy_service_generation,
+            Some(reference)
+        );
     }
 
     #[test]

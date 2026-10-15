@@ -43,7 +43,7 @@ const MAX_COORDINATOR_ARTIFACT_CHUNK_JSON_BYTES: usize = 160 * 1024;
     about = "L3MS launcher (TUI + interactive model and bench CLI)",
     group(
         ArgGroup::new("action")
-            .args(["run", "run_profile", "bench", "list", "quickstart", "settings", "export_profile", "import_profile", "compare_results", "coordinator_status", "coordinator_cancel", "request_results", "request_output", "artifact_chunk", "coordinator_managed_session"])
+            .args(["run", "run_profile", "bench", "list", "quickstart", "settings", "export_profile", "import_profile", "compare_results", "coordinator_status", "coordinator_cancel", "request_results", "request_output", "artifact_chunk"])
             .multiple(false)
     )
 )]
@@ -154,10 +154,6 @@ struct Cli {
     #[arg(long, value_enum, value_name = "LANE")]
     request_lane: Option<RequestOutputLane>,
 
-    /// Run one explicitly configured foreground managed language session.
-    #[arg(long, value_name = "CONFIG")]
-    coordinator_managed_session: Option<PathBuf>,
-
     /// Results cursor to read after; defaults to 0 and requires --request-results.
     #[arg(long, value_name = "CURSOR")]
     after_cursor: Option<u64>,
@@ -205,6 +201,8 @@ struct DirectNativeSpec<'a> {
 struct DirectDecisionInput {
     state: serde_json::Value,
     questions: serde_json::Map<String, serde_json::Value>,
+    #[serde(default)]
+    images: Vec<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -286,7 +284,11 @@ fn parse_direct_decision_input(bytes: &[u8]) -> Result<DirectDecisionInput, Dire
     if bytes.len() > MAX_DIRECT_NATIVE_INPUT_BYTES {
         return Err(DirectInputError::TooLarge);
     }
-    serde_json::from_slice(bytes).map_err(|_| DirectInputError::Invalid)
+    let parsed: DirectDecisionInput =
+        serde_json::from_slice(bytes).map_err(|_| DirectInputError::Invalid)?;
+    crate::control::requests::validate_decision_images(&parsed.images)
+        .map_err(|_| DirectInputError::Invalid)?;
+    Ok(parsed)
 }
 
 fn parse_direct_speech_input(bytes: &[u8]) -> Result<DirectSpeechInput, DirectInputError> {
@@ -406,7 +408,6 @@ fn coordinator_options_present(cli: &Cli) -> bool {
         || cli.artifact_byte_budget.is_some()
         || cli.artifact_version.is_some()
         || cli.request_lane.is_some()
-        || cli.coordinator_managed_session.is_some()
         || cli.after_cursor.is_some()
         || cli.result_page_bytes.is_some()
         || cli.coordinator_socket_dir.is_some()
@@ -460,47 +461,12 @@ struct CommandSpec {
 
 /// Parse process arguments and launch the requested mode.
 pub fn run() -> Result<u8> {
-    #[cfg(target_os = "linux")]
-    {
-        // The owned manager invokes this internal operation directly. Preserve
-        // OS-native backend argv and bypass ordinary settings/interactive startup.
-        let arguments: Vec<OsString> = std::env::args_os().skip(1).collect();
-        if let Some(result) = isolated_engine_action(arguments) {
-            return result;
-        }
-        let arguments: Vec<OsString> = std::env::args_os().skip(1).collect();
-        if arguments.first().is_some_and(|argument| {
-            crate::control::owned_job_helper::is_helper_entrypoint(argument)
-        }) {
-            return crate::control::owned_job_helper::run_helper(arguments)
-                .map(|()| 0)
-                .map_err(anyhow::Error::new);
-        }
-    }
     dispatch(Cli::parse())
-}
-
-#[cfg(target_os = "linux")]
-fn isolated_engine_action(arguments: Vec<OsString>) -> Option<Result<u8>> {
-    if !arguments
-        .first()
-        .is_some_and(|argument| crate::control::engine_helper::is_helper_entrypoint(argument))
-    {
-        return None;
-    }
-    Some(
-        crate::control::engine_helper::run_supervisor(arguments)
-            .map(|()| 0)
-            .map_err(anyhow::Error::new),
-    )
 }
 
 fn dispatch(cli: Cli) -> Result<u8> {
     if let Some(code) = direct_native_action(&cli)? {
         return Ok(code);
-    }
-    if let Some(config_path) = coordinator_managed_session_action(&cli)? {
-        return run_managed_session_action(config_path);
     }
     let output_spec = coordinator_output_spec(&cli)?;
     let artifact_chunk_spec = coordinator_artifact_chunk_spec(&cli)?;
@@ -611,31 +577,6 @@ fn dispatch(cli: Cli) -> Result<u8> {
     Ok(0)
 }
 
-fn coordinator_managed_session_action(cli: &Cli) -> Result<Option<&Path>> {
-    let Some(config_path) = cli.coordinator_managed_session.as_deref() else {
-        return Ok(None);
-    };
-    if cli.coordinator_socket_dir.is_some()
-        || cli.coordinator_status.is_some()
-        || cli.coordinator_cancel.is_some()
-        || cli.request_results.is_some()
-        || cli.request_output.is_some()
-        || cli.artifact_chunk.is_some()
-        || cli.artifact_kind.is_some()
-        || cli.artifact_path.is_some()
-        || cli.artifact_offset.is_some()
-        || cli.artifact_byte_budget.is_some()
-        || cli.artifact_version.is_some()
-        || cli.request_lane.is_some()
-        || cli.after_cursor.is_some()
-        || cli.result_page_bytes.is_some()
-        || cli.extra.is_some()
-    {
-        bail!("--coordinator-managed-session cannot be combined with other coordinator options");
-    }
-    Ok(Some(config_path))
-}
-
 fn coordinator_output_spec(cli: &Cli) -> Result<Option<(&str, crate::control::catalog::Lane)>> {
     match (cli.request_output.as_deref(), cli.request_lane) {
         (None, None) => Ok(None),
@@ -686,7 +627,6 @@ fn coordinator_artifact_chunk_spec(cli: &Cli) -> Result<Option<ArtifactChunkSpec
         || cli.request_results.is_some()
         || cli.request_output.is_some()
         || cli.request_lane.is_some()
-        || cli.coordinator_managed_session.is_some()
         || cli.after_cursor.is_some()
         || cli.result_page_bytes.is_some()
         || cli.extra.is_some()
@@ -736,40 +676,6 @@ fn is_artifact_version_token(token: &str) -> bool {
         && token
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-#[cfg(target_os = "linux")]
-fn run_managed_session_action(config_path: &Path) -> Result<u8> {
-    let report = run_managed_session(config_path)?;
-    println!("{}", managed_session_report_json(report));
-    Ok(u8::from(
-        report.stopped == crate::control::daemon::StopReason::WorkerUncertain,
-    ))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn run_managed_session_action(_: &Path) -> Result<u8> {
-    bail!("managed coordinator sessions are supported only on Linux");
-}
-
-#[cfg(target_os = "linux")]
-fn run_managed_session(config_path: &Path) -> Result<crate::control::daemon::RunReport> {
-    crate::control::coordinator_launch::run_managed_session(config_path)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))
-}
-
-#[cfg(target_os = "linux")]
-fn managed_session_report_json(report: crate::control::daemon::RunReport) -> String {
-    let stopped = match report.stopped {
-        crate::control::daemon::StopReason::Cancelled => "cancelled",
-        crate::control::daemon::StopReason::Deadline => "deadline",
-        crate::control::daemon::StopReason::ConnectionLimit => "connection_limit",
-        crate::control::daemon::StopReason::WorkerUncertain => "worker_uncertain",
-    };
-    format!(
-        "{{\"completed_exchanges\":{},\"failed_connections\":{},\"stopped\":\"{stopped}\"}}",
-        report.completed_exchanges, report.failed_connections
-    )
 }
 
 fn coordinator_action(
@@ -1195,11 +1101,22 @@ fn print_stack_list() -> Result<()> {
         &resolved.media_toolkit_root,
         &resolved.decisions_toolkit_root,
     )?;
-    println!("L3MS stack profiles ({}):", catalog.list().len());
-    for profile in catalog.list() {
-        println!("{}", format_stack_profile(profile));
+    write_stack_list(&mut io::stdout().lock(), catalog.list())
+        .context("failed to write stack listing")
+}
+
+fn write_stack_list(output: &mut impl Write, profiles: &[CatalogProfile]) -> io::Result<()> {
+    let result: io::Result<()> = (|| {
+        writeln!(output, "L3MS stack profiles ({}):", profiles.len())?;
+        for profile in profiles {
+            writeln!(output, "{}", format_stack_profile(profile))?;
+        }
+        Ok(())
+    })();
+    match result {
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        result => result,
     }
-    Ok(())
 }
 
 fn format_stack_profile(profile: &CatalogProfile) -> String {
@@ -1664,6 +1581,7 @@ fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
             crate::control::task_form::TaskFields::Decisions {
                 state: input.state,
                 questions: input.questions,
+                images: input.images,
             },
             None,
         ),
@@ -2066,21 +1984,6 @@ fn direct_comfy_output_json<'a>(
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn hidden_engine_action_is_exact_and_malformed_launch_stays_redacted() {
-        assert!(isolated_engine_action(vec![OsString::from("--quickstart")]).is_none());
-        assert!(isolated_engine_action(Vec::new()).is_none());
-        let error =
-            isolated_engine_action(vec![OsString::from("--l3ms-isolated-engine-supervisor-v1")])
-                .unwrap()
-                .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "isolated engine helper: invalid launch arguments"
-        );
-    }
-
     #[test]
     fn direct_native_action_requires_explicit_inputs_and_uses_bounded_default() {
         let cli = Cli::try_parse_from([
@@ -2349,11 +2252,19 @@ mod tests {
         let parsed = parse_direct_decision_input(valid).unwrap();
         assert_eq!(parsed.state["ready"], true);
         assert!(parsed.questions.contains_key("route"));
+        assert!(parsed.images.is_empty());
+        let with_image = parse_direct_decision_input(
+            br#"{"state":{},"questions":{"route":{"type":"choice","options":["yes"]}},"images":["data:image/png;base64,iVBORw0KGgo="]}"#,
+        )
+        .unwrap();
+        assert_eq!(with_image.images, ["data:image/png;base64,iVBORw0KGgo="]);
 
         for invalid in [
             br#"{"state":{},"state":{},"questions":{}}"#.as_slice(),
             br#"{"state":{},"questions":{},"unexpected":true}"#.as_slice(),
             br#"{"state":{}}"#.as_slice(),
+            br#"{"state":{},"questions":{"route":{"type":"choice","options":["yes"]}},"images":["https://example.test/image.png"]}"#.as_slice(),
+            br#"{"state":{},"questions":{"route":{"type":"choice","options":["yes"]}},"images":"data:image/png;base64,iVBORw0KGgo="}"#.as_slice(),
             br#"[]"#.as_slice(),
             br#"{"state":{},"questions":{}} trailing"#.as_slice(),
         ] {
@@ -3090,20 +3001,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn managed_session_report_contains_only_compact_counts_and_stop_reason() {
-        let report = crate::control::daemon::RunReport {
-            completed_exchanges: 7,
-            failed_connections: 2,
-            stopped: crate::control::daemon::StopReason::Deadline,
-        };
-        assert_eq!(
-            managed_session_report_json(report),
-            r#"{"completed_exchanges":7,"failed_connections":2,"stopped":"deadline"}"#
-        );
-    }
-
     #[test]
     fn results_budget_is_bounded_and_rejected_before_socket_connect() {
         let directory = tempfile::tempdir().unwrap();
@@ -3483,6 +3380,29 @@ mod tests {
         assert!(formatted.contains("tts"));
         assert!(formatted.contains("manifest-only"));
         assert!(formatted.contains("media-runtimes.json"));
+    }
+
+    #[test]
+    fn stack_listing_handles_closed_pipe_but_preserves_other_output_errors() {
+        struct FailedOutput(io::ErrorKind);
+        impl Write for FailedOutput {
+            fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
+                Err(io::Error::from(self.0))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        assert!(write_stack_list(&mut FailedOutput(io::ErrorKind::BrokenPipe), &[]).is_ok());
+        assert_eq!(
+            write_stack_list(&mut FailedOutput(io::ErrorKind::PermissionDenied), &[])
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        let mut output = Vec::new();
+        write_stack_list(&mut output, &[]).unwrap();
+        assert_eq!(output, b"L3MS stack profiles (0):\n");
     }
 
     #[test]

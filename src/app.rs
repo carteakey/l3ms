@@ -35,7 +35,7 @@ use crate::control::{
 use crate::{
     chat::{
         detect_chat_server, detected_servers, terminate_detected_server, ChatClient,
-        ChatCompletion, ChatRequest,
+        ChatCompletion, ChatModelInventory, ChatRequest,
     },
     chat_history::ChatHistory,
     commands::{command, search_all_commands, visible_commands, CommandContext, CommandId},
@@ -268,6 +268,7 @@ enum TaskFormField {
     SpeechReferenceText,
     DecisionState,
     DecisionQuestions,
+    DecisionImages,
     Run,
 }
 
@@ -287,6 +288,7 @@ impl TaskFormField {
             Self::SpeechReferenceText => "Reference transcript",
             Self::DecisionState => "Decision state JSON",
             Self::DecisionQuestions => "Decision questions JSON",
+            Self::DecisionImages => "Decision images data URL JSON array",
             Self::Run => "Run once",
         }
     }
@@ -349,6 +351,7 @@ struct TaskFormValues {
     speech_reference_text: String,
     decision_state: String,
     decision_questions: String,
+    decision_images: String,
 }
 
 impl TaskFormValues {
@@ -364,6 +367,7 @@ impl TaskFormValues {
             self.speech_reference_text.len(),
             self.decision_state.len(),
             self.decision_questions.len(),
+            self.decision_images.len(),
         ]
         .into_iter()
         .fold(0usize, usize::saturating_add)
@@ -385,6 +389,7 @@ struct TaskFormEditor {
     profile: crate::control::catalog::ProfileKey,
     profile_snapshot: CatalogProfile,
     direct_native_decision: bool,
+    direct_native_decision_images: bool,
     direct_breeze_speech: bool,
     direct_native_music: bool,
     direct_native_h3: bool,
@@ -408,6 +413,8 @@ impl TaskFormEditor {
         direct_language_embeddings: bool,
     ) -> Self {
         let direct_native_decision = is_direct_native_decision_profile(profile);
+        let direct_native_decision_images = direct_native_decision
+            && crate::control::requests::decision_profile_supports_images(profile);
         let direct_breeze_speech = is_direct_breeze_speech_profile(profile);
         let direct_native_music = is_direct_cuda_music_profile(profile);
         let direct_native_h3 = is_direct_cuda_h3_profile(profile);
@@ -455,6 +462,7 @@ impl TaskFormEditor {
             profile: profile.key.clone(),
             profile_snapshot: profile.clone(),
             direct_native_decision,
+            direct_native_decision_images,
             direct_breeze_speech,
             direct_native_music,
             direct_native_h3,
@@ -487,6 +495,9 @@ impl TaskFormEditor {
                 .declared_tasks
                 .iter()
                 .position(|task| task == "decision");
+        }
+        if direct_native_decision_images {
+            editor.values.decision_images = "[]".into();
         }
         if direct_breeze_speech {
             editor.selected_task = editor
@@ -576,10 +587,15 @@ impl TaskFormEditor {
                     fields.push(TaskFormField::EmbeddingInputs);
                 }
             }
-            Lane::Decisions => fields.extend([
-                TaskFormField::DecisionState,
-                TaskFormField::DecisionQuestions,
-            ]),
+            Lane::Decisions => {
+                fields.extend([
+                    TaskFormField::DecisionState,
+                    TaskFormField::DecisionQuestions,
+                ]);
+                if self.direct_native_decision_images {
+                    fields.push(TaskFormField::DecisionImages);
+                }
+            }
             Lane::Media => {
                 if self.direct_breeze_speech {
                     match self
@@ -654,6 +670,7 @@ impl TaskFormEditor {
             TaskFormField::SpeechReferenceText => Some(&self.values.speech_reference_text),
             TaskFormField::DecisionState => Some(&self.values.decision_state),
             TaskFormField::DecisionQuestions => Some(&self.values.decision_questions),
+            TaskFormField::DecisionImages => Some(&self.values.decision_images),
             TaskFormField::DeclaredTask
             | TaskFormField::MediaOperation
             | TaskFormField::SpeechMode
@@ -673,6 +690,7 @@ impl TaskFormEditor {
             TaskFormField::SpeechReferenceText => Some(&mut self.values.speech_reference_text),
             TaskFormField::DecisionState => Some(&mut self.values.decision_state),
             TaskFormField::DecisionQuestions => Some(&mut self.values.decision_questions),
+            TaskFormField::DecisionImages => Some(&mut self.values.decision_images),
             TaskFormField::DeclaredTask
             | TaskFormField::MediaOperation
             | TaskFormField::SpeechMode
@@ -881,6 +899,12 @@ impl TaskFormEditor {
                     .map_err(|_| TaskFormError::InvalidNativeFields)?,
                 questions: serde_json::from_str(&self.values.decision_questions)
                     .map_err(|_| TaskFormError::InvalidNativeFields)?,
+                images: if self.direct_native_decision_images {
+                    serde_json::from_str(&self.values.decision_images)
+                        .map_err(|_| TaskFormError::InvalidNativeFields)?
+                } else {
+                    Vec::new()
+                },
             },
             Lane::Media => match self
                 .media_operation
@@ -1141,7 +1165,7 @@ enum BackgroundEvent {
         request_id: u64,
         endpoint: String,
         client: ChatClient,
-        models: Vec<SwapModel>,
+        inventory: ChatModelInventory,
     },
     ChatConnectionFailed {
         request_id: u64,
@@ -1217,6 +1241,7 @@ struct App {
     chat_endpoint_committed: Option<String>,
     chat_client: Option<ChatClient>,
     chat_models: Vec<SwapModel>,
+    chat_decision_model_ids: Vec<String>,
     chat_model_state: TableState,
     chat_connection_pending: bool,
     chat_connection_request_id: u64,
@@ -1403,6 +1428,7 @@ impl App {
             chat_endpoint_committed: None,
             chat_client: None,
             chat_models: Vec::new(),
+            chat_decision_model_ids: Vec::new(),
             chat_model_state: TableState::default().with_selected(Some(0)),
             chat_connection_pending: false,
             chat_connection_request_id: 0,
@@ -1574,16 +1600,16 @@ impl App {
         thread::spawn(move || {
             let result = ChatClient::new(&endpoint, api_key.as_deref()).and_then(|client| {
                 client
-                    .list_models()
-                    .map(|models| (client.base_url().to_owned(), client, models))
+                    .list_model_inventory()
+                    .map(|inventory| (client.base_url().to_owned(), client, inventory))
             });
             match result {
-                Ok((endpoint, client, models)) => {
+                Ok((endpoint, client, inventory)) => {
                     let _ = sender.send(BackgroundEvent::ChatConnected {
                         request_id,
                         endpoint,
                         client,
-                        models,
+                        inventory,
                     });
                 }
                 Err(error) => {
@@ -1609,12 +1635,12 @@ impl App {
         let api_key = env::var("LLAMA_SWAP_API_KEY").ok();
         let sender = self.sender.clone();
         thread::spawn(move || match detect_chat_server(api_key.as_deref()) {
-            Ok((client, models)) => {
+            Ok((client, inventory)) => {
                 let _ = sender.send(BackgroundEvent::ChatConnected {
                     request_id,
                     endpoint: client.base_url().to_owned(),
                     client,
-                    models,
+                    inventory,
                 });
             }
             Err(error) => {
@@ -1640,6 +1666,7 @@ impl App {
                 self.push_log(format!("Stopped externally-started llama-server PID {pid}"));
                 self.chat_client = None;
                 self.chat_models.clear();
+                self.chat_decision_model_ids.clear();
             }
             Err(error) => {
                 self.status = format!("Could not stop detected server PID {pid}");
@@ -1662,13 +1689,13 @@ impl App {
         self.chat_connection_pending = true;
         self.status = format!("Refreshing Chat models from {}…", client.base_url());
         let sender = self.sender.clone();
-        thread::spawn(move || match client.list_models() {
-            Ok(models) => {
+        thread::spawn(move || match client.list_model_inventory() {
+            Ok(inventory) => {
                 let _ = sender.send(BackgroundEvent::ChatConnected {
                     request_id,
                     endpoint: client.base_url().to_owned(),
                     client,
-                    models,
+                    inventory,
                 });
             }
             Err(error) => {
@@ -1682,12 +1709,26 @@ impl App {
     }
 
     fn initialize_chat_model_selection(&mut self) {
-        let selected = self
-            .chat_models
+        let selectable = self.chat_picker_model_indices();
+        let selected = selectable
             .iter()
-            .position(|model| model.state == "loaded")
-            .or_else(|| (!self.chat_models.is_empty()).then_some(0));
+            .position(|&model_index| self.chat_models[model_index].state == "loaded")
+            .or_else(|| (!selectable.is_empty()).then_some(0));
         self.chat_model_state.select(selected);
+    }
+
+    fn chat_picker_model_indices(&self) -> Vec<usize> {
+        self.chat_models
+            .iter()
+            .enumerate()
+            .filter(|(_, model)| {
+                !self
+                    .chat_decision_model_ids
+                    .iter()
+                    .any(|decision_id| decision_id == &model.id)
+            })
+            .map(|(index, _)| index)
+            .collect()
     }
 
     fn drain_background_events(&mut self) {
@@ -1785,7 +1826,7 @@ impl App {
                     request_id,
                     endpoint,
                     client,
-                    models,
+                    inventory,
                 } => {
                     if request_id != self.chat_connection_request_id {
                         continue;
@@ -1794,11 +1835,12 @@ impl App {
                     self.chat_endpoint_draft = endpoint.clone();
                     self.chat_endpoint_committed = Some(endpoint.clone());
                     self.chat_client = Some(client);
-                    self.chat_models = models;
+                    self.chat_models = inventory.models;
+                    self.chat_decision_model_ids = inventory.decision_model_ids;
                     self.initialize_chat_model_selection();
                     self.status = format!(
                         "Connected to {endpoint} · {} model(s)",
-                        self.chat_models.len()
+                        self.chat_picker_model_indices().len()
                     );
                 }
                 BackgroundEvent::ChatConnectionFailed {
@@ -4293,21 +4335,22 @@ impl App {
     }
 
     fn selected_chat_model(&self) -> Option<SwapModel> {
-        self.chat_model_state
-            .selected()
-            .and_then(|index| self.chat_models.get(index))
-            .cloned()
+        let selectable = self.chat_picker_model_indices();
+        let model_index = *selectable.get(self.chat_model_state.selected()?)?;
+        self.chat_models.get(model_index).cloned()
     }
 
     fn select_previous_chat_model(&mut self) {
-        select_previous_table(&mut self.chat_model_state, self.chat_models.len());
+        let count = self.chat_picker_model_indices().len();
+        select_previous_table(&mut self.chat_model_state, count);
         if let Some(model) = self.selected_chat_model() {
             self.status = format!("Chat model: {}", model.id);
         }
     }
 
     fn select_next_chat_model(&mut self) {
-        select_next_table(&mut self.chat_model_state, self.chat_models.len());
+        let count = self.chat_picker_model_indices().len();
+        select_next_table(&mut self.chat_model_state, count);
         if let Some(model) = self.selected_chat_model() {
             self.status = format!("Chat model: {}", model.id);
         }
@@ -4708,7 +4751,19 @@ impl App {
             return true;
         }
 
-        self.chat_model_state.select(Some(model_index));
+        let Some(picker_index) = self
+            .chat_picker_model_indices()
+            .iter()
+            .position(|&index| index == model_index)
+        else {
+            self.status = format!(
+                "Route model {} is decision-capable and cannot be selected for Chat",
+                model_id
+            );
+            return true;
+        };
+
+        self.chat_model_state.select(Some(picker_index));
         self.tab = Tab::Chat;
         self.input_mode = InputMode::ChatMessage;
         self.status = format!(
@@ -7130,7 +7185,10 @@ impl App {
         let connection = if self.chat_connection_pending {
             "connecting…".to_owned()
         } else if self.chat_client.is_some() {
-            format!("connected · {} model(s)", self.chat_models.len())
+            format!(
+                "connected · {} model(s)",
+                self.chat_picker_model_indices().len()
+            )
         } else {
             "disconnected".into()
         };
@@ -10423,6 +10481,7 @@ mod tests {
         app.chat_endpoint_committed = Some(endpoint.into());
         app.chat_client = Some(ChatClient::new(endpoint, api_key).unwrap());
         app.chat_models = models;
+        app.chat_decision_model_ids.clear();
         app.chat_model_state.select(Some(0));
     }
 
@@ -11235,9 +11294,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn serve_llamacpp_decision(
         listener: std::net::TcpListener,
-        model_id: &'static str,
-        expected_state: serde_json::Value,
-        expected_questions: serde_json::Value,
+        expected_request: serde_json::Value,
         expected_authorization: Option<&'static str>,
         release: Option<mpsc::Receiver<()>>,
         request_received: Option<mpsc::Sender<()>>,
@@ -11272,14 +11329,7 @@ mod tests {
                 }));
             }
             let request: serde_json::Value = serde_json::from_str(body).unwrap();
-            assert_eq!(
-                request,
-                serde_json::json!({
-                    "model": model_id,
-                    "state": expected_state,
-                    "questions": expected_questions
-                })
-            );
+            assert_eq!(request, expected_request);
             if let Some(request_received) = request_received {
                 request_received.send(()).unwrap();
             }
@@ -11381,9 +11431,10 @@ mod tests {
         let (request_received_tx, request_received_rx) = mpsc::channel();
         let server = serve_llamacpp_decision(
             listener,
-            router_model,
-            state,
-            questions,
+            serde_json::json!({
+                "model": router_model, "state": state, "questions": questions,
+                "images": ["data:image/png;base64,iVBORw0KGgo="]
+            }),
             Some("fixture-key"),
             None,
             Some(request_received_tx),
@@ -11398,7 +11449,14 @@ mod tests {
                 test_chat_model(router_model, "unloaded", false),
             ],
         );
+        app.chat_decision_model_ids = vec![router_model.into()];
+        assert_eq!(app.selected_chat_model().unwrap().id, "another-model");
+        assert!(app.chat_models.iter().any(|model| model.id == router_model));
         open_direct_decision_form_for_profile(&mut app, router_model);
+        let editor = app.task_form_editor.as_mut().unwrap();
+        assert!(editor.fields.contains(&TaskFormField::DecisionImages));
+        assert_eq!(editor.values.decision_images, "[]");
+        editor.values.decision_images = r#"["data:image/png;base64,iVBORw0KGgo="]"#.into();
         assert!(app.status.contains("may evict the loaded language model"));
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
@@ -11441,6 +11499,7 @@ mod tests {
         assert!(!persisted.contains("decision-private-secret"));
         assert!(!persisted.contains("fixture-key"));
         assert!(!persisted.contains("fixture_units"));
+        assert!(!persisted.contains("data:image"));
         assert!(!persisted.contains("\"answers\""));
     }
 
@@ -11454,6 +11513,7 @@ mod tests {
         let questions = serde_json::json!({
             "route": {
                 "type": "choice",
+                "instructions": "Choose whether to proceed.",
                 "criteria": {"yes": "Proceed", "no": "Stop"}
             }
         });
@@ -11463,9 +11523,7 @@ mod tests {
         let (release_tx, release_rx) = mpsc::channel();
         let server = serve_llamacpp_decision(
             listener,
-            router_model,
-            state,
-            questions,
+            serde_json::json!({"model": router_model, "state": state, "questions": questions}),
             Some("fixture-key"),
             Some(release_rx),
             Some(request_received_tx),
@@ -11480,6 +11538,11 @@ mod tests {
         open_direct_decision_form_for_profile(&mut app, router_model);
         app.task_form_editor.as_mut().unwrap().values.decision_state =
             r#"{"private_prompt":"decision-cancel-secret"}"#.into();
+        app.task_form_editor
+            .as_mut()
+            .unwrap()
+            .values
+            .decision_questions = questions.to_string();
         app.run_task_form();
         request_received_rx
             .recv_timeout(Duration::from_secs(3))
@@ -11772,6 +11835,7 @@ mod tests {
         assert!(editor.direct_native_decision);
         assert!(editor.is_direct_native());
         assert!(!editor.fields.contains(&TaskFormField::DeclaredTask));
+        assert!(!editor.fields.contains(&TaskFormField::DecisionImages));
         assert_eq!(editor.profile.profile_id.as_str(), "jev-api");
 
         let catalog = app.stack_catalog.as_ref().unwrap().clone();
@@ -11781,6 +11845,7 @@ mod tests {
             profile,
             state,
             questions,
+            images,
         } = request
         else {
             panic!("hosted Jev task form must build the standard decision request");
@@ -11788,6 +11853,7 @@ mod tests {
         assert_eq!(profile.profile_id.as_str(), "jev-api");
         assert_eq!(state["private_prompt"], "decision-private-secret");
         assert!(questions.get("route").is_some());
+        assert!(images.is_empty());
         assert_eq!(app.job_history.records().len(), 0);
         assert!(!app.status.contains("decision-private-secret"));
         assert!(app
@@ -13395,7 +13461,7 @@ mod tests {
                 request_id: 1,
                 endpoint: client.base_url().into(),
                 client: client.clone(),
-                models: Vec::new(),
+                inventory: ChatModelInventory::default(),
             })
             .unwrap();
         app.drain_background_events();
@@ -13408,15 +13474,18 @@ mod tests {
                 request_id: 2,
                 endpoint: client.base_url().into(),
                 client,
-                models: vec![SwapModel {
-                    id: "chat-model".into(),
-                    state: "loaded".into(),
-                    name: String::new(),
-                    description: String::new(),
-                    created: None,
-                    disabled: false,
-                    size_bytes: None,
-                }],
+                inventory: ChatModelInventory {
+                    models: vec![SwapModel {
+                        id: "chat-model".into(),
+                        state: "loaded".into(),
+                        name: String::new(),
+                        description: String::new(),
+                        created: None,
+                        disabled: false,
+                        size_bytes: None,
+                    }],
+                    decision_model_ids: Vec::new(),
+                },
             })
             .unwrap();
         app.drain_background_events();
@@ -13479,6 +13548,9 @@ mod tests {
 
         assert_eq!(app.selected_chat_model().unwrap().id, "other-loaded-model");
         assert!(app.stack_coordinator_socket_dir.is_none());
+        // A decision-only model before the chat route must not shift the
+        // filtered Chat picker index when the route is selected.
+        app.chat_decision_model_ids = vec!["other-loaded-model".into()];
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
             .unwrap();
 
@@ -13512,6 +13584,7 @@ mod tests {
             MissingModel,
             DisabledProfile,
             DisabledModel,
+            DecisionModel,
             Disconnected,
             EndpointMismatch,
             ActiveRequest,
@@ -13525,6 +13598,7 @@ mod tests {
             (Refusal::MissingModel, "not advertised"),
             (Refusal::DisabledProfile, "profile is disabled"),
             (Refusal::DisabledModel, "disabled in Chat"),
+            (Refusal::DecisionModel, "decision-capable"),
             (Refusal::Disconnected, "Connect Chat"),
             (Refusal::EndpointMismatch, "not a confirmed connection"),
             (Refusal::ActiveRequest, "active Chat response"),
@@ -13557,6 +13631,9 @@ mod tests {
                 vec![test_chat_model("local-chat", "loaded", false)]
             };
             connect_test_chat(&mut app, advertised_models);
+            if matches!(case, Refusal::DecisionModel) {
+                app.chat_decision_model_ids = vec!["local-chat".into()];
+            }
             match case {
                 Refusal::Disconnected => {
                     app.chat_client = None;
@@ -13576,7 +13653,10 @@ mod tests {
                 Refusal::CoordinatorRequestPending => {
                     app.coordinator_request_id = Some("caller:pending".into());
                 }
-                Refusal::MissingModel | Refusal::DisabledProfile | Refusal::DisabledModel => {}
+                Refusal::MissingModel
+                | Refusal::DisabledProfile
+                | Refusal::DisabledModel
+                | Refusal::DecisionModel => {}
             }
             let input_before = app.chat_input.clone();
             app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
@@ -13683,6 +13763,27 @@ mod tests {
 
         assert_eq!(app.selected_chat_model().unwrap().id, "chat-loaded");
         assert_eq!(app.loaded_model_id.as_deref(), Some("workbench-model"));
+    }
+
+    #[test]
+    fn chat_picker_skips_loaded_decision_models_but_keeps_them_in_the_inventory() {
+        let fixture = AppFixture::new();
+        let mut app = fixture.app();
+        app.chat_models = vec![
+            test_chat_model("loaded-decision", "loaded", false),
+            test_chat_model("chat-loaded", "loaded", false),
+            test_chat_model("chat-unloaded", "unloaded", false),
+        ];
+        app.chat_decision_model_ids = vec!["loaded-decision".into()];
+
+        app.initialize_chat_model_selection();
+        assert_eq!(app.selected_chat_model().unwrap().id, "chat-loaded");
+        assert_eq!(app.chat_models.len(), 3);
+
+        app.select_previous_chat_model();
+        assert_eq!(app.selected_chat_model().unwrap().id, "chat-unloaded");
+        app.select_next_chat_model();
+        assert_eq!(app.selected_chat_model().unwrap().id, "chat-loaded");
     }
 
     #[test]

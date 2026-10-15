@@ -15,7 +15,7 @@ use reqwest::{
 };
 use serde_json::{json, Value};
 
-use crate::llama_swap::{auth_headers, normalize_base_url, parse_models, SwapModel};
+use crate::llama_swap::{auth_headers, normalize_base_url, parse_models_with_decisions, SwapModel};
 
 const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
 const MAX_MODEL_BODY_BYTES: usize = 1024 * 1024;
@@ -80,6 +80,15 @@ pub struct ChatCompletion {
     pub content: String,
     pub completion_tokens: Option<u64>,
     pub elapsed: Duration,
+}
+
+/// Models returned by `/v1/models`, retaining the llama-swap decision-route
+/// metadata separately so decision models remain available to native forms
+/// without becoming ordinary Chat choices.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ChatModelInventory {
+    pub models: Vec<SwapModel>,
+    pub decision_model_ids: Vec<String>,
 }
 
 impl ChatCompletion {
@@ -154,6 +163,10 @@ impl ChatClient {
     }
 
     pub fn list_models(&self) -> Result<Vec<SwapModel>> {
+        Ok(self.list_model_inventory()?.models)
+    }
+
+    pub fn list_model_inventory(&self) -> Result<ChatModelInventory> {
         let url = endpoint_url(&self.base_url, "/v1/models");
         let response = self
             .client
@@ -175,7 +188,12 @@ impl ChatClient {
             "chat model response exceeds {MAX_MODEL_BODY_BYTES} bytes"
         );
         let body = String::from_utf8(body).context("chat model response is not UTF-8")?;
-        parse_models(&body).context("failed to parse chat model response")
+        let (models, decision_model_ids) =
+            parse_models_with_decisions(&body).context("failed to parse chat model response")?;
+        Ok(ChatModelInventory {
+            models,
+            decision_model_ids,
+        })
     }
 
     pub fn stream_completion(
@@ -207,13 +225,15 @@ impl ChatClient {
 }
 
 /// Probe running llama-server instances and common local ports.
-pub fn detect_chat_server(api_key: Option<&str>) -> Result<(ChatClient, Vec<SwapModel>)> {
+pub fn detect_chat_server(api_key: Option<&str>) -> Result<(ChatClient, ChatModelInventory)> {
     let endpoints = detected_endpoints();
     let mut failures = Vec::new();
     for endpoint in endpoints {
-        match ChatClient::new(&endpoint, api_key)
-            .and_then(|client| client.list_models().map(|models| (client, models)))
-        {
+        match ChatClient::new(&endpoint, api_key).and_then(|client| {
+            client
+                .list_model_inventory()
+                .map(|inventory| (client, inventory))
+        }) {
             Ok(connection) => return Ok(connection),
             Err(error) => failures.push(format!("{endpoint}: {error}")),
         }
@@ -745,7 +765,7 @@ mod tests {
     }
 
     #[test]
-    fn connected_client_lists_models_with_bearer_auth() {
+    fn connected_client_lists_inventory_with_bearer_auth() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
@@ -758,15 +778,21 @@ mod tests {
             write_http_response(
                 &mut stream,
                 "application/json",
-                r#"{"data":[{"id":"model-a","state":"loaded"}]}"#,
+                r#"{"data":[{"id":"decision-a","state":"loaded","architecture":{"output_modalities":["decisions"]}},{"id":"model-a","state":"loaded"}]}"#,
             );
         });
 
         let client = ChatClient::new(format!("http://{address}"), Some("test-token")).unwrap();
-        let models = client.list_models().unwrap();
+        let inventory = client.list_model_inventory().unwrap();
         server.join().unwrap();
-        assert_eq!(models[0].id, "model-a");
-        assert_eq!(models[0].state, "loaded");
+        assert_eq!(inventory.decision_model_ids, ["decision-a"]);
+        assert_eq!(inventory.models.len(), 2);
+        let model = inventory
+            .models
+            .iter()
+            .find(|model| model.id == "model-a")
+            .unwrap();
+        assert_eq!(model.state, "loaded");
     }
 
     #[test]

@@ -25,6 +25,7 @@ SPEC.loader.exec_module(runner)
 
 STATE = {"alert": "test"}
 QUESTIONS = {"route": {"criteria": {"one": "First", "two": "Second"}}}
+IMAGE = "data:image/png;base64,iVBORw0KGgo="
 
 
 class RunnerSafetyTest(unittest.TestCase):
@@ -38,11 +39,26 @@ class RunnerSafetyTest(unittest.TestCase):
             self.assertEqual(runner.main(), 0)
         engine.decide.assert_called_once_with(STATE, QUESTIONS)
 
+    def test_stdin_image_inputs_reach_llamacpp_as_optional_image_argument(self):
+        engine = Mock()
+        engine.decide.return_value = {"answers": {"route": {"choice": "one"}}}
+        data = json.dumps({"state": STATE, "questions": QUESTIONS, "images": [IMAGE]}).encode()
+        with patch(
+            "sys.argv", [str(RUNNER), "--engine", "llamacpp", "--model", "vllm-d3-flash", "--input-stdin"]
+        ), patch("sys.stdin", io.TextIOWrapper(io.BytesIO(data))), patch.object(
+            runner, "get_engine", return_value=engine
+        ), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(runner.main(), 0)
+        engine.decide.assert_called_once_with(STATE, QUESTIONS, images=[IMAGE])
+
     def test_invalid_stdin_fails_before_engine_construction_without_echoing_input(self):
         for payload in [b"secret-malformed", b"\xff", b"{}", b"[]", b"x" * (runner.MAX_INPUT_BYTES + 1),
                         b'{"state":NaN,"questions":{"route":{"type":"score"}}}',
                         b'{"state":{},"questions":{}}', b'{"state":{},"questions":{"x":"invalid"}}',
-                        b'{"state":{},"questions":{"x":{}},"secret":"credential"}']:
+                        b'{"state":{},"questions":{"x":{}},"secret":"credential"}',
+                        b'{"state":{},"questions":{"x":{}},"images":"not-an-array"}',
+                        b'{"state":{},"questions":{"x":{}},"images":["https://example.test/image.png"]}',
+                        json.dumps({"state": {}, "questions": {"x": {}}, "images": [IMAGE] * 9}).encode()]:
             with self.subTest(payload_size=len(payload)), \
                  patch("sys.argv", [str(RUNNER), "--engine", "nagi", "--model", "fixture", "--input-stdin"]), \
                  patch("sys.stdin", io.TextIOWrapper(io.BytesIO(payload))), \
@@ -193,7 +209,7 @@ class RunnerSafetyTest(unittest.TestCase):
         with patch(
             "sys.argv",
             [str(RUNNER), "--engine", "jev", "--model", "jev-latest", "--single-attempt"],
-        ), patch.object(runner, "one_shot_inputs", return_value=(STATE, QUESTIONS)), patch.object(
+        ), patch.object(runner, "one_shot_inputs", return_value=(STATE, QUESTIONS, [])), patch.object(
             runner, "get_engine", return_value=engine
         ) as build_engine, contextlib.redirect_stdout(output):
             self.assertEqual(runner.main(), 0)
@@ -304,6 +320,46 @@ class LlamaCppSystemOneTest(unittest.TestCase):
         self.assertGreaterEqual(result["client_latency_ms"], 0)
         self.assertNotIn("latency_ms", result)
 
+    def test_one_post_forwards_top_level_data_url_images(self):
+        opener = MagicMock()
+        opener.open.return_value = self._response({"answers": self.answers})
+        with patch.object(runner, "build_opener", return_value=opener):
+            engine = runner.LlamaCppSystemOneEngine("vllm-d3-flash")
+            engine.decide(STATE, QUESTIONS, images=[IMAGE])
+
+        opener.open.assert_called_once()
+        request = opener.open.call_args.args[0]
+        self.assertEqual(
+            json.loads(request.data),
+            {
+                "model": "vllm-d3-flash",
+                "state": STATE,
+                "questions": QUESTIONS,
+                "images": [IMAGE],
+            },
+        )
+
+    def test_invalid_or_too_many_images_fail_before_http_dispatch(self):
+        for images in (
+            ["https://example.test/image.png"],
+            ["file:///tmp/image.png"],
+            ["data:image/png;base64,"],
+            ["data:image/png;base64,AAAA_=="],
+        ):
+            opener = MagicMock()
+            with patch.object(runner, "build_opener", return_value=opener):
+                engine = runner.LlamaCppSystemOneEngine("vllm-d3-flash")
+                with self.assertRaises(runner.InferenceUnavailable):
+                    engine.decide(STATE, QUESTIONS, images=images)
+            opener.open.assert_not_called()
+
+        opener = MagicMock()
+        with patch.object(runner, "build_opener", return_value=opener):
+            engine = runner.LlamaCppSystemOneEngine("vllm-d3-flash")
+            with self.assertRaises(runner.InferenceUnavailable):
+                engine.decide(STATE, QUESTIONS, images=[IMAGE] * (runner.MAX_DECISION_IMAGES + 1))
+        opener.open.assert_not_called()
+
     def test_http_failure_is_one_attempt_redacted_and_never_simulated(self):
         opener = MagicMock()
         opener.open.side_effect = RuntimeError("fixture-secret request body: test alert")
@@ -314,7 +370,7 @@ class LlamaCppSystemOneTest(unittest.TestCase):
                 base_url="http://localhost:8080",
             )
             with self.assertRaises(runner.InferenceUnavailable) as failure:
-                engine.decide(STATE, QUESTIONS)
+                engine.decide(STATE, {"route": {**QUESTIONS["route"], "instructions": "Choose a route."}})
 
         self.assertEqual(str(failure.exception), "llama.cpp System One request failed")
         self.assertIsNone(failure.exception.__cause__)
@@ -460,7 +516,7 @@ class LlamaCppSystemOneTest(unittest.TestCase):
                 "--api-key",
                 "fixture-secret",
             ],
-        ), patch.object(runner, "one_shot_inputs", return_value=(STATE, QUESTIONS)), patch.object(
+        ), patch.object(runner, "one_shot_inputs", return_value=(STATE, QUESTIONS, [])), patch.object(
             runner, "get_engine", return_value=engine
         ) as build_engine, contextlib.redirect_stdout(output):
             self.assertEqual(runner.main(), 0)
@@ -474,6 +530,7 @@ class LlamaCppSystemOneTest(unittest.TestCase):
             allow_simulation=False,
             single_attempt=False,
         )
+        engine.decide.assert_called_once_with(STATE, QUESTIONS, images=[])
         self.assertEqual(json.loads(output.getvalue()), engine.decide.return_value)
 
     def test_cli_rejects_simulation_for_local_http_engine(self):
@@ -484,6 +541,35 @@ class LlamaCppSystemOneTest(unittest.TestCase):
             runner.main()
         self.assertEqual(error.exception.code, 2)
         build_engine.assert_not_called()
+
+    def test_cli_rejects_images_for_other_engines_before_construction(self):
+        for engine in ("nagi", "llamacpp"):
+            with self.subTest(engine=engine):
+                errors = io.StringIO()
+                with patch(
+                    "sys.argv", [str(RUNNER), "--engine", engine, "--model", "fixture"]
+                ), patch.object(
+                    runner, "one_shot_inputs", return_value=(STATE, QUESTIONS, [IMAGE])
+                ), patch.object(runner, "get_engine") as build_engine, contextlib.redirect_stderr(errors):
+                    self.assertEqual(runner.main(), 2)
+                build_engine.assert_not_called()
+                self.assertIn("require the llama.cpp engine", errors.getvalue())
+
+    def test_direct_engine_rejects_images_for_unknown_models_before_http(self):
+        opener = MagicMock()
+        with patch.object(runner, "build_opener", return_value=opener):
+            engine = runner.LlamaCppSystemOneEngine("other-router-model")
+            with self.assertRaises(runner.InferenceUnavailable):
+                engine.decide(STATE, QUESTIONS, images=[IMAGE])
+        opener.open.assert_not_called()
+
+    def test_clef_missing_instructions_fails_before_http(self):
+        opener = MagicMock()
+        with patch.object(runner, "build_opener", return_value=opener):
+            engine = runner.LlamaCppSystemOneEngine("cloudflare-clef-flash")
+            with self.assertRaises(runner.InferenceUnavailable):
+                engine.decide(STATE, QUESTIONS)
+        opener.open.assert_not_called()
 
 
 class NagiRepositoryTest(unittest.TestCase):

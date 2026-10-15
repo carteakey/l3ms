@@ -18,8 +18,8 @@ recipes, environment variables, live-use restrictions and unfinished gates.
 
 | Profile | Engine | Architecture / tier | Declared deployment | Manifest expected latency | Readiness |
 |---|---|---|---|---:|---|
-| `vllm-d3-flash` | llama.cpp / llama-swap | Qwen3.5-9B, Q8_0 | Local router-owned CUDA | ~110ms historical warm text | Branch HTTP fixtures only; live/quality acceptance pending. |
-| `cloudflare-clef-flash` | llama.cpp / llama-swap | Qwen3.5-9B, Q4_K_M | Local router-owned CUDA | ~65ms historical warm routed text | Branch HTTP fixtures only; live/quality acceptance pending. |
+| `vllm-d3-flash` | llama.cpp / llama-swap | Qwen3.5-9B, Q8_0 | Local router-owned CUDA | ~110ms historical warm text | Real isolated CPU text/image sanity checks pass; GPU/quality acceptance pending. |
+| `cloudflare-clef-flash` | llama.cpp / llama-swap | Qwen3.5-9B, Q4_K_M | Local router-owned CUDA | ~65ms historical warm routed text | Real isolated CPU text sanity check passes; image/GPU/quality acceptance pending. |
 | `nagi-smol` | Nagi | ModernBERT-large / M2', Smol (~480M) | Local (CUDA; CPU fallback) | ~17ms | CUDA target is unverified; CPU evidence is for the separate explicit CPU profile. |
 | `nagi-smol-cpu` | Nagi | ModernBERT-large / M2', Smol (~480M) | Local (CPU only) | ~1,600ms | Offline native execution used the installed environment and cached weights; this is not a quality or clean-install claim. |
 | `nagi-big` | Nagi | Qwen3.5-4B + Adapter, Big (4B) | Local (CUDA, 8.5GB) | ~70ms | Declared profile; native execution, latency and quality are unverified. |

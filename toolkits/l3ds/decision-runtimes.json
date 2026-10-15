@@ -14,7 +14,7 @@
       "fallback_device": "cuda",
       "vram_gb": 11.5,
       "expected_latency_ms": 110,
-      "description": "Native System One request through local llama-swap passthrough; historical warm text estimate (~110 ms), no latency guarantee",
+      "description": "Native /v1/systemone through llama-swap v262+; real CPU text/image sanity checks passed. GPU acceptance pending; historical warm text estimate (~110 ms), no latency guarantee",
       "entrypoint": "decision-models/runner.py"
     },
     {
@@ -29,7 +29,7 @@
       "fallback_device": "cuda",
       "vram_gb": 8.9,
       "expected_latency_ms": 65,
-      "description": "Native System One request through local llama-swap passthrough; historical warm routed text estimate (~65 ms), no latency guarantee",
+      "description": "Native /v1/systemone through llama-swap v262+; real CPU text sanity check passed. Image/GPU acceptance pending; historical warm text estimate (~65 ms), no latency guarantee",
       "entrypoint": "decision-models/runner.py"
     },
     {

@@ -558,6 +558,7 @@ mod tests {
             profile: ProfileKey::new(Lane::Decisions,profile).unwrap(),
             state:serde_json::json!({"alert":"fixture"}),
             questions:serde_json::json!({"route":{"type":"choice","criteria":{"yes":"Proceed","no":"Stop"}}}).as_object().unwrap().clone(),
+            images: Vec::new(),
         }
     }
     fn typed_request(question_type: &str) -> InferenceRequest {
@@ -568,6 +569,7 @@ mod tests {
                 .as_object()
                 .unwrap()
                 .clone(),
+            images: Vec::new(),
         }
     }
     fn catalog() -> Catalog {

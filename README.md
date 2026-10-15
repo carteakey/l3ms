@@ -15,14 +15,17 @@ language, media, and decision-model workflows.
 
 Language (root L3MS) · Media (L2M2) · Decisions (L3DS)
 
-The root L3MS app continues to run its existing language-model workflows. The
-media and decision toolkits keep their native runtimes and configuration;
-shared catalog and direct CPU decision/speech paths are available. CUDA Nagi/Laya,
-Breeze, HeartMuLa, H3 and LTX share an explicit idle-GPU native runner. Blender
-headless Python/rendering shares its admission guard without a CUDA device claim.
-Resident llama-swap pause/restore is explicitly opt-in; the default remains an
-operator-managed idle window. Native embedding/Comfy transport, real Blender/GPU
-and handoff acceptance, and broader simplification keep the full port unfinished.
+The app uses llama-swap for language, embeddings and native d3/Clef decisions.
+Comfy jobs use their native job/cancellation/artifact interface, directly or
+through llama-swap's `/comfyui/` route. Other media and speech workflows reuse
+the toolkits' scripts. There is no second inference server or private-engine
+transport; the branch-added managed-session runtime has been retired.
+
+CUDA scripts still require an explicit idle-GPU window. Resident pause/restore
+is opt-in, not a default supervisor layered over llama-swap. Shared CLI/UI forms,
+history and native output validation remain. Real CPU workflow evidence and the
+remaining GPU/interactive acceptance gates are recorded in the
+[migration status](docs/migration/status.md); the full port is not yet accepted.
 
 Vision-capable LLMs, including Gemma vision, and embeddings remain in the
 language lane.
@@ -287,9 +290,11 @@ cancellation (`c`) and results; the TUI allocates a fresh private output directo
 under its data root. History stores metadata and relative artifact references,
 not text or audio bytes. See [real CPU speech evidence](docs/migration/direct-speech-acceptance.md).
 
-### Temporary coordinator path
+### Retained coordinator compatibility clients
 
-The older opt-in path remains while its callers are replaced under the
+The branch-added coordinator server and managed-session creator are retired.
+Only compatibility clients for an explicitly supplied older server remain;
+existing disk records are preserved. See the
 [simplification plan](docs/migration/simplification-plan.md).
 On Linux, observe or cancel a coordinator request using an explicitly
 configured private socket directory:
@@ -308,7 +313,7 @@ refuse instead of submitting through a second execution mode. A lost reply from
 an external coordinator means query the original ID, not resubmit. A missing
 coordinator fails explicitly. Cancellation acceptance is not proof that active
 work has finished; query the same request ID for its terminal status. Service
-installation and general GPU/media dispatch remain gated by migration acceptance.
+installation is not provided by these compatibility commands.
 CPU-local decisions use `--run-profile` or the Stack Catalog typed form (`f`)
 directly, without a daemon; see [native CPU workflows](docs/cpu-native-workflows.md).
 Declared CUDA Nagi/Laya, Breeze, HeartMuLa, H3 and LTX use the same runner with an

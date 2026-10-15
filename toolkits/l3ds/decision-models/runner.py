@@ -32,10 +32,16 @@ class InferenceUnavailable(RuntimeError):
 
 
 MAX_INPUT_BYTES = 1024 * 1024
+MAX_DECISION_IMAGES = 8
+LLAMACPP_IMAGE_MODELS = {"vllm-d3-flash", "cloudflare-clef-flash"}
 MAX_HTTP_RESPONSE_BYTES = 2 * 1024 * 1024
 LLAMACPP_TIMEOUT_SECONDS = 30
 LLAMACPP_DEFAULT_BASE_URL = "http://localhost:8080"
 _ROUTER_MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_IMAGE_DATA_URL = re.compile(
+    r"data:image/[A-Za-z0-9][A-Za-z0-9.+-]*;base64,"
+    r"(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{4})"
+)
 
 
 def reject_nonfinite_json(_value):
@@ -101,12 +107,25 @@ class LlamaCppSystemOneEngine(BaseDecisionEngine):
         except (TypeError, ValueError):
             self.initialization_error = "llama.cpp endpoint configuration is invalid"
 
-    def decide(self, state: Dict[str, Any], questions: Dict[str, Any]) -> Dict[str, Any]:
+    def decide(
+        self,
+        state: Dict[str, Any],
+        questions: Dict[str, Any],
+        images: List[str] = None,
+    ) -> Dict[str, Any]:
         if self.initialization_error:
             raise InferenceUnavailable(self.initialization_error) from None
         try:
+            images = [] if images is None else images
+            _validate_decision_images(images)
+            _validate_llamacpp_questions(self.model, questions)
+            if images and self.model not in LLAMACPP_IMAGE_MODELS:
+                raise ValueError("selected model does not support decision images")
+            request_body = {"model": self.model, "state": state, "questions": questions}
+            if images:
+                request_body["images"] = images
             body = json.dumps(
-                {"model": self.model, "state": state, "questions": questions},
+                request_body,
                 allow_nan=False,
                 separators=(",", ":"),
             ).encode("utf-8")
@@ -190,21 +209,27 @@ class LlamaCppSystemOneEngine(BaseDecisionEngine):
 
 
 def one_shot_inputs(args):
-    """Read coordinator input without exposing state/questions in argv."""
+    """Read bounded decision input without exposing state/questions in argv."""
     if args.input_stdin:
         payload = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
         if not payload or len(payload) > MAX_INPUT_BYTES:
             raise ValueError("invalid input size")
         envelope = json.loads(payload.decode("utf-8"), parse_constant=reject_nonfinite_json)
-        if not isinstance(envelope, dict) or set(envelope) != {"state", "questions"}:
+        if (
+            not isinstance(envelope, dict)
+            or not {"state", "questions"}.issubset(envelope)
+            or set(envelope) - {"state", "questions", "images"}
+        ):
             raise ValueError("invalid input envelope")
         state, questions = envelope["state"], envelope["questions"]
+        images = envelope.get("images", [])
+        _validate_decision_images(images)
         if not isinstance(questions, dict) or not 1 <= len(questions) <= 128:
             raise ValueError("invalid question count")
         if not all(isinstance(key, str) and key.strip() and len(key.encode("utf-8")) <= 128
                    and isinstance(value, dict) and value for key, value in questions.items()):
             raise ValueError("invalid questions")
-        return state, questions
+        return state, questions, images
     state = json.loads(args.state) if args.state else {"message": "Server 500 error encountered on checkout"}
     questions = json.loads(args.question) if args.question else {
         "routing": {
@@ -217,7 +242,25 @@ def one_shot_inputs(args):
             }
         }
     }
-    return state, questions
+    return state, questions, []
+
+
+def _validate_decision_images(images):
+    if (
+        not isinstance(images, list)
+        or len(images) > MAX_DECISION_IMAGES
+        or not all(isinstance(image, str) and _IMAGE_DATA_URL.fullmatch(image) for image in images)
+    ):
+        raise ValueError("invalid decision images")
+
+
+def _validate_llamacpp_questions(model, questions):
+    if model == "cloudflare-clef-flash" and (
+        not isinstance(questions, dict)
+        or any(not isinstance(question, dict) or question.get("instructions") is None
+               for question in questions.values())
+    ):
+        raise ValueError("Clef decision questions require instructions")
 
 
 class MockOrApiJevEngine(BaseDecisionEngine):
@@ -582,7 +625,7 @@ def main():
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--state", type=str, default=None)
     parser.add_argument("--question", type=str, default=None)
-    parser.add_argument("--input-stdin", action="store_true", help="Read a bounded JSON {state, questions} object from stdin; keeps input out of argv")
+    parser.add_argument("--input-stdin", action="store_true", help="Read bounded JSON {state, questions[, images]} from stdin; keeps input out of argv")
     parser.add_argument("--api-key", type=str, default=None)
     parser.add_argument("--base-url", type=str, default=None)
     parser.add_argument("--bench-suite", type=str, default=None)
@@ -599,9 +642,14 @@ def main():
         parser.error("--input-stdin cannot be combined with --state, --question, or --bench-suite")
     if not args.bench_suite:
         try:
-            state, questions = one_shot_inputs(args)
+            state, questions, images = one_shot_inputs(args)
+            if args.engine == "llamacpp":
+                _validate_llamacpp_questions(args.model, questions)
         except (ValueError, UnicodeError, RecursionError):
             print("Invalid decision input: expected bounded JSON state/questions", file=sys.stderr)
+            return 2
+        if images and (args.engine != "llamacpp" or args.model not in LLAMACPP_IMAGE_MODELS):
+            print("Decision images require the llama.cpp engine with a supported d3/Clef model", file=sys.stderr)
             return 2
 
     try:
@@ -611,7 +659,10 @@ def main():
             return 0
 
         # One-shot decision
-        res = engine.decide(state, questions)
+        if args.engine == "llamacpp":
+            res = engine.decide(state, questions, images=images)
+        else:
+            res = engine.decide(state, questions)
         print(json.dumps(res, indent=2))
         return 0
     except InferenceUnavailable as error:
