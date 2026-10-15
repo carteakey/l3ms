@@ -9,12 +9,102 @@
   Vision-capable LLMs and embeddings remain in L3MS.
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
+### Added
+- **Serving TTL, Cold-Boot Retries & Compaction Anti-Thrashing (2026-10-15)**:
+  - Replaced `ttl: 0` (pinned) with **`ttl: 3600`** (1-hour idle timeout) across all Platinum tiers in `llama-swap.yaml`, preventing perpetual ~30W GPU idle power draw and 47 GB RAM lock-in while preserving a generous active pairing runway.
+  - Added 35-second cold-boot retry loop with backoff and graceful abort handling to `no-thinking-compaction.ts`, eliminating `Connection error` failures during on-demand Strata cold starts (~25s load).
+  - Configured `"supportsFinishReason": false` for the `llama-swap` provider in `models.json` and `no-thinking-compaction.ts`, resolving `Stream ended without finish_reason` during Strata SSE generation completions.
+  - Eliminated compaction thrashing on 128k context by scaling `keepRecentTokens` from default 20k down to **`8192`** and `reserveTokens` to **`16384`** in `settings.json`, slashing post-compaction context from ~60k down to ~12k–15k tokens and expanding working runway from ~38k to **~100k tokens**.
+  - Injected clean distillation instructions into `no-thinking-compaction.ts` (*"Condense completed tasks into high-level bullet points under 1.5k tokens; drop resolved debugging steps and intermediate tool output"*) to prevent summary snowballing.
+  - Integrated `remote-pi` (v0.7.0) mobile extension with QR pairing and camera attachment directly routed into `abliterated-vision`.
+  - Documented 128k context ceiling architecture and 256k VRAM/RAM penalty in `docs/strata-evaluation-internal.md` §11.1 and `agentdex`.
+- **Qwen3.8-Flash-Next Refresh & Strata v0.1.44.1 Promotion (2026-10-14)**:
+  - Upgraded Strata from `v0.1.40.2` to `v0.1.44.1`, delivering **62.20 t/s steady decode** (probes: 59.6–64.8 t/s, peak burst up to 90.2 t/s) under verified `performance` governor (vs 58.08 t/s for v0.1.40.2; +31.8% under powersave) with expert cache hit rates reaching 75–78% while maintaining 100% needle-in-a-haystack retrieval accuracy and full 128k context support in 11.7 GB VRAM.
+  - Upgraded llama.cpp Gold from master `b11475` to `b11619` (`683bbc0dc`), delivering **+30.2% decode speedup** (12.84 vs 9.86 t/s) and **+27.8% prefill speedup** (526.0 vs 411.5 t/s @ 8k prompt), natively incorporating upstream `llama-moe-cache.cpp` and kernel fusions.
+  - Standardized before/after A/B benchmark suite executed and recorded in `logs/results/qwen38-refresh-ab.jsonl`.
+  - Promoted Strata v0.1.44.1 in `llama-swap.yaml` across Platinum (`qwen38-flash-next-plat`, `strata`, `plat`), Platinum Vision (`qwen38-flash-next-plat-vision`, `strata-vision`), and Platinum IQ3_S tiers.
+  - Added abliterated / uncensored tier **`qwen38-flash-next-plat-abliterated`** (alias **`abliterated`**) based on `SC117/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-GGUF` (IQ3_XXS). Identified byte-identical PLE Shard 2 (`316b46f3a2db...`) to save 28.8 GB disk/transit. Automated runtime pack generation via `maintenance/download-abliterated.py`.
+  - Added abliterated multimodal tier **`qwen38-flash-next-plat-abliterated-vision`** (alias **`abliterated-vision`**) combining SC117 unaligned weights with CPU-offloaded `strata-vision` (`mmproj-F16.gguf`) image encoder and conversation caching, exposed through `llama-swap` and tracked in `pi` `models.json`.
+- **Humanizer 12B (`humanizer-12b`, alias `humanizer`, 2026-10-13)**: fine-tuned
+  `google/gemma-4-12B` text-rewriting model from `jialinyyzz/humanizer` for transforming
+  AI drafts into natural human prose while strictly retaining all facts, numbers, dates,
+  and names. Downloaded `humanizer-12b-Q6_K.gguf` (10.0 GB) and verified `prompt_format.json`
+  (sha256 fingerprint `cc51d66b4c593fbe`). Served via `llama-swap` with full GPU offloading
+  (`-ngl 99`, ~10.5 GB VRAM), `--jinja` chat template support, 8k context, and author-specified
+  sampling parameters (`temp=1.0, top_p=0.95, top_k=0, min_p=0.0, repeat_penalty=1.0`).
+  Added benchmark script `bench-models/bench-llama-humanizer.sh` and verification self-test
+  `maintenance/test-humanizer.py`.
+- **Post-v0.1.40.2 Qwen3.8-Flash-Next optimization campaign (2026-10-13)**:
+  documented the next Strata/llama.cpp experiment queue and promotion gates in
+  `docs/strata-evaluation-internal.md` §16. Added
+  `bench-models/bench-strata-lookahead-ab.sh` for an interleaved, environment-
+  captured `STRATA_LOOKAHEAD` on/off A/B using the production IQ3_XXS, MTP and
+  K8V4 configuration. The first campaign targets avoidable router-prediction CPU
+  contention after the expert complement is fully resident in GPU/RAM.
+- **vLLM-SR Decision 3.0 endpoint (`vllm-d3-flash`, 2026-10-12)**: d3-flash 9B
+  (Q8_0 + mmproj-BF16, `ggml-org/vllm-d3-flash-GGUF`) served by a new
+  `vendor/llama.cpp-d3` worktree pinned at master `efe3626b1` (#30383 vllm-d3
+  support), macro `d3_server`. Text + image choice/noul/score decisions with
+  probabilities via `POST /upstream/vllm-d3-flash/v1/systemone` (llama-swap
+  v247 does not route `/v1/systemone` directly). Non-causal model, so the
+  whole prompt must fit one ubatch: `-c 8192 -b 8192 -ub 8192`, 11.5 GB VRAM.
+  ~0.45 s text, ~1.8 s with a 1024x768 image.
+- **Cloudflare Clef-Flash endpoint (`cloudflare-clef-flash`, 2026-10-12)**: Clef-Flash 9B
+  (Q4_K_M + mmproj-BF16, `ggml-org/Clef-Flash-GGUF`) on the same `d3_server` build.
+  Joint decision head, so the image is read once per request: warm ~0.09 s text,
+  ~0.5 s with an image + 4 questions (1.1k prompt tokens vs 3.4k for d3), 8.9 GB VRAM.
+  `POST /upstream/cloudflare-clef-flash/v1/systemone`. d3-flash description corrected
+  to warm figures (~0.11 s text, ~1.7 s image).
+- **Decision model docs and GGUF decision check (2026-10-12)**: `docs/decision-models.md`
+  (served models, warm latency, why d3 image requests cost about N× Clef's, Jev Decision
+  Index snapshot, header-checked GGUF list, untested candidates).
+  `maintenance/gguf-decision-check.py` range-reads a remote GGUF header and reports
+  whether it carries `<arch>.decision.type`.
+- **`/add-decision-model` workflow (2026-10-12)**: `.claude/commands/add-decision-model.md`
+  covers decision-type support check, `llama.cpp-d3` worktree build, VRAM sizing,
+  standalone and router smoke tests (`/upstream/<id>/v1/systemone`), and L3DS
+  catalog registration.
+- **Jev Classifier Triage Workflow (2026-09-30)**: Wired TypeSafe `jev-latest` into
+  pi through the `codemode` tool (`~/.pi/agent/auth.json` credential,
+  `defaultTools: ["+codemode"]`). Added `maintenance/codemode/jev-bench-triage.js`
+  (steady-state / evidence-strength / comparability / memory-spill judgment over
+  `bench-models/logs/results/*.jsonl` plus bench-log system frontmatter) and
+  `maintenance/codemode/jev-log-triage.js` (serving-ready, failure class, and
+  llama-swap action choice over server logs, router journal, and a GPU/RAM
+  snapshot), exposed as the `/jev-bench` and `/jev-log` project prompt templates.
+  Workflow, verified runs, and limits documented in
+  `docs/pi-jev-classifier-workflow.md`.
+- **Strata Platinum Tier (`qwen38-flash-next-plat` / `strata`) Integration (2026-09-30)**:
+  - Downloaded and verified ISTA-DASLab GSQ-RCO IQ3_XXS quant (`Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS`, 71.2 GB across 2 shards).
+  - Built native SM89 Ada Lovelace `strata` engine (v0.1.30) linked against master GGML in `vendor/strata`.
+  - Configured native MTP draft layer (`mtp-q2_0.gguf`, 0.889 GB) and dynamic expert VRAM caching (3,086 hot experts cached in VRAM, 5.04 GiB).
+  - Deployed `qwen38-flash-next-plat` (and alias `strata`) to `llama-swap.yaml` on port `${PORT}` with 65k context and K8V4 KV cache.
+  - Benchmarked live throughput: **53.5–62.6 t/s steady decode on real-world code and complex reasoning**, **90.2 t/s peak decode** (97.0% MTP acceptance), and **1,138–1,821 t/s prefill** (5x–10x faster than llama.cpp).
+  - Verified exact output equivalence against `llama.cpp` under greedy decoding, and verified probabilistic sampling sensitivity across temperatures ($T=0$ to $T=1.2$).
+  - Authored comprehensive architecture and empirical report: `docs/strata-evaluation-internal.md`.
+
 ### Changed
+- **Strata Output Clamping & Context Safeguards (2026-10-07)**:
+  - Enabled `--fit-max-tokens` (PR #545) across all Platinum tiers (`qwen38-flash-next-plat`, `plat`, `strata`, `qwen38-flash-next-plat-vision`, `plat-vision`, `strata-vision`, `qwen38-flash-next-plat-iq3s`) in `llama-swap.yaml`.
+  - Added `"fit_max_tokens": true` in `vendor/strata-latest/strata-iq3_xxs.json` and `vendor/strata-latest/strata-vision.json`.
+  - Eliminates `400 invalid_request_error` exceptions on near-capacity prompts by dynamically shortening `max_tokens` to fit available context headroom (`max_new = max(1, room)`).
 - Moved the `model-inventory-manager` Codex skill to [skillrex](https://github.com/carteakey/skillrex/tree/main/skills/model-inventory-manager) (history preserved); dropped the stale May `.skill` bundle and the now-empty `codex-skills/` directory.
+- **Unified QSA Sparsity Stack V2 & MTP Refresh (2026-09-29)**:
+  - Refreshed gold master binary (`vendor/llama.cpp-master`, macro `qwen38_master_server`) to tag `b11241` (commit `1c4729414`). Delivers steady prefill increase of 148.8 → 179.8 t/s (+20.8%) via GDN RMS_NORM+SCALE CUDA fusion (#29393) and causal attention fixes (#28751), reaching up to 22.11 t/s peak decode.
+  - Assembled and deployed **Unified QSA Sparsity Stack V2** in `vendor/llama.cpp-exp-stack-v2` (`build 11268`, commit `f382a59e3`) onto `llama-swap.yaml` for both `qwen38-flash-next-mtp` and `qwen38-flash-next-exp`:
+    - Core PRs: Daniel Han PR #28243 (updated Sept 28, 2026), Rhonstin #28699 (incremental pooled-key cache), Abdel Darwish #28213 (gather-based sparse decode), Akio Nishimura #29166 (multi-sequence block bias indexing).
+    - Cherry-picks: Aman Gupta PR #29599 (`madvise` row prefetching for PLE tensors on NVMe), Inovello PR #28671 (radix-select TOP_K for CUB fallback), kh0pper PR #28569 (`-sm tensor` multi-GPU scheduler fix).
+    - Reverted PR #28118 (`LLAMA_STATE_SEQ_FLAGS_ON_DEVICE`) due to prompt checkpoint abort (`state_seq_set_data`) during non-speculative queries.
+  - Sized MTP tier (`qwen38-flash-next-mtp`) with `-ncmoe 46` under 11,025 MiB VRAM (>1.25 GB headroom), achieving **25.32–27.06 t/s aggregate decode** (+26% to +31% over previous 20.65 t/s MTP) with **97.4%–100% draft acceptance** (2.76–2.93 tokens/round).
+  - Upgraded Gold tier (`qwen38-flash-next`) context window to **96k context** (`-c 98304 --parallel 1 --fit on --fit-target 512`), consuming 11,302 MiB VRAM with 896 MiB safe headroom and delivering steady 20.5–22.1 t/s decode.
+  - Characterized context scaling ladder across context depths (16k vs 32k vs 48k vs 64k vs 96k): identified the symmetrical draft context bottleneck where MTP excels under 16k (+33% over Gold), while Gold takes the lead past 32k (+25% at 48k, +15% at 64k) by dedicating slack VRAM to packing 4 MoE layers on GPU.
+  - Evaluated ISTA-DASLab GSQ-RCO GGUF quantizations (`Q2_0`, `IQ2_XS`, `IQ3_XXS`, `IQ3_S`): documented that `IQ3_XXS` (3.0 bpw, 47.0 GB weights) retains 99.4% task recovery and could save 7.5 GB host RAM vs AtomicChat AD-4.27bpw if disk space allows (currently gated on 15.4 GB free NVMe space).
+  - Documented technical comparisons between Autoregressive MTP (Daniel Han PR #28243 with `ctx_other` tensor borrowing) and block-parallel DFlash, and mathematically analyzed KV cache quantization asymmetry (`-ctk q8_0 -ctv q4_0` vs `-ctk q4_0 -ctv q8_0`).
+  - Confirmed 3x faster cold prefill (135.2 vs 32.9–49.8 t/s) via Aman Gupta's PR #29599 `madvise` row prefetching on SSD-offloaded PLE layers.
 - Extracted shared filesystem utilities (`atomic_write`, `write_unique_snapshot`, `safe_stamp`, `format_utc_seconds`, `resolve_allow_missing`, `ensure_single_component`) into `src/fs_util.rs` to deduplicate ~300 lines of identical logic across `config_store` and `script_store`.
 - Added typed `ModelState` enum and `SwapModel::model_state()` to `llama_swap.rs` for compiler-checked model lifecycle states.
 - Marked compile-time `repository_root()` and `versions_root()` in `config_store` and `script_store` as deprecated with clear guidance to use runtime-resolved root paths via `_in()` functions.
-- Refreshed gold tier binary (`vendor/llama.cpp-master`, macro `qwen38_master_server`) from commit `b78a39a2f` to upstream master `ce8caa6e6` (tag `b11065`). Brings upstream's merged PR #28770 (CUDA sparse Flash Attention), `qwen4exp` rms_norm + mul and hyper-connection fusion kernels (#28896, #28901), and CUDA graph fixes (#28549) directly to `qwen38-flash-next` and `qwen38-flash-next-vision`.
+- Refreshed gold tier binary (`vendor/llama.cpp-master`, macro `qwen38_master_server`) from commit `ce8caa6e6` (tag `b11065`) to upstream master `84e76d8a2` (tag `b11171`, +108 commits). Brings upstream graph capture fixes (#29390), token_id grammar parsing fixes (#29382), CONV_2D_DW F16 CUDA kernels (#29064), and latest ggml sync (#29396).
 - Updated default reasoning effort from `medium` to `xhigh` across all Qwen3.8 Flash Next tiers (`qwen38-flash-next`, `qwen38-flash-next-exp`, `qwen38-flash-next-mtp`, `qwen38-flash-next-vision`) in `llama-swap.yaml` and `chat-template.jinja`. Extended `param_registry.rs` `--reasoning-effort` choice set to support `xhigh` and `max`.
 
 ### Fixed

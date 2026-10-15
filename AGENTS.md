@@ -49,33 +49,48 @@ Image generation/editing, audio/music, speech, and video belong in sibling
 
 ## Qwen3.8-Flash-Next (qwen4exp) Tiers
 
-Deep detail, decisions and next steps: `docs/qwen38-flash-next-internal.md`.
+Deep detail, decisions and next steps: `docs/qwen38-flash-next-internal.md` and `docs/strata-evaluation-internal.md`.
 
-Four router tiers share one AtomicChat AD-4.27bpw quant:
+Seven router tiers:
 
+- plat `qwen38-flash-next-plat` (alias `strata`): Strata v0.1.44.1 with ISTA-DASLab
+  GSQ-RCO IQ3_XXS quant, dynamic VRAM expert caching (2,444–3,086 hot experts in VRAM),
+  native MTP speculative decoding (Q2_0 draft head), K8V4 KV cache @ 128k ctx (`131072`),
+  StrataGP 2 MB Transparent Huge Page (`MADV_HUGEPAGE`) kernel acceleration, 4-slot / 3 GiB
+  host-RAM conversation parking, and `ttl: 3600` (1-hour idle timeout). **59–65 t/s steady decode on real code, 90.2 t/s peak, pp=1,138–2,013 t/s**,
+  11.5 GB VRAM, 47 GB RAM (14 GB headroom).
+- plat-vision `qwen38-flash-next-plat-vision` (alias `strata-vision`): Strata v0.1.44.1
+  with MTMD vision support (`strata-vision` CPU encoder with `mmproj-F16.gguf`), `--vision` position table
+  allocation, and `--fit-max-tokens`. Zero VRAM overhead for vision; retains all GPU experts and K8V4 KV cache.
+  512px warmup patch slashes cold boot from 8m to 1.8s. 53–60 t/s decode @ 128k ctx.
+- plat-abliterated-vision `qwen38-flash-next-plat-abliterated-vision` (alias `abliterated-vision`):
+  Strata v0.1.44.1 uncensored/unaligned SC117 weights with CPU-offloaded `strata-vision` image encoder,
+  4-slot / 3 GiB host-RAM conversation cache, 128k context, and `ttl: 3600`. Primary multimodal daily driver for Pi.
 - gold `qwen38-flash-next`: plain upstream master (`vendor/llama.cpp-master`,
-  macro `qwen38_master_server`, commit `ce8caa6e6`, tag `b11065`). 19.35 t/s steady state
-  decode, pp 198-200 t/s @ 64k. Natively includes upstream-merged PR #28770
-  (CUDA sparse Flash Attention) and kernel fusions (#28896, #28901). Refresh = `git fetch` + rebuild.
-- vision `qwen38-flash-next-vision`: master `ce8caa6e6` with `mmproj-F16.gguf`
+  macro `qwen38_master_server`, commit `1c4729414`, tag `b11241`). 20.5–22.1 t/s steady state
+  decode, pp 180–385 t/s @ 96k ctx (`-c 98304`). Natively includes PR #29393 (RMS_NORM+SCALE CUDA fusion),
+  PR #28770 (CUDA sparse Flash Attention), and kernel fusions (#28896, #28901).
+- vision `qwen38-flash-next-vision`: master with `mmproj-F16.gguf`
   vision projector (`models/unsloth/Qwen3.8-Flash-Next-GGUF/mmproj-F16.gguf`),
   `-ngl 99 -ncmoe 45` @ 16k ctx, 18.2–18.6 t/s, 10.4 GB VRAM (1.8 GB headroom).
-- MTP `qwen38-flash-next-mtp`: Unified QSA Sparsity Stack (#28770 [merged upstream b11062] + #28699 + #28213 + #29166 multi-seq fix)
+- MTP `qwen38-flash-next-mtp`: Unified QSA Sparsity Stack V2 (#28770 [merged upstream b11062] + #28699 + #28213 + #29166 multi-seq fix
+  + #29599 NVMe madvise prefetch + #28671 TOP_K radix select + #28569 tensor scheduler)
   + Daniel Han PR #28243 with compact `mtp-Qwen3.8-Flash-Next-shared-Q4_K_M.gguf` (1.78 GB),
-  `vendor/llama.cpp-pr-test-28770-28699-28213/build/bin/llama-server`, macro `qwen38_mtp_server`,
-  `-ngl 99 -ncmoe 45 --spec-draft-n-max 2 --spec-draft-p-min 0.7` @ 16k ctx,
-  **20.65+ t/s aggregate** (77–96% acceptance), 11.8 GB VRAM.
-- exp `qwen38-flash-next-exp`: master + QSA Sparsity Stack (#28770 + #28699 + #28213)
-  (`build/bin/llama-server` inside `vendor/llama.cpp-pr-test-28770-28699-28213`, macro
-  `qwen38_exp_server`). True CUDA sparse Flash Attention, incremental pooled-key
-  indexer cache, and gather-based sparse decode. 20.11 t/s plain decode @ 4k-8k ctx
-  (breaks 20 t/s on plain decode without MTP), 3.8x prefill jump at 1k ctx (223.3 vs 58.0 t/s),
-  +6 MiB VRAM delta. Same flags as gold for A/B.
+  `vendor/llama.cpp-exp-stack-v2/build/bin/llama-server`, macro `qwen38_mtp_server`,
+  `-ngl 99 -ncmoe 46 --spec-draft-n-max 2 --spec-draft-p-min 0.7` @ 16k ctx,
+  **25.32–27.06 t/s aggregate** (97–100% acceptance, 2.76–2.93 tok/step), 11,025 MiB VRAM.
+- exp `qwen38-flash-next-exp`: Unified QSA Sparsity Stack V2 (#28770 + #28699 + #28213 + #29166 + #29599 + #28671)
+  (`build/bin/llama-server` inside `vendor/llama.cpp-exp-stack-v2`, macro `qwen38_exp_server`).
+  20.52–20.81 t/s plain decode, cold prefill 135.2 t/s (3x boost from Aman Gupta's PR #29599 `madvise` row prefetching),
+  9,953 MiB VRAM. Same flags as gold for A/B.
 
-MTP upgrade status (2026-09-14): PR #28243 on master with the 1.78 GB
-`shared-Q4_K_M` head definitively surpasses plain master across all tasks
-(20.65 vs 19.35 t/s), breaking through the 20 t/s barrier on every task
-when paired with `-ncmoe 45`. The old exp clone `0b7d6d57d` is superseded.
+Note: Legacy AtomicChat `AD-4.27bpw` quant (89 GB, 33 shards) is archived to NAS (`/mnt/storage/models/qwen38-flash-next/AD-4.27bpw-Q4_K_M-M64/`).
+Active pipeline uses ISTA-DASLab GSQ-RCO quants (`IQ3_XXS`, `IQ3_S`, and `Coder IQ1_M` with shared byte-identical PLE Shard 2).
+
+MTP upgrade status (2026-09-29): Unified QSA Sparsity Stack V2 on master b11242
+with Daniel Han PR #28243, compact 1.78 GB `shared-Q4_K_M` head, and `-ncmoe 46`
+reaches **25.32–27.06 t/s** (up to 31% speedup over previous 20.65 t/s),
+achieving 97–100% draft acceptance while fitting safely in 11,025 MiB VRAM.
 
 Gotchas:
 
@@ -135,6 +150,18 @@ Gotchas:
   carry it) — test binaries then bake a foreign `CARGO_MANIFEST_DIR` and
   repo-detection tests fail with `left: None`. Fix: `cargo clean -p l3ms`.
 
+## Decision Models
+
+Native decision models (typed choice/noul/score probabilities, no generation) run on
+`vendor/llama.cpp-d3` (macro `d3_server`) as `vllm-d3-flash` and
+`cloudflare-clef-flash`, called via `POST /upstream/<id>/v1/systemone` (llama-swap does
+not route `/v1/systemone` directly). They need `-c = -b = -ub` (whole prompt in one
+ubatch). Before downloading, verify `<arch>.decision.type` with
+`maintenance/gguf-decision-check.py`: most community GGUFs of leaderboard models
+are plain LLM conversions. Onboard with `/add-decision-model`. Latency, leaderboard
+snapshot and candidates: `docs/decision-models.md`. The decision toolkit itself is
+L3DS (`~/repos/l3ds`, moving to `toolkits/l3ds/`).
+
 ## Structure
 
 - `src/app.rs`: Ratatui layout, keybindings, workflows, and process supervision
@@ -148,6 +175,20 @@ Gotchas:
 - `src/script_store.rs`: script CRUD + snapshots
 - `l3ms/` and `l3ms.py`: legacy Python TUI retained during parity work
 - `model_downloader/`: Python downloader compatibility boundary
+- `maintenance/codemode/`: pi `codemode` scripts — Jev classifier triage for bench
+  results and serving logs (`/jev-bench`, `/jev-log`)
+
+## Classifier Triage (Jev)
+
+Typed-judgment triage runs through pi's `codemode` tool with TypeSafe
+`typesafe/jev-latest` (credential in `~/.pi/agent/auth.json`, `codemode` enabled
+via `defaultTools: ["+codemode"]`). `/jev-bench` judges whether a bench row is
+steady state, strong enough to quote, comparable to other runs, and spill-free;
+`/jev-log` classifies a serving failure and picks the llama-swap action (hot
+reload, router restart, RAM reclaim, flag fix). Code gathers evidence and applies
+thresholds; Jev only answers the questions. Details, verified numbers, and limits:
+`docs/pi-jev-classifier-workflow.md`. Treat a low `next_action` confidence as
+"gather more evidence", not "the answer is wrong".
 
 ## Versioning
 
