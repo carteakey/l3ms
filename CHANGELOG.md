@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### Changed
+- Dashboard: profiles declared in `llama-swap.yaml` but with no measured throughput
+  (`"tps": null` in `docs/dashboard-meta.json`) are listed under "Declared, not yet
+  measured" and never ranked; the generator no longer needs invented figures.
+  `qwen38-flash-next-plat-abliterated-vision` is the first such profile, which also
+  unblocks regenerating `docs/generated-models.js`.
 - Declare `audiocpp_auto` and `comfyui_auto` in `llama-swap.yaml` so llama-swap owns
   speech and image engines (`/audiocpp/`, `/comfyui/`); add
   `toolkits/l2m2/maintenance/test-audiocpp-via-llama-swap.sh` and a CPU-verified

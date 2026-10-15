@@ -122,6 +122,10 @@ assert.equal((byId.get("media-list").innerHTML.match(/<article\b/g) || []).lengt
   context.window.L3MS_DASHBOARD.media.length);
 assert.equal((byId.get("decision-list").innerHTML.match(/<article\b/g) || []).length,
   context.window.L3MS_DASHBOARD.decisions.length);
+assert.equal((byId.get("unmeasured-list").innerHTML.match(/<article\b/g) || []).length,
+  context.window.L3MS_DASHBOARD.unmeasured.length);
+assert.ok(byId.get("unmeasured-list").innerHTML.includes("not measured"));
+assert.ok(!context.window.L3MS_DASHBOARD.models.some(model => model.tps == null));
 assert.ok(byId.get("media-list").innerHTML.includes("Breeze"));
 assert.ok(byId.get("decision-list").innerHTML.includes("No measured decision benchmark published."));
 assert.equal(vm.runInContext('escapeHtml("<script>&\\\"\\\'")', context),

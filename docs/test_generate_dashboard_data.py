@@ -66,13 +66,31 @@ class DashboardDataTest(unittest.TestCase):
             if model.get("cmd") and not model.get("unlisted", False)
             and "--embedding" not in model["cmd"]
             and key not in native_ids
+            and not key.endswith("_auto")
         }
         metadata = json.loads((ROOT / "docs" / "dashboard-meta.json").read_text())
         self.assertEqual(active, set(metadata["models"]))
 
+    def test_unmeasured_profiles_are_listed_but_never_ranked(self):
+        meta = json.loads((ROOT / "docs" / "dashboard-meta.json").read_text())
+        unmeasured_ids = {k for k, v in meta["models"].items() if v.get("tps") is None}
+        self.assertTrue(unmeasured_ids, "fixture expects at least one unmeasured profile")
+        text = (ROOT / "docs" / "generated-models.js").read_text()
+        payload = json.loads(text.split("window.L3MS_DASHBOARD = ", 1)[1].rsplit(";", 1)[0])
+        ranked = {m["id"] for m in payload["models"]}
+        listed = {m["id"] for m in payload["unmeasured"]}
+        self.assertEqual(listed, unmeasured_ids)
+        self.assertFalse(ranked & listed)
+        self.assertTrue(all(isinstance(m["tps"], (int, float)) for m in payload["models"]))
+        for item in payload["unmeasured"]:
+            self.assertNotIn("tps", item)
+            self.assertNotIn("/home/", item["command"])
+
     def test_every_local_profile_has_complete_evidence_shape(self):
         meta = json.loads((ROOT / "docs" / "dashboard-meta.json").read_text())
         for profile_id, display in meta["models"].items():
+            if display.get("tps") is None:
+                continue  # declared but unmeasured profiles carry no evidence
             with self.subTest(profile=profile_id):
                 evidence = dashboard.profile_evidence(display)
                 self.assertEqual(set(dashboard.EVIDENCE_FIELDS), set(evidence) - {"scope"})
