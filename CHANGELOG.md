@@ -43,6 +43,10 @@
   Use `l2m2 --media FILTER --extra ARGS` for extracted generation workflows.
 
 ### Changed
+- Reconcile the current upstream-first checklist and record real standalone
+  Blender GUI/MCP scene round-trip evidence, separately from its software-Wayland
+  shutdown crash and still-open root/GPU acceptance. No installed runtime change
+  or new execution layer is introduced.
 - Exclude explicitly advertised decision models from Chat's default and picker,
   while preserving them for native decision forms and general model actions.
   Apply the same filter to explicitly non-text media/embedding outputs; retain

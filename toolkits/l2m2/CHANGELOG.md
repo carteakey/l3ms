@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Record real standalone CPU headless and software GUI/MCP checks separately
+  from root/GPU acceptance. GUI scene mutation/read-back passed, but shutdown
+  crashed; do not claim a clean interactive lifecycle or change the installed
+  Blender/add-on to mask it.
+
 - Add opt-in Blender headless-only wrapper execution with a single explicit
   code/script/render action, Python exception exit codes and a fresh fixed PNG
   target. Preserve standalone GUI/MCP behavior and the scene's renderer backend;

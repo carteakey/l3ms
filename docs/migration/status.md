@@ -78,7 +78,11 @@ Four real CPU speech modes (standard, design, clone and streaming) passed after
 the platform retirement using the existing audio.cpp pin and weights. Each
 receipt verified child-process cleanup; no quality or GPU claim follows. A
 standalone CPU-only Blender headless render and child cleanup also passed; root
-CLI dispatch, GPU, external GUI and MCP handoff remain unverified. See the
+CLI/Stack successful headless execution and GPU acceptance remain open. A real
+standalone software-rendered GUI/MCP handshake, scene mutation and read-back
+passed, but Blender crashed during shutdown; its private listener/processes were
+released. This is not a clean lifecycle pass. See the
+[Blender record](blender-acceptance.md),
 [decision and media audit](upstream-first-audit.md),
 [speech evidence](direct-speech-acceptance.md), and
 [simplification plan](simplification-plan.md) for current gates.
@@ -95,10 +99,10 @@ maintenance), root downloader tests (14), and dashboard tests (11 plus DOM
 fixtures) passed at the latest reported check. The tracked `src/control` source
 count is currently 30,414 lines (65,624 at the 2c checkpoint); historical
 measurement baselines differ, so no exact half-reduction claim is made.
-These checks and CPU receipts are bounded evidence, not full acceptance. No live
-GPU workflow, Pi handoff, live model task or complete all-lane acceptance has
-been established. Read-only router version/catalog visibility is verified; Pi's
-GPU window remains parked.
+These checks and real isolated CPU inference receipts are bounded evidence, not
+full acceptance. No live GPU workflow, Pi handoff, task against the shared live
+router or complete all-lane acceptance has been established. Read-only router
+version/catalog visibility is verified; Pi's GPU window remains parked.
 
 Tracked-source recheck: exported `914afa8` with `git archive` to
 `/tmp/l3ms-native-source-mkQ3UC`, without ignored vendors, models or environments.

@@ -120,8 +120,12 @@ The root integration uses the [shared idle-GPU window](../../../docs/native-gpu-
 without pretending the manifest declares CUDA or overriding its scene-selected
 backend. Code/script success claims no output artifact; root render references
 receive bounded PNG header sanity checks, not decoding/quality validation.
-Real Blender/device acceptance is still pending. Interactive GUI/MCP remains externally owned;
-`--prompt` only prints guidance, not a completed inference result.
+Standalone CPU headless rendering passed. A real software-rendered GUI/MCP scene
+round trip passed, but Blender crashed on shutdown; root headless execution,
+clean interactive lifecycle and GPU acceptance remain open. See the current
+[acceptance record](../../../docs/migration/blender-acceptance.md). Interactive
+GUI/MCP remains externally owned; `--prompt` only prints guidance, not a completed
+inference result.
 
 ## 5. Smoke Test Verification
 

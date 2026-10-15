@@ -203,7 +203,13 @@ another daemon. No new framework, service installation or GPUI pivot.
 - Keep ordinary bench/download workflows working. Consolidate inference ownership
   first rather than rewriting every non-inference background task at once.
 
-### Delivery order and gates
+### Historical delivery order and gates — superseded by the upstream-first revision
+
+This table records the earlier implementation sequence, not a requirement to
+rebuild the retired queue or custom service-handoff platform. The current
+sequence is the upstream-first revision above. The requested language → GPU
+tool → language behavior still needs evidence; that does not prescribe a custom
+coordinator as its implementation.
 
 | Slice | Change | Evidence before proceeding |
 | --- | --- | --- |

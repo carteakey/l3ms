@@ -19,16 +19,21 @@ for scope and evidence.
   `in_progress` under load. Do not claim cancellation parity, GPU acceptance, or
   learned-model acceptance from these runs.
 - [ ] Finish Blender acceptance at the intended boundaries. Standalone CPU-only
-  headless rendering and child cleanup pass; root CLI dispatch, GPU, external GUI
-  and MCP handoff are not verified. Keep CPU/GPU claims explicit.
+  headless rendering and child cleanup pass. Real standalone GUI/MCP scene
+  mutation/read-back also passed, but Blender crashed on shutdown; all private
+  processes/listeners were released. Successful root CLI/Stack headless execution,
+  clean interactive lifecycle and GPU acceptance remain open. See the
+  [Blender record](docs/migration/blender-acceptance.md).
 - [ ] With the operator, arrange any live GPU or language → media → language
   check after Pi's GPU window is clear. Read-only checks already confirmed the
   installed/running llama-swap v265 build; no model was dispatched. Verify
   cancellation, artifacts and restoration only in an approved window. This
   checklist does not authorize service changes or downloads.
-- [ ] Finish remaining cross-lane product checks, including Comfy and GPU
-  workflows, keyboard/visual/accessibility, standalone/import and
-  remote CI. Cached CPU speech and embedding acceptance cover those paths only,
+- [ ] Finish remaining cross-lane runtime and keyboard/visual checks, including
+  Comfy and GPU workflows. Committed standalone-source parity, source-export
+  builds and toolkit tests pass; remaining runtime checks are separate. Remote
+  CI and comprehensive accessibility remain release/quality checks. Cached CPU
+  speech and embedding acceptance cover those paths only,
   not full-port acceptance. See the [speech record](docs/migration/direct-speech-acceptance.md).
   The post-retirement 80×24 decision-image form, Chat capability selection and
   metadata-only history pass against a private synthetic endpoint; real Clef

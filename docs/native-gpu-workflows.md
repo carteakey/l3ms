@@ -258,7 +258,10 @@ establish ownership/release of a multi-GPU scene.
 The existing GUI/MCP commands remain standalone and externally owned. They are
 not adopted, stopped, or counted as completed headless jobs; `--prompt` still only
 prints guidance. See [Blender workflow](../toolkits/l2m2/docs/blender-mcp-setup.md).
-Real headless/interactive/device acceptance remains pending.
+Standalone CPU headless rendering and a real software-rendered GUI/MCP scene
+round trip have passed, but the GUI crashed during shutdown. Successful root
+CLI/Stack headless execution, clean interactive lifecycle and GPU/device
+acceptance remain open; see [Blender evidence](migration/blender-acceptance.md).
 
 ## What the wrapper checks
 
