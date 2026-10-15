@@ -59,8 +59,9 @@ Prototype sequence:
    inference GPU ownership policy; measure its actual claimant/resource impact.
 6. Keep the CLI/TUI and profile website available until native parity is proven.
 
-The current change establishes a style on the website only. TUI palette
-alignment and the native prototype remain future work. A GPUI migration is not
+The website and the TUI (`src/theme.rs`, contrast-tested at 4.5:1 with an 80×24
+render test) now share the Signal / 03 palette. The native prototype remains
+future work. A GPUI migration is not
 part of declaring the ongoing inference port complete.
 
 ## First-pass verification
