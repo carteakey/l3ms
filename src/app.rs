@@ -17,13 +17,7 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
-#[cfg(target_os = "linux")]
-use crate::control::coordinator_workbench::{
-    self as coordinator_workbench, CancelOutcome, CoordinatorWorkbench, ObserveFailure,
-    WorkbenchEvent,
-};
 use crate::control::requests::SpeechMode;
-use crate::control::result_consumer::NativeOutput;
 #[cfg(target_os = "linux")]
 use crate::control::{
     comfy::{ComfyAdapter, ComfyContract},
@@ -120,7 +114,6 @@ const MODEL_PAGE_SIZE: usize = 50;
 const DOWNLOAD_PAGE_SIZE: usize = 50;
 const DOWNLOAD_ESTIMATE_TIMEOUT: Duration = Duration::from_secs(180);
 const DOWNLOAD_DISK_TIMEOUT: Duration = Duration::from_secs(3);
-const MAX_COORDINATOR_ID_INPUT_BYTES: usize = 128;
 const MAX_STACK_OUTPUT_PREVIEW_CHARS: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -243,14 +236,7 @@ enum InputMode {
     ChatMessage,
     ChatEndpoint,
     ChatSystemPrompt,
-    CoordinatorInput,
     TaskForm,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CoordinatorInputAction {
-    ObserveId,
-    CancelId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1271,20 +1257,7 @@ struct App {
     stack_catalog: Option<Catalog>,
     stack_catalog_error: Option<String>,
     stack_catalog_state: TableState,
-    stack_coordinator_socket_dir: Option<PathBuf>,
-    coordinator_request_id: Option<String>,
-    coordinator_request_lane: Option<Lane>,
-    coordinator_request_terminal: bool,
-    coordinator_action_pending: bool,
-    coordinator_input: String,
-    coordinator_input_action: Option<CoordinatorInputAction>,
     task_form_editor: Option<TaskFormEditor>,
-    coordinator_output: Option<NativeOutput>,
-    coordinator_decision_metadata: Option<crate::control::result_consumer::NativeDecisionMetadata>,
-    coordinator_output_complete: bool,
-    coordinator_results_available: bool,
-    #[cfg(target_os = "linux")]
-    coordinator_workbench: Option<CoordinatorWorkbench>,
     #[cfg(target_os = "linux")]
     direct_native_job: Option<DirectNativeJob>,
     #[cfg(target_os = "linux")]
@@ -1456,20 +1429,7 @@ impl App {
             stack_catalog: None,
             stack_catalog_error: None,
             stack_catalog_state: TableState::default().with_selected(Some(0)),
-            stack_coordinator_socket_dir: None,
-            coordinator_request_id: None,
-            coordinator_request_lane: None,
-            coordinator_request_terminal: false,
-            coordinator_action_pending: false,
-            coordinator_input: String::new(),
-            coordinator_input_action: None,
             task_form_editor: None,
-            coordinator_output: None,
-            coordinator_decision_metadata: None,
-            coordinator_output_complete: false,
-            coordinator_results_available: false,
-            #[cfg(target_os = "linux")]
-            coordinator_workbench: None,
             #[cfg(target_os = "linux")]
             direct_native_job: None,
             #[cfg(target_os = "linux")]
@@ -2086,87 +2046,7 @@ impl App {
             }
         }
         #[cfg(target_os = "linux")]
-        self.drain_coordinator_events();
-        #[cfg(target_os = "linux")]
         self.drain_direct_native_result();
-    }
-
-    #[cfg(target_os = "linux")]
-    fn drain_coordinator_events(&mut self) {
-        let mut events = Vec::new();
-        if let Some(workbench) = self.coordinator_workbench.as_mut() {
-            while let Some(event) = workbench.try_next_event() {
-                events.push(event);
-            }
-        }
-        for event in events {
-            if self.coordinator_request_id.as_deref() != Some(event.request_id()) {
-                continue;
-            }
-            self.coordinator_action_pending = false;
-            match event {
-                WorkbenchEvent::Observed { outcome, .. } => match outcome {
-                    Ok(observation) => {
-                        self.coordinator_request_terminal = matches!(
-                            observation.status,
-                            crate::control::ipc::RequestStatus::Succeeded
-                                | crate::control::ipc::RequestStatus::Failed
-                                | crate::control::ipc::RequestStatus::Cancelled
-                                | crate::control::ipc::RequestStatus::Interrupted
-                        );
-                        self.coordinator_output = observation.output;
-                        self.coordinator_decision_metadata = observation.decision_metadata;
-                        self.coordinator_output_complete = observation.output_complete;
-                        self.coordinator_results_available = observation.results_available;
-                        self.status = match observation.results_state {
-                            coordinator_workbench::ResultReadState::Unknown => "Coordinator has no retained native result row for this ID".into(),
-                            coordinator_workbench::ResultReadState::Expired => "Native result pages have expired; coordinator status remains available".into(),
-                            coordinator_workbench::ResultReadState::Unavailable => match observation.status {
-                            crate::control::ipc::RequestStatus::NotFound => {
-                                "Coordinator has no retained row for this ID; do not resubmit automatically".into()
-                            }
-                            state => format!("Request {state:?} · native results not currently available"),
-                            },
-                            coordinator_workbench::ResultReadState::Available => {
-                                format!("Request {:?} · native results refreshed{}", observation.status, if observation.output_complete { " (complete)" } else { " (more may arrive)" })
-                            }
-                        };
-                    }
-                    Err(ObserveFailure::Exchange(_)) => {
-                        self.status = "Coordinator observation failed; caller ID retained".into();
-                    }
-                    Err(ObserveFailure::Rejected(_)) => {
-                        self.status =
-                            "Coordinator rejected the observation; caller ID retained".into();
-                    }
-                    Err(ObserveFailure::InvalidResponse) => {
-                        self.status =
-                            "Coordinator returned an invalid observation; caller ID retained"
-                                .into();
-                    }
-                },
-                WorkbenchEvent::Cancelled { outcome, .. } => match outcome {
-                    CancelOutcome::Accepted(state) => {
-                        self.coordinator_request_terminal =
-                            state == crate::control::ipc::RequestStatus::Cancelled;
-                        self.status =
-                            format!("Cancel acknowledged · request {state:?}; press o to observe");
-                    }
-                    CancelOutcome::Rejected(_) => {
-                        self.status =
-                            "Cancel was rejected; caller ID retained for observation".into();
-                    }
-                    CancelOutcome::Unconfirmed(_) => {
-                        self.status = "Cancel acknowledgment unavailable; ID retained. Press o to observe; do not retry automatically".into();
-                    }
-                },
-                WorkbenchEvent::WorkerFailed { .. } => {
-                    self.status =
-                        "Coordinator worker failed; caller ID retained for explicit observation"
-                            .into();
-                }
-            }
-        }
     }
 
     fn refresh_telemetry_if_due(&mut self) {
@@ -2579,10 +2459,6 @@ impl App {
                 if self.tab == Tab::Chat && self.cancel_chat_request() {
                     return Ok(());
                 }
-                if self.input_mode == InputMode::CoordinatorInput {
-                    self.coordinator_input.clear();
-                    self.coordinator_input_action = None;
-                }
                 if self.input_mode == InputMode::TaskForm {
                     self.task_form_editor = None;
                 }
@@ -2605,7 +2481,6 @@ impl App {
                 }
                 InputMode::ChatMessage => self.send_chat_message(),
                 InputMode::ChatEndpoint => self.start_chat_connect(),
-                InputMode::CoordinatorInput => self.finish_coordinator_input(),
                 InputMode::BrowserPath => {
                     self.input_mode = InputMode::Normal;
                     self.scan_browser();
@@ -2673,9 +2548,6 @@ impl App {
                 InputMode::ChatEndpoint => {
                     self.chat_endpoint_draft.pop();
                 }
-                InputMode::CoordinatorInput => {
-                    self.coordinator_input.pop();
-                }
                 InputMode::TaskForm => {
                     if let Some(editor) = self.task_form_editor.as_mut() {
                         editor.backspace();
@@ -2704,14 +2576,6 @@ impl App {
                     InputMode::ChatMessage => self.chat_input.push(character),
                     InputMode::ChatSystemPrompt => self.chat_system_prompt.push(character),
                     InputMode::ChatEndpoint => self.chat_endpoint_draft.push(character),
-                    InputMode::CoordinatorInput => {
-                        let max_bytes = MAX_COORDINATOR_ID_INPUT_BYTES;
-                        if self.coordinator_input.len() + character.len_utf8() <= max_bytes
-                            && !character.is_control()
-                        {
-                            self.coordinator_input.push(character);
-                        }
-                    }
                     InputMode::TaskForm => {
                         if let Some(editor) = self.task_form_editor.as_mut() {
                             if !editor.insert_char(character) && !character.is_control() {
@@ -3291,8 +3155,10 @@ impl App {
             }
             StackCatalogRefresh => self.refresh_stack_catalog(),
             StackCatalogForm => self.begin_task_form(),
-            StackCatalogObserve => self.begin_coordinator_observe(),
-            StackCatalogCancel => self.begin_coordinator_cancel(),
+            StackCatalogCancel => {
+                #[cfg(target_os = "linux")]
+                self.begin_direct_native_cancel();
+            }
             PreviousTab => {
                 self.tab =
                     Tab::from_index((self.tab.index() + TAB_NAMES.len() - 1) % TAB_NAMES.len());
@@ -4498,18 +4364,12 @@ impl App {
     fn refresh_stack_catalog(&mut self) {
         let settings = crate::settings::load_current_stack_settings_in(&self.root, &self.data_root);
         let catalog = match settings {
-            Ok(settings) => {
-                self.stack_coordinator_socket_dir = settings.coordinator_socket_dir;
-                Catalog::load_from_roots(
-                    &self.root,
-                    settings.media_toolkit_root,
-                    settings.decisions_toolkit_root,
-                )
-            }
-            Err(error) => {
-                self.stack_coordinator_socket_dir = None;
-                Err(error)
-            }
+            Ok(settings) => Catalog::load_from_roots(
+                &self.root,
+                settings.media_toolkit_root,
+                settings.decisions_toolkit_root,
+            ),
+            Err(error) => Err(error),
         };
         match catalog {
             Ok(catalog) => {
@@ -4537,7 +4397,6 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => Some(CommandId::StackCatalogSelectNext),
             KeyCode::Char('r') => Some(CommandId::StackCatalogRefresh),
             KeyCode::Char('f') => Some(CommandId::StackCatalogForm),
-            KeyCode::Char('o') => Some(CommandId::StackCatalogObserve),
             KeyCode::Char('c') => Some(CommandId::StackCatalogCancel),
             _ => None,
         };
@@ -4581,12 +4440,6 @@ impl App {
         }
         #[cfg(target_os = "linux")]
         {
-            if self.coordinator_action_pending
-                || (self.coordinator_request_id.is_some() && !self.coordinator_request_terminal)
-            {
-                self.status = "A coordinator request is pending or nonterminal; observe or cancel it before starting other work".into();
-                return;
-            }
             if !direct_native_profile
                 && (self.direct_native_job.is_some() || self.direct_native_admission_closed)
             {
@@ -4636,7 +4489,7 @@ impl App {
             } else if is_direct_comfy_workflow_profile(&profile) {
                 "Foreground Comfy workflow form open · existing server only; operator remains responsible for GPU availability".into()
             } else if direct_language_embeddings {
-                "Foreground language embeddings form open · no caller ID or coordinator; run once with Ctrl+Enter".into()
+                "Foreground language embeddings form open; run once with Ctrl+Enter".into()
             } else {
                 "Native task form open · choose the declared task explicitly".into()
             };
@@ -4803,12 +4656,6 @@ impl App {
             self.status =
                 "Wait for active Chat or model operations before starting foreground native work"
                     .into();
-            return;
-        }
-        if self.coordinator_action_pending
-            || (self.coordinator_request_id.is_some() && !self.coordinator_request_terminal)
-        {
-            self.status = "A coordinator request is pending or nonterminal; observe or cancel it before starting a foreground native run".into();
             return;
         }
         if self.direct_native_admission_closed {
@@ -5061,10 +4908,6 @@ impl App {
             }
         };
 
-        self.coordinator_output = None;
-        self.coordinator_decision_metadata = None;
-        self.coordinator_output_complete = false;
-        self.coordinator_results_available = false;
         self.direct_native_summary = Some(DirectNativeSummary {
             job_id,
             lane,
@@ -5307,10 +5150,6 @@ impl App {
                 summary.state = DirectNativeState::Interrupted;
             }
             self.finish_direct_native_history(expected_job_id, "interrupted", None);
-            self.coordinator_output = None;
-            self.coordinator_decision_metadata = None;
-            self.coordinator_output_complete = false;
-            self.coordinator_results_available = false;
             let label = self
                 .direct_native_summary
                 .as_ref()
@@ -5587,247 +5426,6 @@ impl App {
                 self.apply_direct_native_completion(job_id, None);
             }
             Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => {}
-        }
-    }
-
-    fn begin_coordinator_input(&mut self, action: CoordinatorInputAction) {
-        if self.coordinator_action_pending {
-            self.status = "A coordinator action is already pending".into();
-            return;
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = action;
-            self.status = "The private coordinator workbench is available on Linux only".into();
-        }
-        #[cfg(target_os = "linux")]
-        {
-            if self.direct_native_job.is_some() || self.direct_native_admission_closed {
-                self.status = "A foreground native task is active or its completion is unconfirmed; coordinator input is unavailable until it is resolved".into();
-                return;
-            }
-            if self.stack_coordinator_socket_dir.is_none() {
-                self.status =
-                    "No explicit private coordinator socket is configured in shared settings"
-                        .into();
-                return;
-            }
-            self.coordinator_input.clear();
-            self.coordinator_input_action = Some(action);
-            self.input_mode = InputMode::CoordinatorInput;
-            self.status = match action {
-                CoordinatorInputAction::ObserveId => {
-                    "Enter the caller-supplied request ID to observe".into()
-                }
-                CoordinatorInputAction::CancelId => {
-                    "Enter the caller-supplied request ID to cancel once".into()
-                }
-            };
-        }
-    }
-
-    fn begin_coordinator_observe(&mut self) {
-        #[cfg(not(target_os = "linux"))]
-        {
-            self.status = "The private coordinator workbench is available on Linux only".into();
-        }
-        #[cfg(target_os = "linux")]
-        {
-            if self.direct_native_job.is_some() || self.direct_native_admission_closed {
-                self.status = "A foreground native task is active or its completion is unconfirmed; coordinator observation is unavailable until it is resolved".into();
-                return;
-            }
-            if self.coordinator_request_id.is_some() {
-                self.enqueue_coordinator_observe();
-            } else {
-                self.begin_coordinator_input(CoordinatorInputAction::ObserveId);
-            }
-        }
-    }
-
-    fn begin_coordinator_cancel(&mut self) {
-        #[cfg(not(target_os = "linux"))]
-        {
-            self.status = "The private coordinator workbench is available on Linux only".into();
-        }
-        #[cfg(target_os = "linux")]
-        {
-            if self.begin_direct_native_cancel() {
-                return;
-            }
-            if self.direct_native_admission_closed {
-                self.status = "Foreground native admission is closed after an unconfirmed completion; inspect the backend before other coordinator actions".into();
-                return;
-            }
-            if self.coordinator_request_id.is_some() {
-                self.enqueue_coordinator_cancel();
-            } else {
-                self.begin_coordinator_input(CoordinatorInputAction::CancelId);
-            }
-        }
-    }
-
-    fn finish_coordinator_input(&mut self) {
-        let action = self.coordinator_input_action.take();
-        let value = std::mem::take(&mut self.coordinator_input);
-        self.input_mode = InputMode::Normal;
-        let Some(action) = action else {
-            return;
-        };
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = (action, value);
-            self.status = "The private coordinator workbench is available on Linux only".into();
-        }
-        #[cfg(target_os = "linux")]
-        match action {
-            CoordinatorInputAction::ObserveId => self.enqueue_coordinator_observe_for(&value),
-            CoordinatorInputAction::CancelId => self.enqueue_coordinator_cancel_for(&value),
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    fn ensure_coordinator_worker(&mut self) -> bool {
-        if self.stack_coordinator_socket_dir.is_none() {
-            self.status =
-                "No explicit private coordinator socket is configured in shared settings".into();
-            return false;
-        }
-        if self.coordinator_workbench.is_none() {
-            match CoordinatorWorkbench::start() {
-                Ok(worker) => self.coordinator_workbench = Some(worker),
-                Err(_) => {
-                    self.status = "Could not start the bounded coordinator action worker".into();
-                    return false;
-                }
-            }
-        }
-        true
-    }
-
-    #[cfg(target_os = "linux")]
-    fn enqueue_coordinator_observe(&mut self) {
-        let Some(request_id) = self.coordinator_request_id.clone() else {
-            return;
-        };
-        self.enqueue_coordinator_observe_for(&request_id);
-    }
-
-    #[cfg(target_os = "linux")]
-    fn enqueue_coordinator_observe_for(&mut self, raw_id: &str) {
-        if self.direct_native_job.is_some() || self.direct_native_admission_closed {
-            self.status = "A foreground native task is active or its completion is unconfirmed; coordinator observation is unavailable until it is resolved".into();
-            return;
-        }
-        if self.coordinator_action_pending {
-            self.status = "A coordinator action is already pending".into();
-            return;
-        }
-        let Some(socket_directory) = self.stack_coordinator_socket_dir.clone() else {
-            self.status =
-                "No explicit private coordinator socket is configured in shared settings".into();
-            return;
-        };
-        let (request_id, lane) = if let (Some(request_id), Some(lane)) = (
-            self.coordinator_request_id.clone(),
-            self.coordinator_request_lane,
-        ) {
-            (request_id, lane)
-        } else {
-            let Some(lane) = self
-                .selected_stack_profile()
-                .map(|profile| profile.key.lane)
-            else {
-                self.status = "Select a manifest profile to choose the request lane".into();
-                return;
-            };
-            (raw_id.trim().to_owned(), lane)
-        };
-        if !self.ensure_coordinator_worker() {
-            return;
-        }
-        let result = self.coordinator_workbench.as_mut().unwrap().observe(
-            socket_directory,
-            request_id.clone(),
-            lane,
-        );
-        match result {
-            Ok(()) => {
-                self.clear_direct_native_result_display();
-                if self.coordinator_request_id.is_none() {
-                    self.coordinator_request_id = Some(request_id);
-                    self.coordinator_request_lane = Some(lane);
-                }
-                self.coordinator_action_pending = true;
-                self.status =
-                    "Querying coordinator status and native results for the retained caller ID"
-                        .into();
-            }
-            Err(_) => {
-                self.status =
-                    "Could not enqueue coordinator observation; caller ID was not replayed".into()
-            }
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    fn enqueue_coordinator_cancel(&mut self) {
-        let Some(request_id) = self.coordinator_request_id.clone() else {
-            return;
-        };
-        self.enqueue_coordinator_cancel_for(&request_id);
-    }
-
-    #[cfg(target_os = "linux")]
-    fn enqueue_coordinator_cancel_for(&mut self, raw_id: &str) {
-        if self.direct_native_job.is_some() || self.direct_native_admission_closed {
-            self.status = "A foreground native task is active or its completion is unconfirmed; coordinator cancellation is unavailable until it is resolved".into();
-            return;
-        }
-        if self.coordinator_action_pending {
-            self.status = "A coordinator action is already pending".into();
-            return;
-        }
-        let Some(socket_directory) = self.stack_coordinator_socket_dir.clone() else {
-            self.status =
-                "No explicit private coordinator socket is configured in shared settings".into();
-            return;
-        };
-        let request_id = self
-            .coordinator_request_id
-            .clone()
-            .unwrap_or_else(|| raw_id.trim().to_owned());
-        if !self.ensure_coordinator_worker() {
-            return;
-        }
-        let result = self
-            .coordinator_workbench
-            .as_mut()
-            .unwrap()
-            .cancel(socket_directory, request_id.clone());
-        match result {
-            Ok(()) => {
-                self.clear_direct_native_result_display();
-                if self.coordinator_request_id.is_none() {
-                    self.coordinator_request_id = Some(request_id);
-                    self.coordinator_request_lane = self
-                        .selected_stack_profile()
-                        .map(|profile| profile.key.lane);
-                }
-                self.coordinator_action_pending = true;
-                self.status = "Sending one cancel request for the retained caller ID".into();
-            }
-            Err(_) => self.status = "Could not enqueue cancellation; caller ID retained".into(),
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    fn clear_direct_native_result_display(&mut self) {
-        if self.direct_native_summary.take().is_some() {
-            self.coordinator_output = None;
-            self.coordinator_decision_metadata = None;
-            self.coordinator_output_complete = false;
-            self.coordinator_results_available = false;
         }
     }
 
@@ -7497,26 +7095,16 @@ impl App {
                 .wrap(Wrap { trim: false }),
             info[0],
         );
-        let explicit_coordinator_observer = self.coordinator_request_id.is_some()
-            || self.coordinator_action_pending
-            || self.input_mode == InputMode::CoordinatorInput;
-        let coordinator_configured = self.stack_coordinator_socket_dir.is_some();
         #[cfg(target_os = "linux")]
         let show_direct_native = {
             let native_busy_or_uncertain =
                 self.direct_native_job.is_some() || self.direct_native_admission_closed;
-            // A previous retained ID must not hide the newer native result.
-            // Beginning a new observation overrides it; enqueue then clears it.
-            let retained_native_summary = self.direct_native_summary.is_some()
-                && !self.coordinator_action_pending
-                && self.input_mode != InputMode::CoordinatorInput;
-            let selected_native_profile = !coordinator_configured
-                && !explicit_coordinator_observer
-                && self.selected_stack_profile().is_some_and(|profile| {
-                    self.stack_catalog
-                        .as_ref()
-                        .is_some_and(|catalog| is_direct_native_profile(profile, catalog))
-                });
+            let retained_native_summary = self.direct_native_summary.is_some();
+            let selected_native_profile = self.selected_stack_profile().is_some_and(|profile| {
+                self.stack_catalog
+                    .as_ref()
+                    .is_some_and(|catalog| is_direct_native_profile(profile, catalog))
+            });
             native_busy_or_uncertain || retained_native_summary || selected_native_profile
         };
         #[cfg(not(target_os = "linux"))]
@@ -7535,9 +7123,6 @@ impl App {
         });
         #[cfg(not(target_os = "linux"))]
         let direct_result_visible = false;
-        let show_coordinator_observer =
-            !show_direct_native && (coordinator_configured || explicit_coordinator_observer);
-        let show_native_guidance = !show_direct_native && !show_coordinator_observer;
         #[cfg(target_os = "linux")]
         let native_chat_guidance = "f opens Chat/task\nChat handoff uses the existing Chat tab.\nSupported native tasks run foreground; unsupported profiles are refused.";
         #[cfg(not(target_os = "linux"))]
@@ -7545,7 +7130,7 @@ impl App {
         #[cfg(target_os = "linux")]
         let (action_text, action_title) = if show_direct_native {
             let text = self.direct_native_summary.as_ref().map_or_else(
-                || "Native decisions (CPU Nagi/Laya, hosted Jev, and explicitly selected CUDA Nagi/Laya), CPU/CUDA Breeze tts/clon/design, HeartMuLa CUDA music, Blender headless, connected embeddings, and Comfy workflows run in one foreground job. CUDA and Blender headless require an idle shared GPU window before admission. Services stay operator-managed by default; only explicitly configured resident llama-swap may be paused/restored. Blender Python is not sandboxed; its GUI/MCP workflow remains external. Comfy uses an existing external server; operator manages GPU availability. No caller ID or coordinator for these tasks.\nf open task · c cancels an active run".to_owned(),
+                || "Native decisions (CPU Nagi/Laya, hosted Jev, and explicitly selected CUDA Nagi/Laya), CPU/CUDA Breeze tts/clon/design, HeartMuLa CUDA music, Blender headless, connected embeddings, and Comfy workflows run in one foreground job. CUDA and Blender headless require an idle shared GPU window before admission. Services stay operator-managed by default; only explicitly configured resident llama-swap may be paused/restored. Blender Python is not sandboxed; its GUI/MCP workflow remains external. Comfy uses an existing external server; operator manages GPU availability.\nf open task · c cancels an active run".to_owned(),
                 |summary| {
                     let operator_note = if summary.native_id.is_some() {
                         "\nExisting Comfy server · operator manages GPU availability"
@@ -7600,66 +7185,12 @@ impl App {
                 },
             );
             (text, "Foreground native task")
-        } else if show_native_guidance {
-            (native_chat_guidance.to_owned(), "Native / Chat guidance")
         } else {
-            let retained = self.coordinator_request_id.as_deref().unwrap_or("none");
-            let lane = self.coordinator_request_lane.map_or("—", Lane::as_str);
-            let lifecycle = if self.coordinator_request_id.is_none() {
-                "no caller ID retained"
-            } else if self.coordinator_request_terminal {
-                "terminal observed · caller ID retained for lookup"
-            } else {
-                "ambiguous or nonterminal · observe/cancel before other work"
-            };
-            let socket = if self.stack_coordinator_socket_dir.is_some() {
-                "explicit socket configured"
-            } else {
-                "no explicit socket configured"
-            };
-            let text = if self.input_mode == InputMode::CoordinatorInput {
-                format!(
-                    "{}\n> {}",
-                    coordinator_prompt(self.coordinator_input_action),
-                    self.coordinator_input
-                )
-            } else {
-                format!(
-                    "{socket}\nretained ID: {retained}\nlane: {lane}\n{lifecycle}\n{}",
-                    if self.coordinator_action_pending {
-                        "action pending…"
-                    } else {
-                        "idle · f/o/c"
-                    }
-                )
-            };
-            (text, "Coordinator · observation/cancel only")
+            (native_chat_guidance.to_owned(), "Native / Chat guidance")
         };
         #[cfg(not(target_os = "linux"))]
-        let (action_text, action_title) = {
-            let retained = self.coordinator_request_id.as_deref().unwrap_or("none");
-            let lane = self.coordinator_request_lane.map_or("—", Lane::as_str);
-            let lifecycle = if self.coordinator_request_id.is_none() {
-                "no caller ID retained"
-            } else if self.coordinator_request_terminal {
-                "terminal observed · caller ID retained for lookup"
-            } else {
-                "ambiguous or nonterminal · observe/cancel before other work"
-            };
-            let socket = if self.stack_coordinator_socket_dir.is_some() {
-                "explicit socket configured"
-            } else {
-                "no explicit socket configured"
-            };
-            if show_native_guidance {
-                (native_chat_guidance.to_owned(), "Native / Chat guidance")
-            } else {
-                (
-                    format!("{socket}\nretained ID: {retained}\nlane: {lane}\n{lifecycle}"),
-                    "Coordinator · observation/cancel only",
-                )
-            }
-        };
+        let (action_text, action_title) =
+            (native_chat_guidance.to_owned(), "Native / Chat guidance");
         frame.render_widget(
             Paragraph::new(action_text)
                 .style(theme::text())
@@ -7667,15 +7198,6 @@ impl App {
                 .wrap(Wrap { trim: false }),
             info[1],
         );
-        #[cfg(target_os = "linux")]
-        if !show_direct_native && self.input_mode == InputMode::CoordinatorInput {
-            frame.set_cursor_position((
-                info[1].x.saturating_add(
-                    3 + coordinator_prompt(self.coordinator_input_action).len() as u16,
-                ),
-                info[1].y.saturating_add(2),
-            ));
-        }
         let output_text = if show_direct_native {
             if direct_result_visible {
                 self.direct_native_summary
@@ -7686,23 +7208,8 @@ impl App {
             } else {
                 "Foreground native result is hidden until its completed profile is selected.".into()
             }
-        } else if show_native_guidance {
-            "Foreground native results appear here after a supported task completes. Coordinator results require a retained request ID and explicit observation.".to_owned()
         } else {
-            self.coordinator_output.as_ref().map_or_else(
-            || {
-                if self.coordinator_results_available {
-                    "No native output in the latest page.".to_owned()
-                } else {
-                    "Native results are shown here only after pressing o. No result body is copied to logs or history.".to_owned()
-                }
-            },
-            |output| native_output_preview(
-                output,
-                self.coordinator_output_complete,
-                self.coordinator_decision_metadata.as_ref(),
-            ),
-            )
+            "Foreground native results appear here after a supported task completes.".to_owned()
         };
         frame.render_widget(
             Paragraph::new(output_text)
@@ -7711,10 +7218,8 @@ impl App {
                     theme::block()
                         .title(if show_direct_native {
                             "Foreground native result"
-                        } else if show_native_guidance {
-                            "Native task results"
                         } else {
-                            "Private native result panel · explicit observation only"
+                            "Native task results"
                         })
                         .borders(Borders::ALL),
                 )
@@ -7748,19 +7253,19 @@ impl App {
         } else if editor.direct_breeze_speech && is_direct_cuda_profile(&editor.profile_snapshot) {
             "CUDA Breeze · GPU must be idle before starting · resident pause/restore is opt-in · tts/clon/design fields stay task-specific"
         } else if editor.direct_breeze_speech {
-            "CPU Breeze · tts standard/streaming, clon reference, design instruction · no caller ID or coordinator"
+            "CPU Breeze · tts standard/streaming, clon reference, design instruction"
         } else if editor.direct_native_decision {
             if editor.profile_snapshot.runtime.as_str() == "llamacpp" {
                 "Router-owned CUDA decision · normal router swapping may evict the language model · use a quiet window · no automatic restoration"
             } else if is_direct_cuda_profile(&editor.profile_snapshot) {
-                "CUDA decision · GPU must be idle before starting · resident pause/restore is opt-in · no caller ID or coordinator"
+                "CUDA decision · GPU must be idle before starting · resident pause/restore is opt-in"
             } else {
-                "Native decision · local CPU or hosted route · no caller ID or coordinator"
+                "Native decision · local CPU or hosted route"
             }
         } else if editor.direct_comfy_workflow {
             "Comfy workflow · existing server only · operator manages GPU availability"
         } else if editor.direct_language_embeddings {
-            "language embedding batch · connected Chat endpoint · no caller ID or coordinator"
+            "language embedding batch · connected Chat endpoint"
         } else {
             "choose the task explicitly from its declared list"
         };
@@ -8222,7 +7727,6 @@ impl App {
                 InputMode::ChatMessage => "  CHAT INPUT",
                 InputMode::ChatEndpoint => "  CHAT ENDPOINT",
                 InputMode::ChatSystemPrompt => "  SYSTEM PROMPT INPUT",
-                InputMode::CoordinatorInput => "  COORDINATOR INPUT",
                 InputMode::TaskForm => "  NATIVE TASK FORM",
             }
         };
@@ -8968,83 +8472,6 @@ fn create_private_direct_output_directory(
         return Ok(output_directory);
     }
     Err(())
-}
-
-fn coordinator_prompt(action: Option<CoordinatorInputAction>) -> &'static str {
-    match action {
-        Some(CoordinatorInputAction::ObserveId) => "Caller request ID to observe",
-        Some(CoordinatorInputAction::CancelId) => "Caller request ID to cancel",
-        None => "Coordinator input",
-    }
-}
-
-fn native_output_preview(
-    output: &NativeOutput,
-    complete: bool,
-    metadata: Option<&crate::control::result_consumer::NativeDecisionMetadata>,
-) -> String {
-    let mut rendered = match output {
-        NativeOutput::Language { content, reasoning } => {
-            if reasoning.is_empty() {
-                content.clone()
-            } else {
-                format!("Content:\n{content}\n\nReasoning:\n{reasoning}")
-            }
-        }
-        NativeOutput::LanguageEmbeddings { vectors, usage } => {
-            let sample = vectors
-                .first()
-                .map(|vector| vector.iter().take(32).copied().collect::<Vec<_>>())
-                .unwrap_or_default();
-            format!(
-                "Embeddings: {} vectors · {} dimensions\nNative tokens: {} prompt / {} total\nFirst vector, up to 32 components: {}\nUse explicit CLI native output for complete vectors.",
-                vectors.len(),
-                vectors.first().map_or(0, Vec::len),
-                usage.prompt_tokens,
-                usage.total_tokens,
-                serde_json::to_string(&sample).unwrap_or_else(|_| "unavailable".into()),
-            )
-        }
-        NativeOutput::Decisions { answers } => {
-            let answers = serde_json::to_string_pretty(answers)
-                .unwrap_or_else(|_| "Decision output could not be rendered".into());
-            let answers = format!("Answers:\n{answers}");
-            match metadata {
-                None => answers,
-                Some(metadata) => format!(
-                    "{answers}\n\nNative decision metadata (not coordinator timing):\n{}",
-                    serde_json::to_string_pretty(metadata)
-                        .unwrap_or_else(|_| "Metadata unavailable".into()),
-                ),
-            }
-        }
-        NativeOutput::Media { artifacts } => artifacts
-            .iter()
-            .map(|artifact| format!("{:?}: {}", artifact.kind, artifact.relative_path))
-            .collect::<Vec<_>>()
-            .join("\n"),
-    };
-    rendered = rendered
-        .chars()
-        .map(|character| {
-            if character.is_control() && character != '\n' && character != '\t' {
-                '�'
-            } else {
-                character
-            }
-        })
-        .collect();
-    let mut preview = rendered
-        .chars()
-        .take(MAX_STACK_OUTPUT_PREVIEW_CHARS)
-        .collect::<String>();
-    if rendered.chars().count() > MAX_STACK_OUTPUT_PREVIEW_CHARS {
-        preview.push_str("\n… [native output preview truncated]");
-    }
-    if !complete {
-        preview.push_str("\n[more native output may be available; press o to refresh]");
-    }
-    preview
 }
 
 fn stack_profile_details(profile: &CatalogProfile) -> Text<'static> {
@@ -10589,7 +10016,6 @@ mod tests {
             .position(|profile| profile.key.profile_id.as_str() == "breeze-tts-2-cpu")
             .unwrap();
         app.stack_catalog_state.select(Some(index));
-        assert!(app.stack_coordinator_socket_dir.is_none());
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
             .unwrap();
         let editor = app.task_form_editor.as_mut().unwrap();
@@ -10633,7 +10059,6 @@ mod tests {
             decision,
             crate::control::requests::InferenceRequest::Decision { .. }
         ));
-        assert!(app.coordinator_workbench.is_none());
         assert!(app.direct_native_job.is_none());
         assert!(app.job_history.records().is_empty());
 
@@ -10713,7 +10138,6 @@ mod tests {
             .log
             .iter()
             .all(|line| !line.contains("private CUDA design instruction")));
-        assert!(app.coordinator_workbench.is_none());
         assert!(app.direct_native_job.is_none());
     }
 
@@ -10776,7 +10200,6 @@ mod tests {
         );
         assert!(app.job_history.records().is_empty());
         assert!(app.direct_native_job.is_none());
-        assert!(app.coordinator_workbench.is_none());
         let persisted =
             fs::read_to_string(crate::state_store::jobs_path_in(&fixture.data)).unwrap_or_default();
         assert!(!persisted.contains("private music prompt"));
@@ -10849,7 +10272,6 @@ mod tests {
             .all(|line| !line.contains("private H3 input")));
         assert!(app.job_history.records().is_empty());
         assert!(app.direct_native_job.is_none());
-        assert!(app.coordinator_workbench.is_none());
         let persisted =
             fs::read_to_string(crate::state_store::jobs_path_in(&fixture.data)).unwrap_or_default();
         assert!(!persisted.contains("private H3 input"));
@@ -10861,7 +10283,6 @@ mod tests {
         let fixture = AppFixture::new();
         write_ltx_25_media_manifest(&fixture);
         let mut app = fixture.app();
-        assert!(app.stack_coordinator_socket_dir.is_none());
 
         focus_stack_profile_by_id(&mut app, "ltx-2.5");
         let profile = app.selected_stack_profile().unwrap();
@@ -10921,7 +10342,6 @@ mod tests {
             .all(|line| !line.contains("private LTX prompt")));
         assert!(app.job_history.records().is_empty());
         assert!(app.direct_native_job.is_none());
-        assert!(app.coordinator_workbench.is_none());
         let persisted =
             fs::read_to_string(crate::state_store::jobs_path_in(&fixture.data)).unwrap_or_default();
         assert!(!persisted.contains("private LTX prompt"));
@@ -11011,7 +10431,6 @@ mod tests {
         assert!(app.log.iter().all(|line| !line.contains("primitive_cube")));
         assert!(app.job_history.records().is_empty());
         assert!(app.direct_native_job.is_none());
-        assert!(app.coordinator_workbench.is_none());
         let persisted =
             fs::read_to_string(crate::state_store::jobs_path_in(&fixture.data)).unwrap_or_default();
         assert!(!persisted.contains("primitive_cube"));
@@ -11078,7 +10497,6 @@ mod tests {
             })
             .unwrap();
         app.stack_catalog_state.select(Some(index));
-        assert!(app.stack_coordinator_socket_dir.is_none());
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
             .unwrap();
         let editor = app.task_form_editor.as_mut().unwrap();
@@ -11095,7 +10513,6 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn open_direct_embedding_form(app: &mut App, input: &str) {
         focus_stack_profile_by_id(app, "local-embeddings");
-        assert!(app.stack_coordinator_socket_dir.is_none());
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
             .unwrap();
         let editor = app.task_form_editor.as_mut().unwrap();
@@ -11116,7 +10533,6 @@ mod tests {
         write_comfy_stack_fixture(&fixture);
         let mut app = fixture.app();
         focus_stack_profile_by_id(&mut app, "comfy-workflow");
-        assert!(app.stack_coordinator_socket_dir.is_none());
 
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
             .unwrap();
@@ -11124,7 +10540,6 @@ mod tests {
         assert!(app
             .status
             .contains("operator remains responsible for GPU availability"));
-        assert!(app.coordinator_workbench.is_none());
         let draft = {
             let editor = app.task_form_editor.as_mut().unwrap();
             assert!(editor.direct_comfy_workflow);
@@ -11380,7 +10795,6 @@ mod tests {
             r#"["embedding-private-secret","unicode π"]"#,
         );
         assert!(app.direct_native_job.is_some());
-        assert!(app.coordinator_workbench.is_none());
         assert!(app.task_form_editor.is_none());
         wait_for_direct_native(&mut app);
         server.join().unwrap();
@@ -11759,7 +11173,6 @@ mod tests {
         open_direct_decision_form(&mut app);
         app.run_task_form();
         assert!(app.direct_native_job.is_some());
-        assert!(app.coordinator_workbench.is_none());
         assert!(app.task_form_editor.is_none());
         wait_for_direct_native(&mut app);
 
@@ -11806,8 +11219,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(140, 45)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
         assert!(terminal_text(&terminal).contains("result is hidden"));
-        app.clear_direct_native_result_display();
-        assert!(app.coordinator_output.is_none());
+        app.direct_native_summary = None;
         assert!(app.direct_native_summary.is_none());
     }
 
@@ -11818,7 +11230,6 @@ mod tests {
         write_hosted_jev_decision_stack_fixture(&fixture);
         let mut app = fixture.app();
         focus_stack_profile_by_id(&mut app, "jev-api");
-        assert!(app.stack_coordinator_socket_dir.is_none());
         let profile = app
             .stack_catalog
             .as_ref()
@@ -11837,7 +11248,6 @@ mod tests {
 
         open_direct_decision_form_for_profile(&mut app, "jev-api");
         assert!(app.status.contains("Foreground native decision form open"));
-        assert!(app.coordinator_workbench.is_none());
         assert!(app.direct_native_job.is_none());
         assert!(app.job_history.records().is_empty());
         let editor = app.task_form_editor.as_mut().unwrap();
@@ -11885,7 +11295,6 @@ mod tests {
         open_direct_cpu_speech_form(&mut app, "tts-private-secret");
         app.run_task_form();
         assert!(app.direct_native_job.is_some());
-        assert!(app.coordinator_workbench.is_none());
         assert!(app.task_form_editor.is_none());
         wait_for_direct_native(&mut app);
 
@@ -12009,7 +11418,6 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL))
             .unwrap();
         assert!(app.direct_native_job.is_some());
-        assert!(app.coordinator_workbench.is_none());
         wait_for_direct_native(&mut app);
 
         let summary = app.direct_native_summary.as_ref().unwrap();
@@ -12081,7 +11489,6 @@ mod tests {
 
         app.run_task_form();
         assert!(app.direct_native_job.is_some());
-        assert!(app.coordinator_workbench.is_none());
         wait_for_direct_native(&mut app);
 
         let summary = app.direct_native_summary.as_ref().unwrap();
@@ -12158,7 +11565,6 @@ mod tests {
 
         app.run_task_form();
         assert!(app.direct_native_job.is_some());
-        assert!(app.coordinator_workbench.is_none());
         wait_for_direct_native(&mut app);
 
         let summary = app.direct_native_summary.as_ref().unwrap();
@@ -12320,11 +11726,6 @@ mod tests {
         assert!(app
             .status
             .contains("foreground native task is active or interrupted"));
-        app.begin_coordinator_observe();
-        assert!(app
-            .status
-            .contains("coordinator observation is unavailable"));
-        assert!(app.coordinator_workbench.is_none());
         app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
             .unwrap();
         assert_eq!(app.direct_native_job.as_ref().unwrap().job_id, job_id);
@@ -12437,8 +11838,6 @@ mod tests {
         write_stack_fixture(&fixture);
         let mut app = fixture.app();
         focus_stack_profile_by_id(&mut app, "local-chat");
-        assert!(app.stack_coordinator_socket_dir.is_none());
-        assert!(app.coordinator_request_id.is_none());
 
         let mut narrow = Terminal::new(TestBackend::new(80, 24)).unwrap();
         narrow.draw(|frame| app.draw(frame)).unwrap();
@@ -12461,77 +11860,6 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn explicit_coordinator_observer_overrides_selected_native_profile() {
-        let fixture = AppFixture::new();
-        write_stack_fixture(&fixture);
-        let mut settings = crate::settings::Settings::default();
-        settings.stack.coordinator_socket_dir = Some(
-            fixture
-                .data
-                .path()
-                .join("configured-but-no-listener")
-                .display()
-                .to_string(),
-        );
-        crate::settings::save_settings_in(fixture.data.path(), &settings).unwrap();
-
-        let mut app = fixture.app();
-        focus_stack_profile_by_id(&mut app, "nagi");
-        assert!(app
-            .selected_stack_profile()
-            .is_some_and(is_direct_native_decision_profile));
-        app.direct_native_summary = Some(DirectNativeSummary {
-            job_id: 7,
-            lane: Lane::Decisions,
-            profile_id: "nagi".into(),
-            task: "decision".into(),
-            cuda: false,
-            requires_idle_gpu_window: false,
-            native_id: None,
-            state: DirectNativeState::Succeeded,
-            result: None,
-        });
-
-        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
-        app.coordinator_request_id = Some("caller:previous".into());
-        terminal.draw(|frame| app.draw(frame)).unwrap();
-        assert!(terminal_text(&terminal).contains("Foreground native task"));
-
-        app.coordinator_request_id = None;
-        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE))
-            .unwrap();
-        assert_eq!(app.input_mode, InputMode::CoordinatorInput);
-        app.coordinator_input = "caller:render-only".into();
-        terminal.draw(|frame| app.draw(frame)).unwrap();
-        let prompt = terminal_text(&terminal);
-        assert!(prompt.contains("Caller request ID to observe"));
-        assert!(prompt.contains("caller:render-only"));
-        assert!(!prompt.contains("Foreground native task"));
-
-        app.clear_direct_native_result_display();
-        app.input_mode = InputMode::Normal;
-        app.coordinator_input_action = None;
-        app.coordinator_request_id = Some("caller:retained".into());
-        app.coordinator_request_lane = Some(Lane::Decisions);
-        app.coordinator_request_terminal = true;
-        app.coordinator_results_available = true;
-        app.coordinator_output_complete = true;
-        app.coordinator_output = Some(NativeOutput::Decisions {
-            answers: vec![serde_json::json!({"answer": "retained observer result"})
-                .as_object()
-                .unwrap()
-                .clone()],
-        });
-        terminal.draw(|frame| app.draw(frame)).unwrap();
-        let retained = terminal_text(&terminal);
-        assert!(retained.contains("Coordinator · observation/cancel only"));
-        assert!(retained.contains("retained ID: caller:retained"));
-        assert!(retained.contains("Private native result panel · explicit observation only"));
-        assert!(retained.contains("retained observer result"));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
     fn direct_embedding_form_needs_no_socket_or_caller_id_and_requires_connected_chat() {
         let fixture = AppFixture::new();
         write_embedding_stack_fixture(&fixture);
@@ -12542,14 +11870,11 @@ mod tests {
         assert_eq!(editor.active_field(), TaskFormField::Timeout);
         assert!(!editor.fields.contains(&TaskFormField::DeclaredTask));
         assert_eq!(editor.values.embedding_inputs, r#"["private text π"]"#);
-        assert!(app.stack_coordinator_socket_dir.is_none());
-        assert!(app.coordinator_workbench.is_none());
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL))
             .unwrap();
         assert!(app.status.contains("Connect Chat"));
         assert!(app.task_form_editor.is_some());
         assert!(app.direct_native_job.is_none());
-        assert!(app.coordinator_workbench.is_none());
         assert!(app.job_history.records().is_empty());
         assert!(!app.status.contains("private text π"));
         assert!(!app.log.iter().any(|line| line.contains("private text π")));
@@ -12700,47 +12025,6 @@ mod tests {
         assert!(app.running_process.is_none());
     }
 
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn private_decision_preview_labels_native_timing_and_sanitizes_usage() {
-        use crate::control::result_buffer::{ResultBuffer, ResultEvent, MAX_PAGE_BYTES};
-        use crate::control::result_consumer::ResultConsumer;
-        let mut buffer = ResultBuffer::new();
-        buffer
-            .begin("preview", crate::control::catalog::Lane::Decisions)
-            .unwrap();
-        buffer
-            .append(
-                "preview",
-                ResultEvent::DecisionResult {
-                    answers: serde_json::json!({"choice": true})
-                        .as_object()
-                        .unwrap()
-                        .clone(),
-                    native_latency: Some(Duration::from_nanos(17)),
-                    native_usage: Some(
-                        serde_json::json!({"native_units": 3, "detail": "private\u{1b}usage"})
-                            .as_object()
-                            .unwrap()
-                            .clone(),
-                    ),
-                },
-            )
-            .unwrap();
-        let mut consumer =
-            ResultConsumer::new("preview", crate::control::catalog::Lane::Decisions).unwrap();
-        consumer
-            .consume(&buffer.page("preview", 0, MAX_PAGE_BYTES).unwrap())
-            .unwrap();
-        let preview = native_output_preview(consumer.output(), false, consumer.decision_metadata());
-        assert!(preview.contains("not coordinator timing"));
-        assert!(preview.contains("native_latency_ns"));
-        assert!(preview.contains("native_units"));
-        assert!(preview.contains("press o"));
-        assert!(!preview.contains('\u{1b}'));
-        assert!(!format!("{:?}", consumer.decision_metadata()).contains("private"));
-    }
-
     #[test]
     fn unsupported_task_form_refuses_without_contacting_configured_coordinator() {
         let fixture = AppFixture::new();
@@ -12764,189 +12048,8 @@ mod tests {
             .status
             .contains("coordinator task submission has been retired"));
         assert!(app.task_form_editor.is_none());
-        assert!(app.coordinator_workbench.is_none());
-        assert!(!app.coordinator_action_pending);
-        assert!(app.coordinator_request_id.is_none());
         assert!(app.direct_native_job.is_none());
         assert!(app.job_history.records().is_empty());
-    }
-
-    #[test]
-    fn stack_catalog_external_request_observe_cancel_shows_native_results() {
-        use std::os::unix::fs::PermissionsExt;
-        use std::os::unix::net::UnixListener;
-
-        use crate::control::ipc::{
-            self, AcceptedOperation, ClientRequest, RequestStatus, ResponseEnvelope,
-            ResponseMessage,
-        };
-        use crate::control::result_buffer::{
-            ResultBuffer, ResultEvent, ResultTerminal, MAX_PAGE_BYTES,
-        };
-
-        const REQUEST_ID: &str = "caller:keyboard-workbench";
-        const RESULT_PREVIEW: &str = "Answers:";
-        const PRIVATE_RESULT: &str = "private coordinator result";
-
-        let fixture = AppFixture::new();
-        write_coordinator_decision_stack_fixture(&fixture);
-        let socket_directory = tempfile::tempdir().unwrap();
-        fs::set_permissions(socket_directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        let listener =
-            UnixListener::bind(socket_directory.path().join("coordinator.sock")).unwrap();
-        fs::set_permissions(
-            socket_directory.path().join("coordinator.sock"),
-            fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
-        let mut settings = crate::settings::Settings::default();
-        settings.stack.coordinator_socket_dir = Some(socket_directory.path().display().to_string());
-        crate::settings::save_settings_in(fixture.data.path(), &settings).unwrap();
-
-        let server = thread::spawn(move || {
-            let mut status_stream = listener.accept().unwrap().0;
-            let ipc::IncomingRequest::Control(ClientRequest::Status { request_id }) =
-                ipc::read_incoming_request(&mut status_stream).unwrap()
-            else {
-                panic!("keyboard o should observe an externally submitted request")
-            };
-            assert_eq!(request_id, REQUEST_ID);
-            ipc::write_response(
-                &mut status_stream,
-                &ResponseEnvelope::v1(ResponseMessage::Status {
-                    request_id: request_id.clone(),
-                    state: RequestStatus::Succeeded,
-                }),
-            )
-            .unwrap();
-
-            let mut results_stream = listener.accept().unwrap().0;
-            let ipc::IncomingRequest::Results(query) =
-                ipc::read_incoming_request(&mut results_stream).unwrap()
-            else {
-                panic!("observation should use native results paging")
-            };
-            assert_eq!(query.request_id, REQUEST_ID);
-            let mut buffer = ResultBuffer::new();
-            buffer.begin(&query.request_id, Lane::Decisions).unwrap();
-            buffer
-                .append(
-                    &query.request_id,
-                    ResultEvent::DecisionResult {
-                        answers: serde_json::json!({"answer":PRIVATE_RESULT})
-                            .as_object()
-                            .unwrap()
-                            .clone(),
-                        native_latency: Some(Duration::from_nanos(17)),
-                        native_usage: Some(
-                            serde_json::json!({"fixture_tokens": 1})
-                                .as_object()
-                                .unwrap()
-                                .clone(),
-                        ),
-                    },
-                )
-                .unwrap();
-            buffer
-                .terminal(&query.request_id, ResultTerminal::Succeeded)
-                .unwrap();
-            let page = buffer
-                .page(&query.request_id, query.after_cursor, MAX_PAGE_BYTES)
-                .unwrap();
-            ipc::write_response(
-                &mut results_stream,
-                &ResponseEnvelope::v2_results(ResponseMessage::Results {
-                    request_id: query.request_id,
-                    state: RequestStatus::Succeeded,
-                    after_cursor: query.after_cursor,
-                    byte_budget: query.byte_budget,
-                    page,
-                }),
-            )
-            .unwrap();
-
-            let mut cancel_stream = listener.accept().unwrap().0;
-            let ipc::IncomingRequest::Control(ClientRequest::Cancel { request_id }) =
-                ipc::read_incoming_request(&mut cancel_stream).unwrap()
-            else {
-                panic!("keyboard c should issue exactly one Cancel")
-            };
-            assert_eq!(request_id, REQUEST_ID);
-            ipc::write_response(
-                &mut cancel_stream,
-                &ResponseEnvelope::v1(ResponseMessage::Accepted {
-                    request_id,
-                    operation: AcceptedOperation::Cancel,
-                    state: RequestStatus::Cancelled,
-                }),
-            )
-            .unwrap();
-        });
-
-        let mut app = fixture.app();
-        app.handle_key(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE))
-            .unwrap();
-        assert_eq!(
-            app.stack_coordinator_socket_dir,
-            Some(socket_directory.path().to_path_buf())
-        );
-        let selected = app
-            .stack_catalog
-            .as_ref()
-            .unwrap()
-            .list()
-            .iter()
-            .position(|profile| profile.key.profile_id.as_str() == "semif-fixture")
-            .unwrap();
-        app.stack_catalog_state.select(Some(selected));
-        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
-            .unwrap();
-        assert_eq!(app.input_mode, InputMode::Normal);
-        assert!(app
-            .status
-            .contains("coordinator task submission has been retired"));
-        assert!(app.task_form_editor.is_none());
-        assert!(app.coordinator_workbench.is_none());
-        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE))
-            .unwrap();
-        for character in REQUEST_ID.chars() {
-            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
-                .unwrap();
-        }
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
-            .unwrap();
-        assert_eq!(app.coordinator_request_id.as_deref(), Some(REQUEST_ID));
-
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while app.coordinator_action_pending && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(5));
-            app.drain_background_events();
-        }
-        assert!(!app.coordinator_action_pending);
-        assert!(app.status.contains("native results refreshed"));
-        assert_eq!(app.coordinator_request_id.as_deref(), Some(REQUEST_ID));
-        assert!(app.coordinator_results_available);
-        assert!(app.coordinator_output_complete);
-        assert!(!app.status.contains(PRIVATE_RESULT));
-        assert!(!app.log.iter().any(|line| line.contains(PRIVATE_RESULT)));
-        assert!(app.job_history.records().is_empty());
-
-        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
-        terminal.draw(|frame| app.draw(frame)).unwrap();
-        assert!(terminal_text(&terminal).contains(RESULT_PREVIEW));
-        assert!(terminal_text(&terminal).contains("Private native result panel"));
-        assert!(terminal_text(&terminal).contains(PRIVATE_RESULT));
-
-        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
-            .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while app.coordinator_action_pending && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(5));
-            app.drain_background_events();
-        }
-        assert!(!app.coordinator_action_pending);
-        assert!(app.status.contains("Cancel acknowledged"));
-        server.join().unwrap();
     }
 
     #[test]
@@ -13559,7 +12662,6 @@ mod tests {
         let previous_sessions = app.chat_sessions.clone();
         let previous_stream_id = app.chat_stream_request_id;
 
-        assert!(app.stack_coordinator_socket_dir.is_none());
         // Non-chat models before the Chat route must not shift the filtered
         // picker index when the exact route is selected.
         app.chat_non_chat_model_ids = vec![
@@ -13610,7 +12712,6 @@ mod tests {
             SessionPending,
             ConnectionPending,
             ChangedProfile,
-            CoordinatorRequestPending,
         }
 
         let cases = [
@@ -13624,10 +12725,6 @@ mod tests {
             (Refusal::SessionPending, "active Chat response or session"),
             (Refusal::ConnectionPending, "current Chat connection"),
             (Refusal::ChangedProfile, "profile changed"),
-            (
-                Refusal::CoordinatorRequestPending,
-                "A coordinator request is pending or nonterminal",
-            ),
         ];
 
         for (case, expected_status) in cases {
@@ -13669,9 +12766,6 @@ mod tests {
                     "models:\n  local-chat:\n    cmd: server --embedding\n",
                 )
                 .unwrap(),
-                Refusal::CoordinatorRequestPending => {
-                    app.coordinator_request_id = Some("caller:pending".into());
-                }
                 Refusal::MissingModel
                 | Refusal::DisabledProfile
                 | Refusal::DisabledModel

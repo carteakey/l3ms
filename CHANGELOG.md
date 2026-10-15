@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### Breaking changes
+- Remove the retained-ID coordinator clients: the CLI flags
+  `--coordinator-status`, `--coordinator-cancel`, `--request-results`,
+  `--request-output`, `--artifact-chunk` (with its `--artifact-*`, `--request-lane`,
+  `--after-cursor`, `--result-page-bytes` options) and `--coordinator-socket-dir`,
+  the Stack tab's observe (`o`) mode and retained-ID panel, and the `ipc`,
+  `local_ipc`, `result_buffer`, `result_consumer`, `client` and
+  `coordinator_workbench` modules. Stack `c` now cancels the active foreground
+  native task. Net `src/` change: -11,123 lines (68,873 to 57,750).
 - Retire the branch-added `--coordinator-managed-session` server and hidden
   engine/job helper entrypoints, with their private transport, ownership stores
   and duplicate chat implementation. Native CLI/UI execution, the actual Chat

@@ -77,7 +77,6 @@ pub enum CommandId {
     StackCatalogSelectNext,
     StackCatalogRefresh,
     StackCatalogForm,
-    StackCatalogObserve,
     StackCatalogCancel,
     ParamBuilderToggleFocus,
     ParamBuilderNextParam,
@@ -176,7 +175,7 @@ pub enum CommandId {
 impl CommandId {
     /// Every command identifier. Kept in declaration order for completeness
     /// checks and integrations which want to validate their dispatch table.
-    pub const ALL: [Self; 103] = [
+    pub const ALL: [Self; 102] = [
         Self::Quit,
         Self::ShowHelp,
         Self::ShowPalette,
@@ -193,7 +192,6 @@ impl CommandId {
         Self::StackCatalogSelectNext,
         Self::StackCatalogRefresh,
         Self::StackCatalogForm,
-        Self::StackCatalogObserve,
         Self::StackCatalogCancel,
         Self::ParamBuilderToggleFocus,
         Self::ParamBuilderNextParam,
@@ -301,7 +299,6 @@ impl CommandId {
             Self::StackCatalogSelectNext => "stack-catalog.select-next",
             Self::StackCatalogRefresh => "stack-catalog.refresh",
             Self::StackCatalogForm => "stack-catalog.form",
-            Self::StackCatalogObserve => "stack-catalog.observe",
             Self::StackCatalogCancel => "stack-catalog.cancel",
             Self::ParamBuilderToggleFocus => "param-builder.toggle-focus",
             Self::ParamBuilderNextParam => "param-builder.next-param",
@@ -688,22 +685,13 @@ pub static COMMANDS: &[CommandSpec] = &[
         ]
     ),
     command!(
-        StackCatalogObserve,
-        StackCatalog,
-        "o",
-        "Observe request",
-        "Stack Catalog: query retained status and native results",
-        true,
-        ["coordinator", "status", "results", "native output"]
-    ),
-    command!(
         StackCatalogCancel,
         StackCatalog,
         "c",
-        "Cancel request",
-        "Stack Catalog: cancel a retained caller request ID",
+        "Cancel task",
+        "Stack Catalog: cancel the active foreground native task",
         true,
-        ["coordinator", "stop", "request"]
+        ["stop", "cancel", "task"]
     ),
     command!(
         PreviousTab,
