@@ -1201,7 +1201,7 @@ Recovery now preflights every retained runtime/role and manager observation befo
 the first Stop, rather than discovering a later unsupported intent after partial
 cleanup. This does not enable mixed-runtime recovery. The remaining durable
 Stop-stage, legacy-record and pre-dispatch job-association requirements are captured
-in [crash-recovery-contract.md](crash-recovery-contract.md). The updated checkpoint
+in [crash-recovery-contract.md](history/crash-recovery-contract.md). The updated checkpoint
 passes **859 root tests, 1 ignored**, strict all-target Clippy, formatting and
 whitespace checks. No live service action was performed.
 
@@ -1464,7 +1464,7 @@ The single-supervisor model-free live probe passed on 2026-10-07: named FD
 handoff, actual helper/backend namespace equality and host separation,
 coordinator-only Unix transport, one native proof GET, exact-generation stop,
 process birth-identity disappearance and empty/removed cgroup. Existing live
-services and GPU state were unchanged. See [measured launch gate](private-engine-probe.md).
+services and GPU state were unchanged. See [measured launch gate](history/private-engine-probe.md).
 Real native health, model/TTS execution and coordinated GPU switching remain open.
 
 Combined verification after the embedding/health/drain slice:
@@ -1492,7 +1492,7 @@ verified daemon/process-group cleanup. Eight offline harness regressions pass.
 See [Nagi evidence](nagi-acceptance.md). Explicit owned-engine stack-root
 environment handoff and its actual-child fixtures also pass. No
 existing service was stopped in this continuation; nothing was pushed/published.
-The [managed foreground integration contract](managed-session-contract.md)
+The [managed foreground integration contract](history/managed-session-contract.md)
 records the concrete remaining orchestration and ingress gates.
 
 Root verification after accepted-route Breeze protection: **689 passed,
@@ -1616,7 +1616,7 @@ CAR-220 Phase 9, and CAR-221 Phase 10.
 | 2026-09-30 | Native path/recipe verification | Catalog refresh preserves canonical configured roots even for empty lanes. Six dispatch-time path tests reject missing/empty/nonregular files, symlink escapes, and changed runtime identity. Twelve native recipe tests cover actual Breeze mode flags, clone-file checks/path anchoring, explicit decision devices, bounded/redacted stdin and argv, missing interpreters, and unsupported workflow/simulation dispatch. These preparations start no engines. |
 | 2026-09-30 | Decision stdin compatibility | Added optional `--input-stdin` with a bounded UTF-8 `{state,questions}` JSON envelope; malformed input is rejected before engine construction. Legacy inline/benchmark flags remain supported. Eleven child Python safety/setup tests pass; no environment or model was installed. |
 | 2026-09-30 | Supervised local decision execution | Added a Linux child-group runner with bounded nonblocking stdin/output, distinct stdout/stderr under one shared cap, deadline/cancellation checks, and independently bounded recovery. The leader stays unreaped until the final owned-group signal; after reaping only a non-signalling absence probe is used. Nine runner tests pass. The concrete local decision adapter prepares/executes/decodes harmless fixtures with offline model flags, validates native engine labels/answers, and preserves native latency/usage; five decoder/execution tests pass. Escaped/daemonized descendants remain outside the process-group proof; local cleanup cannot establish remote Comfy cancellation or GPU release. Hosted execution remains gated by SDK retry/auth verification; standalone hosted CLI is unaffected. |
-| 2026-09-30 | Combined adapter checkpoint | Root full suite: **373 passed, 1 ignored**, plus fmt, Clippy, and whitespace checks. Changes are committed locally on `feature/l3ms-monorepo`; no migration service switch, real model pilot, endpoint cutover, push, or publication occurred. Pi delegation was attempted with a read-only task and timed out; further Pi use is deferred at the user's request. Implementation assumptions and release gates are documented in [execution-contracts.md](execution-contracts.md). |
+| 2026-09-30 | Combined adapter checkpoint | Root full suite: **373 passed, 1 ignored**, plus fmt, Clippy, and whitespace checks. Changes are committed locally on `feature/l3ms-monorepo`; no migration service switch, real model pilot, endpoint cutover, push, or publication occurred. Pi delegation was attempted with a read-only task and timed out; further Pi use is deferred at the user's request. Implementation assumptions and release gates are documented in [execution-contracts.md](history/execution-contracts.md). |
 
 ## Historical coordinator prototype archive — superseded 2026-10-15
 
@@ -1834,7 +1834,7 @@ responsive status/cancel, result pages, timeout and active shutdown cleanup,
 output-quota preflight, GPU refusal and restart without replay. Explicit foreground
 startup reads a strict bounded private configuration and handles SIGINT/SIGTERM
 cooperatively. The normal control-only loop and standalone defaults are unchanged.
-See [foreground-coordinator.md](foreground-coordinator.md).
+See [foreground-coordinator.md](history/foreground-coordinator.md).
 
 One-shot CLI Submit uses a shared bounded nofollow reader and caller-owned IDs.
 Private language SSE and Comfy submission fixtures verify native HTTP over the
@@ -1851,7 +1851,7 @@ browser availability check still returned no enabled apps or browsers, so actual
 site visual/mobile acceptance remains open. Full-port acceptance and publication
 are not complete.
 
-The subsequent [model-free manager namespace probe](private-engine-probe.md)
+The subsequent [model-free manager namespace probe](history/private-engine-probe.md)
 disproved the proposed two-unit namespace-join topology on this installed user
 manager: declared join properties still left the bridge in the host namespace.
 Removing the join produced two genuinely isolated namespaces; a startup delay
@@ -1884,7 +1884,7 @@ framing, bounded deadlines/attempts, native correlation and lost Submit replies
 without retry. The all-target suite passes 617 tests with one ignored; strict
 denied-warning Clippy passes. CPU startup and gateway sessions share scoped
 SIGINT/SIGTERM ownership without changing normal startup. See
-[http-gateway.md](http-gateway.md).
+[http-gateway.md](history/http-gateway.md).
 
 The internal single-service supervisor entrypoint also compiles and passes five
 argument/descriptor-contract tests. Its process-cleanup regressions, typed manager
