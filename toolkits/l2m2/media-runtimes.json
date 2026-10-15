@@ -52,6 +52,7 @@
       "id": "yue2-music",
       "name": "YuE2 foundation music generation",
       "runtime": "YuE2 Python",
+      "device": "cuda",
       "variant": "3B BF16 / FP8 AR, flow matching NAR, YuE2-Vae 48kHz stereo",
       "tasks": ["music"],
       "inputs": ["text", "lyrics", "abc"],

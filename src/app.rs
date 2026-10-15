@@ -402,7 +402,8 @@ impl TaskFormEditor {
         let direct_native_decision_images = direct_native_decision
             && crate::control::requests::decision_profile_supports_images(profile);
         let direct_breeze_speech = is_direct_breeze_speech_profile(profile);
-        let direct_native_music = is_direct_cuda_music_profile(profile);
+        let direct_native_music =
+            is_direct_cuda_music_profile(profile) || is_direct_yue2_profile(profile);
         let direct_native_h3 = is_direct_cuda_h3_profile(profile);
         let direct_native_ltx = is_direct_cuda_ltx_profile(profile);
         let direct_blender_headless = is_direct_blender_headless_profile(profile);
@@ -4469,9 +4470,9 @@ impl App {
             } else if is_direct_cuda_ltx_profile(&profile) {
                 "Foreground CUDA LTX-2.5 form open · choose video or music; both generate synchronized MP4 · prompt/argv stay in memory · the selected GPU must be idle before starting · run once with Ctrl+Enter".into()
             } else if is_direct_cuda_h3_profile(&profile) {
-                "Foreground CUDA MiniMax H3 form open · choose music, tts, or video; prompt/argv stay in memory · the selected GPU must be idle before starting · run once with Ctrl+Enter".into()
+                "MiniMax H3 form open · music/tts use llama-swap; connect Chat first · video needs an idle GPU · Ctrl+Enter runs once".into()
             } else if is_direct_cuda_music_profile(&profile) {
-                "Foreground CUDA HeartMuLa music form open · the selected GPU must be idle before starting · prompt/lyrics stay in memory · run once with Ctrl+Enter".into()
+                "HeartMuLa music form open · served by llama-swap (/audiocpp/) · connect Chat first · Ctrl+Enter runs once".into()
             } else if direct_run::is_supported_cuda_breeze_profile(&profile) {
                 "Breeze speech form open · served by llama-swap (/audiocpp/) · connect Chat first · run once with Ctrl+Enter".into()
             } else if is_direct_cuda_profile(&profile) {
@@ -4708,12 +4709,15 @@ impl App {
                 .inspect(request.profile())
                 .is_some_and(direct_run::is_llamacpp_decision_profile);
         let remote_decision = hosted_jev_decision || llamacpp_decision;
-        let cuda_native = catalog
-            .inspect(request.profile())
-            .is_some_and(is_direct_cuda_profile);
-        let requires_idle_gpu_window = catalog
-            .inspect(request.profile())
-            .is_some_and(direct_run::requires_operator_gpu_window);
+        let routed_audio = is_routed_speech_request(&catalog, &request);
+        let cuda_native = !routed_audio
+            && catalog
+                .inspect(request.profile())
+                .is_some_and(is_direct_cuda_profile);
+        let requires_idle_gpu_window = !routed_audio
+            && catalog
+                .inspect(request.profile())
+                .is_some_and(direct_run::requires_operator_gpu_window);
         let blender_headless = catalog
             .inspect(request.profile())
             .is_some_and(is_direct_blender_headless_profile);
@@ -4727,8 +4731,7 @@ impl App {
         } else {
             direct_native_task_label(&task)
         };
-        let routed_speech = is_routed_speech_request(&catalog, &request);
-        let language_adapter = if routed_speech {
+        let language_adapter = if routed_audio {
             match self.prepare_direct_routed_speech_adapter(&catalog, &request) {
                 Ok(adapter) => Some(adapter),
                 Err(message) => {
@@ -5007,7 +5010,7 @@ impl App {
         request: &crate::control::requests::InferenceRequest,
     ) -> Result<LanguageAdapter, String> {
         if !is_routed_speech_request(catalog, request) {
-            return Err("Routed speech is limited to the declared CUDA Breeze task".into());
+            return Err("Routed audio requires a declared audio.cpp audio task".into());
         }
         self.prepare_confirmed_chat_adapter(None, "speech")
     }
@@ -7283,9 +7286,11 @@ impl App {
         } else if editor.direct_native_ltx {
             "LTX-2.5 · video/music both generate synchronized MP4 · JSON argv only · prompt/settings stay in memory · GPU must be idle before starting"
         } else if editor.direct_native_h3 {
-            "MiniMax H3 · choose music/tts/video; JSON argv only · prompt stays in memory · GPU must be idle before starting"
+            "MiniMax H3 · music/tts via llama-swap (connect Chat); video needs idle GPU · JSON argv"
+        } else if is_direct_yue2_profile(&editor.profile_snapshot) {
+            "YuE2 · prepared/offline runtime only · JSON argv · GPU must be idle before starting"
         } else if editor.direct_native_music {
-            "HeartMuLa music · JSON argv only · prompt/lyrics stay in memory · GPU must be idle before starting"
+            "HeartMuLa · llama-swap (connect Chat first) · JSON argv · prompt/lyrics stay in memory"
         } else if editor.direct_breeze_speech && is_routed_breeze_profile(&editor.profile_snapshot)
         {
             "Breeze via llama-swap · needs a confirmed Chat connection · tts/clon/design fields stay task-specific"
@@ -7999,26 +8004,37 @@ fn is_hosted_direct_decision_profile(profile: &CatalogProfile) -> bool {
     profile.runtime.as_str() == "jev" && direct_run::is_supported_direct_decision_profile(profile)
 }
 
-/// CUDA Breeze speech runs through llama-swap's /audiocpp/ route.
+/// Native audio tasks run through llama-swap's /audiocpp/ route.
 #[cfg(target_os = "linux")]
 fn is_routed_speech_request(
     catalog: &Catalog,
     request: &crate::control::requests::InferenceRequest,
 ) -> bool {
-    matches!(
-        request,
-        crate::control::requests::InferenceRequest::Media {
-            input: crate::control::requests::MediaInput::Speech(_),
-            ..
-        }
-    ) && catalog
-        .inspect(request.profile())
-        .is_some_and(direct_run::is_supported_cuda_breeze_profile)
+    direct_run::is_routed_audio_script_request(catalog, request)
+        || matches!(
+            request,
+            crate::control::requests::InferenceRequest::Media {
+                input: crate::control::requests::MediaInput::Speech(_),
+                ..
+            }
+        ) && catalog
+            .inspect(request.profile())
+            .is_some_and(direct_run::is_supported_cuda_breeze_profile)
 }
 
 #[cfg(target_os = "linux")]
 fn is_direct_cuda_profile(profile: &CatalogProfile) -> bool {
     direct_run::is_supported_direct_cuda_profile(profile)
+}
+
+#[cfg(target_os = "linux")]
+fn is_direct_yue2_profile(profile: &CatalogProfile) -> bool {
+    direct_run::is_supported_direct_yue2_profile(profile)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_direct_yue2_profile(_profile: &CatalogProfile) -> bool {
+    false
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -8183,7 +8199,9 @@ fn direct_script_media_task_label(profile_id: &str, task: &str) -> &'static str 
         };
     }
     if profile_id == "heartmula-music" && task == "music" {
-        "CUDA music"
+        "HeartMuLa music"
+    } else if profile_id == "yue2-music" && task == "music" {
+        "CUDA YuE2 music"
     } else {
         "CUDA script media"
     }
@@ -8255,7 +8273,7 @@ fn is_direct_native_script_request(
 #[cfg(target_os = "linux")]
 fn is_direct_script_media_task(profile_id: &str, task: &str) -> bool {
     match profile_id {
-        "heartmula-music" => task == "music",
+        "heartmula-music" | "yue2-music" => task == "music",
         "minimax-h3" => matches!(task, "music" | "tts" | "video"),
         "ltx-2.5" => matches!(task, "music" | "video"),
         "blender-3d" => matches!(task, "3d" | "render" | "image"),
@@ -10232,6 +10250,44 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn yue2_form_uses_the_existing_music_argv_editor() {
+        let fixture = AppFixture::new();
+        write_heartmula_music_media_manifest(&fixture);
+        let manifest = fixture.root.join("toolkits/l2m2/media-runtimes.json");
+        let text = fs::read_to_string(&manifest)
+            .unwrap()
+            .replace("generate-heartmula-music.sh", "generate-yue2.sh")
+            .replace("heartmula-music", "yue2-music")
+            .replace("audio.cpp", "YuE2 Python");
+        fs::write(manifest, text).unwrap();
+        fs::create_dir_all(fixture.root.join("toolkits/l2m2/media-models")).unwrap();
+        fs::write(
+            fixture
+                .root
+                .join("toolkits/l2m2/media-models/generate-yue2.sh"),
+            "#!/bin/sh\nexit 99\n",
+        )
+        .unwrap();
+        let mut app = fixture.app();
+        focus_stack_profile_by_id(&mut app, "yue2-music");
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+            .unwrap();
+        let editor = app.task_form_editor.as_mut().unwrap();
+        assert!(editor.is_direct_native());
+        assert_eq!(editor.declared_tasks, ["music"]);
+        editor.values.script_argv =
+            r#"["--prompt","private style","--lyrics","private lyrics"]"#.into();
+        let draft = editor.to_draft().unwrap();
+        let catalog = app.stack_catalog.as_ref().unwrap();
+        let (request, _) = build_direct_native(catalog, draft).unwrap();
+        assert!(is_direct_native_script_request(catalog, &request));
+        assert!(!is_routed_speech_request(catalog, &request));
+        assert!(app.direct_native_job.is_none());
+        assert!(app.job_history.records().is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn heartmula_form_keeps_argv_ephemeral_and_uses_no_coordinator() {
         let fixture = AppFixture::new();
         write_heartmula_music_media_manifest(&fixture);
@@ -10278,7 +10334,7 @@ mod tests {
             ]
         );
 
-        assert!(app.status.contains("selected GPU must be idle"));
+        assert!(app.status.contains("llama-swap"));
         assert!(!app.status.contains("private music prompt"));
         assert!(!app.status.contains("private lyrics"));
         assert!(
@@ -10353,7 +10409,7 @@ mod tests {
             assert!(editor.fields.contains(&TaskFormField::MediaScriptArgv));
         }
 
-        assert!(app.status.contains("selected GPU must be idle"));
+        assert!(app.status.contains("music/tts use llama-swap"));
         assert!(!app.status.contains("private H3 input"));
         assert!(app
             .log

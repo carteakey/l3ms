@@ -31,6 +31,22 @@ The server config registers three model ids over the same GGUF; with
 
 ## Evidence
 
+Branch follow-up: HeartMuLa music and H3 music/tts use
+`POST /audiocpp/v1/tasks/run` with the existing `{"args":[...]}` CLI/form input
+translated to native request fields. Use the same `LLAMA_SWAP_URL` and
+`LLAMA_SWAP_API_KEY`, or a confirmed TUI Chat connection. Output remains
+`result.wav`. H3 video remains direct because it also needs RGB24-to-MP4
+post-processing. Server model paths, threads and session options now belong in
+`toolkits/l2m2/audiocpp-server.json`; shell-wrapper environment overrides do not
+configure routed jobs. The native `options.duration_seconds` is normalized to
+HeartMuLa's `duration_sec` by the pinned engine.
+
+These new routes have fixture coverage, **not real-model acceptance**. On
+2026-10-15 the conventional local HeartMuLa/H3/LTX/YuE2 weight directories were
+absent, and `/mnt/storage` was only an autofs mount without mounted storage.
+No model download, NAS mutation, live config reload or engine eviction was
+performed for this follow-up. Live acceptance remains a required TODO gate.
+
 `toolkits/l2m2/maintenance/test-audiocpp-via-llama-swap.sh [cpu|cuda]` starts an
 isolated router on port 18932 (never the live service), runs the four modes,
 and checks that `/unload` stops the audio.cpp process.
@@ -86,8 +102,8 @@ end state for them, not unfinished work:
 | --- | --- | --- |
 | `ltx-2.5` (video, music) | LTX-2 Python via `uv` | A script, not an inference server. Nothing for llama-swap to start, health-check or proxy. |
 | `yue2-music` | YuE2 Python | Same. The pinned audio.cpp build also has no `yue2` loader (built with `minimax_h3,heartmula,breeze_tts`). |
-| `blender-3d` | Blender 5.2 / blender-mcp | An application, not a model engine. CPU renders need no GPU window. |
-| `minimax-h3`, `heartmula-music` | audio.cpp | **Routable.** Both are audio.cpp families, so `audiocpp_auto` could serve them. Not done: their 12 GB profiles use staged, layerwise weights, and a server entry needs its own CUDA run before it replaces the verified scripts. |
+| `blender-3d` | Blender 5.2 / blender-mcp | An application, not a model engine. Root execution guards the shared GPU because the scene chooses its backend. |
+| `minimax-h3` video | audio.cpp + MP4 post-processing | The script converts the additional RGB24 video artifact to MP4; the routed audio response is not equivalent. |
 
-If H3 and HeartMuLa move to `audiocpp_auto`, the window code shrinks but cannot
-disappear while LTX and YuE2 exist.
+HeartMuLa and H3 audio use `audiocpp_auto` on this branch, subject to the live
+acceptance gate above. The window cannot disappear while direct lanes exist.

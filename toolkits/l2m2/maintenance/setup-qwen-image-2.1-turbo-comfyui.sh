@@ -3,6 +3,11 @@
 set -euo pipefail
 
 root="$(cd -- "$(dirname -- "$BASH_SOURCE")/.." && pwd)"
+downloader="$root/model_downloader/download_hf_model.py"
+if [[ ! -f "$downloader" ]]; then
+    downloader="$root/../../model_downloader/download_hf_model.py"
+fi
+[[ -f "$downloader" ]] || { echo "Model downloader missing: $downloader" >&2; exit 1; }
 workspace="$root/vendor/ComfyUI"
 manifest="$root/models/qwen-image-2.1-turbo-comfyui-files.txt"
 comfy_revision="6bfaacc67c2103481e5f0c84d75257cd0581d86a"
@@ -72,7 +77,7 @@ while read -r repo revision repo_file relative expected_size expected_sha; do
     mkdir -p "$target_dir"
     if [[ ! -f "$path" ]]; then
         echo "Downloading $repo_file from $repo at $revision"
-        HF_HUB_DISABLE_XET=1 "$root/.venv-comfy/bin/python" "$root/model_downloader/download_hf_model.py" \
+        HF_HUB_DISABLE_XET=1 "$root/.venv-comfy/bin/python" "$downloader" \
             --repo-id "$repo" --revision "$revision" --allow-patterns "$repo_file" --local-dir "$target_dir"
     fi
     actual_size="$(stat -c %s "$path")"

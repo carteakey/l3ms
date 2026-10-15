@@ -16,7 +16,7 @@ use serde_json::Value;
 use super::catalog::{Catalog, Lane, ProfileKey};
 use super::decision::{decode_systemone_response, NativeDecisionResult};
 use super::requests::{
-    EmbeddingUsage, InferenceRequest, InferenceResult, SpeechInput, SpeechMode,
+    EmbeddingUsage, InferenceRequest, InferenceResult, MediaInput, SpeechInput, SpeechMode,
     MAX_EMBEDDING_INPUTS, MAX_EMBEDDING_JSON_BYTES,
 };
 use super::routes::{resolve_profile_route, NativeRoute, ResolvedProfileRoute};
@@ -281,6 +281,52 @@ impl LanguageAdapter {
     }
 
     fn audiocpp_speech_url(&self) -> Result<reqwest::Url, LanguageFailure> {
+        self.audiocpp_url(&["v1", "audio", "speech"])
+    }
+
+    /// Execute one admitted HeartMuLa or H3 audio script request through the
+    /// router. The caller owns catalog/route revalidation and lifecycle admission.
+    /// The established script argv input is translated locally; no shell runs.
+    pub fn execute_routed_audio_script(
+        &self,
+        request: &InferenceRequest,
+        context: &OperationContext<'_>,
+    ) -> Result<SpeechAudio, LanguageFailure> {
+        check_context(context, DispatchDisposition::NoDispatch)?;
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return Err(failure(
+                DispatchDisposition::NoDispatch,
+                LanguageErrorKind::Configuration,
+            ));
+        }
+        let url = self.audiocpp_url(&["v1", "tasks", "run"])?;
+        let body = routed_audio_request_body(request)?;
+        check_context(context, DispatchDisposition::NoDispatch)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| {
+                failure(
+                    DispatchDisposition::NoDispatch,
+                    LanguageErrorKind::Configuration,
+                )
+            })?;
+        runtime.block_on(async {
+            let client = self.http_client_without_proxy(context)?;
+            let http = client
+                .post(url)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .header(reqwest::header::ACCEPT, "application/json")
+                .body(body);
+            // JSON wraps a base64 WAV: cap both its wire and decoded sizes.
+            let body = send_json_body(http, context, MAX_AUDIO_WIRE_BYTES).await?;
+            let audio = parse_routed_audio_response(&body)?;
+            check_context(context, DispatchDisposition::Uncertain)?;
+            Ok(audio)
+        })
+    }
+
+    fn audiocpp_url(&self, suffix: &[&str]) -> Result<reqwest::Url, LanguageFailure> {
         let configuration = failure(
             DispatchDisposition::NoDispatch,
             LanguageErrorKind::Configuration,
@@ -292,7 +338,8 @@ impl LanguageAdapter {
         let mut segments = url.path_segments_mut().map_err(|_| configuration)?;
         segments
             .pop_if_empty()
-            .extend(["audiocpp", "v1", "audio", "speech"]);
+            .push("audiocpp")
+            .extend(suffix.iter().copied());
         drop(segments);
         Ok(url)
     }
@@ -567,6 +614,202 @@ pub struct SpeechAudio {
 }
 
 const MAX_SPEECH_BYTES: usize = 128 * 1024 * 1024;
+const MAX_AUDIO_WIRE_BYTES: usize = MAX_SPEECH_BYTES.div_ceil(3) * 4 + 64 * 1024;
+
+fn routed_audio_request_body(request: &InferenceRequest) -> Result<Vec<u8>, LanguageFailure> {
+    let invalid = failure(
+        DispatchDisposition::NoDispatch,
+        LanguageErrorKind::InvalidRequest,
+    );
+    let InferenceRequest::Media {
+        profile,
+        input: MediaInput::Script { task, args },
+    } = request
+    else {
+        return Err(invalid);
+    };
+    let heartmula = profile.profile_id.as_str() == "heartmula-music";
+    if profile.lane != Lane::Media
+        || !(if heartmula {
+            task.as_str() == "music" && super::native_commands::is_supported_heartmula_args(args)
+        } else {
+            profile.profile_id.as_str() == "minimax-h3"
+                && matches!(task.as_str(), "music" | "tts")
+                && super::native_commands::is_supported_h3_args(args, task.as_str())
+        })
+    {
+        return Err(invalid);
+    }
+    let mut options = if heartmula {
+        serde_json::json!({"duration_seconds":"30", "num_inference_steps":"10", "seed":"42",
+            "temperature":"1.0", "top_k":"50", "guidance_scale":"1.5"})
+    } else {
+        // The native H3 wrapper uses task gen for both music and tts.
+        serde_json::json!({"num_inference_steps":"20", "seed":"42", "guidance_scale":"1.0",
+            "width":"32", "height":"32", "num_frames":"241", "return_video":"false",
+            "text_layerwise":"true", "text_layerwise_batch":"1", "dit_layerwise":"true",
+            "dit_layerwise_batch":"1", "dit_mlp_chunk_tokens":"1024"})
+    };
+    let mut prompt = String::new();
+    let mut lyrics = String::new();
+    let mut tags = None;
+    let mut instrumental = false;
+    let mut index = 0;
+    while index < args.len() {
+        let flag = args[index].as_str();
+        if flag == "--instrumental" {
+            instrumental = true;
+            index += 1;
+            continue;
+        }
+        let value = args.get(index + 1).ok_or(invalid)?;
+        if value.len() > MAX_OUTPUT_BYTES {
+            return Err(invalid);
+        }
+        match flag {
+            "--prompt" | "--text" => prompt = value.clone(),
+            "--prompt-file" => prompt = bounded_audio_text_file(value)?,
+            "--lyrics" => lyrics = value.clone(),
+            "--lyrics-file" => lyrics = bounded_audio_text_file(value)?,
+            "--tags" => tags = Some(value.clone()),
+            "--request-option" => {
+                let (key, value) = value.split_once('=').ok_or(invalid)?;
+                options[key] = value.into();
+            }
+            _ => {
+                let key = match flag {
+                    "--duration" | "--duration-seconds" => "duration_seconds",
+                    "--steps" | "--num-inference-steps" => "num_inference_steps",
+                    "--seed" => "seed",
+                    "--temperature" => "temperature",
+                    "--top-k" => "top_k",
+                    "--guidance-scale" => "guidance_scale",
+                    "--width" => "width",
+                    "--height" => "height",
+                    "--frames" => "num_frames",
+                    _ => return Err(invalid),
+                };
+                // Keep the native option strings: the pinned engine validates
+                // their numeric ranges, just as it does for the script CLI.
+                options[key] = value.as_str().into();
+            }
+        }
+        index += 2;
+    }
+    if prompt.is_empty() || prompt.contains('\0') || lyrics.contains('\0') {
+        return Err(invalid);
+    }
+    if heartmula {
+        let mut tags = tags.unwrap_or_else(|| prompt.clone());
+        if instrumental {
+            tags.push_str(",instrumental,no vocals");
+        }
+        options["tags"] = tags.into();
+    }
+    let body = serde_json::to_vec(&serde_json::json!({
+        "model": profile.profile_id.as_str(),
+        "request": {"text": prompt, "lyrics": lyrics, "options": options}
+    }))
+    .map_err(|_| invalid)?;
+    if body.len() > MAX_OUTPUT_BYTES {
+        return Err(invalid);
+    }
+    Ok(body)
+}
+
+fn bounded_audio_text_file(path: &str) -> Result<String, LanguageFailure> {
+    use std::io::Read;
+    let invalid = failure(
+        DispatchDisposition::NoDispatch,
+        LanguageErrorKind::InvalidRequest,
+    );
+    let mut open = std::fs::OpenOptions::new();
+    open.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // A malicious or replaced FIFO must not block before cancellation can
+        // be observed; metadata below still requires a regular file.
+        open.custom_flags(libc::O_NONBLOCK);
+    }
+    let mut file = open.open(path).map_err(|_| invalid)?;
+    let metadata = file.metadata().map_err(|_| invalid)?;
+    if !metadata.is_file() || metadata.len() > MAX_OUTPUT_BYTES as u64 {
+        return Err(invalid);
+    }
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(MAX_OUTPUT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| invalid)?;
+    if bytes.len() > MAX_OUTPUT_BYTES {
+        return Err(invalid);
+    }
+    let text = String::from_utf8(bytes).map_err(|_| invalid)?;
+    // Bash's $(<file) removes trailing newlines in the existing wrappers.
+    Ok(text.trim_end_matches('\n').to_owned())
+}
+
+fn parse_routed_audio_response(body: &[u8]) -> Result<SpeechAudio, LanguageFailure> {
+    let protocol = failure(DispatchDisposition::Uncertain, LanguageErrorKind::Protocol);
+    #[derive(Deserialize)]
+    struct Response {
+        audio: String,
+        sample_rate: u32,
+        channels: u16,
+    }
+    let response: Response = serde_json::from_slice(body).map_err(|_| protocol)?;
+    // The pinned server emits canonical PCM16 RIFF with a 44-byte header.
+    // Check the base64 grammar before using the shared decoder (which also
+    // accepts the unpadded PCM event representation).
+    let encoded = response.audio.as_bytes();
+    let padding = encoded
+        .iter()
+        .rev()
+        .take_while(|&&byte| byte == b'=')
+        .count();
+    if encoded.is_empty()
+        || !encoded.len().is_multiple_of(4)
+        || padding > 2
+        || !encoded[..encoded.len() - padding]
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'+' | b'/'))
+    {
+        return Err(protocol);
+    }
+    let wave = decode_base64(&response.audio).ok_or(protocol)?;
+    if wave.len() > MAX_SPEECH_BYTES {
+        return Err(failure(
+            DispatchDisposition::Uncertain,
+            LanguageErrorKind::TooLarge,
+        ));
+    }
+    let short = |offset| u16::from_le_bytes(wave[offset..offset + 2].try_into().unwrap());
+    let integer = |offset| u32::from_le_bytes(wave[offset..offset + 4].try_into().unwrap());
+    if wave.len() <= 44
+        || &wave[..4] != b"RIFF"
+        || &wave[8..16] != b"WAVEfmt "
+        || &wave[36..40] != b"data"
+        || integer(4) as usize + 8 != wave.len()
+        || integer(16) != 16
+        || short(20) != 1
+        || short(22) != response.channels
+        || !(1..=8).contains(&response.channels)
+        || integer(24) != response.sample_rate
+        || !(8000..=384000).contains(&response.sample_rate)
+        || short(34) != 16
+        || short(32) != response.channels * 2
+        || integer(28) != response.sample_rate * u32::from(response.channels) * 2
+        || integer(40) as usize != wave.len() - 44
+        || (wave.len() - 44) % usize::from(response.channels * 2) != 0
+    {
+        return Err(protocol);
+    }
+    Ok(SpeechAudio {
+        wave,
+        chunks: Vec::new(),
+    })
+}
 /// Breeze-TTS-2 streams raw signed 16-bit little-endian mono PCM at 24 kHz.
 const SPEECH_SAMPLE_RATE: u32 = 24_000;
 
@@ -1840,6 +2083,192 @@ mod tests {
 
     fn speech_context() -> OperationContext<'static> {
         OperationContext::new(Instant::now() + Duration::from_secs(5), &NeverCancel)
+    }
+
+    fn audio_script(profile: &str, task: &str, args: &[&str]) -> InferenceRequest {
+        InferenceRequest::Media {
+            profile: ProfileKey::new(Lane::Media, profile).unwrap(),
+            input: MediaInput::Script {
+                task: super::super::catalog::Task::new(task).unwrap(),
+                args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+            },
+        }
+    }
+
+    fn routed_audio_fixture(body: Vec<u8>) -> (String, std::thread::JoinHandle<Value>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/prefix", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let (headers, request) = read_http_json_with_headers(
+                &mut stream,
+                "/prefix/audiocpp/v1/tasks/run",
+                MAX_OUTPUT_BYTES,
+            );
+            assert!(headers
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("authorization: Bearer audio-secret")));
+            assert!(headers
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("accept: application/json")));
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+            stream.write_all(&body).unwrap();
+            drop(stream);
+            listener.set_nonblocking(true).unwrap();
+            assert_listener_has_no_connection(&listener);
+            request
+        });
+        (endpoint, server)
+    }
+
+    #[test]
+    fn routed_audio_posts_once_and_decodes_the_native_wav_envelope() {
+        // 24 kHz mono PCM16, two samples; generated from the canonical header.
+        let encoded = "UklGRigAAABXQVZFZm10IBAAAAABAAEAwF0AAIC7AAACABAAZGF0YQQAAAAAAAEA";
+        let body = serde_json::to_vec(
+            &serde_json::json!({"audio":encoded,"sample_rate":24000,"channels":1}),
+        )
+        .unwrap();
+        for (profile, task, args) in [
+            (
+                "heartmula-music",
+                "music",
+                vec!["--prompt", "ambient", "--instrumental", "--duration", "8"],
+            ),
+            (
+                "minimax-h3",
+                "tts",
+                vec![
+                    "--text",
+                    "hello",
+                    "--frames",
+                    "49",
+                    "--request-option",
+                    "dit_layerwise_batch=2",
+                ],
+            ),
+        ] {
+            let (endpoint, server) = routed_audio_fixture(body.clone());
+            let audio = LanguageAdapter::new(&endpoint, Some("audio-secret"))
+                .unwrap()
+                .execute_routed_audio_script(&audio_script(profile, task, &args), &speech_context())
+                .unwrap();
+            assert_eq!(audio.wave, wav_from_pcm16(&[0, 0, 1, 0]));
+            assert!(audio.chunks.is_empty());
+            let request = server.join().unwrap();
+            assert_eq!(request["model"], profile);
+            if profile == "heartmula-music" {
+                assert_eq!(
+                    request["request"]["options"]["tags"],
+                    "ambient,instrumental,no vocals"
+                );
+                assert_eq!(request["request"]["options"]["duration_seconds"], "8");
+            } else {
+                assert_eq!(request["request"]["options"]["num_frames"], "49");
+                assert_eq!(request["request"]["options"]["return_video"], "false");
+                assert_eq!(request["request"]["options"]["dit_layerwise_batch"], "2");
+            }
+        }
+    }
+
+    #[test]
+    fn routed_audio_rejects_malformed_native_responses_after_dispatch() {
+        for body in [
+            b"{}".to_vec(),
+            b"not json".to_vec(),
+            br#"{"audio":"bm90IHdhdg==","sample_rate":24000,"channels":1}"#.to_vec(),
+        ] {
+            let (endpoint, server) = routed_audio_fixture(body);
+            let error = LanguageAdapter::new(&endpoint, Some("audio-secret"))
+                .unwrap()
+                .execute_routed_audio_script(
+                    &audio_script("minimax-h3", "music", &["--prompt", "x"]),
+                    &speech_context(),
+                )
+                .err()
+                .unwrap();
+            assert_eq!(
+                error,
+                failure(DispatchDisposition::Uncertain, LanguageErrorKind::Protocol)
+            );
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn routed_audio_translates_bounded_files_and_rejects_video_and_output_flags() {
+        let directory = tempfile::tempdir().unwrap();
+        let prompt = directory.path().join("prompt.txt");
+        let lyrics = directory.path().join("lyrics.txt");
+        std::fs::write(&prompt, "dreamy\n\n").unwrap();
+        std::fs::write(&lyrics, "verse\n").unwrap();
+        let request = audio_script(
+            "heartmula-music",
+            "music",
+            &[
+                "--prompt-file",
+                prompt.to_str().unwrap(),
+                "--lyrics-file",
+                lyrics.to_str().unwrap(),
+            ],
+        );
+        let body: Value =
+            serde_json::from_slice(&routed_audio_request_body(&request).unwrap()).unwrap();
+        assert_eq!(body["request"]["text"], "dreamy");
+        assert_eq!(body["request"]["lyrics"], "verse");
+        for request in [
+            audio_script("minimax-h3", "video", &["--prompt", "x"]),
+            audio_script(
+                "heartmula-music",
+                "music",
+                &["--prompt", "x", "--output", "/tmp/x"],
+            ),
+        ] {
+            assert!(routed_audio_request_body(&request).is_err());
+        }
+        std::fs::write(&lyrics, vec![b'x'; MAX_OUTPUT_BYTES + 1]).unwrap();
+        assert!(routed_audio_request_body(&request).is_err());
+    }
+
+    #[test]
+    fn routed_audio_cancellation_after_dispatch_is_uncertain_and_not_retried() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let flag = Arc::new(AtomicBool::new(false));
+        let server_flag = Arc::clone(&flag);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let _ = read_http_json_with_headers(
+                &mut stream,
+                "/audiocpp/v1/tasks/run",
+                MAX_OUTPUT_BYTES,
+            );
+            server_flag.store(true, Ordering::Release);
+            std::thread::sleep(Duration::from_millis(150));
+            listener.set_nonblocking(true).unwrap();
+            assert_listener_has_no_connection(&listener);
+        });
+        let cancellation = Flag(flag);
+        let context = OperationContext::new(Instant::now() + Duration::from_secs(2), &cancellation);
+        let error = LanguageAdapter::new(&endpoint, None)
+            .unwrap()
+            .execute_routed_audio_script(
+                &audio_script("heartmula-music", "music", &["--prompt", "x"]),
+                &context,
+            )
+            .err()
+            .unwrap();
+        assert_eq!(
+            error,
+            failure(DispatchDisposition::Uncertain, LanguageErrorKind::Cancelled)
+        );
+        server.join().unwrap();
     }
 
     #[test]

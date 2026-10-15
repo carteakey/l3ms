@@ -22,12 +22,14 @@ use super::catalog::{Catalog, Device};
 use super::cuda_device::CudaDevice;
 use super::language::SpeechAudio;
 use super::native_commands::{
-    is_supported_blender_request_route, is_supported_cpu_breeze_speech,
-    is_supported_h3_request_route, is_supported_heartmula_request_route,
-    is_supported_ltx_request_route, prepare_blender_recipe_for_route, prepare_breeze_speech_recipe,
-    prepare_breeze_speech_recipe_for_route, prepare_h3_recipe_for_route,
-    prepare_heartmula_music_recipe_for_route, prepare_ltx_recipe_for_route,
-    NativeOutputExpectation, CPU_BREEZE_PROFILE_ID,
+    is_supported_blender_request_route, is_supported_cpu_breeze_speech, is_supported_h3_args,
+    is_supported_h3_request_route, is_supported_heartmula_args,
+    is_supported_heartmula_request_route, is_supported_ltx_request_route,
+    is_supported_yue2_request_route, prepare_blender_recipe_for_route,
+    prepare_breeze_speech_recipe, prepare_breeze_speech_recipe_for_route,
+    prepare_h3_recipe_for_route, prepare_heartmula_music_recipe_for_route,
+    prepare_ltx_recipe_for_route, prepare_yue2_music_recipe_for_route, NativeOutputExpectation,
+    CPU_BREEZE_PROFILE_ID,
 };
 use super::process::{self, ProcessFailureDisposition, ProcessFailureKind, ProcessLimits};
 use super::requests::{InferenceRequest, MediaInput, SpeechMode};
@@ -40,6 +42,7 @@ const H3_RAW_VIDEO_NAME: &str = "minimax_h3_video_rgb24.json";
 const H3_VIDEO_NAME: &str = "result.mp4";
 const LTX_VIDEO_NAME: &str = H3_VIDEO_NAME;
 const BLENDER_IMAGE_NAME: &str = "result_0001.png";
+const YUE_SONG_DIRECTORY_NAME: &str = "song";
 const MAX_CAPTURE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_STREAM_CHUNKS: usize = 63;
 const MAX_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
@@ -191,6 +194,48 @@ pub(crate) fn execute_heartmula_music_on_device(
     })
 }
 
+/// Execute the declared YuE2 full-song script on its accepted CUDA route. The
+/// script is restricted to an existing Python environment and offline model
+/// resolution; the fixed result WAV is validated through the shared PCM path.
+pub(crate) fn execute_yue2_on_device(
+    catalog: &Catalog,
+    request: &InferenceRequest,
+    accepted_route: &ResolvedProfileRoute,
+    device: &CudaDevice,
+    job_directory: &Path,
+    context: &OperationContext<'_>,
+    recovery: RecoveryPolicy,
+) -> Result<MediaExecutionResult, MediaExecutionFailure> {
+    if !is_supported_yue2_request_route(request, accepted_route) {
+        return Err(not_dispatched(MediaExecutionErrorKind::InvalidRequest));
+    }
+    let output_root = validate_job_directory(job_directory)?;
+    ensure_absent(&output_root.join(OUTPUT_NAME))?;
+    ensure_absent(&output_root.join(CHUNKS_NAME))?;
+    // The YuE CLI writes into `<output>/song` before the runner can validate
+    // its final fixed WAV; reserve this native directory before spawning.
+    ensure_absent(&output_root.join(YUE_SONG_DIRECTORY_NAME))?;
+    let recipe =
+        prepare_yue2_music_recipe_for_route(catalog, request, accepted_route, &output_root)
+            .map_err(|_| not_dispatched(MediaExecutionErrorKind::InvalidRequest))?;
+
+    execute_script_recipe(
+        &recipe,
+        &output_root,
+        Some(device),
+        context,
+        recovery,
+        ScriptMode::YuePrepared,
+    )?;
+    let artifacts = discover_artifacts(&output_root, SpeechMode::Standard, context)?;
+    check_after_child(context)?;
+    Ok(MediaExecutionResult {
+        output_root,
+        mode: SpeechMode::Standard,
+        artifacts,
+    })
+}
+
 /// Run the declared MiniMax-H3 audio or synchronized audio/video script on its
 /// exact accepted CUDA route. GPU admission/release remains with the caller.
 pub(crate) fn execute_h3_on_device(
@@ -305,6 +350,9 @@ fn execute_script_recipe(
         ScriptMode::LtxPrepared => {
             command.env("L3MS_LTX_PREPARED_ONLY", "1");
         }
+        ScriptMode::YuePrepared => {
+            command.env("L3MS_YUE_PREPARED_ONLY", "1");
+        }
         ScriptMode::BlenderHeadless => {
             command.env("L3MS_BLENDER_HEADLESS_ONLY", "1");
         }
@@ -325,6 +373,7 @@ fn execute_script_recipe(
 enum ScriptMode {
     Default,
     LtxPrepared,
+    YuePrepared,
     BlenderHeadless,
 }
 
@@ -565,6 +614,63 @@ pub(crate) fn publish_routed_speech(
     Ok(MediaExecutionResult {
         output_root,
         mode,
+        artifacts,
+    })
+}
+
+/// Reserve the fixed audio artifact names before an external routed request is
+/// sent. Publication repeats these checks after the response arrives so a
+/// collision cannot silently overwrite another artifact.
+pub(crate) fn preflight_routed_audio_output(
+    job_directory: &Path,
+    streaming: bool,
+) -> Result<SpeechMode, MediaExecutionFailure> {
+    let output_root = validate_job_directory(job_directory)?;
+    ensure_absent(&output_root.join(OUTPUT_NAME))?;
+    ensure_absent(&output_root.join(CHUNKS_NAME))?;
+    Ok(if streaming {
+        SpeechMode::Streaming
+    } else {
+        SpeechMode::Standard
+    })
+}
+
+/// Publish one complete WAV returned by a routed music script. HeartMuLa and
+/// H3 music/tts requests share the PCM validator and private artifact layout;
+/// streamed chunks are not part of these script routes.
+pub(crate) fn publish_routed_audio(
+    request: &InferenceRequest,
+    audio: &SpeechAudio,
+    job_directory: &Path,
+    context: &OperationContext<'_>,
+) -> Result<MediaExecutionResult, MediaExecutionFailure> {
+    let InferenceRequest::Media {
+        profile,
+        input: MediaInput::Script { task, args },
+    } = request
+    else {
+        return Err(not_dispatched(MediaExecutionErrorKind::InvalidRequest));
+    };
+    let supported = match profile.profile_id.as_str() {
+        "heartmula-music" => task.as_str() == "music" && is_supported_heartmula_args(args),
+        "minimax-h3" => {
+            matches!(task.as_str(), "music" | "tts") && is_supported_h3_args(args, task.as_str())
+        }
+        _ => false,
+    };
+    if profile.lane != super::catalog::Lane::Media || !supported || !audio.chunks.is_empty() {
+        return Err(not_dispatched(MediaExecutionErrorKind::InvalidRequest));
+    }
+
+    let output_root = validate_job_directory(job_directory)?;
+    ensure_absent(&output_root.join(OUTPUT_NAME))?;
+    ensure_absent(&output_root.join(CHUNKS_NAME))?;
+    write_private_file(&output_root.join(OUTPUT_NAME), &audio.wave)?;
+    let artifacts = discover_artifacts(&output_root, SpeechMode::Standard, context)?;
+    check_after_child(context)?;
+    Ok(MediaExecutionResult {
+        output_root,
+        mode: SpeechMode::Standard,
         artifacts,
     })
 }
@@ -1388,6 +1494,27 @@ done
 printf 'RIFF\046\000\000\000WAVEfmt \020\000\000\000\001\000\001\000\300\135\000\000\200\273\000\000\002\000\020\000data\002\000\000\000\000\000' > "$output"
 "#;
 
+    const YUE_FIXTURE_SCRIPT: &str = r#"#!/usr/bin/env bash
+set -euo pipefail
+output=""
+while (($#)); do
+  case "$1" in
+    --prompt|--text|--style|--prompt-file|--tags|--lyrics|--lyrics-file|--abc-file|--cot|--seed|--cfg-scale)
+      (($# >= 2)) || exit 91
+      shift 2
+      ;;
+    --output) output="$2"; shift 2 ;;
+    *) exit 92 ;;
+  esac
+done
+[[ "${CUDA_VISIBLE_DEVICES-unset}" == "GPU-01234567-89ab-cdef-0123-456789abcdef" ]] || exit 93
+[[ "${L3MS_YUE_PREPARED_ONLY-unset}" == "1" ]] || exit 94
+[[ -n "$L3MS_MEDIA_OUTPUT_DIR" && "$TMPDIR" == "$L3MS_MEDIA_OUTPUT_DIR" ]] || exit 95
+[[ "$output" == "$L3MS_MEDIA_OUTPUT_DIR" ]] || exit 96
+mkdir "$output/song"
+printf 'RIFF\046\000\000\000WAVEfmt \020\000\000\000\001\000\001\000\300\135\000\000\200\273\000\000\002\000\020\000data\002\000\000\000\000\000' > "$output/result.wav"
+"#;
+
     const H3_FIXTURE_SCRIPT: &str = r#"#!/usr/bin/env bash
 set -euo pipefail
 output=""
@@ -1518,6 +1645,14 @@ esac
                             "script": "media-models/generate-heartmula-music.sh"
                         },
                         {
+                            "id": "yue2-music",
+                            "name": "Fixture YuE2",
+                            "runtime": "YuE2 Python",
+                            "device": "cuda",
+                            "tasks": ["music"],
+                            "script": "media-models/generate-yue2.sh"
+                        },
+                        {
                             "id": "minimax-h3",
                             "name": "Fixture H3",
                             "runtime": "audio.cpp",
@@ -1553,6 +1688,11 @@ esac
             fs::write(
                 media_root.join("media-models/generate-heartmula-music.sh"),
                 HEARTMULA_FIXTURE_SCRIPT,
+            )
+            .unwrap();
+            fs::write(
+                media_root.join("media-models/generate-yue2.sh"),
+                YUE_FIXTURE_SCRIPT,
             )
             .unwrap();
             fs::write(
@@ -1634,6 +1774,16 @@ esac
     fn music_request(args: &[&str]) -> InferenceRequest {
         InferenceRequest::Media {
             profile: ProfileKey::new(Lane::Media, "heartmula-music").unwrap(),
+            input: MediaInput::Script {
+                task: super::super::catalog::Task::new("music").unwrap(),
+                args: args.iter().map(|argument| (*argument).to_owned()).collect(),
+            },
+        }
+    }
+
+    fn yue2_request(args: &[&str]) -> InferenceRequest {
+        InferenceRequest::Media {
+            profile: ProfileKey::new(Lane::Media, "yue2-music").unwrap(),
             input: MediaInput::Script {
                 task: super::super::catalog::Task::new("music").unwrap(),
                 args: args.iter().map(|argument| (*argument).to_owned()).collect(),
@@ -2041,6 +2191,54 @@ esac
     }
 
     #[test]
+    fn routed_music_audio_preflights_and_publishes_through_pcm_validation() {
+        use crate::control::language::wav_from_pcm16;
+        let fixture = Fixture::new();
+        let ctx = context(&NeverCancel, Duration::from_secs(5));
+        let output = fixture.output_directory("routed-music-audio");
+        assert_eq!(
+            preflight_routed_audio_output(&output, false).unwrap(),
+            SpeechMode::Standard
+        );
+        let audio = SpeechAudio {
+            wave: wav_from_pcm16(&sine_pcm(800)),
+            chunks: Vec::new(),
+        };
+        let request = music_request(&["--prompt", "fixture music"]);
+        let result = publish_routed_audio(&request, &audio, &output, &ctx).unwrap();
+        assert_eq!(result.mode(), SpeechMode::Standard);
+        assert_eq!(result.artifacts().len(), 1);
+        assert_eq!(
+            result.artifacts()[0].relative_path(),
+            Path::new(OUTPUT_NAME)
+        );
+        assert_eq!(
+            fs::read(output.join(OUTPUT_NAME)).unwrap(),
+            audio.wave,
+            "the complete routed WAV is written verbatim after validation"
+        );
+        assert_eq!(
+            preflight_routed_audio_output(&output, true)
+                .unwrap_err()
+                .kind(),
+            MediaExecutionErrorKind::OutputAlreadyExists
+        );
+
+        let invalid_chunks = SpeechAudio {
+            wave: wav_from_pcm16(&sine_pcm(20)),
+            chunks: vec![wav_from_pcm16(&sine_pcm(10))],
+        };
+        let rejected = fixture.output_directory("routed-music-chunks-rejected");
+        assert_eq!(
+            publish_routed_audio(&request, &invalid_chunks, &rejected, &ctx)
+                .unwrap_err()
+                .kind(),
+            MediaExecutionErrorKind::InvalidRequest
+        );
+        assert_eq!(fs::read_dir(rejected).unwrap().count(), 0);
+    }
+
+    #[test]
     fn fresh_artifact_validation_rejects_mutation_after_native_result() {
         let fixture = Fixture::new();
         let output = fixture.output_directory("revalidate");
@@ -2165,6 +2363,61 @@ esac
             ProcessFailureDisposition::NoChildSpawned
         );
         assert_eq!(fs::read_dir(drift_rejected_output).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn yue2_uses_prepared_cuda_route_and_rejects_song_symlink_before_spawn() {
+        const UUID: &str = "GPU-01234567-89ab-cdef-0123-456789abcdef";
+        let fixture = Fixture::new();
+        let catalog = fixture.catalog();
+        let request = yue2_request(&["--prompt", "fixture music", "--lyrics", "fixture words"]);
+        let accepted =
+            crate::control::routes::resolve_profile_route(&catalog, request.profile()).unwrap();
+        let device = CudaDevice::new(UUID).unwrap();
+        let context = context(&NeverCancel, Duration::from_secs(5));
+
+        let output = fixture.output_directory("yue2-private");
+        let result = execute_yue2_on_device(
+            &catalog,
+            &request,
+            &accepted,
+            &device,
+            &output,
+            &context,
+            recovery(),
+        )
+        .unwrap();
+        assert_eq!(result.mode(), SpeechMode::Standard);
+        assert_eq!(result.artifacts().len(), 1);
+        assert_eq!(result.artifacts()[0].kind(), MediaArtifactKind::FinalWave);
+        assert_eq!(
+            result.artifacts()[0].relative_path(),
+            Path::new(OUTPUT_NAME)
+        );
+        assert!(output.join("song").is_dir());
+
+        let outside = fixture._parent.path().join("outside-yue-song");
+        fs::create_dir(&outside).unwrap();
+        let symlink_output = fixture.output_directory("yue2-song-symlink");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, symlink_output.join("song")).unwrap();
+        let error = execute_yue2_on_device(
+            &catalog,
+            &request,
+            &accepted,
+            &device,
+            &symlink_output,
+            &context,
+            recovery(),
+        )
+        .expect_err("YuE must not follow a preexisting native output symlink");
+        assert_eq!(error.kind(), MediaExecutionErrorKind::OutputAlreadyExists);
+        assert_eq!(
+            error.disposition(),
+            ProcessFailureDisposition::NoChildSpawned
+        );
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+        assert!(!symlink_output.join(OUTPUT_NAME).exists());
     }
 
     #[test]

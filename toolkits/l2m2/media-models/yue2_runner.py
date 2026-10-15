@@ -20,6 +20,7 @@ DEFAULT_SEED = 42
 
 def resolve_runtime_paths() -> dict[str, Path]:
     """Resolve repository root, python binary, model directories, and output folder."""
+    prepared_only = os.environ.get("L3MS_YUE_PREPARED_ONLY") == "1"
     yue_root_env = os.environ.get("L3MS_YUE_ROOT")
     if yue_root_env:
         yue_root = Path(yue_root_env).resolve()
@@ -34,7 +35,11 @@ def resolve_runtime_paths() -> dict[str, Path]:
             yue_root = repo_candidate
 
     python_env = os.environ.get("L2M2_PYTHON") or os.environ.get("YUE_PYTHON")
-    if python_env:
+    if prepared_only:
+        python_bin = yue_root / ".venv" / "bin" / "python"
+        if not python_bin.is_file() or not os.access(python_bin, os.X_OK):
+            raise RuntimeError("Prepared YuE Python environment not found; install it separately")
+    elif python_env:
         python_bin = Path(python_env).resolve()
     else:
         venv_python = yue_root / ".venv" / "bin" / "python"
@@ -197,10 +202,58 @@ def run_yue2(
     env = os.environ.copy()
     env["PYTHONPATH"] = f"{yue_root / 'src'}:{env.get('PYTHONPATH', '')}"
     env["YUE2_KIT"] = str(yue_root)
+    prepared_only = env.get("L3MS_YUE_PREPARED_ONLY") == "1"
+    if prepared_only:
+        env["HF_HUB_OFFLINE"] = "1"
+        env["TRANSFORMERS_OFFLINE"] = "1"
 
-    print(f"-> Running YuE2: {' '.join(cmd)}", file=sys.stderr)
+    if prepared_only:
+        print("-> Running YuE2 in prepared-only offline mode (<inputs redacted>)", file=sys.stderr)
+    else:
+        print(f"-> Running YuE2: {' '.join(cmd)}", file=sys.stderr)
     result = subprocess.run(cmd, cwd=str(yue_root), env=env)
     return result.returncode
+
+
+def convert_prepared_audio(output_directory: Path) -> bool:
+    """Convert the YuE CLI's fixed FLAC result to the workbench's fixed WAV."""
+    output_root = output_directory.resolve()
+    source = output_root / "song" / "audio.flac"
+    destination = output_root / "result.wav"
+    if (
+        source.is_symlink()
+        or not source.is_file()
+        or not source.resolve().is_relative_to(output_root)
+        or os.path.lexists(destination)
+    ):
+        print("Error: prepared YuE output is missing or conflicts with result.wav", file=sys.stderr)
+        return False
+
+    try:
+        import soundfile as sf
+
+        with sf.SoundFile(str(source), mode="r") as reader:
+            estimated_size = 44 + reader.frames * reader.channels * 2
+            if reader.frames <= 0 or estimated_size > 512 * 1024 * 1024:
+                raise ValueError("audio output is empty or exceeds the artifact limit")
+            with destination.open("xb") as output_file:
+                with sf.SoundFile(
+                    output_file,
+                    mode="w",
+                    samplerate=reader.samplerate,
+                    channels=reader.channels,
+                    format="WAV",
+                    subtype="PCM_16",
+                ) as writer:
+                    while True:
+                        block = reader.read(65_536, dtype="float32", always_2d=True)
+                        if block.shape[0] == 0:
+                            break
+                        writer.write(block)
+    except Exception:
+        print("Error: could not convert the fixed YuE output to PCM WAV", file=sys.stderr)
+        return False
+    return True
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -230,7 +283,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    prepared_only = os.environ.get("L3MS_YUE_PREPARED_ONLY") == "1"
     paths = resolve_runtime_paths()
+
+    if prepared_only and (
+        args.doctor
+        or args.request
+        or args.model
+        or args.vae
+        or not args.output
+        or args.stage != "audio"
+        or args.backend != "torch"
+        or args.quantization != DEFAULT_QUANTIZATION
+        or args.budget != DEFAULT_BUDGET_GIB
+        or args.offload_ar
+    ):
+        print("Error: prepared YuE accepts only pinned offline music generation", file=sys.stderr)
+        return 1
 
     if args.doctor:
         cli_args = build_cli_args(
@@ -280,7 +349,18 @@ def main(argv: list[str] | None = None) -> int:
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         output = paths["output_dir"] / f"yue2-{stamp}"
     else:
-        output = Path(output).resolve()
+        output = Path(output)
+        if prepared_only and output.is_symlink():
+            print("Error: prepared YuE output directory cannot be a symlink", file=sys.stderr)
+            return 1
+        output = output.resolve()
+    if prepared_only and (
+        not output.is_dir()
+        or os.path.lexists(output / "song")
+        or os.path.lexists(output / "result.wav")
+    ):
+        print("Error: prepared YuE output must be an empty private job target", file=sys.stderr)
+        return 1
 
     model = args.model
     vae = args.vae
@@ -308,8 +388,14 @@ def main(argv: list[str] | None = None) -> int:
         stage=args.stage,
         quiet=args.quiet,
     )
+    if prepared_only:
+        cli_args.append("--offline")
+        cli_args.append("--quiet")
 
-    return run_yue2(cli_args, paths["python_bin"], paths["yue_root"])
+    result = run_yue2(cli_args, paths["python_bin"], paths["yue_root"])
+    if result != 0 or not prepared_only:
+        return result
+    return 0 if convert_prepared_audio(output) else 1
 
 
 if __name__ == "__main__":

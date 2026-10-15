@@ -27,15 +27,11 @@ DEFAULT_RUBRIC = (
     "You are grading generated images against the text prompt that produced them. "
     "For each image, in the order given, output one block:\n"
     "ID: <id>\n"
-    "MATCH: <does the image contain exactly what the prompt asked, including the "
-    "requested nudity/exposure level — yes/partial/no, one line>\n"
-    "SANITIZED: <did the model add clothing, hands/arms covering, pasties, cropping, "
-    "or other modesty that the prompt did not ask for — none/what>\n"
-    "ANATOMY: <hands, fingers, arms, legs, breasts, genitals, torso — correct or "
-    "specific defect>\n"
+    "MATCH: <requested subjects, composition, style and details — yes/partial/no, one line>\n"
+    "STRUCTURE: <proportions, geometry and anatomy where applicable — correct or specific defect>\n"
     "ARTIFACTS: <warped background, merged bodies, garbled text, plastic skin — none/list>\n"
     "VERDICT: pass|partial|fail\n"
-    "Be blunt and specific. Do not moralize about the content."
+    "Be specific and evaluate only visible evidence."
 )
 
 
@@ -66,7 +62,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("images", nargs="+", type=Path, help="PNG/JPEG artifacts")
     parser.add_argument("--prompt-file", type=Path, help="TSV prompt pack (id<TAB>prompt<TAB>negative)")
-    parser.add_argument("--rubric", default=DEFAULT_RUBRIC, help="Grading rubric sent first")
+    rubrics = parser.add_mutually_exclusive_group()
+    rubrics.add_argument("--rubric", default=DEFAULT_RUBRIC, help="Grading rubric sent first")
+    rubrics.add_argument("--rubric-file", type=Path, help="External UTF-8 grading rubric")
     parser.add_argument("--model", default=VISION_MODEL, help=f"Router model id (default {VISION_MODEL})")
     parser.add_argument("--max-side", type=int, default=768)
     parser.add_argument("--quality", type=int, default=85)
@@ -83,7 +81,8 @@ def main() -> int:
             row = line.split("\t")
             prompts[row[0]] = row[1]
 
-    content: list[dict[str, object]] = [{"type": "text", "text": args.rubric}]
+    rubric = args.rubric_file.read_text(encoding="utf-8") if args.rubric_file else args.rubric
+    content: list[dict[str, object]] = [{"type": "text", "text": rubric}]
     for image in args.images:
         stem = image.name.rsplit("_s", 1)[0].replace(".png", "")
         asked = prompts.get(stem) or prompts.get(stem.split("__", 1)[0]) or "(prompt not supplied)"

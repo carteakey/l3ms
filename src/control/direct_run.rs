@@ -257,9 +257,10 @@ pub(crate) fn run_native_in_operator_window(
     connection: Option<DirectConnection<'_>>,
     context: &OperationContext<'_>,
 ) -> Result<DirectRunResult, DirectRunError> {
-    if !catalog
-        .inspect(request.profile())
-        .is_some_and(requires_operator_gpu_window)
+    if is_routed_audio_script_request(catalog, request)
+        || !catalog
+            .inspect(request.profile())
+            .is_some_and(requires_operator_gpu_window)
     {
         return run_native(catalog, request, output_directory, connection, context);
     }
@@ -475,7 +476,8 @@ fn run_native(
         || is_comfy_workflow
         || is_hosted_jev_decision
         || is_llamacpp_decision
-        || is_routed_speech;
+        || is_routed_speech
+        || is_routed_audio_script_request(catalog, request);
     let is_breeze_speech = is_breeze_speech_request(request);
     let is_script_media = matches!(
         request,
@@ -499,7 +501,9 @@ fn run_native(
                 && comfy.is_none()
                 && (!is_llamacpp_decision || cuda.is_none())
         }
-        InferenceRequest::Media { .. } if is_routed_speech => {
+        InferenceRequest::Media { .. }
+            if is_routed_speech || is_routed_audio_script_request(catalog, request) =>
+        {
             output_directory.is_some() && language.is_some() && comfy.is_none() && cuda.is_none()
         }
         InferenceRequest::Media { .. } if is_breeze_speech || is_script_media => {
@@ -611,6 +615,22 @@ fn run_native(
                 .map_err(|error| execution_error(error, context))
         }
     } else if is_script_media {
+        if is_routed_audio_script_request(&catalog, request) {
+            let output = output_directory.expect("validated audio output directory");
+            super::media_execution::preflight_routed_audio_output(output, false).map_err(|_| {
+                DirectRunError::remote(
+                    DirectRunErrorKind::InvalidRequest,
+                    DispatchDisposition::NoDispatch,
+                )
+            })?;
+            let audio = language
+                .expect("validated routed audio connection")
+                .execute_routed_audio_script(request, context)
+                .map_err(remote_language_error)?;
+            return super::media_execution::publish_routed_audio(request, &audio, output, context)
+                .map(DirectRunResult::ScriptMedia)
+                .map_err(|_| remote_completion_uncertain());
+        }
         let profile = catalog
             .inspect(request.profile())
             .expect("validated refreshed profile");
@@ -642,6 +662,8 @@ fn run_native(
             super::media_execution::execute_h3_on_device
         } else if is_supported_direct_ltx_profile(profile) {
             super::media_execution::execute_ltx_on_device
+        } else if is_supported_direct_yue2_profile(profile) {
+            super::media_execution::execute_yue2_on_device
         } else {
             execute_heartmula_music_on_device
         };
@@ -684,6 +706,16 @@ fn run_native(
                 unreachable!("validated speech request")
             };
             let output_directory = output_directory.expect("validated speech output directory");
+            super::media_execution::preflight_routed_audio_output(
+                output_directory,
+                input.mode == super::requests::SpeechMode::Streaming,
+            )
+            .map_err(|_| {
+                DirectRunError::remote(
+                    DirectRunErrorKind::InvalidRequest,
+                    DispatchDisposition::NoDispatch,
+                )
+            })?;
             let audio = language
                 .expect("validated routed speech connection")
                 .execute_speech(input, context)
@@ -695,7 +727,7 @@ fn run_native(
                 context,
             )
             .map(DirectRunResult::Speech)
-            .map_err(|error| media_execution_error(error, context))
+            .map_err(|_| remote_completion_uncertain())
         } else {
             Err(DirectRunError::new(
                 DirectRunErrorKind::UnsupportedRoute,
@@ -997,10 +1029,40 @@ pub(crate) fn is_supported_direct_cuda_profile(profile: &CatalogProfile) -> bool
         || is_supported_direct_script_profile(profile)
 }
 
+pub(crate) fn is_routed_audio_script_request(
+    catalog: &Catalog,
+    request: &InferenceRequest,
+) -> bool {
+    matches!(
+        request,
+        InferenceRequest::Media {
+            input: MediaInput::Script { .. },
+            ..
+        }
+    ) && catalog.inspect(request.profile()).is_some_and(|profile| {
+        (is_supported_direct_music_profile(profile) && request.task() == "music")
+            || (is_supported_direct_h3_profile(profile)
+                && matches!(request.task(), "music" | "tts"))
+    })
+}
+
 pub(crate) fn is_supported_direct_script_profile(profile: &CatalogProfile) -> bool {
     is_supported_direct_music_profile(profile)
         || is_supported_direct_h3_profile(profile)
         || is_supported_direct_ltx_profile(profile)
+        || is_supported_direct_yue2_profile(profile)
+}
+
+pub(crate) fn is_supported_direct_yue2_profile(profile: &CatalogProfile) -> bool {
+    !profile.disabled
+        && profile.key.lane == Lane::Media
+        && profile.key.profile_id.as_str() == "yue2-music"
+        && profile.runtime.lane == Lane::Media
+        && profile.runtime.as_str() == "YuE2 Python"
+        && profile.device == Some(Device::Cuda)
+        && profile.tasks.iter().any(|task| task.as_str() == "music")
+        && matches!(&profile.native_source, NativeProfileSource::Media { script }
+            if script == "media-models/generate-yue2.sh")
 }
 
 /// GPU admission is separate from selecting a CUDA inference device. Blender
@@ -1776,6 +1838,37 @@ fi
     }
 
     #[test]
+    fn routed_speech_invalid_output_never_dispatches() {
+        let (root, catalog) = breeze_fixture("breeze-tts-2", "cuda");
+        let mut request = cpu_breeze_request(SpeechMode::Standard, root.path());
+        let InferenceRequest::Media { profile, .. } = &mut request else {
+            unreachable!()
+        };
+        *profile = ProfileKey::new(Lane::Media, "breeze-tts-2").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let adapter =
+            LanguageAdapter::new(&format!("http://{}", listener.local_addr().unwrap()), None)
+                .unwrap();
+        let occupied = cpu_breeze_output(root.path(), "occupied");
+        fs::write(occupied.join("result.wav"), b"keep").unwrap();
+        for output in [root.path().join("missing"), occupied.clone()] {
+            let error = run_native(
+                &catalog,
+                &request,
+                Some(&output),
+                Some(DirectConnection::Language(&adapter)),
+                &context(&NeverCancel),
+            )
+            .err()
+            .unwrap();
+            assert!(!error.blocks_following_work());
+            assert_no_connection(&listener);
+        }
+        assert_eq!(fs::read(occupied.join("result.wav")).unwrap(), b"keep");
+    }
+
+    #[test]
     fn direct_runner_accepts_supported_cpu_breeze_modes() {
         let (root, catalog) = cpu_breeze_fixture();
         for (mode, name) in [
@@ -2435,5 +2528,154 @@ fi
             DirectRunDisposition::Process(ProcessFailureDisposition::NoChildSpawned)
         );
         assert!(!setup_failure.cancellation_confirmed());
+    }
+
+    fn routed_audio_script_fixture(
+        profile: &str,
+        task: &str,
+    ) -> (TempDir, Catalog, InferenceRequest) {
+        let root = tempfile::tempdir().unwrap();
+        let media = root.path().join("toolkits/l2m2");
+        fs::create_dir_all(media.join("media-models")).unwrap();
+        fs::create_dir_all(root.path().join("toolkits/l3ds")).unwrap();
+        fs::write(
+            root.path().join("llama-swap.yaml"),
+            "models:\n  fixture-chat:\n    cmd: server\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("toolkits/l3ds/decision-runtimes.json"),
+            r#"{"version":"1.0","profiles":[]}"#,
+        )
+        .unwrap();
+        let script = if profile == "heartmula-music" {
+            "media-models/generate-heartmula-music.sh"
+        } else {
+            "media-models/generate-minimax-h3.sh"
+        };
+        fs::write(media.join(script), "#!/bin/sh\nexit 99\n").unwrap();
+        fs::write(media.join("media-runtimes.json"), json!({
+            "schema_version": 1,
+            "profiles": [{"id": profile, "name": "Audio routing fixture", "runtime": "audio.cpp",
+                "device": "cuda", "tasks": if profile == "heartmula-music" { vec!["music"] } else { vec!["music", "tts", "video"] },
+                "script": script}]
+        }).to_string()).unwrap();
+        let catalog = Catalog::load(root.path()).unwrap();
+        let request = InferenceRequest::Media {
+            profile: ProfileKey::new(Lane::Media, profile).unwrap(),
+            input: MediaInput::Script {
+                task: super::super::catalog::Task::new(task).unwrap(),
+                args: vec!["--prompt".into(), "fixture audio".into()],
+            },
+        };
+        (root, catalog, request)
+    }
+
+    #[test]
+    fn routed_audio_scripts_publish_through_the_operator_entry_without_native_gpu_admission() {
+        for (profile, task) in [
+            ("heartmula-music", "music"),
+            ("minimax-h3", "music"),
+            ("minimax-h3", "tts"),
+        ] {
+            let (root, catalog, request) = routed_audio_script_fixture(profile, task);
+            let output = cpu_breeze_output(root.path(), "routed-audio");
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let probe = listener.try_clone().unwrap();
+            let endpoint = format!("http://{}/prefix", listener.local_addr().unwrap());
+            let server = std::thread::spawn(move || {
+                let mut stream = accept_bounded(&listener);
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut header = Vec::new();
+                let mut byte = [0];
+                while !header.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    header.push(byte[0]);
+                    assert!(header.len() < 16_384);
+                }
+                let header = String::from_utf8(header).unwrap();
+                assert!(header.starts_with("POST /prefix/audiocpp/v1/tasks/run HTTP/1.1\r\n"));
+                assert!(header
+                    .lines()
+                    .any(|line| line
+                        .eq_ignore_ascii_case("authorization: Bearer fixture-audio-secret")));
+                let length = header
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap();
+                assert!(length < 16_384);
+                let mut body = vec![0; length];
+                stream.read_exact(&mut body).unwrap();
+                let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(payload["model"], profile);
+                assert_eq!(payload["request"]["text"], "fixture audio");
+                let response = json!({"audio":"UklGRigAAABXQVZFZm10IBAAAAABAAEAwF0AAIC7AAACABAAZGF0YQQAAAAAAAEA",
+                    "sample_rate":24000,"channels":1}).to_string();
+                write_http_response(&mut stream, "200 OK", &response);
+            });
+            let adapter = LanguageAdapter::new(&endpoint, Some("fixture-audio-secret")).unwrap();
+            let result = run_native_in_operator_window(
+                &catalog,
+                &request,
+                Some(&output),
+                Some(DirectConnection::Language(&adapter)),
+                &context(&NeverCancel),
+            )
+            .unwrap();
+            let DirectRunResult::ScriptMedia(result) = result else {
+                panic!("expected script media result")
+            };
+            assert_eq!(result.artifacts().len(), 1);
+            assert_eq!(
+                fs::read(output.join("result.wav")).unwrap(),
+                super::super::language::wav_from_pcm16(&[0, 0, 1, 0])
+            );
+            server.join().unwrap();
+            assert_no_connection(&probe);
+        }
+    }
+
+    #[test]
+    fn routed_audio_scripts_reject_existing_output_before_http_and_keep_h3_video_direct() {
+        for profile in ["heartmula-music", "minimax-h3"] {
+            let (root, catalog, request) = routed_audio_script_fixture(profile, "music");
+            let output = cpu_breeze_output(root.path(), "occupied-audio");
+            fs::write(output.join("result.wav"), b"existing artifact").unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let adapter =
+                LanguageAdapter::new(&format!("http://{}", listener.local_addr().unwrap()), None)
+                    .unwrap();
+            let error = run_native_in_operator_window(
+                &catalog,
+                &request,
+                Some(&output),
+                Some(DirectConnection::Language(&adapter)),
+                &context(&NeverCancel),
+            )
+            .err()
+            .unwrap();
+            assert_eq!(
+                error.disposition(),
+                DirectRunDisposition::Remote(DispatchDisposition::NoDispatch)
+            );
+            assert_no_connection(&listener);
+            assert_eq!(
+                fs::read(output.join("result.wav")).unwrap(),
+                b"existing artifact"
+            );
+        }
+        let (_root, catalog, request) = routed_audio_script_fixture("minimax-h3", "video");
+        assert!(!is_routed_audio_script_request(&catalog, &request));
+        assert!(requires_operator_gpu_window(
+            catalog.inspect(request.profile()).unwrap()
+        ));
     }
 }

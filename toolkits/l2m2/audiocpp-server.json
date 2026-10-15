@@ -9,6 +9,25 @@
   "models": [
     {"id": "breeze-tts", "family": "breeze_tts", "path": "/home/kchauhan/models/media/Breeze-TTS-2-GGUF/breeze-tts-2-q8_0.gguf", "task": "tts", "mode": "offline"},
     {"id": "breeze-clone", "family": "breeze_tts", "path": "/home/kchauhan/models/media/Breeze-TTS-2-GGUF/breeze-tts-2-q8_0.gguf", "task": "clon", "mode": "offline"},
-    {"id": "breeze-stream", "family": "breeze_tts", "path": "/home/kchauhan/models/media/Breeze-TTS-2-GGUF/breeze-tts-2-q8_0.gguf", "task": "tts", "mode": "streaming"}
+    {"id": "breeze-stream", "family": "breeze_tts", "path": "/home/kchauhan/models/media/Breeze-TTS-2-GGUF/breeze-tts-2-q8_0.gguf", "task": "tts", "mode": "streaming"},
+    {
+      "id": "heartmula-music",
+      "family": "heartmula",
+      "path": "/home/kchauhan/models/media/HeartMuLa-GGUF/heartmula-q8_0.gguf",
+      "task": "gen",
+      "mode": "offline",
+      "session_options": {"heartmula.mem_saver": "true"}
+    },
+    {
+      "id": "minimax-h3",
+      "family": "minimax_h3",
+      "path": "/home/kchauhan/models/media/MiniMax-H3-Q4-GGUF/dit.gguf",
+      "task": "gen",
+      "mode": "offline",
+      "session_options": {
+        "minimax_h3.weight_context_mb": "512",
+        "minimax_h3.mem_saver": "true"
+      }
+    }
   ]
 }

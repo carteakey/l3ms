@@ -8,7 +8,10 @@
 > pause/restore handoff that used to stop `llama-swap.service` was removed. This
 > page now covers only direct scripts that bypass the router.
 
-CUDA-local Nagi/Laya decisions, HeartMuLa, H3 and LTX use the same
+HeartMuLa and H3 audio also use the router on this branch; they no longer need
+`L3MS_NATIVE_GPU`. Their live acceptance remains pending; see [TODO](../TODO.md).
+
+CUDA-local Nagi/Laya decisions, H3 video, LTX and YuE2 use the same
 foreground runner as CPU work. This is an **operator-managed idle window**: no
 service is stopped or restored, and other clients are not fenced. Original
 standalone commands remain available.

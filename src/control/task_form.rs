@@ -178,6 +178,9 @@ pub fn build_direct_native(
                     && if selected_profile.profile_id.as_str() == "blender-3d" {
                         profile.runtime.as_str() == "Blender 5.2 / blender-mcp"
                             && profile.device.is_none()
+                    } else if selected_profile.profile_id.as_str() == "yue2-music" {
+                        profile.runtime.as_str() == "YuE2 Python"
+                            && profile.device.as_ref() == Some(&super::catalog::Device::Cuda)
                     } else {
                         matches!(profile.runtime.as_str(), "audio.cpp" | "LTX-2 Python")
                             && profile.device.as_ref() == Some(&super::catalog::Device::Cuda)
@@ -192,6 +195,9 @@ pub fn build_direct_native(
                 }
                 "ltx-2.5" => {
                     super::native_commands::is_supported_ltx_args(&args, declared_task.as_str())
+                }
+                "yue2-music" if declared_task.as_str() == "music" => {
+                    super::native_commands::is_supported_yue2_args(&args)
                 }
                 "blender-3d" => {
                     super::native_commands::is_supported_blender_args(&args, declared_task.as_str())

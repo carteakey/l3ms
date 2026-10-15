@@ -976,7 +976,7 @@ fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
         .map_err(|_| anyhow::anyhow!("--task is invalid"))?;
     let script_media = matches!(
         profile.profile_id.as_str(),
-        "heartmula-music" | "minimax-h3" | "ltx-2.5" | "blender-3d"
+        "heartmula-music" | "minimax-h3" | "ltx-2.5" | "yue2-music" | "blender-3d"
     );
     let input = read_direct_native_input(spec.input, spec.task, script_media)?;
     let is_comfy_workflow = !script_media && matches!(spec.task, "image" | "video");
@@ -1058,11 +1058,13 @@ fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
     let (request, timeout) = crate::control::task_form::build_direct_native(&catalog, draft)
         .map_err(|_| anyhow::anyhow!("native request is invalid"))?;
     let output_dir = comfy_output_directory.as_deref().or(output_dir);
-    let uses_router = spec.task == "embeddings"
-        || catalog.inspect(request.profile()).is_some_and(|profile| {
-            crate::control::direct_run::is_llamacpp_decision_profile(profile)
-                || crate::control::direct_run::is_supported_cuda_breeze_profile(profile)
-        });
+    let uses_router =
+        crate::control::direct_run::is_routed_audio_script_request(&catalog, &request)
+            || spec.task == "embeddings"
+            || catalog.inspect(request.profile()).is_some_and(|profile| {
+                crate::control::direct_run::is_llamacpp_decision_profile(profile)
+                    || crate::control::direct_run::is_supported_cuda_breeze_profile(profile)
+            });
     let language = if uses_router {
         let endpoint = env::var("LLAMA_SWAP_URL")
             .unwrap_or_else(|_| crate::llama_swap::DEFAULT_BASE_URL.to_owned());

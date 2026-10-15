@@ -302,11 +302,15 @@ earlier coordinator, its retained-ID `--coordinator-*`/`--request-*` commands an
 the resident pause/restore handoff were removed; there is nothing to observe by
 request ID.
 
+HeartMuLa music and H3 audio also use `/audiocpp/v1/tasks/run` on this branch;
+their real-model acceptance is still pending. YuE2 uses its existing prepared
+offline Python runtime, not a new server. See [remaining gates](TODO.md).
+
 In Stack Catalog (`F8`), `f` opens Chat or a typed native task form and `c`
 cancels the active foreground task. CPU-local decisions use `--run-profile` or
 the form directly, without a daemon; see
 [native CPU workflows](docs/cpu-native-workflows.md). Scripts that llama-swap
-cannot host (LTX, YuE2, HeartMuLa, H3, Blender) run in an
+cannot host (LTX, YuE2, H3 video, Blender) run in an
 [explicit operator-managed idle GPU window](docs/native-gpu-workflows.md), never
 by taking over the live service. Native output is sensitive and should not enter
 shared logs.

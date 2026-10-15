@@ -23,11 +23,16 @@ for scope and evidence.
 - [x] Sibling repos `l2m2` and `l3ds` imported, repointed and moved to
   `~/repos/_retired/` ([record](docs/migration/sibling-retirement.md)).
 
-Optional follow-ups, none blocking:
+## Remaining full-port acceptance gates
 
-- [ ] Route `minimax-h3` and `heartmula-music` through `audiocpp_auto` (they are
-  audio.cpp families). Needs its own CUDA run before replacing the verified
-  scripts. LTX, YuE2 and Blender stay direct by design (see the same doc).
+- [ ] Verify HeartMuLa and H3 audio through the root CLI and `audiocpp_auto`
+  with real weights; then verify language-model return. HTTP fixtures are not
+  real-model acceptance. H3 video retains direct MP4 post-processing.
+- [ ] Verify root H3 video, LTX and YuE2 outputs with real prepared runtimes;
+  decode each artifact and retain settings/logs. LTX/YuE2 remain direct by design.
+  Do not call the full port complete until these advertised paths pass.
+
+Optional follow-ups:
 - [ ] Measure `qwen38-flash-next-plat-abliterated-vision` so it can join the
   ranking; until then the site lists it as not measured.
 - [ ] Delete `~/repos/_retired/` once you are satisfied; history is bundled in

@@ -11,6 +11,27 @@ runtime check.
 
 ## Upstream-first retirement and acceptance — 2026-10-15
 
+Latest branch follow-up (not a deployment): HeartMuLa and H3 audio now use the
+native audio.cpp task endpoint through llama-swap; H3 video stays direct. YuE2
+uses the existing guarded direct runner, not a new service.
+Maintenance archive/restore checks are checksum-based and preserve conflicting
+files; an autofs-only NAS is rejected before traversal. Main checkout changes
+and the running llama-swap service remain untouched.
+
+Full-port acceptance is **still open**: local HeartMuLa/H3/LTX/YuE2 weights and
+the prepared LTX runtime are absent from their default paths. No fixture result
+below substitutes for real-model acceptance of these remaining lanes. See
+[TODO](../../TODO.md) for required gates versus optional follow-ups.
+
+Follow-up checks: `cargo test --all-targets --locked` passes 567 tests with four
+explicitly ignored; `cargo clippy --all-targets --locked -- -D warnings`, debug
+build, formatting and whitespace checks pass. The media Python suite passes
+all 43 tests using the existing YuE environment (system Python skips two audio
+conversion cases); maintenance has 12 passing isolated tests. Private HTTP
+fixtures verify authenticated prefixed HeartMuLa/H3 requests, WAV publication,
+pre-dispatch output refusal, and H3 video staying direct. No live model was
+loaded for this follow-up; the shared service remained active.
+
 Approved live-window follow-up: the real CUDA speech handoff and external
 language → tool → language continuation passed. Clef image inference, root
 Blender CPU rendering, confirmed Comfy scoped cancellation and a learned Krea

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Root workbench YuE2 jobs require the installed Python environment and offline
+  weights, reserve their output subtree, and publish a validated PCM16 WAV.
+  Standalone generation defaults remain unchanged.
+
+- Require a mounted NAS and checksum-identical archive before removing local media;
+  restore through a verified staged copy and refuse existing local paths. Preserve
+  both copies when verification is uncertain.
+- Resolve the Qwen Turbo downloader from the monorepo root with standalone
+  compatibility, and use a general image grading rubric with `--rubric-file`
+  support for external grading criteria.
+
 - Record real standalone CPU headless and software GUI/MCP checks separately
   from root/GPU acceptance. GUI scene mutation/read-back passed, but shutdown
   crashed; do not claim a clean interactive lifecycle or change the installed

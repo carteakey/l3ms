@@ -327,6 +327,37 @@ pub(crate) fn prepare_heartmula_music_recipe_for_route(
     append_private_output_controls(recipe, output_file, None)
 }
 
+/// Prepare the declared YuE2 music script against its accepted CUDA route and
+/// pin its output root to the caller's private job directory. The wrapper's
+/// workbench mode later publishes only the fixed `result.wav` artifact.
+pub(crate) fn prepare_yue2_music_recipe_for_route(
+    catalog: &Catalog,
+    request: &InferenceRequest,
+    accepted_route: &ResolvedProfileRoute,
+    output_directory: &std::path::Path,
+) -> Result<NativeCommandRecipe> {
+    ensure!(
+        is_supported_yue2_request_route(request, accepted_route),
+        "request is not a supported YuE2 music route"
+    );
+    ensure!(
+        output_directory.is_absolute(),
+        "YuE2 output directory must be an absolute private path"
+    );
+    let mut recipe = prepare_native_command_for_route(catalog, request, accepted_route)?;
+    ensure!(
+        matches!(
+            &recipe.expectation,
+            NativeOutputExpectation::MediaScript { task } if task == "music"
+        ),
+        "YuE2 preparation did not resolve to the declared music script"
+    );
+    recipe.argv.push(text_argument("--output")?);
+    recipe.argv.push(path_argument(output_directory)?);
+    ensure_argv_budget(&recipe.executable, &recipe.argv)?;
+    Ok(recipe)
+}
+
 /// Prepare audio.cpp MiniMax-H3 for one declared task, keeping generation mode
 /// and output locations under caller control rather than the request payload.
 pub(crate) fn prepare_h3_recipe_for_route(
@@ -522,6 +553,77 @@ pub(crate) fn is_supported_heartmula_request_route(
             "media-models/generate-heartmula-music.sh",
         ))
         && is_supported_heartmula_args(args)
+}
+
+/// Admit only YuE2's task-owned music inputs. In particular, output, model,
+/// VAE, backend, environment-check, and arbitrary request-file controls are
+/// fixed by the adapter rather than accepted from caller argv.
+pub(crate) fn is_supported_yue2_args(arguments: &[String]) -> bool {
+    // Style aliases, lyrics aliases, ABC source, CoT mode, seed, and CFG scale.
+    let mut seen = [false; 6];
+    let mut has_style = false;
+    let mut has_lyrics = false;
+    let mut has_abc = false;
+    let mut index = 0;
+    while index < arguments.len() {
+        let slot = match arguments[index].as_str() {
+            "--prompt" | "--text" | "--style" | "--prompt-file" | "--tags" => 0,
+            "--lyrics" | "--lyrics-file" => 1,
+            "--abc-file" => 2,
+            "--cot" => 3,
+            "--seed" => 4,
+            "--cfg-scale" => 5,
+            _ => return false,
+        };
+        if seen[slot] {
+            return false;
+        }
+        seen[slot] = true;
+        let Some(value) = arguments.get(index + 1) else {
+            return false;
+        };
+        if !valid_native_value(Some(value)) {
+            return false;
+        }
+        match slot {
+            0 => has_style = true,
+            1 => has_lyrics = true,
+            2 => has_abc = true,
+            3 if !matches!(value.as_str(), "full" | "melody" | "off") => return false,
+            _ => {}
+        }
+        index += 2;
+    }
+    (has_style || has_abc) && (has_lyrics || has_abc)
+}
+
+pub(crate) fn is_supported_yue2_request_route(
+    request: &InferenceRequest,
+    route: &ResolvedProfileRoute,
+) -> bool {
+    let InferenceRequest::Media {
+        profile,
+        input: MediaInput::Script { task, args },
+    } = request
+    else {
+        return false;
+    };
+    let NativeRoute::MediaScript { path } = &route.native_route else {
+        return false;
+    };
+    profile == &route.profile
+        && profile.lane == Lane::Media
+        && profile.profile_id.as_str() == "yue2-music"
+        && task.as_str() == "music"
+        && route.runtime.lane == Lane::Media
+        && route.runtime.as_str() == "YuE2 Python"
+        && route.device.as_ref() == Some(&Device::Cuda)
+        && route
+            .tasks
+            .iter()
+            .any(|declared| declared.as_str() == "music")
+        && path.ends_with(std::path::Path::new("media-models/generate-yue2.sh"))
+        && is_supported_yue2_args(args)
 }
 
 /// Shape-only H3 wrapper admission. Request options are limited to the
@@ -1544,6 +1646,105 @@ mod tests {
                 "accepted unsupported HeartMuLa argument shape"
             );
         }
+    }
+
+    #[test]
+    fn yue2_music_arguments_and_recipe_keep_runtime_and_output_owned() {
+        for accepted in [
+            vec!["--prompt", "warm piano pop", "--lyrics", "[Verse] hello"],
+            vec![
+                "--prompt-file",
+                "prompt.txt",
+                "--lyrics-file",
+                "lyrics.txt",
+                "--cot",
+                "melody",
+                "--seed",
+                "7",
+            ],
+            vec!["--abc-file", "score.abc"],
+            vec![
+                "--style",
+                "ambient",
+                "--lyrics",
+                "words",
+                "--cfg-scale",
+                "1.2",
+            ],
+        ] {
+            assert!(is_supported_yue2_args(
+                &accepted.into_iter().map(str::to_owned).collect::<Vec<_>>()
+            ));
+        }
+        for rejected in [
+            vec!["--prompt", "warm piano pop"],
+            vec!["--lyrics", "words"],
+            vec!["--prompt", "one", "--style", "two", "--lyrics", "words"],
+            vec!["--abc-file", "score.abc", "--output", "/tmp/escape"],
+            vec![
+                "--prompt",
+                "song",
+                "--lyrics",
+                "words",
+                "--model",
+                "other/model",
+            ],
+            vec!["--prompt", "song", "--lyrics", "words", "--backend", "vllm"],
+            vec!["--prompt", "song", "--lyrics", "words", "--doctor"],
+            vec!["--abc-file", "score.abc", "--cot", "invalid"],
+            vec!["--abc-file", "--backend", "torch"],
+        ] {
+            assert!(!is_supported_yue2_args(
+                &rejected.into_iter().map(str::to_owned).collect::<Vec<_>>()
+            ));
+        }
+
+        const PROFILE: &str = "yue2-music";
+        const SCRIPT: &str = "media-models/generate-yue2.sh";
+        let fixture = Fixture::new(PROFILE, SCRIPT, &["music"]);
+        fixture.write_media_script(SCRIPT);
+        let manifest_path = fixture.media_root.join("media-runtimes.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["profiles"][0]["runtime"] = Value::String("YuE2 Python".into());
+        manifest["profiles"][0]["device"] = Value::String("cuda".into());
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let catalog = fixture.catalog();
+        let request = InferenceRequest::Media {
+            profile: key(Lane::Media, PROFILE),
+            input: MediaInput::Script {
+                task: super::super::catalog::Task::new("music").unwrap(),
+                args: vec![
+                    "--prompt".into(),
+                    "private prompt".into(),
+                    "--lyrics".into(),
+                    "private lyrics".into(),
+                ],
+            },
+        };
+        let route = resolve_profile_route(&catalog, request.profile()).unwrap();
+        assert!(is_supported_yue2_request_route(&request, &route));
+        let output = fixture._parent.path().join("private-yue-output");
+        let recipe =
+            prepare_yue2_music_recipe_for_route(&catalog, &request, &route, &output).unwrap();
+        let argv = argv_strings(&recipe);
+        assert_eq!(
+            &argv[argv.len() - 2..],
+            ["--output", output.to_str().unwrap()]
+        );
+        assert!(!argv.iter().any(|argument| {
+            matches!(
+                argument.as_str(),
+                "--model" | "--vae" | "--backend" | "--doctor"
+            )
+        }));
+        assert!(matches!(
+            recipe.expectation,
+            NativeOutputExpectation::MediaScript { ref task } if task == "music"
+        ));
+        let mut wrong_device = route;
+        wrong_device.device = Some(Device::Cpu);
+        assert!(!is_supported_yue2_request_route(&request, &wrong_device));
     }
 
     #[test]
