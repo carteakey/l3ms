@@ -13,9 +13,9 @@ not start, stop or fence engines for these lanes.
 | `audiocpp_auto` | audio.cpp `955c872` | `vendor/audio.cpp-955c872/build/bin/audiocpp_server --config toolkits/l2m2/audiocpp-server.json` | `/health` |
 | `comfyui_auto` | ComfyUI (low-VRAM flags) | `${comfy_root}/.venv-comfy` + `${comfy_root}/vendor/ComfyUI` | `/system_stats` |
 
-`comfy_root` currently points at the old `~/repos/l2m2` checkout; changing that
-one macro finishes the move once the environment is rebuilt under `toolkits/`
-(see [sibling retirement](sibling-retirement.md)).
+`comfy_root` is `${env.L3MS_ROOT}/toolkits/l2m2` (the ComfyUI checkout, its
+Python environment and user data were reflink-cloned there; see
+[sibling retirement](sibling-retirement.md)).
 
 ## Breeze-TTS-2 through `/audiocpp/v1/audio/speech`
 

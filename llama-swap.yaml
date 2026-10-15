@@ -51,7 +51,7 @@ macros:
 
   # media engines owned by llama-swap (reserved model ids audiocpp_auto / comfyui_auto)
   "audiocpp_server":       "${env.L3MS_ROOT}/vendor/audio.cpp-955c872/build/bin/audiocpp_server"
-  "comfy_root":            "/home/kchauhan/repos/l2m2"
+  "comfy_root":            "${env.L3MS_ROOT}/toolkits/l2m2"
 
   # --- shared paths ---
   "chat_template": "${env.L3MS_ROOT}/chat-template.jinja"
