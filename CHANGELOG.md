@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Changed
+- Declare `audiocpp_auto` and `comfyui_auto` in `llama-swap.yaml` so llama-swap owns
+  speech and image engines (`/audiocpp/`, `/comfyui/`); add
+  `toolkits/l2m2/maintenance/test-audiocpp-via-llama-swap.sh` and a CPU-verified
+  four-mode Breeze run. CUDA verification is pending an approved GPU window.
 - TUI adopts the Signal / 03 palette from `docs/interface-direction.md`: ink-graphite
   surface fill, phosphor-mint focus and selection, readable secondary text
   (contrast-tested at 4.5:1), and a header that shows the language, media and

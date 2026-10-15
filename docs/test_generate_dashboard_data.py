@@ -123,7 +123,7 @@ class DashboardDataTest(unittest.TestCase):
             json.loads((ROOT / "toolkits" / "l3ds" / "decision-runtimes.json").read_text()),
             metadata["decisions"],
         )
-        self.assertEqual(len(media), 8)
+        self.assertEqual(len(media), 10)
         self.assertEqual(len(decisions), 9)
         for profile_id in ("vllm-d3-flash", "cloudflare-clef-flash"):
             native = next(profile for profile in decisions if profile["id"] == profile_id)
