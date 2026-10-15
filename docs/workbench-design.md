@@ -1,4 +1,4 @@
-# Workbench design: one inventory, two frontends
+# Workbench design: sidebar, toolbar, tabs, sections
 
 Proposal, 2026-10-15. Not implemented. Supersedes the tab layout; keeps the
 Signal / 03 look from [interface direction](interface-direction.md).
@@ -22,43 +22,66 @@ Three tabs list models. Four are file management. All 102 commands live in one
 13.8k-line `app.rs` that holds state, key handling, workflows and drawing together,
 so a second frontend would have to copy it.
 
-## Shape: one inventory, a focus pane, an inspector
+## Shape: sidebar, toolbar, tabs, sections
+
+Reference: herdr, the workspace app this machine already runs agents in. Not a
+copy; the same building blocks:
+
+- **Sidebar** with **sections**: models (by lane), then jobs. Collapsible.
+- **Toolbar**: the utilities as buttons (reload router, bench, tune, update
+  engines, download, health), acting on the selected model where that applies.
+- **Tabs**: workspaces the user opens, each holding split panes.
+- **Status bar**: live machine and router state.
+
+How herdr's parts translate:
+
+| herdr | L3MS |
+| --- | --- |
+| sidebar `spaces`: repos with branch and ahead count | **models**, grouped by lane, with a state dot and one sub-line (runtime · last steady t/s or "not benched") |
+| sidebar `agents`, grouped, with status dots | **jobs**: running and recent chats, benches, media tasks and utility runs, grouped by model |
+| `new` / `menu` under the spaces list | **new pane** picker and the **utilities** menu |
+| top tabs `○ 1  ● 2  +` | **workspaces** the user creates and names; not fixed app sections |
+| split panes, each a terminal | split panes, each a **view**: chat, bench run, tune, job output, router log, media result |
+| bottom bar: usage meters, CPU, MEM, theme, shortcuts | **status bar**: loaded model, VRAM and RAM bars (red over 90%), CPU, governor, disk free, router endpoint, shortcuts |
 
 ```
-┌ L3MS ─ ● qwen38-flash-next-plat ─ VRAM ███████░░ 11.2/12 ─ RAM ████░░ 31/62 ─ :8080 ┐
-│ INVENTORY              │ FOCUS                                │ INSPECTOR         │
-│ language               │  chat with qwen38-flash-next-plat    │ runtime  strata   │
-│ ● qwen38-flash-next-pl │  > …                                 │ ctx      131072   │
-│ ○ qwen38-flash-next    │                                      │ router   loaded   │
-│ media                  │                                      │ last job  3m ago  │
-│ ○ flux-3-klein         │                                      │                   │
-│ ○ breeze-tts           │                                      │ verbs             │
-│ decisions              │                                      │ c chat  l load    │
-│ ○ vllm-d3-flash        │                                      │ u unload  b bench │
-│ utilities              │                                      │ t tune            │
-│   update engines       │                                      │                   │
-│   download model       │                                      │                   │
-│   reload router        │                                      │                   │
-│ jobs · 12              │                                      │                   │
-├────────────────────────┴──────────────────────────────────────┴───────────────────┤
-│ : command   ⏵ job 4 running · yue2 music · 42s                       ? keys  q quit│
-└────────────────────────────────────────────────────────────────────────────────────┘
+┌ ○ 1 chat  ● 2 bench  +        ⟳ reload  ▷ bench  ⚙ tune  ⇣ update  ⇩ get  ♥ ┐
+│ models               │ chat · qwen38-flash-next-plat   │ bench · ctx sweep  │
+│ language             │ > …                             │ 16k  62.1 t/s      │
+│ ● plat               │                                 │ 32k  58.4 t/s      │
+│   strata · 61 t/s    │                                 │ 64k  ⏵ running     │
+│ ○ gold               │                                 │                    │
+│   master · 21 t/s    │                                 │                    │
+│ media                │                                 │                    │
+│ ○ flux-3-klein       │                                 │                    │
+│ ○ breeze-tts         │                                 │                    │
+│ decisions            │                                 │                    │
+│ ○ vllm-d3-flash      │                                 │                    │
+│ new          menu    │                                 │                    │
+│ jobs         grouped │                                 │                    │
+│ ● bench · plat  2m   │                                 │                    │
+│ ○ chat · plat   5m   │                                 │                    │
+│ ✓ image · flux  1h   │                                 │                    │
+├──────────────────────┴─────────────────────────────────┴────────────────────┤
+│ ● plat  VRAM ████████░ 11.2/12  RAM █████████ 93%  CPU 67%  perf  :8080   ? │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Inventory** (left) is the only list. It is today's Stack catalog with live
-  router state, grouped by lane, plus a `utilities` group (below) and job
-  history. Everything you can act on is a row here.
-- **Focus** (centre) shows what the selected row does: chat for a language
-  model, a task form and its result for media and decisions, the output and
-  artifacts of a job, a model's tuning controls or bench results, or a
-  utility's form and live output.
-- **Inspector** (right) shows facts and the verbs that apply to the selection.
-  Verbs come from the existing command registry, so the palette, help and
-  inspector never disagree.
-- **Status line** (top) carries what every tab used to repeat: loaded model,
-  VRAM and RAM gauges, router endpoint. **Command line** (bottom) shows the
-  running job and takes `:` commands; the Activity box becomes a drawer opened
-  with `a`.
+- **Models** (sidebar, top) is the only model list: today's Stack catalog with
+  live router state. Enter opens the model's default view (chat, or its task
+  form) in the focused pane; the verbs (load, unload, bench, tune) are on the
+  row and in the palette.
+- **Jobs** (sidebar, bottom) replace the Jobs tab and the Activity box. A dot
+  shows running, done or failed; Enter opens the job's output or artifacts in
+  a pane.
+- **Workspaces** answer "are tabs useful": yes, but as the user's own
+  arrangements (a chat beside a bench, a media result beside its prompt), not
+  as one tab per app feature. Workspaces and their pane layout persist.
+- **Panes** split horizontally or vertically, resize and close. Every view can
+  go in any pane.
+- **Status bar** carries what every tab used to repeat. Verbs come from the
+  existing command registry, so the palette, help and row actions never
+  disagree.
 
 ### Utilities, not scripts
 
@@ -81,28 +104,28 @@ those actions; the in-app script editor goes away.
 Each utility is declared once (inputs, preconditions such as "router must be
 stopped", what it writes) so the TUI, GUI and CLI (`l3ms do bench …`) share it.
 
-There are no tabs. Navigation is: move in the inventory, act on the selection.
-`Ctrl+P` still finds any command.
+Navigation: move in the sidebar, act from the toolbar or the row, arrange
+views in tabs. `Ctrl+P` still finds any command.
 
 ### Where each tab goes
 
 | Today | Becomes |
 | --- | --- |
-| Workbench, Model Ops | deleted; inventory plus status line |
-| Stack | the inventory itself |
-| Chat | focus view of a language profile |
-| Param Builder | the Tune utility on a model |
-| Jobs | job history in the inventory; the running job also shows in the command line |
-| Download, Browser | the Download model utility; the GGUF list becomes its picker |
-| Maintenance (script editor) | deleted; scripts sit behind utilities |
-| Workbench bench list | the Bench utility on a model |
+| Workbench, Model Ops | deleted; sidebar models section plus status bar |
+| Stack | the sidebar models section |
+| Chat | a pane view of a language model |
+| Param Builder | the Tune toolbar button |
+| Jobs, Activity | the sidebar jobs section |
+| Download, Browser | the Download toolbar button; the GGUF list becomes its picker |
+| Maintenance (script editor) | deleted; scripts sit behind toolbar utilities |
+| Workbench bench list | the Bench toolbar button |
 
 ## Architecture: core plus two thin frontends
 
 ```
 l3ms-core   catalog, llama-swap client, chat client, job history, control/*,
             command registry, and a Workbench model:
-              State  — inventory, selection, focus, jobs, telemetry
+              State  — models, jobs, tabs and panes, selection, telemetry
               Action — every CommandId plus input events, frontend-neutral
               update(&mut State, Action) -> Vec<Effect>
               Effect — HTTP call, spawn, file write; run off the UI thread,
@@ -116,18 +139,18 @@ frontend spawns engines, retries an ambiguous submission or blocks on inference.
 
 What each frontend adds:
 
-- **TUI:** fixed three panes; `z` zooms the focus pane, `<` `>` resize the
-  inventory, panes collapse below 100 columns (inventory and focus) and 70
-  columns (focus only). Works over SSH and headless.
-- **GUI:** dockable, resizable panes and several focus windows (two chats side
-  by side, a job next to its source profile); inline image, audio and video
-  previews of job artifacts, which a terminal cannot do well.
+- **TUI:** the same sidebar, workspaces and splits with keyboard resizing;
+  `z` zooms a pane; the sidebar collapses below 100 columns. Works over SSH and
+  headless, and inside herdr itself.
+- **GUI:** the herdr look with mouse-draggable splits; inline image, audio and
+  video previews of job artifacts, which a terminal cannot do well.
 
 ## Migration, each step shippable
 
-1. **Inventory-first TUI.** Add the inspector and job history to the Stack
-   screen; delete Workbench and Model Ops. Gate: every command they offered is
-   reachable from the inventory.
+1. **Shell.** Sidebar (models and jobs sections), toolbar, status bar and one
+   pane, with today's tabs temporarily opening as pane views; delete Workbench
+   and Model Ops. Gate: every command they offered is reachable from the
+   sidebar, toolbar or palette.
 2. **Utilities.** Declare the utility schema; ship Reload router, Bench and
    Tune first (the daily ones), then Update engines, Download model, Health and
    Media setup. Delete the script editor once each script it served has a
@@ -135,10 +158,11 @@ What each frontend adds:
 3. **Extract the model.** Move state, `update` and effects out of `app.rs`
    into `src/workbench/`; `app.rs` keeps keys and drawing. Tests move with the
    logic they cover. No behaviour change.
-4. **Fold the rest.** Chat and job views become focus views; tabs go.
-5. **Workspace split.** `l3ms-core` and `l3ms` crates; CLI and tests unchanged.
-6. **GPUI prototype.** Pin a GPUI revision and prove build and launch on this
-   desktop first; then read-only inventory and job views; then actions and
+4. **Fold the rest.** Chat, job output and media results become pane views; the old fixed tabs go.
+5. **Crate split.** `l3ms-core` and `l3ms` crates; CLI and tests unchanged.
+6. **Tabs and splits.** User workspaces with split panes, persisted.
+7. **GPUI prototype.** Pin a GPUI revision and prove build and launch on this
+   desktop first; then read-only sidebar and job views; then actions and
    artifact previews. Measure the GUI's VRAM use: a 12 GB card running a model
    has little to spare.
 
