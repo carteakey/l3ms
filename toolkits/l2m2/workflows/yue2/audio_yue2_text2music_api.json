@@ -1,0 +1,59 @@
+{"graph": {
+  "1": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {"ckpt_name": "yue2_3b_int8_convrot.safetensors"},
+    "_meta": {"title": "YuE2 bundled Comfy checkpoint"}
+  },
+  "2": {
+    "class_type": "PrimitiveStringMultiline",
+    "inputs": {"value": "Warm acoustic pop, gentle piano, clear English vocals."},
+    "_meta": {"title": "Style: edit here"}
+  },
+  "3": {
+    "class_type": "PrimitiveStringMultiline",
+    "inputs": {"value": "[Verse]\nPaper boats across the stream\nCarry every little dream\n[Chorus]\nMorning comes and we begin\nLet the quiet sunlight in"},
+    "_meta": {"title": "Lyrics: edit here"}
+  },
+  "4": {
+    "class_type": "YuE2GenerateABC",
+    "inputs": {
+      "clip": ["1", 1], "style": ["2", 0], "lyrics": ["3", 0],
+      "seed": 42, "mode": "full", "max_abc_tokens": 8192,
+      "temperature": 0.7, "top_p": 0.9, "top_k": 30,
+      "repetition_penalty": 1.005, "penalty_window": 100
+    }
+  },
+  "5": {
+    "class_type": "YuE2GenerateMusic",
+    "inputs": {
+      "clip": ["1", 1], "style": ["2", 0], "lyrics": ["3", 0], "abc": ["4", 0],
+      "seed": 42, "mode": "full", "max_duration": 30.0,
+      "temperature": 1.0, "top_p": 0.95, "top_k": 100,
+      "repetition_penalty": 1.2, "cfg_scale": 1.0
+    }
+  },
+  "6": {
+    "class_type": "ConditioningZeroOut",
+    "inputs": {"conditioning": ["5", 0]}
+  },
+  "7": {
+    "class_type": "EmptyYuE2LatentAudio",
+    "inputs": {"seconds": ["5", 1], "batch_size": 1}
+  },
+  "8": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": ["1", 0], "positive": ["5", 0], "negative": ["6", 0],
+      "latent_image": ["7", 0], "seed": 42, "steps": 32, "cfg": 1.0,
+      "sampler_name": "dpm_2", "scheduler": "sgm_uniform", "denoise": 1.0
+    }
+  },
+  "9": {
+    "class_type": "VAEDecodeAudio",
+    "inputs": {"samples": ["8", 0], "vae": ["1", 2]}
+  },
+  "10": {
+    "class_type": "SaveAudioAdvanced",
+    "inputs": {"audio": ["9", 0], "filename_prefix": "audio/YuE2", "format": "flac"}
+  }
+}}

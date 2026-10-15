@@ -24,11 +24,9 @@ use super::language::SpeechAudio;
 use super::native_commands::{
     is_supported_blender_request_route, is_supported_cpu_breeze_speech, is_supported_h3_args,
     is_supported_h3_request_route, is_supported_heartmula_args,
-    is_supported_heartmula_request_route, is_supported_ltx_request_route,
-    is_supported_yue2_request_route, prepare_blender_recipe_for_route,
+    is_supported_heartmula_request_route, prepare_blender_recipe_for_route,
     prepare_breeze_speech_recipe, prepare_breeze_speech_recipe_for_route,
-    prepare_h3_recipe_for_route, prepare_heartmula_music_recipe_for_route,
-    prepare_ltx_recipe_for_route, prepare_yue2_music_recipe_for_route, NativeOutputExpectation,
+    prepare_h3_recipe_for_route, prepare_heartmula_music_recipe_for_route, NativeOutputExpectation,
     CPU_BREEZE_PROFILE_ID,
 };
 use super::process::{self, ProcessFailureDisposition, ProcessFailureKind, ProcessLimits};
@@ -40,9 +38,7 @@ const OUTPUT_NAME: &str = "result.wav";
 const CHUNKS_NAME: &str = "result.wav.chunks";
 const H3_RAW_VIDEO_NAME: &str = "minimax_h3_video_rgb24.json";
 const H3_VIDEO_NAME: &str = "result.mp4";
-const LTX_VIDEO_NAME: &str = H3_VIDEO_NAME;
 const BLENDER_IMAGE_NAME: &str = "result_0001.png";
-const YUE_SONG_DIRECTORY_NAME: &str = "song";
 const MAX_CAPTURE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_STREAM_CHUNKS: usize = 63;
 const MAX_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
@@ -194,48 +190,6 @@ pub(crate) fn execute_heartmula_music_on_device(
     })
 }
 
-/// Execute the declared YuE2 full-song script on its accepted CUDA route. The
-/// script is restricted to an existing Python environment and offline model
-/// resolution; the fixed result WAV is validated through the shared PCM path.
-pub(crate) fn execute_yue2_on_device(
-    catalog: &Catalog,
-    request: &InferenceRequest,
-    accepted_route: &ResolvedProfileRoute,
-    device: &CudaDevice,
-    job_directory: &Path,
-    context: &OperationContext<'_>,
-    recovery: RecoveryPolicy,
-) -> Result<MediaExecutionResult, MediaExecutionFailure> {
-    if !is_supported_yue2_request_route(request, accepted_route) {
-        return Err(not_dispatched(MediaExecutionErrorKind::InvalidRequest));
-    }
-    let output_root = validate_job_directory(job_directory)?;
-    ensure_absent(&output_root.join(OUTPUT_NAME))?;
-    ensure_absent(&output_root.join(CHUNKS_NAME))?;
-    // The YuE CLI writes into `<output>/song` before the runner can validate
-    // its final fixed WAV; reserve this native directory before spawning.
-    ensure_absent(&output_root.join(YUE_SONG_DIRECTORY_NAME))?;
-    let recipe =
-        prepare_yue2_music_recipe_for_route(catalog, request, accepted_route, &output_root)
-            .map_err(|_| not_dispatched(MediaExecutionErrorKind::InvalidRequest))?;
-
-    execute_script_recipe(
-        &recipe,
-        &output_root,
-        Some(device),
-        context,
-        recovery,
-        ScriptMode::YuePrepared,
-    )?;
-    let artifacts = discover_artifacts(&output_root, SpeechMode::Standard, context)?;
-    check_after_child(context)?;
-    Ok(MediaExecutionResult {
-        output_root,
-        mode: SpeechMode::Standard,
-        artifacts,
-    })
-}
-
 /// Run the declared MiniMax-H3 audio or synchronized audio/video script on its
 /// exact accepted CUDA route. GPU admission/release remains with the caller.
 pub(crate) fn execute_h3_on_device(
@@ -289,46 +243,6 @@ pub(crate) fn execute_h3_on_device(
     })
 }
 
-/// Run one LTX-2.5 synchronized audio/video request on its exact accepted CUDA
-/// route. The prepared-only script path must use the already-installed Python
-/// interpreter and weights; this function does not prepare or download either.
-pub(crate) fn execute_ltx_on_device(
-    catalog: &Catalog,
-    request: &InferenceRequest,
-    accepted_route: &ResolvedProfileRoute,
-    device: &CudaDevice,
-    job_directory: &Path,
-    context: &OperationContext<'_>,
-    recovery: RecoveryPolicy,
-) -> Result<MediaExecutionResult, MediaExecutionFailure> {
-    if !is_supported_ltx_request_route(request, accepted_route) {
-        return Err(not_dispatched(MediaExecutionErrorKind::InvalidRequest));
-    }
-    let output_root = validate_job_directory(job_directory)?;
-    let output_path = output_root.join(LTX_VIDEO_NAME);
-    ensure_absent(&output_path)?;
-    let recipe = prepare_ltx_recipe_for_route(catalog, request, accepted_route, &output_path)
-        .map_err(|_| not_dispatched(MediaExecutionErrorKind::InvalidRequest))?;
-
-    execute_script_recipe(
-        &recipe,
-        &output_root,
-        Some(device),
-        context,
-        recovery,
-        ScriptMode::LtxPrepared,
-    )?;
-    let artifacts = discover_ltx_artifacts(&output_root, context)?;
-    check_after_child(context)?;
-    Ok(MediaExecutionResult {
-        output_root,
-        // The result type predates synchronized video. Callers distinguish it
-        // by its single Video artifact, not this speech-mode compatibility tag.
-        mode: SpeechMode::Standard,
-        artifacts,
-    })
-}
-
 fn execute_script_recipe(
     recipe: &super::native_commands::NativeCommandRecipe,
     output_root: &Path,
@@ -347,12 +261,6 @@ fn execute_script_recipe(
         .env("TMPDIR", output_root);
     match mode {
         ScriptMode::Default => {}
-        ScriptMode::LtxPrepared => {
-            command.env("L3MS_LTX_PREPARED_ONLY", "1");
-        }
-        ScriptMode::YuePrepared => {
-            command.env("L3MS_YUE_PREPARED_ONLY", "1");
-        }
         ScriptMode::BlenderHeadless => {
             command.env("L3MS_BLENDER_HEADLESS_ONLY", "1");
         }
@@ -372,8 +280,6 @@ fn execute_script_recipe(
 #[derive(Clone, Copy)]
 enum ScriptMode {
     Default,
-    LtxPrepared,
-    YuePrepared,
     BlenderHeadless,
 }
 
@@ -819,22 +725,6 @@ fn discover_artifacts(
 
     check_after_child(context)?;
     Ok(artifacts)
-}
-
-fn discover_ltx_artifacts(
-    root: &Path,
-    context: &OperationContext<'_>,
-) -> Result<Vec<MediaArtifact>, MediaExecutionFailure> {
-    check_after_child(context)?;
-    validate_mp4(&root.join(LTX_VIDEO_NAME), root, context)?;
-    for name in [OUTPUT_NAME, CHUNKS_NAME, H3_RAW_VIDEO_NAME] {
-        require_missing_after_child(&root.join(name))?;
-    }
-    check_after_child(context)?;
-    Ok(vec![MediaArtifact {
-        relative_path: PathBuf::from(LTX_VIDEO_NAME),
-        kind: MediaArtifactKind::Video,
-    }])
 }
 
 fn discover_h3_artifacts(
@@ -1494,27 +1384,6 @@ done
 printf 'RIFF\046\000\000\000WAVEfmt \020\000\000\000\001\000\001\000\300\135\000\000\200\273\000\000\002\000\020\000data\002\000\000\000\000\000' > "$output"
 "#;
 
-    const YUE_FIXTURE_SCRIPT: &str = r#"#!/usr/bin/env bash
-set -euo pipefail
-output=""
-while (($#)); do
-  case "$1" in
-    --prompt|--text|--style|--prompt-file|--tags|--lyrics|--lyrics-file|--abc-file|--cot|--seed|--cfg-scale)
-      (($# >= 2)) || exit 91
-      shift 2
-      ;;
-    --output) output="$2"; shift 2 ;;
-    *) exit 92 ;;
-  esac
-done
-[[ "${CUDA_VISIBLE_DEVICES-unset}" == "GPU-01234567-89ab-cdef-0123-456789abcdef" ]] || exit 93
-[[ "${L3MS_YUE_PREPARED_ONLY-unset}" == "1" ]] || exit 94
-[[ -n "$L3MS_MEDIA_OUTPUT_DIR" && "$TMPDIR" == "$L3MS_MEDIA_OUTPUT_DIR" ]] || exit 95
-[[ "$output" == "$L3MS_MEDIA_OUTPUT_DIR" ]] || exit 96
-mkdir "$output/song"
-printf 'RIFF\046\000\000\000WAVEfmt \020\000\000\000\001\000\001\000\300\135\000\000\200\273\000\000\002\000\020\000data\002\000\000\000\000\000' > "$output/result.wav"
-"#;
-
     const H3_FIXTURE_SCRIPT: &str = r#"#!/usr/bin/env bash
 set -euo pipefail
 output=""
@@ -1546,35 +1415,6 @@ if [[ "$video" == true ]]; then
 else
   [[ -z "$video_output" ]] || exit 97
 fi
-"#;
-
-    const LTX_FIXTURE_SCRIPT: &str = r#"#!/usr/bin/env bash
-set -euo pipefail
-output=""
-prompt=""
-while (($#)); do
-  case "$1" in
-    --prompt|--prompt-file) prompt="$2"; shift 2 ;;
-    --frames|--num-frames|--seed|--transformer|--quantization|--offload) shift 2 ;;
-    --image|--input-image) shift 4 ;;
-    --output) output="$2"; shift 2 ;;
-    *) exit 92 ;;
-  esac
-done
-[[ "${CUDA_VISIBLE_DEVICES-unset}" == "GPU-01234567-89ab-cdef-0123-456789abcdef" ]] || exit 93
-[[ "${L3MS_LTX_PREPARED_ONLY-unset}" == "1" ]] || exit 94
-[[ -n "$L3MS_MEDIA_OUTPUT_DIR" && "$TMPDIR" == "$L3MS_MEDIA_OUTPUT_DIR" ]] || exit 95
-[[ "$output" == "$L3MS_MEDIA_OUTPUT_DIR/result.mp4" ]] || exit 96
-printf x >> '__ATTEMPT_MARKER__'
-if [[ "$prompt" == *child-failure* ]]; then
-  printf 'private LTX log'
-  exit 9
-fi
-if [[ "$prompt" == *invalid-mp4* ]]; then
-  printf 'not an mp4' > "$output"
-  exit 0
-fi
-printf '\000\000\000\014ftypisom' > "$output"
 "#;
 
     const BLENDER_FIXTURE_SCRIPT: &str = r#"#!/usr/bin/env bash
@@ -1645,28 +1485,12 @@ esac
                             "script": "media-models/generate-heartmula-music.sh"
                         },
                         {
-                            "id": "yue2-music",
-                            "name": "Fixture YuE2",
-                            "runtime": "YuE2 Python",
-                            "device": "cuda",
-                            "tasks": ["music"],
-                            "script": "media-models/generate-yue2.sh"
-                        },
-                        {
                             "id": "minimax-h3",
                             "name": "Fixture H3",
                             "runtime": "audio.cpp",
                             "device": "cuda",
                             "tasks": ["music", "tts", "video"],
                             "script": "media-models/generate-minimax-h3.sh"
-                        },
-                        {
-                            "id": "ltx-2.5",
-                            "name": "Fixture LTX",
-                            "runtime": "LTX-2 Python",
-                            "device": "cuda",
-                            "tasks": ["video", "music"],
-                            "script": "media-models/generate-ltx-2.5.sh"
                         },
                         {
                             "id": "blender-3d",
@@ -1691,18 +1515,8 @@ esac
             )
             .unwrap();
             fs::write(
-                media_root.join("media-models/generate-yue2.sh"),
-                YUE_FIXTURE_SCRIPT,
-            )
-            .unwrap();
-            fs::write(
                 media_root.join("media-models/generate-minimax-h3.sh"),
                 H3_FIXTURE_SCRIPT,
-            )
-            .unwrap();
-            fs::write(
-                media_root.join("media-models/generate-ltx-2.5.sh"),
-                "#!/usr/bin/env bash\nexit 97\n",
             )
             .unwrap();
             fs::write(
@@ -1781,29 +1595,9 @@ esac
         }
     }
 
-    fn yue2_request(args: &[&str]) -> InferenceRequest {
-        InferenceRequest::Media {
-            profile: ProfileKey::new(Lane::Media, "yue2-music").unwrap(),
-            input: MediaInput::Script {
-                task: super::super::catalog::Task::new("music").unwrap(),
-                args: args.iter().map(|argument| (*argument).to_owned()).collect(),
-            },
-        }
-    }
-
     fn h3_request(task: &str, args: &[&str]) -> InferenceRequest {
         InferenceRequest::Media {
             profile: ProfileKey::new(Lane::Media, "minimax-h3").unwrap(),
-            input: MediaInput::Script {
-                task: super::super::catalog::Task::new(task).unwrap(),
-                args: args.iter().map(|argument| (*argument).to_owned()).collect(),
-            },
-        }
-    }
-
-    fn ltx_request(task: &str, args: &[&str]) -> InferenceRequest {
-        InferenceRequest::Media {
-            profile: ProfileKey::new(Lane::Media, "ltx-2.5").unwrap(),
             input: MediaInput::Script {
                 task: super::super::catalog::Task::new(task).unwrap(),
                 args: args.iter().map(|argument| (*argument).to_owned()).collect(),
@@ -2366,61 +2160,6 @@ esac
     }
 
     #[test]
-    fn yue2_uses_prepared_cuda_route_and_rejects_song_symlink_before_spawn() {
-        const UUID: &str = "GPU-01234567-89ab-cdef-0123-456789abcdef";
-        let fixture = Fixture::new();
-        let catalog = fixture.catalog();
-        let request = yue2_request(&["--prompt", "fixture music", "--lyrics", "fixture words"]);
-        let accepted =
-            crate::control::routes::resolve_profile_route(&catalog, request.profile()).unwrap();
-        let device = CudaDevice::new(UUID).unwrap();
-        let context = context(&NeverCancel, Duration::from_secs(5));
-
-        let output = fixture.output_directory("yue2-private");
-        let result = execute_yue2_on_device(
-            &catalog,
-            &request,
-            &accepted,
-            &device,
-            &output,
-            &context,
-            recovery(),
-        )
-        .unwrap();
-        assert_eq!(result.mode(), SpeechMode::Standard);
-        assert_eq!(result.artifacts().len(), 1);
-        assert_eq!(result.artifacts()[0].kind(), MediaArtifactKind::FinalWave);
-        assert_eq!(
-            result.artifacts()[0].relative_path(),
-            Path::new(OUTPUT_NAME)
-        );
-        assert!(output.join("song").is_dir());
-
-        let outside = fixture._parent.path().join("outside-yue-song");
-        fs::create_dir(&outside).unwrap();
-        let symlink_output = fixture.output_directory("yue2-song-symlink");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&outside, symlink_output.join("song")).unwrap();
-        let error = execute_yue2_on_device(
-            &catalog,
-            &request,
-            &accepted,
-            &device,
-            &symlink_output,
-            &context,
-            recovery(),
-        )
-        .expect_err("YuE must not follow a preexisting native output symlink");
-        assert_eq!(error.kind(), MediaExecutionErrorKind::OutputAlreadyExists);
-        assert_eq!(
-            error.disposition(),
-            ProcessFailureDisposition::NoChildSpawned
-        );
-        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
-        assert!(!symlink_output.join(OUTPUT_NAME).exists());
-    }
-
-    #[test]
     fn heartmula_process_failure_is_not_retried_and_logs_are_not_returned() {
         const UUID: &str = "GPU-01234567-89ab-cdef-0123-456789abcdef";
         let fixture = Fixture::new();
@@ -2747,142 +2486,6 @@ esac
         assert_eq!(fs::read(marker).unwrap(), b"x");
         assert!(!format!("{error:?}").contains("private h3 log"));
         assert!(!error.to_string().contains("private h3 log"));
-    }
-
-    #[test]
-    fn ltx_runs_once_with_private_output_and_returns_only_a_video_artifact() {
-        const UUID: &str = "GPU-01234567-89ab-cdef-0123-456789abcdef";
-        let fixture = Fixture::new();
-        let marker = fixture._parent.path().join("ltx-attempts");
-        let script =
-            LTX_FIXTURE_SCRIPT.replace("__ATTEMPT_MARKER__", &marker.display().to_string());
-        fs::write(
-            fixture.media_root.join("media-models/generate-ltx-2.5.sh"),
-            script,
-        )
-        .unwrap();
-        let conditioning = fixture._parent.path().join("conditioning.png");
-        fs::write(&conditioning, b"fixture image").unwrap();
-        let conditioning = conditioning.to_str().unwrap();
-        let request = ltx_request(
-            "video",
-            &[
-                "--prompt",
-                "the camera approaches the boat",
-                "--input-image",
-                conditioning,
-                "0",
-                "0.8",
-                "--frames",
-                "121",
-            ],
-        );
-        let catalog = fixture.catalog();
-        let accepted =
-            crate::control::routes::resolve_profile_route(&catalog, request.profile()).unwrap();
-        let device = CudaDevice::new(UUID).unwrap();
-        let context = context(&NeverCancel, Duration::from_secs(5));
-        let output = fixture.output_directory("ltx-private-output");
-        let result = execute_ltx_on_device(
-            &catalog,
-            &request,
-            &accepted,
-            &device,
-            &output,
-            &context,
-            recovery(),
-        )
-        .unwrap();
-        assert_eq!(result.artifacts().len(), 1);
-        assert_eq!(result.artifacts()[0].kind(), MediaArtifactKind::Video);
-        assert_eq!(
-            result.artifacts()[0].relative_path(),
-            Path::new("result.mp4")
-        );
-        assert_eq!(fs::read_dir(&output).unwrap().count(), 1);
-        assert_eq!(fs::read(&marker).unwrap(), b"x");
-
-        let music_request = ltx_request("music", &["--prompt", "ambient orchestral music"]);
-        let music_output = fixture.output_directory("ltx-music-output");
-        let music_result = execute_ltx_on_device(
-            &catalog,
-            &music_request,
-            &accepted,
-            &device,
-            &music_output,
-            &context,
-            recovery(),
-        )
-        .unwrap();
-        assert_eq!(music_result.artifacts().len(), 1);
-        assert_eq!(music_result.artifacts()[0].kind(), MediaArtifactKind::Video);
-        assert_eq!(fs::read_dir(&music_output).unwrap().count(), 1);
-        assert_eq!(fs::read(&marker).unwrap(), b"xx");
-
-        let existing_output = fixture.output_directory("ltx-existing-output");
-        fs::write(existing_output.join("result.mp4"), b"existing").unwrap();
-        let error = execute_ltx_on_device(
-            &catalog,
-            &request,
-            &accepted,
-            &device,
-            &existing_output,
-            &context,
-            recovery(),
-        )
-        .expect_err("LTX must refuse to clobber an existing result");
-        assert_eq!(error.kind(), MediaExecutionErrorKind::OutputAlreadyExists);
-        assert_eq!(
-            error.disposition(),
-            ProcessFailureDisposition::NoChildSpawned
-        );
-        assert_eq!(fs::read(&marker).unwrap(), b"xx");
-
-        let invalid_request = ltx_request("video", &["--prompt", "invalid-mp4 output"]);
-        let invalid_output = fixture.output_directory("ltx-invalid-mp4");
-        let error = execute_ltx_on_device(
-            &catalog,
-            &invalid_request,
-            &accepted,
-            &device,
-            &invalid_output,
-            &context,
-            recovery(),
-        )
-        .expect_err("malformed MP4 must not be reported as a video artifact");
-        assert_eq!(error.kind(), MediaExecutionErrorKind::InvalidArtifact);
-        assert_eq!(
-            error.disposition(),
-            ProcessFailureDisposition::ChildGroupReaped
-        );
-        assert_eq!(fs::read(&marker).unwrap(), b"xxx");
-
-        let failed_request = ltx_request("music", &["--prompt", "child-failure prompt"]);
-        let failed_output = fixture.output_directory("ltx-child-failure");
-        let error = execute_ltx_on_device(
-            &catalog,
-            &failed_request,
-            &accepted,
-            &device,
-            &failed_output,
-            &context,
-            recovery(),
-        )
-        .unwrap_err();
-        assert!(matches!(
-            error.kind(),
-            MediaExecutionErrorKind::Process(ProcessFailureKind::ChildExitedUnsuccessfully {
-                code: Some(9)
-            })
-        ));
-        assert_eq!(
-            error.disposition(),
-            ProcessFailureDisposition::ChildGroupReaped
-        );
-        assert_eq!(fs::read(&marker).unwrap(), b"xxxx");
-        assert_eq!(fs::read_dir(&failed_output).unwrap().count(), 0);
-        assert!(!format!("{error:?}").contains("private LTX log"));
-        assert!(!error.to_string().contains("private LTX log"));
     }
 
     #[test]

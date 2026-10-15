@@ -27,48 +27,45 @@
     {
       "id": "ltx-2.5",
       "name": "LTX-2.5 synchronized video",
-      "runtime": "LTX-2 Python",
-      "device": "cuda",
-      "variant": "22B distilled, FP8-cast at load, CPU offload",
+      "runtime": "ComfyUI",
+      "variant": "22B distilled Comfy INT8 ConvRot, synchronized audio/video",
       "tasks": ["video", "music"],
       "inputs": ["text", "image"],
       "status": "gated-local",
       "script": "media-models/generate-ltx-2.5.sh",
-      "description": "Text-to-video/audio generation through the official LTX-2.5 DistilledPipeline. The official BF16 transformer is quantized to FP8 while loading and offloaded to CPU; an explicit transformer-path override is available for future compatible pre-quantized releases.",
+      "description": "Shared-engine generation through native ComfyUI LTX-2.5 workflows. Supply API-format workflow JSON; the included first-pass preview saves synchronized video and a separate audio artifact. The standalone Python script remains available separately.",
       "requirements": [
-        "Lightricks/LTX-2 checkout with uv sync --extra natten",
-        "Hugging Face access to the gated LTX-2.5 files",
-        "about 66 GiB of model storage plus CPU RAM and swap"
+        "Prepared shared ComfyUI server with native LTX-2.5 nodes",
+        "Compatible LTX-2.5 Comfy diffusion model, text encoder, video VAE and audio VAE already installed",
+        "API-format workflow JSON with model names matching the server's installed files"
       ],
       "notes": [
-        "The official LTX-2.5 repository currently publishes BF16 split components; no official pre-quantized Ada transformer is listed. The selected fp8-cast policy still stores the eligible transformer linears in FP8 during inference.",
-        "The newly reported 2.5 NVFP4 transformer is a Blackwell-oriented path and is about 18.7 GB before runtime overhead, so it is not selected for this 12 GB Ada host.",
-        "The convolutional video VAE is selected to avoid requiring the diffusion VAE attention extra during decode.",
-        "Use --transformer PATH with the matching --quantization policy only after a pre-quantized artifact has been verified against the official ltx-pipelines loader.",
-        "The distilled pipeline accepts still-image conditioning through --image PATH FRAME STRENGTH. Use a dedicated LTX pipeline for audio-to-video or video-to-video inputs."
+        "workflows/ltx-2.5/video_ltx2_5_t2v_preview_api.json is a low-resolution first-pass preview derived from the installed official template; it omits the second sampling/upscaling stage.",
+        "Both video and music tasks accept workflow JSON; the preview saves MP4 and FLAC. Image conditioning requires a compatible image-to-video graph.",
+        "ComfyUI owns device scheduling. Shared use requires the scoped-job ownership assertion described in docs/comfyui-ltx-yue2.md; a reachable server is not proof of safe concurrent operation.",
+        "Weights and real generation acceptance remain unverified. The retained standalone script uses its original separate Python runtime and assets."
       ]
     },
     {
       "id": "yue2-music",
       "name": "YuE2 foundation music generation",
-      "runtime": "YuE2 Python",
-      "device": "cuda",
-      "variant": "3B BF16 / FP8 AR, flow matching NAR, YuE2-Vae 48kHz stereo",
+      "runtime": "ComfyUI",
+      "variant": "YuE2 3B Comfy INT8 ConvRot, native ABC planning and audio generation",
       "tasks": ["music"],
       "inputs": ["text", "lyrics", "abc"],
       "status": "local",
       "script": "media-models/generate-yue2.sh",
-      "description": "Offline prompt-, lyrics-, and score-conditioned full-song generation through the official YuE2 pipeline with FP8 and memory budget tuning for 12 GB GPUs.",
+      "description": "Shared-engine song generation through native ComfyUI YuE2 nodes. Supply API-format workflow JSON with style, lyrics and optional ABC planning; the included recipe saves FLAC. The standalone Python script remains available separately.",
       "requirements": [
-        "YuE repository checkout with Python 3.12 uv virtual environment (yue2-infer)",
-        "YuE2-3B and YuE2-Vae models in L3MS_MEDIA_ROOT/YuE2 or Hugging Face cache",
-        "NVIDIA GPU with CUDA and BF16 support (FP8 supported on Ada Lovelace / CC >= 8.9)"
+        "Prepared shared ComfyUI server with native YuE2 nodes",
+        "Compatible bundled YuE2 Comfy checkpoint already installed under checkpoints",
+        "API-format workflow JSON with checkpoint name matching the server's installed file"
       ],
       "notes": [
-        "YuE2 generates an editable ABC melody-and-chord plan, predicts semantic tokens, synthesizes acoustic latents, and decodes 48 kHz stereo audio.",
-        "Supports --cot {full,melody,off}, --abc-file for exact-score conditioning, --quantization {none,fp8}, and --budget GiB.",
-        "On 12 GB GPUs like Yeti's RTX 4070, --quantization fp8 and --budget 12 are recommended defaults.",
-        "Keep llama-swap GPU models unloaded during generation."
+        "workflows/yue2/audio_yue2_text2music_api.json derives from the installed official template and includes ABC planning. A supplied ABC string can replace that link.",
+        "Standalone CLI flags are not translated into a shared workflow: edit the graph inputs for style, lyrics, seeds and duration.",
+        "ComfyUI owns device scheduling. Shared use requires the scoped-job ownership assertion described in docs/comfyui-ltx-yue2.md.",
+        "Weights and real generation acceptance remain unverified. The retained standalone script uses its original separate Python runtime and assets."
       ]
     },
     {

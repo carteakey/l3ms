@@ -163,6 +163,19 @@ impl ChatClient {
         crate::control::language::LanguageAdapter::new(&self.base_url, self.api_key.as_deref())
     }
 
+    /// Reuse the committed router connection for its shared ComfyUI engine.
+    /// Construction performs no network I/O or environment lookup.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn comfy_adapter(
+        &self,
+    ) -> Result<crate::control::comfy::ComfyAdapter, crate::control::comfy::ComfyFailure> {
+        crate::control::comfy::ComfyAdapter::new(
+            &endpoint_url(&self.base_url, "/comfyui"),
+            self.api_key.as_deref(),
+            crate::control::comfy::ComfyContract::CanonicalIdsAndAtomicScopedCancellation,
+        )
+    }
+
     pub fn list_models(&self) -> Result<Vec<SwapModel>> {
         Ok(self.list_model_inventory()?.models)
     }
@@ -846,6 +859,18 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(1));
         assert!(error.to_string().contains("cancelled"), "{error:#}");
         server.join().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn comfy_adapter_constructs_from_the_captured_prefixed_connection() {
+        let client = ChatClient::new("http://localhost:9090/stack/", Some("captured-key")).unwrap();
+        assert_eq!(
+            endpoint_url(client.base_url(), "/comfyui"),
+            "http://localhost:9090/stack/comfyui"
+        );
+        assert!(client.comfy_adapter().is_ok());
+        assert!(!format!("{client:?}").contains("captured-key"));
     }
 
     fn read_http_request(stream: &mut impl Read) -> String {

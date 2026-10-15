@@ -28,11 +28,19 @@ for scope and evidence.
 - [ ] Verify HeartMuLa and H3 audio through the root CLI and `audiocpp_auto`
   with real weights; then verify language-model return. HTTP fixtures are not
   real-model acceptance. H3 video retains direct MP4 post-processing.
-- [ ] Verify root H3 video, LTX and YuE2 outputs with real prepared runtimes;
-  decode each artifact and retain settings/logs. LTX/YuE2 remain direct by design.
+- [ ] Verify LTX and YuE2 ComfyUI workflow outputs with real weights;
+  decode each artifact and retain settings/logs. Both share the existing ComfyUI
+  engine; separate Python runtimes are not workbench prerequisites.
   Do not call the full port complete until these advertised paths pass.
 
 Optional follow-ups:
+- [ ] Advanced direct H3 video/Blender acceptance remains separate from the
+  shared-engine workbench. Do not expand direct-script orchestration to fill
+  unsupported model gaps by default; narrow the supported scope instead.
+- [ ] Finish source consolidation after shared-engine acceptance: keep one
+  product/UI/config/history, relocate still-needed toolkit modules, audit callers
+  before retiring standalone compatibility entry points. A folder rename alone
+  is not runtime integration. Do not delete model/runtime data with source cleanup.
 - [ ] Measure `qwen38-flash-next-plat-abliterated-vision` so it can join the
   ranking; until then the site lists it as not measured.
 - [ ] Delete `~/repos/_retired/` once you are satisfied; history is bundled in

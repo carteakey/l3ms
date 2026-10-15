@@ -157,6 +157,7 @@ pub fn build_direct_native(
             if selected_profile.lane != Lane::Media
                 || profile.runtime.lane != Lane::Media
                 || profile.runtime.as_str() != "ComfyUI"
+                || !matches!(declared_task.as_str(), "image" | "video" | "music")
             {
                 return Err(TaskFormError::ProfileTaskMismatch);
             }
@@ -178,11 +179,8 @@ pub fn build_direct_native(
                     && if selected_profile.profile_id.as_str() == "blender-3d" {
                         profile.runtime.as_str() == "Blender 5.2 / blender-mcp"
                             && profile.device.is_none()
-                    } else if selected_profile.profile_id.as_str() == "yue2-music" {
-                        profile.runtime.as_str() == "YuE2 Python"
-                            && profile.device.as_ref() == Some(&super::catalog::Device::Cuda)
                     } else {
-                        matches!(profile.runtime.as_str(), "audio.cpp" | "LTX-2 Python")
+                        profile.runtime.as_str() == "audio.cpp"
                             && profile.device.as_ref() == Some(&super::catalog::Device::Cuda)
                     }
             });
@@ -192,12 +190,6 @@ pub fn build_direct_native(
                 }
                 "minimax-h3" => {
                     super::native_commands::is_supported_h3_args(&args, declared_task.as_str())
-                }
-                "ltx-2.5" => {
-                    super::native_commands::is_supported_ltx_args(&args, declared_task.as_str())
-                }
-                "yue2-music" if declared_task.as_str() == "music" => {
-                    super::native_commands::is_supported_yue2_args(&args)
                 }
                 "blender-3d" => {
                     super::native_commands::is_supported_blender_args(&args, declared_task.as_str())
@@ -484,6 +476,40 @@ mod tests {
         (temporary, catalog)
     }
 
+    fn comfy_workflow_catalog() -> (TempDir, Catalog) {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        fs::create_dir_all(root.join("toolkits/l2m2")).unwrap();
+        fs::create_dir_all(root.join("toolkits/l3ds")).unwrap();
+        fs::write(
+            root.join("llama-swap.yaml"),
+            "models:\n  fixture-chat:\n    cmd: server\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("toolkits/l2m2/media-runtimes.json"),
+            serde_json::json!({
+                "schema_version": 1,
+                "profiles": [{
+                    "id": "fixture-workflow",
+                    "name": "Comfy workflow fixture",
+                    "runtime": "ComfyUI",
+                    "tasks": ["image", "video", "music"],
+                    "script": "media-models/comfy.sh"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            root.join("toolkits/l3ds/decision-runtimes.json"),
+            r#"{"version":"1.0","profiles":[]}"#,
+        )
+        .unwrap();
+        let catalog = Catalog::load(root).unwrap();
+        (temporary, catalog)
+    }
+
     fn profile(lane: super::super::catalog::Lane, id: &str) -> ProfileKey {
         ProfileKey::new(lane, id).unwrap()
     }
@@ -696,6 +722,41 @@ mod tests {
                 ),
             )),
             TaskFormError::FrameTooLarge
+        );
+    }
+
+    #[test]
+    fn direct_workflow_builder_accepts_image_video_and_music_tasks() {
+        let (_temporary, catalog) = comfy_workflow_catalog();
+        for declared_task in ["image", "video", "music"] {
+            let (request, _) = build_direct_native(
+                &catalog,
+                TaskFormDraft::new(
+                    profile(super::super::catalog::Lane::Media, "fixture-workflow"),
+                    task(declared_task),
+                    60_000,
+                    TaskFields::MediaWorkflow {
+                        graph: json!({"1": {"class_type": "FixtureNode", "inputs": {}}}),
+                    },
+                ),
+            )
+            .unwrap();
+            assert_eq!(request.task(), declared_task);
+        }
+
+        assert_eq!(
+            direct_error(build_direct_native(
+                &catalog,
+                TaskFormDraft::new(
+                    profile(super::super::catalog::Lane::Media, "fixture-workflow"),
+                    task("audio"),
+                    60_000,
+                    TaskFields::MediaWorkflow {
+                        graph: json!({"1": {"class_type": "FixtureNode", "inputs": {}}}),
+                    },
+                ),
+            )),
+            TaskFormError::ProfileTaskMismatch
         );
     }
 

@@ -28,7 +28,6 @@ const MAX_DIRECT_NATIVE_INPUT_BYTES: usize = 1024 * 1024;
 const MAX_DIRECT_NATIVE_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_DIRECT_NATIVE_TIMEOUT_MS: u64 = 300_000;
 const MAX_DIRECT_NATIVE_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;
-const DEFAULT_DIRECT_COMFY_URL: &str = "http://127.0.0.1:8188";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -925,10 +924,20 @@ fn direct_comfy_adapter_from_environment() -> Result<crate::control::comfy::Comf
     let scoped_jobs = optional_environment_value("L3MS_COMFY_SCOPED_JOBS")?;
     let endpoint = optional_environment_value("L2M2_COMFY_URL")?;
     let api_key = optional_environment_value("L3MS_COMFY_API_KEY")?;
+    let (router_endpoint, router_api_key) = if endpoint.is_none() {
+        (
+            optional_environment_value("LLAMA_SWAP_URL")?,
+            optional_environment_value("LLAMA_SWAP_API_KEY")?,
+        )
+    } else {
+        (None, None)
+    };
     direct_comfy_adapter(
         scoped_jobs.as_deref(),
         endpoint.as_deref(),
         api_key.as_deref(),
+        router_endpoint.as_deref(),
+        router_api_key.as_deref(),
     )
 }
 
@@ -936,18 +945,47 @@ fn direct_comfy_adapter(
     scoped_jobs_assertion: Option<&str>,
     endpoint: Option<&str>,
     api_key: Option<&str>,
+    router_endpoint: Option<&str>,
+    router_api_key: Option<&str>,
 ) -> Result<crate::control::comfy::ComfyAdapter> {
     if scoped_jobs_assertion != Some("1") {
         bail!(
             "Comfy dispatch requires L3MS_COMFY_SCOPED_JOBS=1 asserting canonical IDs and atomic scoped cancellation"
         );
     }
+    let (endpoint, api_key) =
+        direct_comfy_connection(endpoint, api_key, router_endpoint, router_api_key)?;
     crate::control::comfy::ComfyAdapter::new(
-        endpoint.unwrap_or(DEFAULT_DIRECT_COMFY_URL),
+        &endpoint,
         api_key,
         crate::control::comfy::ComfyContract::CanonicalIdsAndAtomicScopedCancellation,
     )
     .map_err(|_| anyhow::anyhow!("Comfy adapter configuration is invalid"))
+}
+
+fn direct_comfy_connection<'a>(
+    endpoint: Option<&str>,
+    api_key: Option<&'a str>,
+    router_endpoint: Option<&str>,
+    router_api_key: Option<&'a str>,
+) -> Result<(String, Option<&'a str>)> {
+    let invalid = || anyhow::anyhow!("Comfy adapter configuration is invalid");
+    match endpoint {
+        Some(endpoint) => Ok((
+            crate::llama_swap::normalize_base_url(endpoint).map_err(|_| invalid())?,
+            api_key,
+        )),
+        None => {
+            let base = crate::llama_swap::normalize_base_url(
+                router_endpoint.unwrap_or(crate::llama_swap::DEFAULT_BASE_URL),
+            )
+            .map_err(|_| invalid())?;
+            Ok((
+                format!("{}/comfyui", base.trim_end_matches('/')),
+                router_api_key,
+            ))
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -976,10 +1014,10 @@ fn run_direct_native(spec: &DirectNativeSpec<'_>) -> Result<u8> {
         .map_err(|_| anyhow::anyhow!("--task is invalid"))?;
     let script_media = matches!(
         profile.profile_id.as_str(),
-        "heartmula-music" | "minimax-h3" | "ltx-2.5" | "yue2-music" | "blender-3d"
+        "heartmula-music" | "minimax-h3" | "blender-3d"
     );
     let input = read_direct_native_input(spec.input, spec.task, script_media)?;
-    let is_comfy_workflow = !script_media && matches!(spec.task, "image" | "video");
+    let is_comfy_workflow = !script_media && matches!(spec.task, "image" | "video" | "music");
     let comfy_output_directory = if is_comfy_workflow {
         Some(absolute_comfy_output_path(spec.output_dir.ok_or_else(
             || anyhow::anyhow!("Comfy output directory is required"),
@@ -1223,7 +1261,7 @@ fn read_direct_native_input(
         "design" => parse_direct_voice_design_input(&bytes)
             .map(DirectNativeInput::VoiceDesign)
             .map_err(|error| anyhow::anyhow!(error.to_string())),
-        "image" | "video" => parse_direct_comfy_input(&bytes)
+        "image" | "video" | "music" => parse_direct_comfy_input(&bytes)
             .map(DirectNativeInput::ComfyWorkflow)
             .map_err(|error| anyhow::anyhow!(error.to_string())),
         "embeddings" => parse_direct_embedding_input(&bytes)
@@ -1828,11 +1866,84 @@ mod tests {
     }
 
     #[test]
-    fn direct_comfy_configuration_requires_scoped_jobs_assertion_and_uses_loopback_default() {
-        assert!(direct_comfy_adapter(None, None, None).is_err());
-        assert!(direct_comfy_adapter(Some("0"), None, None).is_err());
-        assert!(direct_comfy_adapter(Some("1"), None, None).is_ok());
-        assert!(direct_comfy_adapter(Some("1"), Some("not a URL"), None).is_err());
+    fn bundled_ltx_and_yue2_inputs_match_the_shared_workflow_contract() {
+        for input in [
+            include_bytes!("../toolkits/l2m2/workflows/yue2/audio_yue2_text2music_api.json")
+                .as_slice(),
+            include_bytes!("../toolkits/l2m2/workflows/ltx-2.5/video_ltx2_5_t2v_preview_api.json")
+                .as_slice(),
+        ] {
+            let graph = parse_direct_comfy_input(input).unwrap();
+            assert!(graph
+                .as_object()
+                .unwrap()
+                .values()
+                .all(|node| node["class_type"].is_string() && node["inputs"].is_object()));
+        }
+    }
+
+    #[test]
+    fn direct_comfy_configuration_requires_scoped_jobs_assertion_and_uses_router_default() {
+        assert!(direct_comfy_adapter(None, None, None, None, None).is_err());
+        assert!(direct_comfy_adapter(Some("0"), None, None, None, None).is_err());
+        assert!(direct_comfy_adapter(Some("1"), None, None, None, None).is_ok());
+        assert!(direct_comfy_adapter(Some("1"), Some("not a URL"), None, None, None).is_err());
+    }
+
+    #[test]
+    fn comfy_connection_preserves_router_prefix_and_scopes_credentials_to_the_selected_endpoint() {
+        assert_eq!(
+            direct_comfy_connection(None, None, None, None).unwrap(),
+            ("http://localhost:8080/comfyui".into(), None)
+        );
+        assert_eq!(
+            direct_comfy_connection(
+                None,
+                None,
+                Some("http://localhost:9090/stack/"),
+                Some("router-secret")
+            )
+            .unwrap(),
+            (
+                "http://localhost:9090/stack/comfyui".into(),
+                Some("router-secret")
+            )
+        );
+        assert_eq!(
+            direct_comfy_connection(None, Some("comfy-secret"), None, Some("router-secret"))
+                .unwrap()
+                .1,
+            Some("router-secret")
+        );
+        assert_eq!(
+            direct_comfy_connection(
+                Some("http://localhost:8188/custom/"),
+                None,
+                Some("not a URL"),
+                Some("router-secret")
+            )
+            .unwrap(),
+            ("http://localhost:8188/custom".into(), None)
+        );
+        assert_eq!(
+            direct_comfy_connection(
+                Some("http://localhost:8188"),
+                Some("comfy-secret"),
+                None,
+                Some("router-secret")
+            )
+            .unwrap()
+            .1,
+            Some("comfy-secret")
+        );
+        let error = direct_comfy_connection(
+            None,
+            None,
+            Some("invalid/private/endpoint"),
+            Some("private-key"),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "Comfy adapter configuration is invalid");
     }
 
     #[test]

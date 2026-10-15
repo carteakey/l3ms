@@ -1140,6 +1140,7 @@ impl<'de> Deserialize<'de> for NativeStatusMessage {
 enum NativeOutputItem {
     File(NativeJsonObject<NativeOutputFile>),
     Text(String),
+    Boolean(bool),
 }
 
 #[derive(Deserialize)]
@@ -1357,6 +1358,17 @@ fn parse_snapshot(body: &[u8], id: &str) -> Result<ComfySnapshot, ComfyFailure> 
                             }
                             continue;
                         }
+                        // PreviewVideo and animated image nodes return
+                        // `animated: (True,)`, serialized as a boolean list.
+                        // Accept that native metadata without relaxing the
+                        // file-list contract of images/audio/video outputs.
+                        NativeOutputItem::Boolean(flag) => {
+                            if media_type != "animated" {
+                                return Err(error);
+                            }
+                            let _ = flag;
+                            continue;
+                        }
                     };
                     let Some(filename) = item.0.filename.as_deref() else {
                         continue;
@@ -1375,7 +1387,19 @@ fn parse_snapshot(body: &[u8], id: &str) -> Result<ComfySnapshot, ComfyFailure> 
                     }
                     artifacts.push(ComfyArtifact {
                         node_id: node_id.clone(),
-                        media_type: media_type.clone(),
+                        // Native SaveVideo uses PreviewVideo, which puts its
+                        // MP4 descriptor in the same `images` list as image
+                        // nodes. Retain the actual media kind for validation
+                        // and consumers, without trusting arbitrary metadata.
+                        media_type: if media_type == "images"
+                            && filename
+                                .rsplit_once('.')
+                                .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("mp4"))
+                        {
+                            "video".to_owned()
+                        } else {
+                            media_type.clone()
+                        },
                         filename: filename.to_owned(),
                         subfolder: subfolder.to_owned(),
                         storage_type: storage_type.to_owned(),
@@ -1675,6 +1699,179 @@ mod tests {
     }
     fn reply(body: Value) -> (u16, String, Duration) {
         (200, body.to_string(), Duration::ZERO)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn native_media_fixture(
+        replies: Vec<(String, Vec<u8>)>,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}/stack/comfyui", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for (path, body) in replies {
+                let deadline = Instant::now() + Duration::from_secs(3);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline);
+                            std::thread::sleep(Duration::from_millis(2));
+                        }
+                        Err(error) => panic!("fixture accept: {error}"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut header = Vec::new();
+                let mut byte = [0];
+                while !header.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    header.push(byte[0]);
+                    assert!(header.len() < 16_384);
+                }
+                let header = String::from_utf8(header).unwrap();
+                assert!(header.starts_with(&format!("GET /stack/comfyui{path} HTTP/1.1\r\n")));
+                assert!(header
+                    .lines()
+                    .any(|line| line.eq_ignore_ascii_case("authorization: Bearer media-secret")));
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+                stream.write_all(&body).unwrap();
+            }
+            assert!(
+                matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+            );
+        });
+        (endpoint, server)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_save_audio_and_save_video_outputs_download_through_scoped_job_history() {
+        use std::os::unix::fs::PermissionsExt;
+        let wave = super::super::language::wav_from_pcm16(&[0, 0, 1, 0]);
+        // Native FLAC STREAMINFO metadata followed by a frame sync marker.
+        let mut flac = b"fLaC\x80\0\0\x22".to_vec();
+        flac.extend_from_slice(&[0; 34]);
+        flac.extend_from_slice(&[0xff, 0xf8]);
+        let mp4 = b"\0\0\0\x18ftypisom\0\0\0\0isommp42".to_vec();
+        let mut history = terminal("completed");
+        history["outputs"] = serde_json::json!({
+            "10": {"audio": [{"filename":"song.wav","subfolder":"audio/run","type":"output"}]},
+            "20": {"audio": [{"filename":"song.flac","subfolder":"audio/run","type":"output"}]},
+            // Actual installed SaveVideo -> PreviewVideo contract.
+            "30": {"images": [{"filename":"clip.mp4","subfolder":"video/run","type":"output"}], "animated":[true]},
+            "40": {"audio": [{"filename":"preview.flac","subfolder":"","type":"temp"}]}
+        });
+        let (endpoint, server) = native_media_fixture(vec![
+            (
+                format!("/api/jobs/{ID}"),
+                serde_json::to_vec(&history).unwrap(),
+            ),
+            (
+                "/view?filename=song.wav&subfolder=audio%2Frun&type=output".into(),
+                wave.clone(),
+            ),
+            (
+                "/view?filename=song.flac&subfolder=audio%2Frun&type=output".into(),
+                flac.clone(),
+            ),
+            (
+                "/view?filename=clip.mp4&subfolder=video%2Frun&type=output".into(),
+                mp4.clone(),
+            ),
+        ]);
+        let adapter = ComfyAdapter::new(
+            &endpoint,
+            Some("media-secret"),
+            ComfyContract::CanonicalIdsAndAtomicScopedCancellation,
+        )
+        .unwrap();
+        let mut job = prepared(&adapter);
+        job.attempted = true;
+        let status = adapter.status(&job, &context()).unwrap();
+        assert_eq!(
+            status
+                .artifacts
+                .iter()
+                .find(|item| item.filename == "clip.mp4")
+                .unwrap()
+                .media_type,
+            "video"
+        );
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let root = ComfyOutputRoot::open_fresh(directory.path()).unwrap();
+        let artifacts = adapter
+            .collect_terminal_outputs(&root, &status, &context())
+            .unwrap();
+        assert_eq!(artifacts.len(), 3);
+        for ((artifact, expected), kind) in artifacts
+            .iter()
+            .zip([wave, flac, mp4])
+            .zip(["audio", "audio", "video"])
+        {
+            assert_eq!(artifact.media_type, kind);
+            assert_eq!(
+                std::fs::read(directory.path().join(&artifact.relative_path)).unwrap(),
+                expected
+            );
+        }
+        server.join().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_video_normalization_keeps_download_validation_fail_closed() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut history = terminal("completed");
+        history["outputs"] = serde_json::json!({"9":{"images":[{"filename":"clip.mp4","subfolder":"","type":"output"}]}});
+        let status = snapshot(&history).unwrap();
+        let (endpoint, server) = native_media_fixture(vec![(
+            "/view?filename=clip.mp4&subfolder=&type=output".into(),
+            b"<html>failed</html>".to_vec(),
+        )]);
+        let adapter = ComfyAdapter::new(
+            &endpoint,
+            Some("media-secret"),
+            ComfyContract::CanonicalIdsAndAtomicScopedCancellation,
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let root = ComfyOutputRoot::open_fresh(directory.path()).unwrap();
+        assert_eq!(
+            adapter
+                .collect_terminal_outputs(&root, &status, &context())
+                .err()
+                .unwrap(),
+            uncertain(ComfyErrorKind::Protocol)
+        );
+        server.join().unwrap();
+        assert!(!valid_comfy_signature("audio", "song.wav", b"fLaC"));
+        assert!(!valid_comfy_signature("video", "clip.mp4", b"RIFF1234WAVE"));
+        history["outputs"] = serde_json::json!({"9":{"images":[{"filename":"../clip.mp4","subfolder":"","type":"output"}]}});
+        assert!(snapshot(&history).is_err());
+    }
+
+    #[test]
+    fn native_animated_boolean_metadata_does_not_relax_file_output_lists() {
+        let mut history = terminal("completed");
+        history["outputs"] = serde_json::json!({"9": {
+            "images": [{"filename":"clip.mp4","subfolder":"","type":"output"}],
+            "animated": [true]
+        }});
+        let parsed = snapshot(&history).unwrap();
+        assert_eq!(parsed.artifacts.len(), 1);
+        assert_eq!(parsed.artifacts[0].media_type, "video");
+        for field in ["images", "audio", "video"] {
+            history["outputs"] = serde_json::json!({"9": {field: [true]}});
+            assert_eq!(
+                snapshot(&history).unwrap_err(),
+                uncertain(ComfyErrorKind::Protocol)
+            );
+        }
     }
 
     #[test]

@@ -660,10 +660,6 @@ fn run_native(
         }
         let execute = if is_supported_direct_h3_profile(profile) {
             super::media_execution::execute_h3_on_device
-        } else if is_supported_direct_ltx_profile(profile) {
-            super::media_execution::execute_ltx_on_device
-        } else if is_supported_direct_yue2_profile(profile) {
-            super::media_execution::execute_yue2_on_device
         } else {
             execute_heartmula_music_on_device
         };
@@ -1047,22 +1043,7 @@ pub(crate) fn is_routed_audio_script_request(
 }
 
 pub(crate) fn is_supported_direct_script_profile(profile: &CatalogProfile) -> bool {
-    is_supported_direct_music_profile(profile)
-        || is_supported_direct_h3_profile(profile)
-        || is_supported_direct_ltx_profile(profile)
-        || is_supported_direct_yue2_profile(profile)
-}
-
-pub(crate) fn is_supported_direct_yue2_profile(profile: &CatalogProfile) -> bool {
-    !profile.disabled
-        && profile.key.lane == Lane::Media
-        && profile.key.profile_id.as_str() == "yue2-music"
-        && profile.runtime.lane == Lane::Media
-        && profile.runtime.as_str() == "YuE2 Python"
-        && profile.device == Some(Device::Cuda)
-        && profile.tasks.iter().any(|task| task.as_str() == "music")
-        && matches!(&profile.native_source, NativeProfileSource::Media { script }
-            if script == "media-models/generate-yue2.sh")
+    is_supported_direct_music_profile(profile) || is_supported_direct_h3_profile(profile)
 }
 
 /// GPU admission is separate from selecting a CUDA inference device. Blender
@@ -1084,21 +1065,6 @@ pub(crate) fn is_supported_blender_headless_profile(profile: &CatalogProfile) ->
             .any(|task| matches!(task.as_str(), "3d" | "render" | "image"))
         && matches!(&profile.native_source, NativeProfileSource::Media { script }
             if script == "media-models/generate-blender-3d.sh")
-}
-
-pub(crate) fn is_supported_direct_ltx_profile(profile: &CatalogProfile) -> bool {
-    !profile.disabled
-        && profile.key.lane == Lane::Media
-        && profile.key.profile_id.as_str() == "ltx-2.5"
-        && profile.runtime.lane == Lane::Media
-        && profile.runtime.as_str() == "LTX-2 Python"
-        && profile.device.as_ref() == Some(&Device::Cuda)
-        && profile
-            .tasks
-            .iter()
-            .any(|task| matches!(task.as_str(), "video" | "music"))
-        && matches!(&profile.native_source, NativeProfileSource::Media { script }
-            if script == "media-models/generate-ltx-2.5.sh")
 }
 
 pub(crate) fn is_supported_direct_h3_profile(profile: &CatalogProfile) -> bool {

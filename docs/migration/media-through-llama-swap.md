@@ -92,16 +92,15 @@ The resident pause/restore handoff (the opt-in stop-and-restore of
 `llama-swap.service`, about 1,700 lines of service management plus its tests) is
 removed.
 
-## Lanes that stay direct, and why
+## Shared workflows and remaining advanced direct work
 
 The idle-GPU window (locks, idle observation, recovery marker, KDE desktop
-baseline) remains for scripts that llama-swap cannot host. This is the minimal
-end state for them, not unfinished work:
+baseline) remains only for explicit advanced direct work, not as the default
+for new models. LTX and YuE2 share `comfyui_auto`; their standalone Python
+scripts remain toolkit-only, with no root fallback. See [runtime policy](runtime-policy.md).
 
 | Lane | Engine | Why it is not routed |
 | --- | --- | --- |
-| `ltx-2.5` (video, music) | LTX-2 Python via `uv` | A script, not an inference server. Nothing for llama-swap to start, health-check or proxy. |
-| `yue2-music` | YuE2 Python | Same. The pinned audio.cpp build also has no `yue2` loader (built with `minimax_h3,heartmula,breeze_tts`). |
 | `blender-3d` | Blender 5.2 / blender-mcp | An application, not a model engine. Root execution guards the shared GPU because the scene chooses its backend. |
 | `minimax-h3` video | audio.cpp + MP4 post-processing | The script converts the additional RGB24 video artifact to MP4; the routed audio response is not equivalent. |
 

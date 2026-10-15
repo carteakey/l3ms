@@ -157,14 +157,16 @@ inspect the endpoint before continuing. There is no automatic replay or GPU
 release claim. HTTP/IPC acceptance remains pending in the restricted session;
 see [migration status](docs/migration/status.md).
 
-### Direct Comfy workflows (Linux, acceptance pending)
+### Shared ComfyUI workflows (Linux)
 
 Use an already configured ComfyUI server with the pinned toolkit's canonical
 client job IDs and atomic per-job cancellation contract. Stock servers without
 that contract are not supported by this foreground path. After verifying the
 server, explicitly set `L3MS_COMFY_SCOPED_JOBS=1`; this asserts compatibility,
-not GPU ownership. `L2M2_COMFY_URL` defaults to `http://127.0.0.1:8188` and
-`L3MS_COMFY_API_KEY` optionally supplies authentication.
+not GPU ownership. By default the CLI uses `LLAMA_SWAP_URL/comfyui` and
+`LLAMA_SWAP_API_KEY`; the TUI uses its confirmed Chat connection. An explicit
+`L2M2_COMFY_URL` selects a separate server and receives only
+`L3MS_COMFY_API_KEY`, never the router key.
 
 The toolkit setup pin (`6bfaacc`) implements this contract natively; no custom
 server patch is required. Its generated job snapshots pass the adapter parser
@@ -177,7 +179,9 @@ L3MS_COMFY_SCOPED_JOBS=1 l3ms --run-profile media:your-comfy-profile --task imag
 ```
 
 Input is `{"graph":{...}}` containing a native API workflow, not a UI export.
-The selected profile must declare the image/video task and ComfyUI runtime.
+The selected profile must declare the image/video/music task and ComfyUI runtime.
+LTX and YuE2 use this same path; start with the bundled
+[workflow recipes and model requirements](toolkits/l2m2/docs/comfyui-ltx-yue2.md).
 The output directory must already exist, be empty, owned by you and mode `0700`.
 Stack `f` uses the same graph form and foreground worker, with a fresh private
 output directory; history stores job metadata and relative artifact references,
@@ -293,7 +297,8 @@ not text or audio bytes. See [real CPU speech evidence](docs/migration/direct-sp
 
 ### Native tasks and routed engines
 
-Speech, images, embeddings, language and decisions go through llama-swap:
+Shared-engine speech, images, music, video, embeddings, language and decisions
+go through llama-swap:
 `l3ms --run-profile media:breeze-tts-2` calls its `/audiocpp/` route, and Breeze
 TTS (`audiocpp_auto`) and ComfyUI (`comfyui_auto`) are declared in
 `llama-swap.yaml`, so the router swaps them like any model; see
@@ -303,14 +308,14 @@ the resident pause/restore handoff were removed; there is nothing to observe by
 request ID.
 
 HeartMuLa music and H3 audio also use `/audiocpp/v1/tasks/run` on this branch;
-their real-model acceptance is still pending. YuE2 uses its existing prepared
-offline Python runtime, not a new server. See [remaining gates](TODO.md).
+their real-model acceptance is still pending. LTX and YuE2 share ComfyUI; no
+separate workbench Python runtimes are needed. See [remaining gates](TODO.md).
 
 In Stack Catalog (`F8`), `f` opens Chat or a typed native task form and `c`
 cancels the active foreground task. CPU-local decisions use `--run-profile` or
 the form directly, without a daemon; see
 [native CPU workflows](docs/cpu-native-workflows.md). Scripts that llama-swap
-cannot host (LTX, YuE2, H3 video, Blender) run in an
+cannot host (advanced H3 video and Blender workflows) run in an
 [explicit operator-managed idle GPU window](docs/native-gpu-workflows.md), never
 by taking over the live service. Native output is sensitive and should not enter
 shared logs.

@@ -100,8 +100,8 @@ models:
   # ===========================================================================
 
   "audiocpp_auto":
-    name: "audio.cpp (Breeze-TTS-2: tts, design, clone, streaming)"
-    description: "Native audio.cpp server on CUDA. /audiocpp/v1/audio/speech with model breeze-tts (standard or options.instruction design), breeze-clone (voice_ref + reference_text) and breeze-stream (SSE)."
+    name: "audio.cpp (Breeze TTS · HeartMuLa · MiniMax H3 audio)"
+    description: "Shared CUDA audio engine. Breeze standard/design, clone and streaming use /audiocpp/v1/audio/speech; HeartMuLa music and H3 audio use /audiocpp/v1/tasks/run. Model ids and weights are configured in audiocpp-server.json."
     cmd: >-
       ${audiocpp_server} --config ${env.L3MS_ROOT}/toolkits/l2m2/audiocpp-server.json
       --host 127.0.0.1 --port ${PORT} --no-ui
@@ -109,7 +109,7 @@ models:
     checkEndpoint: /health
 
   "comfyui_auto":
-    name: "ComfyUI (image and workflow engine)"
+    name: "ComfyUI (images · LTX video · YuE2 music)"
     description: "ComfyUI via /comfyui/. Low-VRAM flags; job submit, status, cancel and artifact routes are used by the l2m2 adapter."
     cmd: >-
       /usr/bin/bash -c 'cd ${comfy_root}/vendor/ComfyUI &&

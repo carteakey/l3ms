@@ -3,11 +3,14 @@
 ## [Unreleased]
 
 ### Changed
+- Prefer shared engines: LTX and YuE2 use the existing ComfyUI workflow runner
+  instead of root Python executors. ComfyUI defaults to llama-swap's `/comfyui`
+  route, preserving confirmed TUI credentials and isolating custom-endpoint keys.
+  Add native API workflow recipes and MP4 output compatibility; real-model
+  acceptance remains pending. Expand the shared audio.cpp label beyond Breeze.
 - HeartMuLa and H3 audio tasks use llama-swap's native audio.cpp task route;
   H3 video keeps its MP4 post-processing path. Validate routed output directories
   before synthesis. Real-model acceptance for these paths is tracked in TODO.
-- Add the root CLI/TUI YuE2 music task using the existing prepared-only runner
-  and guarded direct GPU path; no implicit downloads during a workbench job.
 - Dashboard: profiles declared in `llama-swap.yaml` but with no measured throughput
   (`"tps": null` in `docs/dashboard-meta.json`) are listed under "Declared, not yet
   measured" and never ranked; the generator no longer needs invented figures.

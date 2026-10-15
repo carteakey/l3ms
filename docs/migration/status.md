@@ -11,15 +11,38 @@ runtime check.
 
 ## Upstream-first retirement and acceptance — 2026-10-15
 
-Latest branch follow-up (not a deployment): HeartMuLa and H3 audio now use the
+Current shared-engine policy supersedes the direct LTX/YuE2 implementation
+below: both profiles use ComfyUI workflows and the root Python adapters have
+been removed. ComfyUI defaults to llama-swap's `/comfyui` route (confirmed Chat
+connection in the TUI), with explicit standalone endpoint override. Native
+SaveVideo MP4 and SaveAudio WAV/FLAC use the existing bounded download path.
+Engine labels now cover HeartMuLa/H3 audio and LTX/YuE2 instead of implying only
+Breeze/images. See [runtime policy](runtime-policy.md) and the toolkit's
+[recipes and limitations](../../toolkits/l2m2/docs/comfyui-ltx-yue2.md).
+
+No separate LTX/YuE2 runtime installation is needed for root execution. Their
+weights and real-model workflow acceptance are still pending; template/schema
+and HTTP fixture checks do not replace generation/decoder/VRAM tests. Source
+locations stay under `toolkits/` for compatibility until caller consolidation.
+The live router has not been reloaded and the dirty main checkout is untouched.
+
+Shared-engine checks: 568 Rust tests pass (four ignored), 38 standalone media
+tests, 12 maintenance tests and six workflow wrapper/schema/provenance tests
+pass. Build, clippy with denied warnings, formatting and whitespace checks pass.
+The root Rust change is net -610 lines including tests. No weights were loaded
+or downloaded. The main checkout received concurrent media-toolkit edits during
+this work, so branch integration must preserve/reconcile those changes rather
+than overwriting its manifest or scripts.
+
+Prior `ba2cc37` follow-up (not a deployment): HeartMuLa and H3 audio use the
 native audio.cpp task endpoint through llama-swap; H3 video stays direct. YuE2
 uses the existing guarded direct runner, not a new service.
 Maintenance archive/restore checks are checksum-based and preserve conflicting
 files; an autofs-only NAS is rejected before traversal. Main checkout changes
 and the running llama-swap service remain untouched.
 
-Full-port acceptance is **still open**: local HeartMuLa/H3/LTX/YuE2 weights and
-the prepared LTX runtime are absent from their default paths. No fixture result
+At that checkpoint local HeartMuLa/H3/LTX/YuE2 weights and
+the prepared LTX runtime were absent from their default paths. No fixture result
 below substitutes for real-model acceptance of these remaining lanes. See
 [TODO](../../TODO.md) for required gates versus optional follow-ups.
 

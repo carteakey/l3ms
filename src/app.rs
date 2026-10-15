@@ -379,7 +379,6 @@ struct TaskFormEditor {
     direct_breeze_speech: bool,
     direct_native_music: bool,
     direct_native_h3: bool,
-    direct_native_ltx: bool,
     direct_blender_headless: bool,
     direct_comfy_workflow: bool,
     direct_language_embeddings: bool,
@@ -402,10 +401,8 @@ impl TaskFormEditor {
         let direct_native_decision_images = direct_native_decision
             && crate::control::requests::decision_profile_supports_images(profile);
         let direct_breeze_speech = is_direct_breeze_speech_profile(profile);
-        let direct_native_music =
-            is_direct_cuda_music_profile(profile) || is_direct_yue2_profile(profile);
+        let direct_native_music = is_direct_cuda_music_profile(profile);
         let direct_native_h3 = is_direct_cuda_h3_profile(profile);
-        let direct_native_ltx = is_direct_cuda_ltx_profile(profile);
         let direct_blender_headless = is_direct_blender_headless_profile(profile);
         #[cfg(target_os = "linux")]
         let direct_comfy_workflow = is_direct_comfy_workflow_profile(profile);
@@ -431,9 +428,6 @@ impl TaskFormEditor {
         if direct_native_h3 {
             declared_tasks.retain(|task| matches!(task.as_str(), "music" | "tts" | "video"));
         }
-        if direct_native_ltx {
-            declared_tasks.retain(|task| matches!(task.as_str(), "music" | "video"));
-        }
         if direct_blender_headless {
             declared_tasks.retain(|task| matches!(task.as_str(), "3d" | "render" | "image"));
         }
@@ -453,7 +447,6 @@ impl TaskFormEditor {
             direct_breeze_speech,
             direct_native_music,
             direct_native_h3,
-            direct_native_ltx,
             direct_blender_headless,
             direct_comfy_workflow,
             direct_language_embeddings,
@@ -510,14 +503,6 @@ impl TaskFormEditor {
                 .or_else(|| (!editor.declared_tasks.is_empty()).then_some(0));
             editor.media_operation = Some(TaskFormMediaOperation::Script);
         }
-        if direct_native_ltx {
-            editor.selected_task = editor
-                .declared_tasks
-                .iter()
-                .position(|task| task == "video")
-                .or_else(|| (!editor.declared_tasks.is_empty()).then_some(0));
-            editor.media_operation = Some(TaskFormMediaOperation::Script);
-        }
         if direct_blender_headless {
             editor.selected_task = editor
                 .declared_tasks
@@ -548,10 +533,7 @@ impl TaskFormEditor {
     }
 
     fn is_direct_script_media(&self) -> bool {
-        self.direct_native_music
-            || self.direct_native_h3
-            || self.direct_native_ltx
-            || self.direct_blender_headless
+        self.direct_native_music || self.direct_native_h3 || self.direct_blender_headless
     }
 
     fn refresh_fields(&mut self) {
@@ -4467,8 +4449,6 @@ impl App {
             self.input_mode = InputMode::TaskForm;
             self.status = if is_direct_blender_headless_profile(&profile) {
                 "Foreground Blender headless form open · Python runs with your user permissions and is not sandboxed · shared GPU must be idle before starting · external GUI/MCP remains separate · run once with Ctrl+Enter".into()
-            } else if is_direct_cuda_ltx_profile(&profile) {
-                "Foreground CUDA LTX-2.5 form open · choose video or music; both generate synchronized MP4 · prompt/argv stay in memory · the selected GPU must be idle before starting · run once with Ctrl+Enter".into()
             } else if is_direct_cuda_h3_profile(&profile) {
                 "MiniMax H3 form open · music/tts use llama-swap; connect Chat first · video needs an idle GPU · Ctrl+Enter runs once".into()
             } else if is_direct_cuda_music_profile(&profile) {
@@ -4487,7 +4467,7 @@ impl App {
                 "Foreground CPU task form open · request stays in memory; run once with Ctrl+Enter"
                     .into()
             } else if is_direct_comfy_workflow_profile(&profile) {
-                "Foreground Comfy workflow form open · existing server only; operator remains responsible for GPU availability".into()
+                "Comfy workflow form open · llama-swap shared engine (connect Chat first) · API-format workflow JSON · Ctrl+Enter runs once".into()
             } else if direct_language_embeddings {
                 "Foreground language embeddings form open; run once with Ctrl+Enter".into()
             } else {
@@ -5086,7 +5066,18 @@ impl App {
         }
         let endpoint = match env::var("L2M2_COMFY_URL") {
             Ok(endpoint) => endpoint,
-            Err(env::VarError::NotPresent) => "http://127.0.0.1:8188".into(),
+            Err(env::VarError::NotPresent) => {
+                let client = self
+                    .chat_client
+                    .as_ref()
+                    .ok_or("Connect Chat before running a routed Comfy workflow")?;
+                if self.chat_endpoint_committed.as_deref() != Some(client.base_url()) {
+                    return Err("Reconnect Chat to confirm the Comfy router endpoint");
+                }
+                return client
+                    .comfy_adapter()
+                    .map_err(|_| "The confirmed Comfy router connection is invalid");
+            }
             Err(env::VarError::NotUnicode(_)) => {
                 return Err("The configured Comfy endpoint is invalid");
             }
@@ -7169,10 +7160,10 @@ impl App {
         #[cfg(target_os = "linux")]
         let (action_text, action_title) = if show_direct_native {
             let text = self.direct_native_summary.as_ref().map_or_else(
-                || "Native decisions (CPU Nagi/Laya, hosted Jev, and explicitly selected CUDA Nagi/Laya), CPU/CUDA Breeze tts/clon/design, HeartMuLa CUDA music, Blender headless, connected embeddings, and Comfy workflows run in one foreground job. CUDA and Blender headless require an idle shared GPU window before admission. Blender Python is not sandboxed; its GUI/MCP workflow remains external. Comfy uses an existing external server; operator manages GPU availability.\nf open task · c cancels an active run".to_owned(),
+                || "One foreground job: routed language/decisions, audio.cpp speech/music, and ComfyUI image/video/music workflows. LTX and YuE2 share ComfyUI. Only advanced direct jobs require an operator-managed idle GPU window; Blender Python is not sandboxed.\nf open task · c cancels an active run".to_owned(),
                 |summary| {
                     let operator_note = if summary.native_id.is_some() {
-                        "\nExisting Comfy server · operator manages GPU availability"
+                        "\nComfyUI shared engine · llama-swap by default"
                     } else if summary.cuda {
                         "\nCUDA · GPU idle required before admission"
                     } else if summary.requires_idle_gpu_window {
@@ -7283,12 +7274,8 @@ impl App {
             .split(area);
         let form_hint = if editor.direct_blender_headless {
             "Blender headless · Python runs with your user permissions (no sandbox) · shared GPU must be idle before starting · GUI/MCP is external and not launched here"
-        } else if editor.direct_native_ltx {
-            "LTX-2.5 · video/music both generate synchronized MP4 · JSON argv only · prompt/settings stay in memory · GPU must be idle before starting"
         } else if editor.direct_native_h3 {
             "MiniMax H3 · music/tts via llama-swap (connect Chat); video needs idle GPU · JSON argv"
-        } else if is_direct_yue2_profile(&editor.profile_snapshot) {
-            "YuE2 · prepared/offline runtime only · JSON argv · GPU must be idle before starting"
         } else if editor.direct_native_music {
             "HeartMuLa · llama-swap (connect Chat first) · JSON argv · prompt/lyrics stay in memory"
         } else if editor.direct_breeze_speech && is_routed_breeze_profile(&editor.profile_snapshot)
@@ -7305,7 +7292,7 @@ impl App {
                 "Native decision · local CPU or hosted route"
             }
         } else if editor.direct_comfy_workflow {
-            "Comfy workflow · existing server only · operator manages GPU availability"
+            "ComfyUI shared engine · API-format workflow JSON · llama-swap by default"
         } else if editor.direct_language_embeddings {
             "language embedding batch · connected Chat endpoint"
         } else {
@@ -8027,16 +8014,6 @@ fn is_direct_cuda_profile(profile: &CatalogProfile) -> bool {
     direct_run::is_supported_direct_cuda_profile(profile)
 }
 
-#[cfg(target_os = "linux")]
-fn is_direct_yue2_profile(profile: &CatalogProfile) -> bool {
-    direct_run::is_supported_direct_yue2_profile(profile)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn is_direct_yue2_profile(_profile: &CatalogProfile) -> bool {
-    false
-}
-
 #[cfg(not(target_os = "linux"))]
 fn is_direct_cuda_profile(_profile: &CatalogProfile) -> bool {
     false
@@ -8073,16 +8050,6 @@ fn is_direct_cuda_h3_profile(profile: &CatalogProfile) -> bool {
 
 #[cfg(not(target_os = "linux"))]
 fn is_direct_cuda_h3_profile(_profile: &CatalogProfile) -> bool {
-    false
-}
-
-#[cfg(target_os = "linux")]
-fn is_direct_cuda_ltx_profile(profile: &CatalogProfile) -> bool {
-    direct_run::is_supported_direct_ltx_profile(profile)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn is_direct_cuda_ltx_profile(_profile: &CatalogProfile) -> bool {
     false
 }
 
@@ -8192,16 +8159,8 @@ fn direct_script_media_task_label(profile_id: &str, task: &str) -> &'static str 
             _ => "CUDA H3 media",
         };
     }
-    if profile_id == "ltx-2.5" {
-        return match task {
-            "music" | "video" => "CUDA LTX synchronized MP4",
-            _ => "CUDA LTX media",
-        };
-    }
     if profile_id == "heartmula-music" && task == "music" {
         "HeartMuLa music"
-    } else if profile_id == "yue2-music" && task == "music" {
-        "CUDA YuE2 music"
     } else {
         "CUDA script media"
     }
@@ -8212,7 +8171,7 @@ fn direct_native_summary_label(summary: &DirectNativeSummary) -> &'static str {
     if summary.native_id.is_some() {
         "Comfy workflow"
     } else if summary.profile_id == "blender-3d"
-        || (summary.cuda && matches!(summary.profile_id.as_str(), "minimax-h3" | "ltx-2.5"))
+        || (summary.cuda && summary.profile_id == "minimax-h3")
     {
         direct_script_media_task_label(&summary.profile_id, &summary.task)
     } else if summary.cuda {
@@ -8273,9 +8232,8 @@ fn is_direct_native_script_request(
 #[cfg(target_os = "linux")]
 fn is_direct_script_media_task(profile_id: &str, task: &str) -> bool {
     match profile_id {
-        "heartmula-music" | "yue2-music" => task == "music",
+        "heartmula-music" => task == "music",
         "minimax-h3" => matches!(task, "music" | "tts" | "video"),
-        "ltx-2.5" => matches!(task, "music" | "video"),
         "blender-3d" => matches!(task, "3d" | "render" | "image"),
         _ => false,
     }
@@ -9919,16 +9877,6 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    fn write_ltx_25_media_manifest(fixture: &AppFixture) {
-        write_stack_fixture(fixture);
-        fs::write(
-            fixture.root.join("toolkits/l2m2/media-runtimes.json"),
-            r#"{"schema_version":1,"profiles":[{"id":"ltx-2.5","name":"LTX-2.5 fixture","runtime":"LTX-2 Python","device":"cuda","tasks":["video","music"],"script":"media-models/generate-ltx-2.5.sh"}]}"#,
-        )
-        .unwrap();
-    }
-
-    #[cfg(target_os = "linux")]
     fn write_blender_headless_media_manifest(fixture: &AppFixture) {
         write_stack_fixture(fixture);
         fs::write(
@@ -10250,44 +10198,6 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn yue2_form_uses_the_existing_music_argv_editor() {
-        let fixture = AppFixture::new();
-        write_heartmula_music_media_manifest(&fixture);
-        let manifest = fixture.root.join("toolkits/l2m2/media-runtimes.json");
-        let text = fs::read_to_string(&manifest)
-            .unwrap()
-            .replace("generate-heartmula-music.sh", "generate-yue2.sh")
-            .replace("heartmula-music", "yue2-music")
-            .replace("audio.cpp", "YuE2 Python");
-        fs::write(manifest, text).unwrap();
-        fs::create_dir_all(fixture.root.join("toolkits/l2m2/media-models")).unwrap();
-        fs::write(
-            fixture
-                .root
-                .join("toolkits/l2m2/media-models/generate-yue2.sh"),
-            "#!/bin/sh\nexit 99\n",
-        )
-        .unwrap();
-        let mut app = fixture.app();
-        focus_stack_profile_by_id(&mut app, "yue2-music");
-        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
-            .unwrap();
-        let editor = app.task_form_editor.as_mut().unwrap();
-        assert!(editor.is_direct_native());
-        assert_eq!(editor.declared_tasks, ["music"]);
-        editor.values.script_argv =
-            r#"["--prompt","private style","--lyrics","private lyrics"]"#.into();
-        let draft = editor.to_draft().unwrap();
-        let catalog = app.stack_catalog.as_ref().unwrap();
-        let (request, _) = build_direct_native(catalog, draft).unwrap();
-        assert!(is_direct_native_script_request(catalog, &request));
-        assert!(!is_routed_speech_request(catalog, &request));
-        assert!(app.direct_native_job.is_none());
-        assert!(app.job_history.records().is_empty());
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
     fn heartmula_form_keeps_argv_ephemeral_and_uses_no_coordinator() {
         let fixture = AppFixture::new();
         write_heartmula_music_media_manifest(&fixture);
@@ -10420,76 +10330,6 @@ mod tests {
         let persisted =
             fs::read_to_string(crate::state_store::jobs_path_in(&fixture.data)).unwrap_or_default();
         assert!(!persisted.contains("private H3 input"));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn ltx_form_keeps_only_declared_synchronized_media_tasks_ephemeral() {
-        let fixture = AppFixture::new();
-        write_ltx_25_media_manifest(&fixture);
-        let mut app = fixture.app();
-
-        focus_stack_profile_by_id(&mut app, "ltx-2.5");
-        let profile = app.selected_stack_profile().unwrap();
-        assert!(is_direct_cuda_ltx_profile(profile));
-        assert!(is_direct_cuda_profile(profile));
-        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
-            .unwrap();
-
-        let catalog = app.stack_catalog.as_ref().unwrap().clone();
-        {
-            let editor = app.task_form_editor.as_ref().unwrap();
-            assert!(editor.direct_native_ltx);
-            assert!(!editor.direct_native_music);
-            assert!(!editor.direct_native_h3);
-            assert!(editor.is_direct_native());
-            assert_eq!(editor.declared_tasks, ["video", "music"]);
-            assert!(editor.fields.contains(&TaskFormField::DeclaredTask));
-            assert!(!editor.fields.contains(&TaskFormField::MediaOperation));
-            assert!(editor.fields.contains(&TaskFormField::MediaScriptArgv));
-            assert!(!editor.fields.contains(&TaskFormField::SpeechText));
-            assert!(!editor.fields.contains(&TaskFormField::SpeechMode));
-            assert!(!editor.fields.contains(&TaskFormField::SpeechInstruction));
-            assert!(!editor.fields.contains(&TaskFormField::SpeechVoiceReference));
-            assert!(!editor.fields.contains(&TaskFormField::SpeechReferenceText));
-            assert!(!editor.fields.contains(&TaskFormField::MediaWorkflowGraph));
-        }
-
-        for task in ["video", "music"] {
-            select_task_form_declared_task(&mut app, task);
-            let editor = app.task_form_editor.as_mut().unwrap();
-            editor.values.script_argv = r#"["--prompt","private LTX prompt","--seed","42"]"#.into();
-            let draft = editor.to_draft().unwrap();
-            assert!(!format!("{draft:?}").contains("private LTX prompt"));
-            let (request, _) = build_direct_native(&catalog, draft).unwrap();
-            assert!(is_direct_native_script_request(&catalog, &request));
-            let crate::control::requests::InferenceRequest::Media {
-                profile,
-                input:
-                    crate::control::requests::MediaInput::Script {
-                        task: built_task,
-                        args,
-                    },
-            } = request
-            else {
-                panic!("LTX form builds a native script argv request")
-            };
-            assert_eq!(profile.profile_id.as_str(), "ltx-2.5");
-            assert_eq!(built_task.as_str(), task);
-            assert_eq!(args, ["--prompt", "private LTX prompt", "--seed", "42"]);
-        }
-
-        assert!(app.status.contains("selected GPU must be idle"));
-        assert!(!app.status.contains("private LTX prompt"));
-        assert!(app
-            .log
-            .iter()
-            .all(|line| !line.contains("private LTX prompt")));
-        assert!(app.job_history.records().is_empty());
-        assert!(app.direct_native_job.is_none());
-        let persisted =
-            fs::read_to_string(crate::state_store::jobs_path_in(&fixture.data)).unwrap_or_default();
-        assert!(!persisted.contains("private LTX prompt"));
     }
 
     #[cfg(target_os = "linux")]
@@ -10673,6 +10513,39 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn ltx_and_yue2_use_the_shared_comfy_form_not_gpu_scripts() {
+        for (profile_id, task) in [("ltx-2.5", "video"), ("yue2-music", "music")] {
+            let fixture = AppFixture::new();
+            write_comfy_stack_fixture(&fixture);
+            let manifest = fixture.root.join("toolkits/l2m2/media-runtimes.json");
+            let text = fs::read_to_string(&manifest)
+                .unwrap()
+                .replace("comfy-workflow", profile_id)
+                .replace("\"tasks\":[\"image\"]", &format!("\"tasks\":[\"{task}\"]"));
+            fs::write(manifest, text).unwrap();
+            let mut app = fixture.app();
+            focus_stack_profile_by_id(&mut app, profile_id);
+            let profile = app.selected_stack_profile().unwrap();
+            assert!(!direct_run::requires_operator_gpu_window(profile));
+            app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+                .unwrap();
+            let editor = app.task_form_editor.as_mut().unwrap();
+            assert!(editor.direct_comfy_workflow);
+            assert!(!editor.is_direct_script_media());
+            editor.selected_task = Some(0);
+            editor.values.workflow_graph = r#"{"1":{"class_type":"SaveAudio","inputs":{}}}"#.into();
+            let draft = editor.to_draft().unwrap();
+            let catalog = app.stack_catalog.as_ref().unwrap();
+            let (request, _) = build_direct_native(catalog, draft).unwrap();
+            assert!(is_direct_comfy_workflow_request(catalog, &request));
+            assert!(!is_direct_native_script_request(catalog, &request));
+            assert!(app.direct_native_job.is_none());
+            assert!(app.job_history.records().is_empty());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn comfy_workflow_form_is_direct_and_keeps_raw_graph_ephemeral() {
         let fixture = AppFixture::new();
         write_comfy_stack_fixture(&fixture);
@@ -10682,9 +10555,7 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
             .unwrap();
         assert_eq!(app.input_mode, InputMode::TaskForm);
-        assert!(app
-            .status
-            .contains("operator remains responsible for GPU availability"));
+        assert!(app.status.contains("llama-swap shared engine"));
         let draft = {
             let editor = app.task_form_editor.as_mut().unwrap();
             assert!(editor.direct_comfy_workflow);

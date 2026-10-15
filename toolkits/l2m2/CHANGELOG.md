@@ -2,9 +2,9 @@
 
 ## Unreleased
 
-- Root workbench YuE2 jobs require the installed Python environment and offline
-  weights, reserve their output subtree, and publish a validated PCM16 WAV.
-  Standalone generation defaults remain unchanged.
+- Root LTX/YuE2 profiles now use shared ComfyUI workflows, not the standalone
+  Python runners. Add native API recipes and documented preview/acceptance limits;
+  standalone scripts remain compatible and model data is unchanged.
 
 - Require a mounted NAS and checksum-identical archive before removing local media;
   restore through a verified staged copy and refuse existing local paths. Preserve
@@ -26,7 +26,7 @@
 - Declare LTX-2.5's CUDA requirement and add opt-in prepared-only generation
   using the existing `.venv/bin/python` offline, without `uv` syncing/downloads.
   Default standalone `uv run` and synchronized audio/video/image arguments stay
-  unchanged. Shared execution uses a private MP4 target and idle GPU window.
+  unchanged. Root workbench use is now through shared ComfyUI instead.
 
 - Explicitly declare H3's existing CUDA requirement for shared root routing.
   Original standalone script behavior, arbitrary native request options and

@@ -42,7 +42,6 @@ Environment:
   L3MS_MEDIA_ROOT           Shared models root (default: $HOME/models/media)
   L3MS_MEDIA_OUTPUT_DIR     Output directory (default: $HOME/media-output)
   L2M2_PYTHON               Python interpreter override
-  L3MS_YUE_PREPARED_ONLY    Use the existing YuE .venv offline; never prepare or download
 EOF
 }
 
@@ -65,37 +64,15 @@ if [[ -x /opt/cuda/bin/nvcc ]]; then
     export LD_LIBRARY_PATH
 fi
 
-if [[ "${L3MS_YUE_PREPARED_ONLY:-0}" == 1 ]]; then
-    if [[ -n "${L3MS_YUE_ROOT:-}" ]]; then
-        yue_root="$L3MS_YUE_ROOT"
-    elif [[ -d "${HOME}/repos/YuE" ]]; then
-        yue_root="${HOME}/repos/YuE"
+python_bin="${L2M2_PYTHON:-}"
+if [[ -z "$python_bin" ]]; then
+    yue_root="${L3MS_YUE_ROOT:-${REPO_DIR}/vendor/YuE}"
+    if [[ -x "${yue_root}/.venv/bin/python" ]]; then
+        python_bin="${yue_root}/.venv/bin/python"
+    elif [[ -x "${HOME}/repos/YuE/.venv/bin/python" ]]; then
+        python_bin="${HOME}/repos/YuE/.venv/bin/python"
     else
-        yue_root="${REPO_DIR}/vendor/YuE"
-    fi
-    [[ -d "$yue_root" ]] || {
-        echo "Prepared YuE repository not found; install it separately" >&2
-        exit 1
-    }
-    yue_root="$(cd -- "$yue_root" && pwd -P)"
-    python_bin="${yue_root}/.venv/bin/python"
-    [[ -x "$python_bin" ]] || {
-        echo "Prepared YuE Python environment not found; install it separately" >&2
-        exit 1
-    }
-    export L3MS_YUE_ROOT="$yue_root"
-    export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
-else
-    python_bin="${L2M2_PYTHON:-}"
-    if [[ -z "$python_bin" ]]; then
-        yue_root="${L3MS_YUE_ROOT:-${REPO_DIR}/vendor/YuE}"
-        if [[ -x "${yue_root}/.venv/bin/python" ]]; then
-            python_bin="${yue_root}/.venv/bin/python"
-        elif [[ -x "${HOME}/repos/YuE/.venv/bin/python" ]]; then
-            python_bin="${HOME}/repos/YuE/.venv/bin/python"
-        else
-            python_bin="$(command -v python3 || echo "python3")"
-        fi
+        python_bin="$(command -v python3 || echo "python3")"
     fi
 fi
 

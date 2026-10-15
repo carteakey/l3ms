@@ -1,5 +1,9 @@
 # L3MS: a small wrapper, not another inference platform
 
+2026-10-15 refinement: [shared-engine policy](runtime-policy.md). LTX and YuE2
+use ComfyUI, not dedicated root Python executors. Unsupported workflows may stay
+outside the core scope instead of adding direct-script orchestration.
+
 User-approved direction: simplicity and fewer lines of code, 2026-10-09.
 This supersedes the hardened-platform delivery requirements in the older
 consolidation plan. It does not waive preservation, safe process cleanup or
