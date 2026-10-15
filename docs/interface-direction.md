@@ -31,14 +31,16 @@ from palette checks alone.
 
 ## Native Rust / GPUI direction
 
-Recommendation, not an implemented pivot: add a native frontend after the
-coordinator's full-port acceptance. GPUI is a GPU-rendered Rust UI framework
+Recommendation, not an implemented pivot: consider a native frontend after the
+workbench's full-port acceptance. GPUI is a GPU-rendered Rust UI framework
 ([official examples](https://gpui.rs/examples/)); that makes it worth a bounded
 prototype, not a reason to replace verified orchestration.
 
-Keep the coordinator, durable job history, routing, GPU ownership and native
-adapters behind their existing client interface. A GPUI application should be a
-second real client alongside the CLI/TUI, not a second runtime owner. UI code must
+Reuse the existing catalog, settings, history and concrete native operations.
+llama-swap owns supported routing and swapping; direct scripts retain their
+existing admission and cleanup safeguards. The retired coordinator is not a
+frontend prerequisite. A GPUI application would be another caller alongside the
+CLI/TUI, not a second runtime owner. UI code must
 not spawn engines, rewrite manifests without snapshots, retry an ambiguous
 submission, or hold the UI thread while waiting on inference.
 
@@ -47,11 +49,11 @@ Prototype sequence:
 1. Pin an upstream GPUI revision and prove build/launch on the target Linux
    desktop in a separate optional package; do not add GPUI to the CLI build.
 2. Port Signal / 03 tokens, lane navigation, command palette and keyboard focus.
-3. Connect read-only profile discovery, job history and resumable result views
-   through the existing client interface. Distinguish unavailable, queued,
+3. Connect read-only profile discovery, job history and native result views
+   through existing operations. Distinguish unavailable, queued,
    active, completed and uncertain states; no fabricated charts or health.
-4. Add single-shot submissions and cancellation with the same accepted-route,
-   caller-ID, bounded result and uncertainty contracts as the existing client.
+4. Reuse single-shot submissions and cancellation with the same route validation,
+   native job identity, bounded results and uncertainty behavior as CLI/TUI.
 5. Verify two-client behaviour, Unicode/IME, clipboard, keyboard navigation,
    text scaling and desktop resource usage. GPU rendering must not weaken the
    inference GPU ownership policy; measure its actual claimant/resource impact.

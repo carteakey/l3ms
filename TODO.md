@@ -26,10 +26,13 @@ for scope and evidence.
   installed/running llama-swap v265 build; no model was dispatched. Verify
   cancellation, artifacts and restoration only in an approved window. This
   checklist does not authorize service changes or downloads.
-- [ ] Finish remaining cross-lane product checks, including decision image UI,
-  Comfy and GPU workflows, keyboard/visual/accessibility, standalone/import and
+- [ ] Finish remaining cross-lane product checks, including Comfy and GPU
+  workflows, keyboard/visual/accessibility, standalone/import and
   remote CI. Cached CPU speech and embedding acceptance cover those paths only,
   not full-port acceptance. See the [speech record](docs/migration/direct-speech-acceptance.md).
+  The post-retirement 80×24 decision-image form, Chat capability selection and
+  metadata-only history pass against a private synthetic endpoint; real Clef
+  image inference and comprehensive visual/accessibility checks remain open.
 - [ ] Audit the exact outgoing history/export, endpoints, host paths, secrets and
   large files before publication. Publication remains **NO-GO**; no push or
   history rewrite without authorization.

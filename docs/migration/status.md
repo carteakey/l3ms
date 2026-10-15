@@ -11,6 +11,18 @@ runtime check.
 
 ## Upstream-first retirement and acceptance — 2026-10-15
 
+Post-retirement keyboard check: the release binary ran in a real 80×24 PTY with
+isolated data/settings and a private loopback fixture, not the live router. Chat
+selected the sole text model despite two advertised loaded decision models.
+F8, profile navigation, `f`, Tab/text entry and Enter on Run once submitted one
+Clef request with the exact optional image array through `/ui/v1/systemone` and
+the captured bearer key. The compact answer was visible, remained available
+after profile navigation, and Chat still selected the text model on return.
+History contains one succeeded metadata-only row, no input, image, answer or
+key. The UI exited 0 and the fixture listener closed. Private input/request and
+history evidence: `.toolkit/decision-ui-acceptance-COH7vt/`. The image data is intentionally a
+syntax-only fixture; this verifies UI wiring, not decoding or model inference.
+
 The branch-added managed-session creator and its daemon/worker/server/private-
 engine vertical are retired; the duplicate language chat dispatch/SSE facade is
 also removed. Do not treat these as unfinished implementation tasks or revive
