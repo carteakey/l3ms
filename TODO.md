@@ -28,6 +28,12 @@ for scope and evidence.
 - [ ] Verify HeartMuLa and H3 audio through the root CLI and `audiocpp_auto`
   with real weights; then verify language-model return. HTTP fixtures are not
   real-model acceptance. H3 video retains direct MP4 post-processing.
+  Blocked on this host (checked 2026-10-15): neither `~/models/media/HeartMuLa-GGUF`
+  nor the H3 package is installed (the media root holds Breeze, FLUX and Qwen-Image
+  only) and the NAS archive mount is unavailable. Nothing was downloaded; reinstall
+  or restore the weights, then run the same four-step check used for Breeze
+  (CLI run, decode the artifact, restore the language model, confirm no engine
+  process remains).
 - [ ] Verify LTX and YuE2 ComfyUI workflow outputs with real weights;
   decode each artifact and retain settings/logs. Both share the existing ComfyUI
   engine; separate Python runtimes are not workbench prerequisites.
