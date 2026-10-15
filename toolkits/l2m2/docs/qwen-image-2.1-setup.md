@@ -20,6 +20,9 @@ GPU when ComfyUI has an exclusive GPU window.
 Review the [Qwen Image 2.1 model repository](https://huggingface.co/Comfy-Org/Qwen-Image-2.1)
 and its Qwen Research License before using or redistributing the weights.
 
+> [!TIP]
+> For the 8-step accelerated version (~2.24× faster at 8.8s vs 19.7s on RTX 4070), see [Qwen Image 2.1 Turbo Setup](file:///home/kchauhan/repos/l2m2/docs/qwen-image-2.1-turbo-setup.md).
+
 ## Install
 
 Run from the L2M2 repository:

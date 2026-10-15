@@ -49,6 +49,28 @@
       ]
     },
     {
+      "id": "yue2-music",
+      "name": "YuE2 foundation music generation",
+      "runtime": "YuE2 Python",
+      "variant": "3B BF16 / FP8 AR, flow matching NAR, YuE2-Vae 48kHz stereo",
+      "tasks": ["music"],
+      "inputs": ["text", "lyrics", "abc"],
+      "status": "local",
+      "script": "media-models/generate-yue2.sh",
+      "description": "Offline prompt-, lyrics-, and score-conditioned full-song generation through the official YuE2 pipeline with FP8 and memory budget tuning for 12 GB GPUs.",
+      "requirements": [
+        "YuE repository checkout with Python 3.12 uv virtual environment (yue2-infer)",
+        "YuE2-3B and YuE2-Vae models in L3MS_MEDIA_ROOT/YuE2 or Hugging Face cache",
+        "NVIDIA GPU with CUDA and BF16 support (FP8 supported on Ada Lovelace / CC >= 8.9)"
+      ],
+      "notes": [
+        "YuE2 generates an editable ABC melody-and-chord plan, predicts semantic tokens, synthesizes acoustic latents, and decodes 48 kHz stereo audio.",
+        "Supports --cot {full,melody,off}, --abc-file for exact-score conditioning, --quantization {none,fp8}, and --budget GiB.",
+        "On 12 GB GPUs like Yeti's RTX 4070, --quantization fp8 and --budget 12 are recommended defaults.",
+        "Keep llama-swap GPU models unloaded during generation."
+      ]
+    },
+    {
       "id": "heartmula-music",
       "name": "HeartMuLa local music generation",
       "runtime": "audio.cpp",
@@ -156,6 +178,27 @@
         "The Yeti setup uses the official INT8 ConvRot model and text encoder with the BF16 VAE; the three files total about 16.1 GiB on disk.",
         "The CLI default is 1024x1024, 25 steps, CFG 1, Euler/simple. Keep dimensions divisible by 32 and start at 1024 on the 12 GB RTX 4070.",
         "Import workflows/qwen-image-2.1/image_qwen_image_2_1_t2i.json or image_qwen_image_2_1_image_edit.json for the full native ComfyUI workflow."
+      ]
+    },
+    {
+      "id": "qwen-image-2.1-turbo",
+      "name": "Qwen Image 2.1 Turbo image generation",
+      "runtime": "ComfyUI",
+      "variant": "INT8 ConvRot Turbo diffusion model, Qwen3-VL encoder, BF16 VAE, 8 steps",
+      "tasks": ["image"],
+      "inputs": ["text"],
+      "status": "local",
+      "script": "media-models/generate-qwen-image-2.1-turbo.sh",
+      "description": "Accelerated 8-step text-to-image generation through the local ComfyUI API using Qwen Image 2.1 Turbo INT8 ConvRot with official sampling sigmas.",
+      "requirements": [
+        "ComfyUI at the pinned Qwen Image 2.1-compatible revision",
+        "Qwen Image 2.1 Turbo INT8 ConvRot files installed by maintenance/setup-qwen-image-2.1-turbo-comfyui.sh",
+        "Exclusive GPU time; stop llama-swap before starting ComfyUI in GPU mode"
+      ],
+      "notes": [
+        "Uses the INT8 ConvRot quantization of official Qwen-Image-2.1-Turbo with shared Qwen3-VL INT8 text encoder and BF16 VAE.",
+        "The CLI default is 1024x1024, 8 Euler steps with the official schedule (1.0 -> 0.414568 -> 0.0), CFG 1.0, and seed 42.",
+        "Generates images ~3x faster than baseline 25-step Qwen Image 2.1 while fitting in 12 GB VRAM on Yeti."
       ]
     },
     {

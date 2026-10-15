@@ -47,6 +47,65 @@
 
 - Document monorepo-root build/run instructions and the compiled default-root
   and `--root` override behavior.
+- Add Qwen Image 2.1 + Krea 2 explicit-content probe harness, then extract it to a sibling repo:
+  the adult prompt packs, batch runners, contact-sheet tooling, grading rubric, exported probe
+  workflows and experiment write-ups now live in `~/repos/l2m2-nsfw`, which reaches this repo
+  only through `L2M2_ROOT` (default `~/repos/l2m2`) so L2M2 itself carries no explicit strings.
+  What stayed here:
+  - Add `maintenance/grade-images-with-vision-tier.py` so a text-only agent can grade renders
+    through the L3MS vision tier (`qwen38-flash-next-plat-abliterated-vision` serves it without a
+    model swap), with `--rubric`, `--reasoning-log`, and a 16384-token default so thinking tiers
+    do not exhaust the budget before emitting verdicts.
+  - Add `maintenance/export-qwen-image-workflows.py` to dump replayable API-format ComfyUI
+    workflows per prompt-pack row with a `manifest.json`.
+  - Add `.agents/skills/media-gpu-self-preemption/SKILL.md` documenting the self-pause/resume
+    pattern for media tests when the agent's own inference runs on llama-swap: stop
+    `llama-swap.service`, gate on both free VRAM and `MemAvailable` (ComfyUI segfaults under
+    memory pressure, not just VRAM pressure), start ComfyUI as `l2m2-comfyui.service`, and hand
+    the GPU back on `trap … EXIT INT TERM` so an aborted run still restores the model server.
+  - Change the Qwen Image 2.1 base generator default `--cfg` from `1.0` to `2.5`
+    (`media-models/qwen_image_21.py`): at cfg 1 ComfyUI skips the negative-conditioning pass, so
+    pack negatives were inert, and cfg 1.0 measured worst for multi-person anatomy.
+  - Add `--model` to `media-models/qwen_image_21.py` to swap the diffusion model while keeping the
+    text encoder and VAE pinned, so alternate community quants of the same architecture A/B
+    like-for-like instead of forking a generator per release.
+  - Add repeatable `--extra-lora NAME[:STRENGTH]` to `media-models/krea_2.py`, chained after the
+    distill and bypass LoRAs through `LoraLoaderModelOnly` nodes with strength validated to 0-10.
+    Chaining is not numerically neutral on an int8 base — every merge requantizes, so LoRA order
+    changes output — and unit tests cover the chain order.
+  - The extracted runner gained `--generator` (run one pack against any generator script) and an
+    optional `--cfg` that inherits the generator's default instead of overriding it with 1.0.
+
+- Add Krea 2 TextFusion refusal-reduction bypass LoRA:
+  - Download and pin official `Krea2_TextFusion_Refusal_Reduction.safetensors` in `models/krea-2-comfyui-files.txt` and symlink to `vendor/ComfyUI/models/loras/`.
+  - Add `--refusal-bypass` / `--bypass`, `--refusal-bypass-lora`, and `--refusal-bypass-strength` options to `media-models/krea_2.py` and `media-models/generate-krea-2.sh`.
+  - Add unit tests in `media-models/test_krea_2.py` verifying model-only LoRA chaining.
+  - Update `docs/krea-2-setup.md` with refusal bypass instructions.
+  - Pin `fedor_bypass.safetensors` (488 bytes, refusal knobs 9 and 10 only) from
+    `CliffNodes/fedor_bypass` revision `024bf4cd96c824321807ce93574a57ca72867366` in
+    `models/krea-2-comfyui-files.txt` and symlink it into `vendor/ComfyUI/models/loras/`.
+  - Fix `media-models/krea_2.py` counting ComfyUI's own resident checkpoint as a foreign
+    workload: it now whitelists the `l2m2-comfyui.service` MainPID per process the way
+    `media-models/qwen_image_21.py` does, instead of failing every row with
+    `GPU is busy (9882 MiB used)` whenever ComfyUI holds the model between jobs.
+  - Record measured Krea 2 throughput in `docs/krea-2-setup.md`: 32-36 s per 1024x1024 12-step
+    image on this card, because ComfyUI stages 12,864 MB for the INT8 DiT and 4,999 MB for the
+    FP8 text encoder and re-stages the DiT for every job.
+
+- Add YuE2 foundation music generation harness:
+  - Add `yue2-music` profile to `media-runtimes.json` for full-song generation with symbolic planning.
+  - Add `media-models/generate-yue2.sh` script-first CLI runner and `media-models/yue2_runner.py` parameter validator with FP8 quantization and memory budgeting options for 12 GB GPUs.
+  - Add `maintenance/setup-yue2.sh` for checkout, Python 3.12 uv virtual environment setup, and model weights management.
+  - Add pinned model manifest in `models/yue2-files.txt` for `YuE2-3B` and `YuE2-Vae` with verified SHA-256 checksums.
+  - Add unit tests in `media-models/test_yue2.py`, sample song request in `prompts/yue2-city-lights.json`, and setup runbook in `docs/yue2-setup.md`.
+  - Update `maintenance/setup-media-runtimes.sh` with `install-yue` command and readiness checks.
+
+- Add Qwen Image 2.1 Turbo 8-step ComfyUI setup with INT8 ConvRot weights,
+  custom official sampling sigmas, and L2M2 generation profile:
+  - Add `qwen-image-2.1-turbo` profile to `media-runtimes.json` for 8-step text-to-image generation.
+  - Add `media-models/generate-qwen-image-2.1-turbo.sh` and `qwen_image_21_turbo.py` CLI runner.
+  - Add `maintenance/setup-qwen-image-2.1-turbo-comfyui.sh` and `models/qwen-image-2.1-turbo-comfyui-files.txt` manifest.
+  - Add unit tests in `media-models/test_qwen_image_21_turbo.py` and runbook in `docs/qwen-image-2.1-turbo-setup.md`.
 
 - Add audio.cpp runtime management and BreezeTTS 2 profile:
   - Add `vendor/audio.cpp` and `vendor/audio.cpp-master` vendor tree layout mirroring L3MS llama.cpp tiers.

@@ -35,8 +35,9 @@ text are not executed.
 
 ## What is here
 
-- `media-runtimes.json`: MiniMax-H3, HeartMuLa, Breeze-TTS-2, and LTX-2.5 profiles.
-- `media-models/`: editable generation wrappers including `generate-breeze-tts-2.sh`.
+- `media-runtimes.json`: MiniMax-H3, YuE2, HeartMuLa, Breeze-TTS-2, and LTX-2.5 profiles.
+- `media-models/`: editable generation wrappers including `generate-yue2.sh` and `generate-breeze-tts-2.sh`.
+- `maintenance/setup-yue2.sh`: operational script for YuE2 checkout, Python 3.12 venv, and weights management.
 - `maintenance/refresh-audio-cpp.sh`: operational script to audit, build with CUDA, and smoke-test audio.cpp.
 - `maintenance/setup-media-runtimes.sh`: runtime install/readiness commands.
 - `models_config.json`: extracted Qwen Image, Qwen Image Edit,
@@ -99,7 +100,13 @@ The selected baseline and first-run settings are documented in
 Qwen Image 2.1 ComfyUI setup, workflows, and the L2M2 CLI profile are documented
 in [the Qwen Image 2.1 guide](docs/qwen-image-2.1-setup.md).
 
+Qwen Image 2.1 Turbo 8-step ComfyUI setup, INT8 ConvRot weights, and CLI profile
+are documented in [the Qwen Image 2.1 Turbo guide](docs/qwen-image-2.1-turbo-setup.md).
+
 Krea 2 raw INT8 ComfyUI setup with Turbo distill LoRA and the L2M2 CLI profile
 are documented in [the Krea 2 guide](docs/krea-2-setup.md).
 
 audio.cpp multi-tier runtimes, compilation flags, and Breeze-TTS-2 speech generation/voice cloning are documented in [the audio.cpp runtimes guide](docs/audio-cpp-runtimes.md). Measured baseline runs are recorded in [the Breeze-TTS-2 experiment log](docs/experiments/breeze-tts-2-baseline.md).
+ 
+YuE2 foundation music model setup, FP8 quantization, memory budgeting, and symbolic ABC score planning are documented in [the YuE2 setup guide](docs/yue2-setup.md).
+

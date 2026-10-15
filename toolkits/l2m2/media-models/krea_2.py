@@ -49,6 +49,10 @@ def build_workflow(
     lora_strength: float,
     lora_name: str,
     filename_prefix: str,
+    refusal_bypass: bool = False,
+    refusal_bypass_lora: str = "Krea2_TextFusion_Refusal_Reduction.safetensors",
+    refusal_bypass_strength: float = 1.0,
+    extra_loras: tuple[tuple[str, float], ...] = (),
 ) -> dict[str, dict[str, object]]:
     """Return the API-format graph for Krea 2 Raw int8 with Turbo distill LoRA."""
     workflow: dict[str, dict[str, object]] = {
@@ -84,6 +88,29 @@ def build_workflow(
             },
         }
         model_source = ["4", 0]
+
+    if refusal_bypass and refusal_bypass_strength > 0:
+        workflow["11"] = {
+            "class_type": "LoraLoaderModelOnly",
+            "inputs": {
+                "model": model_source,
+                "lora_name": refusal_bypass_lora,
+                "strength_model": refusal_bypass_strength,
+            },
+        }
+        model_source = ["11", 0]
+
+    for index, (extra_name, extra_strength) in enumerate(extra_loras):
+        node_id = str(12 + index)
+        workflow[node_id] = {
+            "class_type": "LoraLoaderModelOnly",
+            "inputs": {
+                "model": model_source,
+                "lora_name": extra_name,
+                "strength_model": extra_strength,
+            },
+        }
+        model_source = [node_id, 0]
 
     workflow["5"] = {
         "class_type": "CLIPTextEncode",
@@ -144,6 +171,26 @@ def build_workflow(
     }
 
     return workflow
+
+
+def parse_extra_loras(specs: list[str]) -> list[tuple[str, float]]:
+    """Parse NAME or NAME:STRENGTH specs into (filename, strength) pairs."""
+    parsed: list[tuple[str, float]] = []
+    for spec in specs:
+        name, separator, raw = spec.rpartition(":")
+        if separator:
+            try:
+                strength = float(raw)
+            except ValueError as error:
+                raise ValueError(f"--extra-lora strength is not a number: {spec}") from error
+        else:
+            name, strength = raw, 1.0
+        if not name.endswith(".safetensors") or name.startswith("/") or ".." in name:
+            raise ValueError("--extra-lora must be a .safetensors file inside ComfyUI's loras/")
+        if strength < 0 or strength > 10:
+            raise ValueError("--extra-lora strength must be between 0 and 10")
+        parsed.append((name, strength))
+    return parsed
 
 
 def validate_settings(
@@ -245,21 +292,55 @@ def check_gpu_exclusive() -> None:
                 )
     nvidia_smi = shutil.which("nvidia-smi")
     if nvidia_smi:
+        # ComfyUI itself holds the checkpoint resident between jobs, and it is the workload
+        # we are about to submit to, so its own PID must not count as a foreign workload.
+        comfy_pids: set[int] = set()
+        systemctl = shutil.which("systemctl")
+        if systemctl:
+            res = subprocess.run(
+                [systemctl, "--user", "show", "-p", "MainPID", "--value", "l2m2-comfyui.service"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if res.returncode == 0 and res.stdout.strip().isdigit():
+                pid = int(res.stdout.strip())
+                if pid > 0:
+                    comfy_pids.add(pid)
+
         result = subprocess.run(
-            [nvidia_smi, "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+            [nvidia_smi, "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"],
             check=False,
             capture_output=True,
             text=True,
         )
-        if result.returncode == 0:
-            try:
-                used_mib = int(result.stdout.splitlines()[0].strip())
-            except (IndexError, ValueError):
-                return
-            if used_mib >= 1500:
-                raise RuntimeError(
-                    f"GPU is busy ({used_mib} MiB used). Wait for other workloads to finish."
-                )
+        if result.returncode == 0 and result.stdout.strip():
+            for line in result.stdout.splitlines():
+                parts = [p.strip() for p in line.split(",") if p.strip()]
+                if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+                    pid, mem = int(parts[0]), int(parts[1])
+                    if pid in comfy_pids:
+                        continue
+                    if mem >= 1500:
+                        raise RuntimeError(
+                            f"GPU is busy (PID {pid} using {mem} MiB). Wait for other workloads to finish."
+                        )
+        else:
+            result_total = subprocess.run(
+                [nvidia_smi, "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if result_total.returncode == 0:
+                try:
+                    used_mib = int(result_total.stdout.splitlines()[0].strip())
+                    if used_mib >= 1500 and not comfy_pids:
+                        raise RuntimeError(
+                            f"GPU is busy ({used_mib} MiB used). Wait for other workloads to finish."
+                        )
+                except (IndexError, ValueError):
+                    pass
 
 
 def wait_for_image(prompt_id: str, timeout: float) -> dict[str, str]:
@@ -313,6 +394,31 @@ def parser() -> argparse.ArgumentParser:
         default="krea2_turbo_distill_r128.safetensors",
         help="Turbo LoRA filename in ComfyUI loras/ (set 'none' to disable)",
     )
+    result.add_argument(
+        "--refusal-bypass",
+        "--bypass",
+        action="store_true",
+        help="Enable Krea2 TextFusion refusal-reduction bypass LoRA",
+    )
+    result.add_argument(
+        "--refusal-bypass-lora",
+        default="Krea2_TextFusion_Refusal_Reduction.safetensors",
+        help="Refusal reduction bypass LoRA filename in ComfyUI loras/",
+    )
+    result.add_argument(
+        "--refusal-bypass-strength",
+        type=float,
+        default=1.0,
+        help="Refusal reduction bypass LoRA strength (default: 1.0)",
+    )
+    result.add_argument(
+        "--extra-lora",
+        action="append",
+        default=[],
+        metavar="NAME[:STRENGTH]",
+        help="Additional LoRA/LoKR in ComfyUI loras/ chained after the bypass; "
+        "NAME:STRENGTH or bare NAME (repeatable, default strength 1.0)",
+    )
     result.add_argument("--timeout", type=float, default=3600, help="Job timeout in seconds")
     result.add_argument("--check", action="store_true", help="Check model files and local ComfyUI nodes")
     return result
@@ -334,6 +440,11 @@ def main() -> int:
         if not prompt or not prompt.strip():
             raise ValueError("Krea 2 requires --prompt or --prompt-file")
         validate_settings(args.width, args.height, args.steps, args.cfg, args.lora_strength, args.timeout)
+        extra_loras = tuple(parse_extra_loras(args.extra_lora))
+        lora_dir = ROOT / "vendor" / "ComfyUI" / "models" / "loras"
+        for extra_name, _ in extra_loras:
+            if not (lora_dir / extra_name).is_file():
+                raise RuntimeError(f"Missing extra LoRA: {lora_dir / extra_name}")
         check_gpu_exclusive()
         check_api()
 
@@ -350,14 +461,23 @@ def main() -> int:
             args.lora_strength,
             args.lora_name,
             filename_prefix,
+            refusal_bypass=args.refusal_bypass,
+            refusal_bypass_lora=args.refusal_bypass_lora,
+            refusal_bypass_strength=args.refusal_bypass_strength,
+            extra_loras=extra_loras,
         )
         response = request_json("/prompt", {"prompt": workflow}, timeout=60)
         if not isinstance(response, dict) or not response.get("prompt_id"):
             raise RuntimeError(f"ComfyUI did not accept the workflow: {response}")
         prompt_id = str(response["prompt_id"])
+        extra_note = ""
+        if extra_loras:
+            pairs = ", ".join(f"{name}@{strength:g}" for name, strength in extra_loras)
+            extra_note = f", extra LoRA {pairs}"
         print(
             f"Generating {args.width}x{args.height}, {args.steps} steps, CFG {args.cfg}, "
-            f"LoRA strength {args.lora_strength}, seed {args.seed}; ComfyUI job {prompt_id}."
+            f"LoRA strength {args.lora_strength}, seed {args.seed}{extra_note}; "
+            f"ComfyUI job {prompt_id}."
         )
         image = wait_for_image(prompt_id, args.timeout)
         output_dir = Path(os.environ.get("L3MS_MEDIA_OUTPUT_DIR", str(Path.home() / "media-output")))

@@ -105,6 +105,49 @@ class Krea2WorkflowTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_settings(1024, 1024, 12, 1.5, -0.5, 3600)
 
+    def test_workflow_with_refusal_bypass(self):
+        workflow = build_workflow(
+            prompt="a portrait",
+            negative_prompt="",
+            width=1024,
+            height=1024,
+            steps=12,
+            seed=42,
+            cfg=1.5,
+            lora_strength=0.60,
+            lora_name="krea2_turbo_distill_r128.safetensors",
+            filename_prefix="test",
+            refusal_bypass=True,
+        )
+        self.assertIn("11", workflow)
+        self.assertEqual(workflow["11"]["class_type"], "LoraLoaderModelOnly")
+        self.assertEqual(workflow["11"]["inputs"]["lora_name"], "Krea2_TextFusion_Refusal_Reduction.safetensors")
+        self.assertEqual(workflow["11"]["inputs"]["strength_model"], 1.0)
+        # Verify chaining: UNet -> Node 4 (Turbo) -> Node 11 (Refusal Bypass) -> KSampler (Node 8)
+        self.assertEqual(workflow["4"]["inputs"]["model"], ["1", 0])
+        self.assertEqual(workflow["11"]["inputs"]["model"], ["4", 0])
+        self.assertEqual(workflow["8"]["inputs"]["model"], ["11", 0])
+
+    def test_workflow_with_refusal_bypass_without_turbo(self):
+        workflow = build_workflow(
+            prompt="a portrait",
+            negative_prompt="",
+            width=1024,
+            height=1024,
+            steps=25,
+            seed=42,
+            cfg=4.0,
+            lora_strength=0.0,
+            lora_name="krea2_turbo_distill_r128.safetensors",
+            filename_prefix="test",
+            refusal_bypass=True,
+        )
+        self.assertNotIn("4", workflow)
+        self.assertIn("11", workflow)
+        self.assertEqual(workflow["11"]["inputs"]["model"], ["1", 0])
+        self.assertEqual(workflow["8"]["inputs"]["model"], ["11", 0])
+
 
 if __name__ == "__main__":
     unittest.main()
+
