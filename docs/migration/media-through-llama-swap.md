@@ -58,10 +58,11 @@ not the CLI's WAV chunk files. Comfy cancellation and learned-model CUDA
 execution through this route were verified earlier; see
 [live acceptance](live-port-acceptance.md).
 
-## What this lets us delete
+## What this let us delete
 
-With the CUDA run passed, the custom GPU guard (`resident_unit`, `gpu_probe`,
-`cuda_device`, `ownership`, `foreground_shutdown`, about 3.8k lines) and the
-stop-and-restore flow have no remaining role for these lanes: llama-swap's own
-swap and unload do the work. Direct scripts that bypass the router keep a simple
-"GPU is busy" check until they move to the route.
+The resident pause/restore handoff (the opt-in stop-and-restore of
+`llama-swap.service`, about 1,700 lines of service management plus its tests) is
+removed. The idle-GPU window, the KDE desktop baseline and the recovery marker
+stay for the direct scripts that still bypass the router (LTX, YuE2, Blender,
+HeartMuLa). Moving those lanes onto routed engines would let the rest of the
+window code go too, and is the next simplification.

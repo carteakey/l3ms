@@ -4468,15 +4468,15 @@ impl App {
             ));
             self.input_mode = InputMode::TaskForm;
             self.status = if is_direct_blender_headless_profile(&profile) {
-                "Foreground Blender headless form open · Python runs with your user permissions and is not sandboxed · shared GPU must be idle before starting · resident pause/restore is opt-in · external GUI/MCP remains separate · run once with Ctrl+Enter".into()
+                "Foreground Blender headless form open · Python runs with your user permissions and is not sandboxed · shared GPU must be idle before starting · external GUI/MCP remains separate · run once with Ctrl+Enter".into()
             } else if is_direct_cuda_ltx_profile(&profile) {
-                "Foreground CUDA LTX-2.5 form open · choose video or music; both generate synchronized MP4 · prompt/argv stay in memory · the selected GPU must be idle before starting · resident pause/restore is opt-in · run once with Ctrl+Enter".into()
+                "Foreground CUDA LTX-2.5 form open · choose video or music; both generate synchronized MP4 · prompt/argv stay in memory · the selected GPU must be idle before starting · run once with Ctrl+Enter".into()
             } else if is_direct_cuda_h3_profile(&profile) {
-                "Foreground CUDA MiniMax H3 form open · choose music, tts, or video; prompt/argv stay in memory · the selected GPU must be idle before starting · resident pause/restore is opt-in · run once with Ctrl+Enter".into()
+                "Foreground CUDA MiniMax H3 form open · choose music, tts, or video; prompt/argv stay in memory · the selected GPU must be idle before starting · run once with Ctrl+Enter".into()
             } else if is_direct_cuda_music_profile(&profile) {
-                "Foreground CUDA HeartMuLa music form open · the selected GPU must be idle before starting · prompt/lyrics stay in memory · resident pause/restore is opt-in · run once with Ctrl+Enter".into()
+                "Foreground CUDA HeartMuLa music form open · the selected GPU must be idle before starting · prompt/lyrics stay in memory · run once with Ctrl+Enter".into()
             } else if is_direct_cuda_profile(&profile) {
-                "Foreground CUDA native form open · the selected GPU must be idle before starting · resident pause/restore is opt-in · run once with Ctrl+Enter".into()
+                "Foreground CUDA native form open · the selected GPU must be idle before starting · run once with Ctrl+Enter".into()
             } else if is_direct_native_decision_profile(&profile) {
                 if profile.runtime.as_str() == "llamacpp" {
                     "Router decision may evict the loaded language model · quiet window required · Ctrl+Enter runs once".into()
@@ -4934,7 +4934,7 @@ impl App {
             )
         } else if requires_idle_gpu_window {
             format!(
-                "{task_label} #{job_id} running · GPU release is checked after runner cleanup; resident pause/restore is opt-in; press c to cancel"
+                "{task_label} #{job_id} running · GPU release is checked after runner cleanup; press c to cancel"
             )
         } else if lane == Lane::Language || remote_decision {
             format!(
@@ -7137,14 +7137,14 @@ impl App {
         #[cfg(target_os = "linux")]
         let (action_text, action_title) = if show_direct_native {
             let text = self.direct_native_summary.as_ref().map_or_else(
-                || "Native decisions (CPU Nagi/Laya, hosted Jev, and explicitly selected CUDA Nagi/Laya), CPU/CUDA Breeze tts/clon/design, HeartMuLa CUDA music, Blender headless, connected embeddings, and Comfy workflows run in one foreground job. CUDA and Blender headless require an idle shared GPU window before admission. Services stay operator-managed by default; only explicitly configured resident llama-swap may be paused/restored. Blender Python is not sandboxed; its GUI/MCP workflow remains external. Comfy uses an existing external server; operator manages GPU availability.\nf open task · c cancels an active run".to_owned(),
+                || "Native decisions (CPU Nagi/Laya, hosted Jev, and explicitly selected CUDA Nagi/Laya), CPU/CUDA Breeze tts/clon/design, HeartMuLa CUDA music, Blender headless, connected embeddings, and Comfy workflows run in one foreground job. CUDA and Blender headless require an idle shared GPU window before admission. Blender Python is not sandboxed; its GUI/MCP workflow remains external. Comfy uses an existing external server; operator manages GPU availability.\nf open task · c cancels an active run".to_owned(),
                 |summary| {
                     let operator_note = if summary.native_id.is_some() {
                         "\nExisting Comfy server · operator manages GPU availability"
                     } else if summary.cuda {
-                        "\nCUDA · GPU idle required before admission; resident pause/restore is opt-in"
+                        "\nCUDA · GPU idle required before admission"
                     } else if summary.requires_idle_gpu_window {
-                        "\nBlender headless · shared GPU idle required before admission; resident pause/restore is opt-in"
+                        "\nBlender headless · shared GPU idle required before admission"
                     } else {
                         ""
                     };
@@ -7177,7 +7177,7 @@ impl App {
                         } else if self.direct_native_job.is_some()
                             && summary.requires_idle_gpu_window
                         {
-                            "c cancel · waits for runner cleanup and GPU release checks; resident pause/restore is opt-in"
+                            "c cancel · waits for runner cleanup and GPU release checks"
                         } else if self.direct_native_job.is_some() && summary.lane == Lane::Language {
                             "c cancel · dispatched remote work may continue"
                         } else if self.direct_native_job.is_some() && summary.lane == Lane::Decisions {
@@ -7250,22 +7250,22 @@ impl App {
             ])
             .split(area);
         let form_hint = if editor.direct_blender_headless {
-            "Blender headless · Python runs with your user permissions (no sandbox) · shared GPU must be idle before starting · resident pause/restore is opt-in · GUI/MCP is external and not launched here"
+            "Blender headless · Python runs with your user permissions (no sandbox) · shared GPU must be idle before starting · GUI/MCP is external and not launched here"
         } else if editor.direct_native_ltx {
-            "LTX-2.5 · video/music both generate synchronized MP4 · JSON argv only · prompt/settings stay in memory · GPU must be idle before starting · resident pause/restore is opt-in"
+            "LTX-2.5 · video/music both generate synchronized MP4 · JSON argv only · prompt/settings stay in memory · GPU must be idle before starting"
         } else if editor.direct_native_h3 {
-            "MiniMax H3 · choose music/tts/video; JSON argv only · prompt stays in memory · GPU must be idle before starting · resident pause/restore is opt-in"
+            "MiniMax H3 · choose music/tts/video; JSON argv only · prompt stays in memory · GPU must be idle before starting"
         } else if editor.direct_native_music {
-            "HeartMuLa music · JSON argv only · prompt/lyrics stay in memory · GPU must be idle before starting · resident pause/restore is opt-in"
+            "HeartMuLa music · JSON argv only · prompt/lyrics stay in memory · GPU must be idle before starting"
         } else if editor.direct_breeze_speech && is_direct_cuda_profile(&editor.profile_snapshot) {
-            "CUDA Breeze · GPU must be idle before starting · resident pause/restore is opt-in · tts/clon/design fields stay task-specific"
+            "CUDA Breeze · GPU must be idle before starting · tts/clon/design fields stay task-specific"
         } else if editor.direct_breeze_speech {
             "CPU Breeze · tts standard/streaming, clon reference, design instruction"
         } else if editor.direct_native_decision {
             if editor.profile_snapshot.runtime.as_str() == "llamacpp" {
                 "Router-owned CUDA decision · normal router swapping may evict the language model · use a quiet window · no automatic restoration"
             } else if is_direct_cuda_profile(&editor.profile_snapshot) {
-                "CUDA decision · GPU must be idle before starting · resident pause/restore is opt-in"
+                "CUDA decision · GPU must be idle before starting"
             } else {
                 "Native decision · local CPU or hosted route"
             }
