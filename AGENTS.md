@@ -38,7 +38,9 @@ decision runtime dependencies to the root L3MS package as part of source import.
 
 - Config hot-reload: `kill -HUP $(pgrep '[l]lama-swap')`. New/edited
   `llama-swap.yaml` entries are picked up without restarting the router
-  (verified: no dropped connections, running models keep serving).
+  (verified: no dropped connections). A reload still evicts the resident model and
+  runs the config's startup preload (2026-10-15: the abliterated tier was replaced
+  by `qwen38-flash-next-plat`), so reload only when a model swap is acceptable.
 - Full-VRAM experiments (bench ladders, OOM hunting, fitting runs): pause the
   router and its spawned servers with `systemctl --user stop llama-swap.service`,
   run the experiment, then `systemctl --user start llama-swap.service`. A 12 GB
