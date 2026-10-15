@@ -329,6 +329,14 @@
         </table>
       </div>
       <div class="mobile-models" id="mobile-models"></div>
+
+      <div id="unmeasured-section" hidden>
+        <div class="lane-intro surface">
+          <span class="label">Declared, not yet measured</span>
+          <p>Served by this router but with no throughput result yet, so they are not ranked.</p>
+        </div>
+        <div class="lane-grid" id="unmeasured-list"></div>
+      </div>
     </section>
 
     <section class="tab-panel" id="media-panel" role="tabpanel" aria-labelledby="media-tab" tabindex="0">
@@ -623,6 +631,24 @@
       activateTab(tabs[next]);
     });
 
+    function renderUnmeasured() {
+      const items = dashboard.unmeasured || [];
+      document.getElementById("unmeasured-section").hidden = items.length === 0;
+      document.getElementById("unmeasured-list").innerHTML = items.map(item => `
+        <article class="lane-card surface">
+          <span class="label">Language // ${escapeHtml(item.id)}</span>
+          <h3>${escapeHtml(item.name)}</h3>
+          <p>${escapeHtml(item.description)}</p>
+          <div class="lane-meta">
+            <div><span class="label">Context</span><span class="detail-value">${escapeHtml(item.context)}</span></div>
+            <div><span class="label">Measured TG</span><span class="detail-value">not measured</span></div>
+          </div>
+          <div class="badge-row">${(item.tags || []).map(tag => `<span class="badge">${escapeHtml(tag)}</span>`).join("")}</div>
+          <div class="lane-links"><a href="${escapeHtml(item.sourceUrl)}">Serving recipe</a></div>
+        </article>
+      `).join("");
+    }
+
     function renderEvolution() {
       const container = document.getElementById("evolution-table-body");
       if (!dashboard.progression || !dashboard.progression.length) {
@@ -673,6 +699,7 @@
     renderDecisions();
     renderBenchmarks();
     renderEvolution();
+    renderUnmeasured();
     renderCommunity();
     renderArchive();
   </script>

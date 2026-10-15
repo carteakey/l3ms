@@ -205,6 +205,22 @@
         "Full-GPU"
       ],
       "benchmark": "bench-models/bench-llama-humanizer.sh"
+    },
+    "qwen38-flash-next-plat-abliterated-vision": {
+      "displayName": "Qwen3.8-Flash-Next Plat Abliterated Vision (Strata v0.1.44.1)",
+      "summary": "Platinum Abliterated Vision: Strata v0.1.44.1 with SC117 uncensored/unaligned weights and a CPU-offloaded strata-vision image encoder (mmproj-F16) that keeps the full GPU expert cache. 128k context. Declared in llama-swap.yaml; no throughput has been measured for this profile yet.",
+      "tps": null,
+      "pp": null,
+      "testedContext": "128k",
+      "quant": "SC117 GSQ-RCO IQ3_XXS + mmproj-F16",
+      "tags": [
+        "MoE",
+        "Vision",
+        "Strata",
+        "Abliterated",
+        "128k"
+      ],
+      "benchmark": null
     }
   },
   "benchmarks": {
