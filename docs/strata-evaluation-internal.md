@@ -344,6 +344,32 @@ Conducted on `yeti-cachy` via `bench-models/bench_strata_long_horizon.py` across
 3. **Retrieval Fidelity**: 100% needle retrieval success across all tested context depths.
 4. **Context Configuration**: Maximum context expanded to **128K** (`--max-context 131072`) in `vendor/strata/strata-iq3_xxs.json`.
 
+### 11.1 Context Ceiling Analysis: Why 128k is the Physical Operating Limit vs. 256k
+An investigation was conducted into the feasibility and utility of expanding `--max-context` to 256k (`262144`). On our RTX 4070 (12.28 GiB VRAM) and 64 GB DDR5-5600 host system, **128k is the strict operational sweet spot**, while 256k introduces crippling throughput penalties:
+
+1. **Zero-Sum VRAM Budget & Expert Eviction**:
+   * Total VRAM is bounded at 12.28 GiB. Base model weights + native MTP speculative head consume ~4.5 GiB; CUDA runtime, scratch buffers, and display compositor require ~0.8 GiB.
+   * **At 128k (`131072`)**: The K8V4 KV cache consumes **~2.2 GiB**. The remaining ~4.0 GiB houses **2,444 hot experts** in VRAM. This achieves a **~72% cache hit rate**, sustaining **60–90 t/s** decode.
+   * **At 256k (`262144`)**: The K8V4 KV cache doubles to **~4.4 GiB**. To accommodate this extra 2.2 GiB in VRAM, Strata must shrink the hot expert cache from 2,444 experts down to **< 1,000 experts**. Cache hit rate plummets to **< 35%**, and decode throughput collapses from 65+ t/s down to **~20 t/s** (a ~70% slowdown).
+
+2. **Host RAM Ceiling**:
+   * Model expert weights in pinned RAM: **47.0 GiB**
+   * Host-RAM conversation parking cache (4 slots @ 3 GiB): **3.0 GiB**
+   * Linux desktop, browser, and operational services: **~8.0–10.0 GiB**
+   * Total committed memory: **~58.0–60.0 GiB** out of 61.6 GiB usable.
+   * 256k context leaves zero memory headroom, inducing immediate zram compression churn and SSD swap thrashing.
+
+3. **Prefill Latency Scaling**:
+   * Prefilling 40k tokens takes ~30–40s at Strata's ~1,200–1,500 t/s prompt processing speed.
+   * Prefilling 200k+ tokens would require **3 to 4 minutes** per turn before the first token decodes.
+
+4. **MoE Routing Entropy & RoPE Limits**:
+   * `Qwen3.8-Flash-Next` is natively trained up to 128k. Extending past 128k requires RoPE frequency scaling, which causes MoE router entropy to spike across 512 experts, degrading needle recall and code reasoning.
+
+5. **Operational Synergy with Rolling Compaction**:
+   * In coding agent harnesses (e.g. Pi), context is managed through rolling compaction at `~98k tokens` (`contextWindow - reserveTokens = 131,072 - 32,768`).
+   * Summarizing older context with thinking forced `off` takes ~2s, keeping working context lean (~15k–30k) while preserving cumulative file tracking and project state.
+
 ---
 
 ## 12. Strata vs. StrataGP & The 2MB Transparent Huge Page (`MADV_HUGEPAGE`) Optimization
@@ -404,6 +430,72 @@ Standardized 7-way benchmark on identical model quant on RTX 4070 12GB:
 - **llama.cpp `exp_cache` (#29887)**: **23.92 t/s decode** | 449.1 t/s prefill @ 8k | 11,454 MiB VRAM
 - **llama.cpp `gold_new` (master b11475)**: **17.34 t/s decode** | 586.6 t/s prefill @ 8k | 11,128 MiB VRAM
 - **llama.cpp `gold_old` (master b11241)**: 14.91 t/s decode | 543.7 t/s prefill @ 8k | 11,472 MiB VRAM
+
+---
+
+## 16. Optimization Campaign After v0.1.40.2 (2026-10-13)
+
+The large architectural wins are already deployed: expert-granular VRAM caching,
+native MTP, K8V4 KV, THP-backed host arenas, fused verify kernels, and output
+clamping. The next campaign therefore targets scheduling overhead and cache-policy
+interactions on this specific RTX 4070 + i5-12600K host. These are experiments,
+not production recommendations, until they pass the gates below.
+
+### 16.1 Measurement and promotion contract
+
+- Stop `llama-swap.service` for every full-VRAM arm and restore it immediately
+  after the campaign. Confirm idle VRAM before launching a test server.
+- Capture `bench-models/bench-env.sh` frontmatter. Compare only matching RAM
+  clock, governor/EPP, thermals, free memory, and GPU baseline.
+- Use ISTA-DASLab GSQ-RCO IQ3_XXS, the production MTP runtime, K8V4, 128k
+  allocation, identical prompts, greedy sampling, and `--fit-max-tokens`.
+- Warm each fresh process before measurement. Use fresh prefixes and disable
+  prompt-cache reuse for decode/prefill throughput probes.
+- Report aggregate generated tokens divided by aggregate decode time, individual
+  spread, MTP acceptance, VRAM, RAM available, and `/proc/<pid>/io read_bytes`.
+- Require a 4k needle check and screen generated code. Approximate-routing arms
+  additionally require logit/KL and task-quality evaluation.
+- Promote only a repeatable improvement that survives representative code,
+  prose, tool-call, and long-context workloads without new instability.
+
+### 16.2 Experiment queue
+
+| Priority | Experiment | Hypothesis | Initial matrix | Promotion gate |
+|---:|---|---|---|---|
+| 1 | Router lookahead | Once every expert is served from GPU/RAM, prediction threads only contend with decode on this 6P+4E AVX2 host | default vs `STRATA_LOOKAHEAD=0` | ≥3% aggregate decode win, no expert file reads, matching correctness |
+| 2 | Strata refresh | Post-0.1.40.2 kernels and scheduling may improve verify/decode, but newer PLE mapping paths have regression reports | v0.1.40.2 vs clean current tag | No read amplification; decode, prefill and long-context non-regressing |
+| 3 | MTP policy | Fixed `--spec 4 --spec-min-p 0.5` may not maximize wall-clock throughput across code and prose | spec 3/4/5/6 × p-min 0.4/0.5/0.6/0.7 | Best aggregate wall time with stable acceptance and quality |
+| 4 | Conversation cache | Coding-agent turns resend large stable prefixes; state reuse may dominate kernel-level gains | cold, follow-up, tool-result, restart/restore | Lower TTFT with bounded write/restore cost and identical continuation |
+| 5 | Prefill CPU share | `auto` may steal scarce AVX2 decode/prefill capacity and can make output non-repeatable | auto/0/0.25/0.40 | Faster representative TTFT with repeatable seeded output |
+| 6 | Async expert adaptation | Overlapped cache swaps may shorten the cold phase after a workload-domain change | off vs `--adapt-async 1` | Faster time-to-steady-state without added stalls or quality drift |
+| 7 | Verify/QSA opt-ins | Split QSA attention and input-only mixer branches may reduce speculative verification cost | `STRATA_QSA_SPLIT_ATTN=1`, `STRATA_SIDE_MIXER=1/2`, isolated then combined | Better decode at equal MTP acceptance and recall |
+| 8 | llama.cpp cache + MTP | A smaller MoE LRU cache plus native MTP may beat either mechanism alone inside 12 GB | cache 512/1024/1536/2048 MiB × MTP off/on | Beats 23.92 t/s exp and 25–27 t/s MTP baselines safely |
+| 9 | Route-tail skipping | Skipping low-ranked routes may trade a bounded quality loss for lower CPU/PCIe traffic | skip 0/3/5/7 | Only with explicit quality acceptance; never a transparent optimization |
+
+Reducing `qwen4exp.expert_used_count` is deliberately excluded from the main
+queue. It changes the effective model and requires a separate approximate-model
+evaluation rather than an inference-runtime promotion.
+
+### 16.3 Campaign 1 — router lookahead A/B
+
+Harness: `bench-models/bench-strata-lookahead-ab.sh`.
+
+The harness runs an interleaved `on/off/off/on` sequence by default. Each fresh
+process receives three discarded warmups, four 256-token code generations, two
+unique-prefix prefill probes at 2k and 8k, and a 4k needle check through the
+engine-neutral refresh probe. Results append to
+`logs/results/strata-lookahead-ab.jsonl`; per-arm server logs and system
+frontmatter are stored under `/tmp/strata-lookahead-ab/`.
+
+Interpretation:
+
+- A win is credible only if both repeated arms agree and the environment remains
+  comparable. Treat a single startup per setting as exploratory.
+- Confirm the startup log shows the intended expert cache and host-resident
+  complement. If experts remain file-backed, lookahead is doing useful I/O work
+  and the comparison answers a different question.
+- If disabling lookahead wins, add it to the Strata config environment only
+  after a longer code/prose/tool-call confirmation run.
 
 
 
