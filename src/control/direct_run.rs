@@ -17,8 +17,8 @@ use super::comfy::{
 };
 use super::cuda_device::CudaDevice;
 use super::decision::{
-    execute_accepted_cpu_decision, execute_accepted_cuda_decision,
-    execute_accepted_hosted_decision, DecisionExecutionError, NativeDecisionResult,
+    execute_accepted_cpu_decision, execute_accepted_hosted_decision, DecisionExecutionError,
+    NativeDecisionResult,
 };
 use super::desktop_gpu::DesktopGpuBaseline;
 use super::gpu_probe::{GpuProbeConfig, NvidiaSmiGpuProbe};
@@ -295,9 +295,7 @@ pub(crate) fn run_native_in_operator_window(
                 ProcessFailureDisposition::NoChildSpawned,
             )
         })?;
-    let cuda_profile = catalog
-        .inspect(request.profile())
-        .is_some_and(is_supported_direct_cuda_profile);
+    let cuda_profile = false;
     let recovery = RecoveryPolicy::new(PROCESS_RECOVERY_TIMEOUT).expect("fixed recovery timeout");
     with_idle_gpu(
         &window,
@@ -580,19 +578,7 @@ fn run_native(
                 .map(DirectRunResult::Decision)
                 .map_err(remote_language_error);
         }
-        if is_supported_cuda_direct_decision_profile(profile) {
-            let Some(device) = cuda else {
-                return Err(DirectRunError::new(
-                    DirectRunErrorKind::UnsupportedRoute,
-                    ProcessFailureDisposition::NoChildSpawned,
-                ));
-            };
-            return execute_accepted_cuda_decision(
-                &catalog, request, &route, device, context, recovery,
-            )
-            .map(DirectRunResult::Decision)
-            .map_err(|error| execution_error(error, context));
-        } else if !is_supported_direct_decision_profile(profile) || cuda.is_some() {
+        if !is_supported_direct_decision_profile(profile) || cuda.is_some() {
             return Err(if is_jev_api_decision_profile(profile) {
                 DirectRunError::remote(
                     DirectRunErrorKind::UnsupportedRoute,
@@ -652,25 +638,12 @@ fn run_native(
             .map(DirectRunResult::ScriptMedia)
             .map_err(|error| media_execution_error(error, context));
         }
-        // HeartMuLa music and H3 music/tts are routed above; only H3 video still
-        // runs as a script in an operator GPU window.
-        if !is_supported_direct_h3_profile(profile) || cuda.is_none() {
-            return Err(DirectRunError::new(
-                DirectRunErrorKind::UnsupportedRoute,
-                ProcessFailureDisposition::NoChildSpawned,
-            ));
-        }
-        super::media_execution::execute_h3_on_device(
-            &catalog,
-            request,
-            &route,
-            cuda.expect("validated CUDA device"),
-            output_directory.expect("validated music output directory"),
-            context,
-            recovery,
-        )
-        .map(DirectRunResult::ScriptMedia)
-        .map_err(|error| media_execution_error(error, context))
+        // HeartMuLa music and H3 music/tts are routed above; no other audio
+        // script runs from the root workbench (standalone toolkit scripts remain).
+        Err(DirectRunError::new(
+            DirectRunErrorKind::UnsupportedRoute,
+            ProcessFailureDisposition::NoChildSpawned,
+        ))
     } else if is_breeze_speech {
         if is_supported_cpu_breeze_route(request, &route) {
             if cuda.is_some() {
@@ -970,29 +943,6 @@ pub(crate) fn is_llamacpp_decision_profile(profile: &CatalogProfile) -> bool {
         && matches!(&profile.native_source, NativeProfileSource::Decisions {profile_type, ..} if profile_type == "local")
 }
 
-/// Profile-level CUDA-local Nagi/Laya decision routes. Callers still need an
-/// explicit `CudaDevice`; this predicate does not establish GPU ownership.
-pub(crate) fn is_supported_cuda_direct_decision_profile(profile: &CatalogProfile) -> bool {
-    if profile.disabled
-        || profile.key.lane != Lane::Decisions
-        || profile.runtime.lane != Lane::Decisions
-        || !profile.tasks.iter().any(|task| task.as_str() == "decision")
-    {
-        return false;
-    }
-    let NativeProfileSource::Decisions { profile_type, .. } = &profile.native_source else {
-        return false;
-    };
-    matches!(
-        (
-            profile.runtime.as_str(),
-            profile.device.as_ref(),
-            profile_type.as_str(),
-        ),
-        ("nagi" | "laya", Some(Device::Cuda), "local")
-    )
-}
-
 /// Profile-level CUDA Breeze route selectable by direct media forms. The
 /// route-level check below additionally binds the request and refreshed task.
 pub(crate) fn is_supported_cuda_breeze_profile(profile: &CatalogProfile) -> bool {
@@ -1015,13 +965,6 @@ pub(crate) fn is_supported_cuda_breeze_profile(profile: &CatalogProfile) -> bool
         )
 }
 
-/// Whether a profile has one of the direct CUDA implementations. The caller
-/// must still apply its operator-selected device and admission checks.
-pub(crate) fn is_supported_direct_cuda_profile(profile: &CatalogProfile) -> bool {
-    is_supported_cuda_direct_decision_profile(profile)
-        || is_supported_direct_script_profile(profile)
-}
-
 pub(crate) fn is_routed_audio_script_request(
     catalog: &Catalog,
     request: &InferenceRequest,
@@ -1039,14 +982,10 @@ pub(crate) fn is_routed_audio_script_request(
     })
 }
 
-pub(crate) fn is_supported_direct_script_profile(profile: &CatalogProfile) -> bool {
-    is_supported_direct_h3_profile(profile)
-}
-
 /// GPU admission is separate from selecting a CUDA inference device. Blender
 /// keeps its scene-configured backend, but must not overlap other GPU work.
 pub(crate) fn requires_operator_gpu_window(profile: &CatalogProfile) -> bool {
-    is_supported_direct_cuda_profile(profile) || is_supported_blender_headless_profile(profile)
+    is_supported_blender_headless_profile(profile)
 }
 
 pub(crate) fn is_supported_blender_headless_profile(profile: &CatalogProfile) -> bool {
@@ -1376,8 +1315,6 @@ mod tests {
         let profile = catalog.inspect(&key).unwrap();
         assert!(is_supported_blender_headless_profile(profile));
         assert!(requires_operator_gpu_window(profile));
-        assert!(!is_supported_direct_cuda_profile(profile));
-        assert!(!is_supported_direct_script_profile(profile));
         assert!(profile.device.is_none());
         let mut changed = profile.clone();
         changed.device = Some(Device::Cuda);
@@ -1914,11 +1851,9 @@ fi
             let (_root, catalog, request, _) =
                 fixture(engine, profile_type, device, &native_response("unused"));
             let profile = catalog.inspect(request.profile()).unwrap();
+            // Jev API, CUDA Nagi and SemIf are not direct root decision profiles.
             assert!(!is_supported_direct_decision_profile(profile));
-            assert_eq!(
-                is_supported_cuda_direct_decision_profile(profile),
-                engine == "nagi" && profile_type == "local" && device == "cuda"
-            );
+            assert!(!requires_operator_gpu_window(profile));
         }
     }
 
@@ -2606,7 +2541,7 @@ fi
     }
 
     #[test]
-    fn routed_audio_scripts_reject_existing_output_before_http_and_keep_h3_video_direct() {
+    fn routed_audio_scripts_reject_existing_output_before_http_and_h3_video_is_unsupported() {
         for profile in ["heartmula-music", "minimax-h3"] {
             let (root, catalog, request) = routed_audio_script_fixture(profile, "music");
             let output = cpu_breeze_output(root.path(), "occupied-audio");
@@ -2635,10 +2570,23 @@ fi
                 b"existing artifact"
             );
         }
-        let (_root, catalog, request) = routed_audio_script_fixture("minimax-h3", "video");
+        // H3 video is not routed and no longer runs from the root workbench.
+        let (root, catalog, request) = routed_audio_script_fixture("minimax-h3", "video");
         assert!(!is_routed_audio_script_request(&catalog, &request));
-        assert!(requires_operator_gpu_window(
+        assert!(!requires_operator_gpu_window(
             catalog.inspect(request.profile()).unwrap()
         ));
+        let output = cpu_breeze_output(root.path(), "video-unsupported");
+        let error = run_native(
+            &catalog,
+            &request,
+            Some(&output),
+            None,
+            &context(&NeverCancel),
+        )
+        .err()
+        .expect("H3 video has no root route");
+        assert_eq!(error.kind(), DirectRunErrorKind::UnsupportedRoute);
+        assert!(!error.blocks_following_work());
     }
 }

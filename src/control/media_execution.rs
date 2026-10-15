@@ -11,21 +11,17 @@
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, File};
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-use serde::de::{DeserializeSeed, Error as DeError, MapAccess, Visitor};
-use serde::{Deserialize, Deserializer};
 
 use super::catalog::{Catalog, Device};
 use super::cuda_device::CudaDevice;
 use super::language::SpeechAudio;
 use super::native_commands::{
     is_supported_blender_request_route, is_supported_cpu_breeze_speech, is_supported_h3_args,
-    is_supported_h3_request_route, is_supported_heartmula_args, prepare_blender_recipe_for_route,
-    prepare_breeze_speech_recipe, prepare_breeze_speech_recipe_for_route,
-    prepare_h3_recipe_for_route, NativeOutputExpectation, CPU_BREEZE_PROFILE_ID,
+    is_supported_heartmula_args, prepare_blender_recipe_for_route, prepare_breeze_speech_recipe,
+    prepare_breeze_speech_recipe_for_route, NativeOutputExpectation, CPU_BREEZE_PROFILE_ID,
 };
 use super::process::{self, ProcessFailureDisposition, ProcessFailureKind, ProcessLimits};
 use super::requests::{InferenceRequest, MediaInput, SpeechMode};
@@ -34,8 +30,6 @@ use super::runtime::{OperationContext, RecoveryPolicy};
 
 const OUTPUT_NAME: &str = "result.wav";
 const CHUNKS_NAME: &str = "result.wav.chunks";
-const H3_RAW_VIDEO_NAME: &str = "minimax_h3_video_rgb24.json";
-const H3_VIDEO_NAME: &str = "result.mp4";
 const BLENDER_IMAGE_NAME: &str = "result_0001.png";
 const MAX_CAPTURE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_STREAM_CHUNKS: usize = 63;
@@ -142,59 +136,6 @@ impl fmt::Debug for MediaExecutionResult {
     }
 }
 
-/// Run the declared MiniMax-H3 audio or synchronized audio/video script on its
-/// exact accepted CUDA route. GPU admission/release remains with the caller.
-pub(crate) fn execute_h3_on_device(
-    catalog: &Catalog,
-    request: &InferenceRequest,
-    accepted_route: &ResolvedProfileRoute,
-    device: &CudaDevice,
-    job_directory: &Path,
-    context: &OperationContext<'_>,
-    recovery: RecoveryPolicy,
-) -> Result<MediaExecutionResult, MediaExecutionFailure> {
-    if !is_supported_h3_request_route(request, accepted_route) {
-        return Err(not_dispatched(MediaExecutionErrorKind::InvalidRequest));
-    }
-    let InferenceRequest::Media {
-        input: MediaInput::Script { task, .. },
-        ..
-    } = request
-    else {
-        return Err(not_dispatched(MediaExecutionErrorKind::InvalidRequest));
-    };
-    let video_task = task.as_str() == "video";
-    let output_root = validate_job_directory(job_directory)?;
-    for name in [OUTPUT_NAME, CHUNKS_NAME, H3_RAW_VIDEO_NAME, H3_VIDEO_NAME] {
-        ensure_absent(&output_root.join(name))?;
-    }
-    let video_output = video_task.then(|| output_root.join(H3_VIDEO_NAME));
-    let recipe = prepare_h3_recipe_for_route(
-        catalog,
-        request,
-        accepted_route,
-        &output_root.join(OUTPUT_NAME),
-        video_output.as_deref(),
-    )
-    .map_err(|_| not_dispatched(MediaExecutionErrorKind::InvalidRequest))?;
-    execute_script_recipe(
-        &recipe,
-        &output_root,
-        Some(device),
-        context,
-        recovery,
-        ScriptMode::Default,
-    )?;
-
-    let artifacts = discover_h3_artifacts(&output_root, video_task, context)?;
-    check_after_child(context)?;
-    Ok(MediaExecutionResult {
-        output_root,
-        mode: SpeechMode::Standard,
-        artifacts,
-    })
-}
-
 fn execute_script_recipe(
     recipe: &super::native_commands::NativeCommandRecipe,
     output_root: &Path,
@@ -212,7 +153,6 @@ fn execute_script_recipe(
         .env("L3MS_MEDIA_OUTPUT_DIR", output_root)
         .env("TMPDIR", output_root);
     match mode {
-        ScriptMode::Default => {}
         ScriptMode::BlenderHeadless => {
             command.env("L3MS_BLENDER_HEADLESS_ONLY", "1");
         }
@@ -231,7 +171,6 @@ fn execute_script_recipe(
 
 #[derive(Clone, Copy)]
 enum ScriptMode {
-    Default,
     BlenderHeadless,
 }
 
@@ -679,305 +618,6 @@ fn discover_artifacts(
     Ok(artifacts)
 }
 
-fn discover_h3_artifacts(
-    root: &Path,
-    video_task: bool,
-    context: &OperationContext<'_>,
-) -> Result<Vec<MediaArtifact>, MediaExecutionFailure> {
-    check_after_child(context)?;
-    let wave_path = root.join(OUTPUT_NAME);
-    let wave_size = validate_wave(&wave_path, root, context)?;
-    let mut total_size = wave_size;
-    let mut artifacts = vec![MediaArtifact {
-        relative_path: PathBuf::from(OUTPUT_NAME),
-        kind: MediaArtifactKind::FinalWave,
-    }];
-    require_missing_after_child(&root.join(CHUNKS_NAME))?;
-
-    if video_task {
-        let raw_path = root.join(H3_RAW_VIDEO_NAME);
-        let (raw_size, _decoded_rgb_bytes) = validate_h3_rgb24_json(&raw_path, root, context)?;
-        total_size = total_size.saturating_add(raw_size);
-        if total_size > MAX_TOTAL_ARTIFACT_BYTES {
-            return Err(artifact_too_large());
-        }
-        artifacts.push(MediaArtifact {
-            relative_path: PathBuf::from(H3_RAW_VIDEO_NAME),
-            kind: MediaArtifactKind::RawRgb24Video,
-        });
-
-        let mp4_path = root.join(H3_VIDEO_NAME);
-        match fs::symlink_metadata(&mp4_path) {
-            Ok(_) => {
-                let mp4_size = validate_mp4(&mp4_path, root, context)?;
-                total_size = total_size.saturating_add(mp4_size);
-                if total_size > MAX_TOTAL_ARTIFACT_BYTES {
-                    return Err(artifact_too_large());
-                }
-                artifacts.push(MediaArtifact {
-                    relative_path: PathBuf::from(H3_VIDEO_NAME),
-                    kind: MediaArtifactKind::Video,
-                });
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(invalid_artifact()),
-        }
-    } else {
-        require_missing_after_child(&root.join(H3_RAW_VIDEO_NAME))?;
-        require_missing_after_child(&root.join(H3_VIDEO_NAME))?;
-    }
-
-    check_after_child(context)?;
-    Ok(artifacts)
-}
-
-#[derive(Deserialize)]
-struct H3Rgb24Metadata {
-    width: u32,
-    height: u32,
-    frames: u32,
-    fps: f64,
-}
-
-struct H3Rgb24Json {
-    metadata: H3Rgb24Metadata,
-    decoded_rgb_bytes: u64,
-}
-
-struct H3Rgb24Seed<'ctx, 'op> {
-    context: &'ctx OperationContext<'op>,
-    interrupted: &'ctx std::cell::Cell<Option<MediaExecutionFailure>>,
-}
-
-impl<'de, 'ctx, 'op> DeserializeSeed<'de> for H3Rgb24Seed<'ctx, 'op> {
-    type Value = H3Rgb24Json;
-
-    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_map(H3Rgb24Visitor {
-            context: self.context,
-            interrupted: self.interrupted,
-        })
-    }
-}
-
-struct H3Rgb24Visitor<'ctx, 'op> {
-    context: &'ctx OperationContext<'op>,
-    interrupted: &'ctx std::cell::Cell<Option<MediaExecutionFailure>>,
-}
-
-impl<'de, 'ctx, 'op> Visitor<'de> for H3Rgb24Visitor<'ctx, 'op> {
-    type Value = H3Rgb24Json;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("an H3 RGB24 artifact object")
-    }
-
-    fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
-    where
-        M: MapAccess<'de>,
-    {
-        let mut metadata = None;
-        let mut decoded_rgb_bytes = None;
-        while let Some(key) = map.next_key::<String>()? {
-            match key.as_str() {
-                "meta" => {
-                    if metadata.is_some() {
-                        return Err(M::Error::custom("duplicate H3 video metadata"));
-                    }
-                    metadata = Some(map.next_value::<H3Rgb24Metadata>()?);
-                }
-                "payload_hex" => {
-                    if decoded_rgb_bytes.is_some() {
-                        return Err(M::Error::custom("duplicate H3 RGB24 payload"));
-                    }
-                    decoded_rgb_bytes = Some(map.next_value_seed(H3Rgb24HexSeed {
-                        context: self.context,
-                        interrupted: self.interrupted,
-                    })?);
-                }
-                _ => {
-                    let _ = map.next_value::<serde::de::IgnoredAny>()?;
-                }
-            }
-        }
-        Ok(H3Rgb24Json {
-            metadata: metadata.ok_or_else(|| M::Error::custom("missing H3 video metadata"))?,
-            decoded_rgb_bytes: decoded_rgb_bytes
-                .ok_or_else(|| M::Error::custom("missing H3 RGB24 payload"))?,
-        })
-    }
-}
-
-struct H3Rgb24HexSeed<'ctx, 'op> {
-    context: &'ctx OperationContext<'op>,
-    interrupted: &'ctx std::cell::Cell<Option<MediaExecutionFailure>>,
-}
-
-impl<'de, 'ctx, 'op> DeserializeSeed<'de> for H3Rgb24HexSeed<'ctx, 'op> {
-    type Value = u64;
-
-    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_str(H3Rgb24HexVisitor {
-            context: self.context,
-            interrupted: self.interrupted,
-        })
-    }
-}
-
-struct H3Rgb24HexVisitor<'ctx, 'op> {
-    context: &'ctx OperationContext<'op>,
-    interrupted: &'ctx std::cell::Cell<Option<MediaExecutionFailure>>,
-}
-
-impl H3Rgb24HexVisitor<'_, '_> {
-    fn validate<E: DeError>(&self, value: &str) -> Result<u64, E> {
-        if !value.len().is_multiple_of(2) {
-            return Err(E::custom("odd-length H3 RGB24 hex payload"));
-        }
-        let mut decoded = 0u64;
-        for (index, byte) in value.bytes().enumerate() {
-            if !byte.is_ascii_hexdigit() {
-                return Err(E::custom("invalid H3 RGB24 hex payload"));
-            }
-            if index % 2 == 1 {
-                decoded += 1;
-            }
-            if index % 65_536 == 0 {
-                if let Err(failure) = check_after_child(self.context) {
-                    self.interrupted.set(Some(failure));
-                    return Err(E::custom("H3 video validation interrupted"));
-                }
-            }
-        }
-        Ok(decoded)
-    }
-}
-
-impl<'de> Visitor<'de> for H3Rgb24HexVisitor<'_, '_> {
-    type Value = u64;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a bounded hexadecimal RGB24 payload")
-    }
-
-    fn visit_str<E: DeError>(self, value: &str) -> Result<Self::Value, E> {
-        self.validate(value)
-    }
-
-    fn visit_borrowed_str<E: DeError>(self, value: &'de str) -> Result<Self::Value, E> {
-        self.validate(value)
-    }
-
-    fn visit_string<E: DeError>(self, value: String) -> Result<Self::Value, E> {
-        self.validate(&value)
-    }
-}
-
-fn validate_h3_rgb24_json(
-    path: &Path,
-    root: &Path,
-    context: &OperationContext<'_>,
-) -> Result<(u64, u64), MediaExecutionFailure> {
-    let (canonical, file_length) = validate_regular_media_file(path, root, context)?;
-    if file_length == 0 {
-        return Err(invalid_artifact());
-    }
-    if file_length > MAX_ARTIFACT_BYTES {
-        return Err(artifact_too_large());
-    }
-    let file = File::open(canonical).map_err(|_| invalid_artifact())?;
-    let interrupted = std::cell::Cell::new(None);
-    let reader = ContextCheckedReader {
-        reader: BufReader::new(file),
-        context,
-        interrupted: &interrupted,
-    };
-    let mut deserializer = serde_json::Deserializer::from_reader(reader);
-    let parsed = H3Rgb24Seed {
-        context,
-        interrupted: &interrupted,
-    }
-    .deserialize(&mut deserializer);
-    if let Some(failure) = interrupted.get() {
-        return Err(failure);
-    }
-    let parsed = parsed.map_err(|_| invalid_artifact())?;
-    let end = deserializer.end();
-    if let Some(failure) = interrupted.get() {
-        return Err(failure);
-    }
-    end.map_err(|_| invalid_artifact())?;
-
-    let metadata = parsed.metadata;
-    if metadata.width == 0
-        || metadata.height == 0
-        || metadata.frames == 0
-        || !metadata.fps.is_finite()
-        || metadata.fps <= 0.0
-    {
-        return Err(invalid_artifact());
-    }
-    let expected = u64::from(metadata.width)
-        .checked_mul(u64::from(metadata.height))
-        .and_then(|size| size.checked_mul(u64::from(metadata.frames)))
-        .and_then(|size| size.checked_mul(3))
-        .ok_or_else(artifact_too_large)?;
-    if expected > MAX_TOTAL_ARTIFACT_BYTES {
-        return Err(artifact_too_large());
-    }
-    if parsed.decoded_rgb_bytes != expected {
-        return Err(invalid_artifact());
-    }
-    check_after_child(context)?;
-    Ok((file_length, expected))
-}
-
-struct ContextCheckedReader<'ctx, 'op> {
-    reader: BufReader<File>,
-    context: &'ctx OperationContext<'op>,
-    interrupted: &'ctx std::cell::Cell<Option<MediaExecutionFailure>>,
-}
-
-impl Read for ContextCheckedReader<'_, '_> {
-    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        if let Err(failure) = check_after_child(self.context) {
-            self.interrupted.set(Some(failure));
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                "H3 artifact validation interrupted",
-            ));
-        }
-        self.reader.read(buffer)
-    }
-}
-
-fn validate_mp4(
-    path: &Path,
-    root: &Path,
-    context: &OperationContext<'_>,
-) -> Result<u64, MediaExecutionFailure> {
-    let (canonical, length) = validate_regular_media_file(path, root, context)?;
-    if length < 12 {
-        return Err(invalid_artifact());
-    }
-    let mut file = File::open(canonical).map_err(|_| invalid_artifact())?;
-    let mut header = [0u8; 12];
-    file.read_exact(&mut header)
-        .map_err(|_| invalid_artifact())?;
-    let brand_box_length = u64::from(u32::from_be_bytes(header[..4].try_into().unwrap()));
-    if &header[4..8] != b"ftyp" || brand_box_length < 12 || brand_box_length > length {
-        return Err(invalid_artifact());
-    }
-    check_after_child(context)?;
-    Ok(length)
-}
-
 fn validate_blender_png(
     path: &Path,
     root: &Path,
@@ -1036,14 +676,6 @@ fn validate_regular_media_file(
     }
     check_after_child(context)?;
     Ok((canonical, metadata.len()))
-}
-
-fn require_missing_after_child(path: &Path) -> Result<(), MediaExecutionFailure> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => Err(invalid_artifact()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err(invalid_artifact()),
-    }
 }
 
 fn validate_wave(
@@ -1547,16 +1179,6 @@ esac
         }
     }
 
-    fn h3_request(task: &str, args: &[&str]) -> InferenceRequest {
-        InferenceRequest::Media {
-            profile: ProfileKey::new(Lane::Media, "minimax-h3").unwrap(),
-            input: MediaInput::Script {
-                task: super::super::catalog::Task::new(task).unwrap(),
-                args: args.iter().map(|argument| (*argument).to_owned()).collect(),
-            },
-        }
-    }
-
     fn blender_request(task: &str, args: &[&str]) -> InferenceRequest {
         InferenceRequest::Media {
             profile: ProfileKey::new(Lane::Media, "blender-3d").unwrap(),
@@ -2006,289 +1628,6 @@ esac
                 .kind(),
             MediaExecutionErrorKind::InvalidArtifact
         );
-    }
-
-    #[test]
-    fn h3_audio_tasks_and_video_raw_rgb24_optional_mp4_are_returned() {
-        const UUID: &str = "GPU-01234567-89ab-cdef-0123-456789abcdef";
-        let fixture = Fixture::new();
-        let device = CudaDevice::new(UUID).unwrap();
-        let context = context(&NeverCancel, Duration::from_secs(5));
-        for (index, task) in ["music", "tts"].iter().enumerate() {
-            let catalog = fixture.catalog();
-            let request = h3_request(task, &["--prompt", "fixture audio", "--steps", "2"]);
-            let accepted =
-                crate::control::routes::resolve_profile_route(&catalog, request.profile()).unwrap();
-            let output = fixture.output_directory(&format!("h3-audio-{index}"));
-            let result = execute_h3_on_device(
-                &catalog,
-                &request,
-                &accepted,
-                &device,
-                &output,
-                &context,
-                recovery(),
-            )
-            .unwrap();
-            assert_eq!(result.mode(), SpeechMode::Standard);
-            assert_eq!(result.artifacts().len(), 1);
-            assert_eq!(result.artifacts()[0].kind(), MediaArtifactKind::FinalWave);
-            assert_eq!(fs::read_dir(output).unwrap().count(), 1);
-        }
-
-        let video_request = h3_request(
-            "video",
-            &[
-                "--prompt",
-                "fixture video",
-                "--width",
-                "2",
-                "--height",
-                "1",
-                "--frames",
-                "2",
-                "--request-option",
-                "dit_layerwise=true",
-            ],
-        );
-        let catalog = fixture.catalog();
-        let accepted =
-            crate::control::routes::resolve_profile_route(&catalog, video_request.profile())
-                .unwrap();
-        let raw_only = fixture.output_directory("h3-video-raw-only");
-        // The wrapper reads these fields, but native artifacts may include
-        // producer/layout metadata too. Keep validation strict for the known
-        // fields without imposing an unverified closed schema.
-        let extended_metadata_script = H3_FIXTURE_SCRIPT.replace(
-            "\"meta\":{\"width\":2",
-            "\"producer\":{\"fixture\":true},\"meta\":{\"layout\":\"NHWC\",\"width\":2",
-        );
-        fs::write(
-            fixture
-                .media_root
-                .join("media-models/generate-minimax-h3.sh"),
-            extended_metadata_script,
-        )
-        .unwrap();
-        let result = execute_h3_on_device(
-            &catalog,
-            &video_request,
-            &accepted,
-            &device,
-            &raw_only,
-            &context,
-            recovery(),
-        )
-        .unwrap();
-        assert_eq!(result.artifacts().len(), 2);
-        assert_eq!(result.artifacts()[0].kind(), MediaArtifactKind::FinalWave);
-        assert_eq!(
-            result.artifacts()[1].kind(),
-            MediaArtifactKind::RawRgb24Video
-        );
-        assert_eq!(
-            result.artifacts()[1].relative_path(),
-            Path::new(H3_RAW_VIDEO_NAME)
-        );
-        assert_eq!(fs::read_dir(&raw_only).unwrap().count(), 2);
-
-        let with_mp4_script = H3_FIXTURE_SCRIPT.replace(
-            "# H3_MUX_FIXTURE",
-            r#"printf '\000\000\000\014ftypisom' > "$video_output""#,
-        );
-        fs::write(
-            fixture
-                .media_root
-                .join("media-models/generate-minimax-h3.sh"),
-            with_mp4_script,
-        )
-        .unwrap();
-        let catalog = fixture.catalog();
-        let accepted =
-            crate::control::routes::resolve_profile_route(&catalog, video_request.profile())
-                .unwrap();
-        let with_mp4 = fixture.output_directory("h3-video-with-mp4");
-        let result = execute_h3_on_device(
-            &catalog,
-            &video_request,
-            &accepted,
-            &device,
-            &with_mp4,
-            &context,
-            recovery(),
-        )
-        .unwrap();
-        assert_eq!(result.artifacts().len(), 3);
-        assert_eq!(result.artifacts()[2].kind(), MediaArtifactKind::Video);
-        assert_eq!(
-            result.artifacts()[2].relative_path(),
-            Path::new(H3_VIDEO_NAME)
-        );
-        assert_eq!(fs::read_dir(&with_mp4).unwrap().count(), 3);
-    }
-
-    #[test]
-    fn h3_rejects_bad_hex_dimensions_outputs_and_wrong_routes_before_success() {
-        const UUID: &str = "GPU-01234567-89ab-cdef-0123-456789abcdef";
-        let fixture = Fixture::new();
-        let video_request = h3_request("video", &["--prompt", "fixture video"]);
-        let device = CudaDevice::new(UUID).unwrap();
-        let context = context(&NeverCancel, Duration::from_secs(5));
-
-        for (index, (needle, replacement)) in [
-            ("000102030405060708090a0b", "000102030405060708090a0g"),
-            ("\"width\":2", "\"width\":3"),
-            ("\"width\":2", "\"width\":2,\"width\":2"),
-            (
-                "\"payload_hex\":\"000102030405060708090a0b\"",
-                "\"payload_hex\":\"000102030405060708090a0b\",\"payload_hex\":\"000102030405060708090a0b\"",
-            ),
-            ("\"fps\":24", "\"fps\":0"),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            fs::write(
-                fixture
-                    .media_root
-                    .join("media-models/generate-minimax-h3.sh"),
-                H3_FIXTURE_SCRIPT.replace(needle, replacement),
-            )
-            .unwrap();
-            let catalog = fixture.catalog();
-            let accepted =
-                crate::control::routes::resolve_profile_route(&catalog, video_request.profile())
-                    .unwrap();
-            let output = fixture.output_directory(&format!("h3-invalid-{index}"));
-            let error = execute_h3_on_device(
-                &catalog,
-                &video_request,
-                &accepted,
-                &device,
-                &output,
-                &context,
-                recovery(),
-            )
-            .expect_err("malformed H3 video artifact must not be reported as success");
-            assert_eq!(error.kind(), MediaExecutionErrorKind::InvalidArtifact);
-            assert_eq!(
-                error.disposition(),
-                ProcessFailureDisposition::ChildGroupReaped
-            );
-        }
-
-        fs::write(
-            fixture
-                .media_root
-                .join("media-models/generate-minimax-h3.sh"),
-            H3_FIXTURE_SCRIPT,
-        )
-        .unwrap();
-        for (index, args) in [
-            vec!["--prompt", "scene", "--video-output", "/tmp/escape.mp4"],
-            vec![
-                "--prompt",
-                "scene",
-                "--request-option",
-                "return_video=false",
-            ],
-            vec!["--prompt", "scene", "--request-option", "output=/tmp/x"],
-            vec!["--prompt", "scene", "--request-option", "width=32"],
-        ]
-        .iter()
-        .enumerate()
-        {
-            let request = h3_request("video", args);
-            let catalog = fixture.catalog();
-            let accepted =
-                crate::control::routes::resolve_profile_route(&catalog, request.profile()).unwrap();
-            let output = fixture.output_directory(&format!("h3-override-{index}"));
-            let error = execute_h3_on_device(
-                &catalog,
-                &request,
-                &accepted,
-                &device,
-                &output,
-                &context,
-                recovery(),
-            )
-            .expect_err("caller cannot override H3 task mode or output paths");
-            assert_eq!(error.kind(), MediaExecutionErrorKind::InvalidRequest);
-            assert_eq!(
-                error.disposition(),
-                ProcessFailureDisposition::NoChildSpawned
-            );
-            assert_eq!(fs::read_dir(output).unwrap().count(), 0);
-        }
-
-        let catalog = fixture.catalog();
-        let accepted =
-            crate::control::routes::resolve_profile_route(&catalog, video_request.profile())
-                .unwrap();
-        let mut wrong_route = accepted.clone();
-        wrong_route.device = Some(Device::Cpu);
-        let output = fixture.output_directory("h3-wrong-device");
-        let error = execute_h3_on_device(
-            &catalog,
-            &video_request,
-            &wrong_route,
-            &device,
-            &output,
-            &context,
-            recovery(),
-        )
-        .expect_err("H3 execution cannot cross a changed CUDA route");
-        assert_eq!(error.kind(), MediaExecutionErrorKind::InvalidRequest);
-        assert_eq!(
-            error.disposition(),
-            ProcessFailureDisposition::NoChildSpawned
-        );
-        assert_eq!(fs::read_dir(output).unwrap().count(), 0);
-    }
-
-    #[test]
-    fn h3_process_failure_is_not_retried_and_native_logs_are_redacted() {
-        const UUID: &str = "GPU-01234567-89ab-cdef-0123-456789abcdef";
-        let fixture = Fixture::new();
-        let marker = fixture._parent.path().join("h3-attempts");
-        fs::write(
-            fixture
-                .media_root
-                .join("media-models/generate-minimax-h3.sh"),
-            format!(
-                "printf x >> '{}'; printf 'private h3 log'; exit 9\n",
-                marker.display()
-            ),
-        )
-        .unwrap();
-        let catalog = fixture.catalog();
-        let request = h3_request("music", &["--prompt", "fixture audio"]);
-        let accepted =
-            crate::control::routes::resolve_profile_route(&catalog, request.profile()).unwrap();
-        let output = fixture.output_directory("h3-one-attempt");
-        let error = execute_h3_on_device(
-            &catalog,
-            &request,
-            &accepted,
-            &CudaDevice::new(UUID).unwrap(),
-            &output,
-            &context(&NeverCancel, Duration::from_secs(5)),
-            recovery(),
-        )
-        .unwrap_err();
-        assert!(matches!(
-            error.kind(),
-            MediaExecutionErrorKind::Process(ProcessFailureKind::ChildExitedUnsuccessfully {
-                code: Some(9)
-            })
-        ));
-        assert_eq!(
-            error.disposition(),
-            ProcessFailureDisposition::ChildGroupReaped
-        );
-        assert_eq!(fs::read(marker).unwrap(), b"x");
-        assert!(!format!("{error:?}").contains("private h3 log"));
-        assert!(!error.to_string().contains("private h3 log"));
     }
 
     #[test]

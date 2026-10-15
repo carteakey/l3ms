@@ -36,6 +36,13 @@
   deleted coordinator commands.
 
 ### Breaking changes
+- Retire two more direct lanes from the root workbench (standalone toolkit scripts
+  are untouched): CUDA Nagi/Laya local decisions (`nagi-smol`, `nagi-big`, `laya-en`;
+  use `vllm-d3-flash` or `cloudflare-clef-flash`, or `nagi-smol-cpu`) and H3
+  **video** (H3 music/tts stay routed through llama-swap). Removes the CUDA
+  decision executor, the H3 script executor and its RGB24/MP4 validators, and the
+  TUI's CUDA concept. Blender headless is now the only profile that needs the
+  idle-GPU window.
 - Remove the HeartMuLa direct-script executor and recipe (and their tests): HeartMuLa
   music runs through llama-swap's `/audiocpp/` route, so it no longer counts as a
   GPU-window profile. Only H3 video, CUDA Nagi/Laya decisions and Blender still use

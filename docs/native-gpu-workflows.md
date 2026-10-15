@@ -14,10 +14,11 @@ HeartMuLa and H3 audio also use the router on this branch; they no longer need
 LTX and YuE2 use shared ComfyUI workflows, not this direct runner. Their
 standalone toolkit scripts remain available but are outside root orchestration.
 
-CUDA-local Nagi/Laya decisions and advanced H3 video use the same
-foreground runner as CPU work. This is an **operator-managed idle window**: no
-service is stopped or restored, and other clients are not fenced. Original
-standalone commands remain available.
+CUDA-local Nagi/Laya decisions and H3 video are no longer run from the root
+workbench (their standalone toolkit scripts still work). Prefer the router-hosted
+decision models `vllm-d3-flash` and `cloudflare-clef-flash`. What is left here is
+an **operator-managed idle window** for Blender headless work: no service is
+stopped or restored, and other clients are not fenced.
 Blender headless work shares this admission/release guard but keeps its native
 scene-selected backend: its manifest does not declare CPU or CUDA, and no CUDA
 connection or visibility override is fabricated for it.
@@ -84,17 +85,6 @@ L3MS_LIVE_GPU_UUID=GPU-your-physical-uuid cargo test --lib real_kde_baseline_ref
 These inspect manager/process/GPU state only; neither starts inference nor
 changes a service. A rejection test is not a successful switching test.
 
-Use the existing native CLI shape, selecting the declared CUDA profile:
-
-```sh
-l3ms --run-profile decisions:nagi-smol --task decision --input input.json
-```
-
-The Stack Catalog typed form (`f`, then `Ctrl+Enter`) uses the same operation.
-The selected runtime and weights must already be installed; there are no implicit
-downloads or simulated decisions. SemIf/OpenJev and unrelated media scripts are
-not admitted by this path.
-
 ### Breeze speech (routed, no window)
 
 ```sh
@@ -136,35 +126,15 @@ This integration has model-free native-script fixtures, not real HeartMuLa
 generation or music-quality acceptance. GPU inference/release, installed native
 WAV compatibility and interactive acceptance still need a live test.
 
-### MiniMax H3 audio and video
+### MiniMax H3 audio (routed, no window)
 
-Use `media:minimax-h3` with `--task music`, `tts` or `video`. Each accepts the same
-`{"args":["--prompt","native H3 prompt","--seed","42"]}` shape, not a Breeze
-speech object or Comfy graph. The UI offers a declared task selector and native
-argv field. The runner supplies `--audio-only` or `--video` from the selected task;
-caller mode/output/backend/help overrides are refused.
-
-Prompt/text/file, steps, seed, width, height and frames remain native. Direct
-`--request-option` supports only the wrapper-evidenced layerwise keys:
-`text_layerwise`, `text_layerwise_batch`, `dit_layerwise`, `dit_layerwise_batch`,
-`dit_mlp_chunk_tokens`. Unknown or duplicate keys and `return_video`/dimension/
-output overrides are refused; the original standalone script still permits its
-original options.
-
-Outputs stay in the private root: `result.wav`, video mode's retained
-`minimax_h3_video_rgb24.json`, and optional `result.mp4`. Native mux temporaries
-also use that root. All fixed targets must be absent before dispatch. The raw
-JSON validator checks positive dimensions/frame count/fps, duplicate fields,
-hex shape and exact RGB24 byte count with bounded, cancellation-aware reading;
-additional native metadata fields are allowed. WAV validation is shared; MP4
-checking is header/container sanity, not codec/playback/quality verification.
-The existing aggregate 512 MiB artifact cap applies.
-
-If muxing tools are unavailable, the native script's raw-only success is retained;
-no tools are installed and no MP4 is invented. Native failure produces no result
-references or inference retry, even if partial private files remain. Fixtures
-cover audio, raw-only and raw+MP4 results, but real H3 output/decoder/GPU behavior
-and interactive acceptance still require the original runtime and a live window.
+`media:minimax-h3` accepts `--task music` or `tts`, with the same
+`{"args":["--prompt","native H3 prompt","--seed","42"]}` shape, and runs through
+llama-swap's `/audiocpp/` route like HeartMuLa; it needs no `L3MS_NATIVE_GPU`.
+H3 **video** (raw RGB24 output with optional MP4 muxing) was removed from the root
+workbench; use the standalone `media-models/generate-minimax-h3.sh` if you need it.
+Live acceptance for the routed audio lanes is pending on installed weights; see
+[TODO](../TODO.md).
 
 ### Blender headless Python and rendering
 

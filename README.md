@@ -315,7 +315,7 @@ In Stack Catalog (`F8`), `f` opens Chat or a typed native task form and `c`
 cancels the active foreground task. CPU-local decisions use `--run-profile` or
 the form directly, without a daemon; see
 [native CPU workflows](docs/cpu-native-workflows.md). Scripts that llama-swap
-cannot host (advanced H3 video and Blender workflows) run in an
+cannot host (Blender headless work) run in an
 [explicit operator-managed idle GPU window](docs/native-gpu-workflows.md), never
 by taking over the live service. Native output is sensitive and should not enter
 shared logs.

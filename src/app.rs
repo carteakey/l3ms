@@ -426,7 +426,7 @@ impl TaskFormEditor {
             declared_tasks.retain(|task| task == "music");
         }
         if direct_native_h3 {
-            declared_tasks.retain(|task| matches!(task.as_str(), "music" | "tts" | "video"));
+            declared_tasks.retain(|task| matches!(task.as_str(), "music" | "tts"));
         }
         if direct_blender_headless {
             declared_tasks.retain(|task| matches!(task.as_str(), "3d" | "render" | "image"));
@@ -1104,7 +1104,6 @@ struct DirectNativeSummary {
     lane: Lane,
     profile_id: String,
     task: String,
-    cuda: bool,
     requires_idle_gpu_window: bool,
     native_id: Option<String>,
     state: DirectNativeState,
@@ -4460,13 +4459,11 @@ impl App {
             self.status = if is_direct_blender_headless_profile(&profile) {
                 "Foreground Blender headless form open · Python runs with your user permissions and is not sandboxed · shared GPU must be idle before starting · external GUI/MCP remains separate · run once with Ctrl+Enter".into()
             } else if is_direct_cuda_h3_profile(&profile) {
-                "MiniMax H3 form open · music/tts use llama-swap; connect Chat first · video needs an idle GPU · Ctrl+Enter runs once".into()
+                "MiniMax H3 form open · music/tts use llama-swap; connect Chat first · Ctrl+Enter runs once".into()
             } else if is_direct_cuda_music_profile(&profile) {
                 "HeartMuLa music form open · served by llama-swap (/audiocpp/) · connect Chat first · Ctrl+Enter runs once".into()
             } else if direct_run::is_supported_cuda_breeze_profile(&profile) {
                 "Breeze speech form open · served by llama-swap (/audiocpp/) · connect Chat first · run once with Ctrl+Enter".into()
-            } else if is_direct_cuda_profile(&profile) {
-                "Foreground CUDA native form open · the selected GPU must be idle before starting · run once with Ctrl+Enter".into()
             } else if is_direct_native_decision_profile(&profile) {
                 if profile.runtime.as_str() == "llamacpp" {
                     "Router decision may evict the loaded language model · quiet window required · Ctrl+Enter runs once".into()
@@ -4700,10 +4697,6 @@ impl App {
                 .is_some_and(direct_run::is_llamacpp_decision_profile);
         let remote_decision = hosted_jev_decision || llamacpp_decision;
         let routed_audio = is_routed_speech_request(&catalog, &request);
-        let cuda_native = !routed_audio
-            && catalog
-                .inspect(request.profile())
-                .is_some_and(is_direct_cuda_profile);
         let requires_idle_gpu_window = !routed_audio
             && catalog
                 .inspect(request.profile())
@@ -4716,8 +4709,6 @@ impl App {
             "Comfy workflow"
         } else if script_media_request {
             direct_script_media_task_label(&profile_id, &task)
-        } else if cuda_native {
-            direct_cuda_task_label(&task)
         } else {
             direct_native_task_label(&task)
         };
@@ -4840,8 +4831,6 @@ impl App {
                     } else {
                         "cuda-script-job"
                     }
-                } else if cuda_native {
-                    "cuda-job"
                 } else {
                     "cpu-job"
                 },
@@ -4898,7 +4887,6 @@ impl App {
                     lane,
                     profile_id,
                     task,
-                    cuda: cuda_native,
                     requires_idle_gpu_window,
                     native_id,
                     state: DirectNativeState::Failed,
@@ -4914,7 +4902,6 @@ impl App {
             lane,
             profile_id: profile_id.clone(),
             task: worker_task.clone(),
-            cuda: cuda_native,
             requires_idle_gpu_window,
             native_id: native_id.clone(),
             state: DirectNativeState::Running,
@@ -5388,9 +5375,7 @@ impl App {
                                 let blender = is_direct_blender_headless_profile(profile);
                                 profile.key.lane == Lane::Media
                                     && profile.key.profile_id.as_str() == summary.profile_id
-                                    && (summary.cuda
-                                        && direct_run::is_supported_direct_script_profile(profile)
-                                        || blender)
+                                    && blender
                                     && profile
                                         .tasks
                                         .iter()
@@ -7174,8 +7159,6 @@ impl App {
                 |summary| {
                     let operator_note = if summary.native_id.is_some() {
                         "\nComfyUI shared engine · llama-swap by default"
-                    } else if summary.cuda {
-                        "\nCUDA · GPU idle required before admission"
                     } else if summary.requires_idle_gpu_window {
                         "\nBlender headless · shared GPU idle required before admission"
                     } else {
@@ -7296,8 +7279,6 @@ impl App {
         } else if editor.direct_native_decision {
             if editor.profile_snapshot.runtime.as_str() == "llamacpp" {
                 "Router-owned CUDA decision · normal router swapping may evict the language model · use a quiet window · no automatic restoration"
-            } else if is_direct_cuda_profile(&editor.profile_snapshot) {
-                "CUDA decision · GPU must be idle before starting"
             } else {
                 "Native decision · local CPU or hosted route"
             }
@@ -7986,8 +7967,6 @@ fn is_direct_native_decision_profile(profile: &CatalogProfile) -> bool {
     #[cfg(target_os = "linux")]
     {
         direct_run::is_supported_direct_decision_profile(profile)
-            || (profile.key.lane == Lane::Decisions
-                && direct_run::is_supported_direct_cuda_profile(profile))
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -8017,16 +7996,6 @@ fn is_routed_speech_request(
         ) && catalog
             .inspect(request.profile())
             .is_some_and(direct_run::is_supported_cuda_breeze_profile)
-}
-
-#[cfg(target_os = "linux")]
-fn is_direct_cuda_profile(profile: &CatalogProfile) -> bool {
-    direct_run::is_supported_direct_cuda_profile(profile)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn is_direct_cuda_profile(_profile: &CatalogProfile) -> bool {
-    false
 }
 
 #[cfg(target_os = "linux")]
@@ -8120,7 +8089,7 @@ fn is_direct_native_profile(profile: &CatalogProfile, catalog: &Catalog) -> bool
     is_direct_native_decision_profile(profile)
         || is_direct_breeze_speech_profile(profile)
         || is_direct_cuda_music_profile(profile)
-        || is_direct_cuda_profile(profile)
+        || is_direct_cuda_h3_profile(profile)
         || is_direct_blender_headless_profile(profile)
         || is_direct_comfy_workflow_profile(profile)
         || is_direct_native_language_embeddings_profile(profile, catalog)
@@ -8136,19 +8105,6 @@ fn direct_native_task_label(task: &str) -> &'static str {
         "music" => "Music",
         "embeddings" => "Language embeddings",
         _ => "Foreground native task",
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn direct_cuda_task_label(task: &str) -> &'static str {
-    match task {
-        "decision" => "CUDA decision",
-        "tts" => "CUDA speech",
-        "clon" => "CUDA voice clone",
-        "design" => "CUDA voice design",
-        "music" => "CUDA music",
-        "video" => "CUDA video",
-        _ => "CUDA native task",
     }
 }
 
@@ -8180,12 +8136,8 @@ fn direct_script_media_task_label(profile_id: &str, task: &str) -> &'static str 
 fn direct_native_summary_label(summary: &DirectNativeSummary) -> &'static str {
     if summary.native_id.is_some() {
         "Comfy workflow"
-    } else if summary.profile_id == "blender-3d"
-        || (summary.cuda && summary.profile_id == "minimax-h3")
-    {
+    } else if summary.profile_id == "blender-3d" {
         direct_script_media_task_label(&summary.profile_id, &summary.task)
-    } else if summary.cuda {
-        direct_cuda_task_label(&summary.task)
     } else {
         direct_native_task_label(&summary.task)
     }
@@ -8228,7 +8180,8 @@ fn is_direct_native_script_request(
     task.as_str() == request.task()
         && profile.lane == Lane::Media
         && catalog.inspect(profile).is_some_and(|profile| {
-            (direct_run::is_supported_direct_script_profile(profile)
+            (direct_run::is_supported_direct_h3_profile(profile)
+                || direct_run::is_supported_direct_music_profile(profile)
                 || is_direct_blender_headless_profile(profile))
                 && profile
                     .tasks
@@ -8243,7 +8196,7 @@ fn is_direct_native_script_request(
 fn is_direct_script_media_task(profile_id: &str, task: &str) -> bool {
     match profile_id {
         "heartmula-music" => task == "music",
-        "minimax-h3" => matches!(task, "music" | "tts" | "video"),
+        "minimax-h3" => matches!(task, "music" | "tts"),
         "blender-3d" => matches!(task, "3d" | "render" | "image"),
         _ => false,
     }
@@ -10075,45 +10028,24 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn cuda_decision_and_breeze_forms_share_the_foreground_native_owner() {
+    fn breeze_form_is_routed_and_cuda_decisions_are_no_longer_offered() {
         let fixture = AppFixture::new();
         write_cuda_decision_stack_fixture(&fixture);
         write_cuda_breeze_media_manifest(&fixture);
         let mut app = fixture.app();
 
+        // CUDA Nagi/Laya are no longer run from the root workbench.
         focus_stack_profile_by_id(&mut app, "nagi-cuda");
-        let profile = app.selected_stack_profile().unwrap();
-        assert!(is_direct_cuda_profile(profile));
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
             .unwrap();
-        assert!(app.status.contains("selected GPU must be idle"));
-        let editor = app.task_form_editor.as_mut().unwrap();
-        assert!(editor.direct_native_decision);
-        assert!(!editor.fields.contains(&TaskFormField::DeclaredTask));
-        editor.values.decision_questions =
-            r#"{"route":{"type":"choice","criteria":{"yes":"Proceed","no":"Stop"}}}"#.into();
-        let catalog = app.stack_catalog.as_ref().unwrap().clone();
-        let decision = build_direct_native(&catalog, editor.to_draft().unwrap())
-            .unwrap()
-            .0;
-        assert!(matches!(
-            decision,
-            crate::control::requests::InferenceRequest::Decision { .. }
-        ));
-        assert!(app.direct_native_job.is_none());
+        assert!(app.task_form_editor.is_none());
+        assert!(
+            app.status
+                .contains("No direct native workflow is available for this profile"),
+            "{}",
+            app.status
+        );
         assert!(app.job_history.records().is_empty());
-
-        app.chat_pending = true;
-        app.run_direct_native();
-        assert!(app.status.contains("Wait for active Chat"));
-        assert!(app.direct_native_job.is_none());
-        assert!(app.job_history.records().is_empty());
-        app.chat_pending = false;
-        app.direct_native_admission_closed = true;
-        app.begin_model_action("fixture-chat".into(), true);
-        assert!(!app.model_action_pending);
-        assert!(app.status.contains("Finish or recover foreground"));
-        app.direct_native_admission_closed = false;
 
         app.task_form_editor = None;
         app.input_mode = InputMode::Normal;
@@ -10180,6 +10112,19 @@ mod tests {
             .iter()
             .all(|line| !line.contains("private CUDA design instruction")));
         assert!(app.direct_native_job.is_none());
+
+        // Admission gating still applies to the routed form.
+        app.chat_pending = true;
+        app.run_direct_native();
+        assert!(app.status.contains("Wait for"), "{}", app.status);
+        assert!(app.direct_native_job.is_none());
+        assert!(app.job_history.records().is_empty());
+        app.chat_pending = false;
+        app.direct_native_admission_closed = true;
+        app.begin_model_action("fixture-chat".into(), true);
+        assert!(!app.model_action_pending);
+        assert!(app.status.contains("Finish or recover foreground"));
+        app.direct_native_admission_closed = false;
     }
 
     #[cfg(target_os = "linux")]
@@ -10217,7 +10162,7 @@ mod tests {
         let profile = app.selected_stack_profile().unwrap();
         assert!(is_direct_cuda_music_profile(profile));
         assert!(
-            !is_direct_cuda_profile(profile) && !direct_run::requires_operator_gpu_window(profile),
+            !direct_run::requires_operator_gpu_window(profile),
             "HeartMuLa music is routed through llama-swap, not an operator GPU window"
         );
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
@@ -10284,7 +10229,10 @@ mod tests {
         focus_stack_profile_by_id(&mut app, "minimax-h3");
         let profile = app.selected_stack_profile().unwrap();
         assert!(is_direct_cuda_h3_profile(profile));
-        assert!(is_direct_cuda_profile(profile));
+        assert!(
+            !direct_run::requires_operator_gpu_window(profile),
+            "H3 music/tts are routed; H3 video is no longer offered"
+        );
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
             .unwrap();
 
@@ -10294,7 +10242,7 @@ mod tests {
             assert!(editor.direct_native_h3);
             assert!(!editor.direct_native_music);
             assert!(editor.is_direct_native());
-            assert_eq!(editor.declared_tasks, ["music", "video", "tts"]);
+            assert_eq!(editor.declared_tasks, ["music", "tts"]);
             assert!(editor.fields.contains(&TaskFormField::DeclaredTask));
             assert!(!editor.fields.contains(&TaskFormField::MediaOperation));
             assert!(editor.fields.contains(&TaskFormField::MediaScriptArgv));
@@ -10306,7 +10254,7 @@ mod tests {
             assert!(!editor.fields.contains(&TaskFormField::MediaWorkflowGraph));
         }
 
-        for task in ["music", "tts", "video"] {
+        for task in ["music", "tts"] {
             select_task_form_declared_task(&mut app, task);
             let editor = app.task_form_editor.as_mut().unwrap();
             editor.values.script_argv = r#"["--prompt","private H3 input","--seed","42"]"#.into();
@@ -10355,14 +10303,12 @@ mod tests {
         focus_stack_profile_by_id(&mut app, "blender-3d");
         let profile = app.selected_stack_profile().unwrap();
         assert!(is_direct_blender_headless_profile(profile));
-        assert!(!is_direct_cuda_profile(profile));
         assert!(direct_run::requires_operator_gpu_window(profile));
         let summary = DirectNativeSummary {
             job_id: 1,
             lane: Lane::Media,
             profile_id: "blender-3d".into(),
             task: "3d".into(),
-            cuda: false,
             requires_idle_gpu_window: true,
             native_id: None,
             state: DirectNativeState::Running,
@@ -10922,7 +10868,6 @@ mod tests {
 
         let summary = app.direct_native_summary.as_ref().unwrap();
         assert!(matches!(summary.state, DirectNativeState::Succeeded));
-        assert!(!summary.cuda);
         assert!(!summary.requires_idle_gpu_window);
         assert!(!app.direct_native_admission_closed);
         let Some(DirectRunResult::Decision(native)) = summary.result.as_ref() else {
@@ -12901,7 +12846,6 @@ mod tests {
             lane: Lane::Decisions,
             profile_id: "jev-api".into(),
             task: "decision".into(),
-            cuda: false,
             requires_idle_gpu_window: false,
             native_id: None,
             state: DirectNativeState::Interrupted,
@@ -12922,7 +12866,6 @@ mod tests {
             lane: Lane::Decisions,
             profile_id: "nagi".into(),
             task: "decision".into(),
-            cuda: false,
             requires_idle_gpu_window: false,
             native_id: None,
             state: DirectNativeState::Running,

@@ -27,7 +27,7 @@ for scope and evidence.
 
 - [ ] Verify HeartMuLa and H3 audio through the root CLI and `audiocpp_auto`
   with real weights; then verify language-model return. HTTP fixtures are not
-  real-model acceptance. H3 video retains direct MP4 post-processing.
+  real-model acceptance. H3 video was removed from the root workbench.
   Blocked on this host (checked 2026-10-15): neither `~/models/media/HeartMuLa-GGUF`
   nor the H3 package is installed (the media root holds Breeze, FLUX and Qwen-Image
   only) and the NAS archive mount is unavailable. Nothing was downloaded; reinstall
@@ -43,8 +43,8 @@ for scope and evidence.
   Do not call the full port complete until these advertised paths pass.
 
 Optional follow-ups:
-- [ ] Advanced direct H3 video/Blender acceptance remains separate from the
-  shared-engine workbench. Do not expand direct-script orchestration to fill
+- [ ] Blender headless acceptance (the only profile still using the idle-GPU
+  window) remains separate from the shared-engine workbench. Do not expand direct-script orchestration to fill
   unsupported model gaps by default; narrow the supported scope instead.
 - [ ] Finish source consolidation after shared-engine acceptance: keep one
   product/UI/config/history, relocate still-needed toolkit modules, audit callers

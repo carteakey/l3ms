@@ -35,8 +35,8 @@ Branch follow-up: HeartMuLa music and H3 music/tts use
 `POST /audiocpp/v1/tasks/run` with the existing `{"args":[...]}` CLI/form input
 translated to native request fields. Use the same `LLAMA_SWAP_URL` and
 `LLAMA_SWAP_API_KEY`, or a confirmed TUI Chat connection. Output remains
-`result.wav`. H3 video remains direct because it also needs RGB24-to-MP4
-post-processing. Server model paths, threads and session options now belong in
+`result.wav`. H3 video was removed from the root workbench (it needed RGB24-to-MP4
+post-processing; the standalone script remains). Server model paths, threads and session options now belong in
 `toolkits/l2m2/audiocpp-server.json`; shell-wrapper environment overrides do not
 configure routed jobs. The native `options.duration_seconds` is normalized to
 HeartMuLa's `duration_sec` by the pinned engine.
@@ -102,7 +102,7 @@ scripts remain toolkit-only, with no root fallback. See [runtime policy](runtime
 | Lane | Engine | Why it is not routed |
 | --- | --- | --- |
 | `blender-3d` | Blender 5.2 / blender-mcp | An application, not a model engine. Root execution guards the shared GPU because the scene chooses its backend. |
-| `minimax-h3` video | audio.cpp + MP4 post-processing | The script converts the additional RGB24 video artifact to MP4; the routed audio response is not equivalent. |
 
 HeartMuLa and H3 audio use `audiocpp_auto` on this branch, subject to the live
-acceptance gate above. The window cannot disappear while direct lanes exist.
+acceptance gate above. Blender headless is the only lane left in the window;
+CUDA Nagi/Laya decisions and H3 video were retired from the root workbench.
