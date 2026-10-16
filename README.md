@@ -418,7 +418,9 @@ The workbench is one frame (see [workbench design](docs/workbench-design.md)):
 - **Sidebar**: the **Models** section lists every manifest profile by lane
   (language, media, decisions) with a router state dot (`●` loaded, `◐` loading,
   `○` unloaded, `·` not listed by the router) and a detail line (tasks and the
-  newest bench decode rate whose GGUF path matches the entry, or "not benched").
+  newest bench decode rate whose GGUF path matches the entry, or "not benched";
+  when entries share a GGUF the bench key must name the entry). On launch the
+  resident model is selected.
   Entries marked `unlisted: true` in `llama-swap.yaml` (aliases) are hidden like
   the router hides them. The **Jobs** section lists runs newest first.
 - **Pane**: the current view. `F1`–`F9` (or `Alt+1`–`Alt+9`) open Model, Chat,
@@ -445,7 +447,9 @@ retains warnings in the activity log without blocking a safe snapshot save.
 
 Global:
 
-- `Tab` / `Shift+Tab`: move focus between the sidebar and the pane
+- `Tab` / `Shift+Tab`: move focus between the sidebar and the pane (in the
+  Download view `Tab` moves between its fields; `Esc` on its table returns to
+  the sidebar)
 - `Ctrl+P`: command palette (every command, current view first)
 - `?`: key binding help
 - `F1`–`F9` / `Alt+1`–`Alt+9`: Model, Chat, Jobs, Bench, Download, Model files,
@@ -459,7 +463,7 @@ Sidebar:
 - `Enter` / `f`: open the selected model (Chat for a language chat profile, the
   task form otherwise) or the selected job; it never loads a model
 - `L`: load the selected model; the first press names the model it would evict,
-  the second confirms
+  the second confirms, any other key cancels
 - `U`: unload the resident model
 - `/`: filter models by id or name (`Esc` clears)
 - `r`: refresh manifests, router state and bench rates

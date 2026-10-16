@@ -1159,6 +1159,8 @@ struct App {
     /// reported on the message line.
     models_refresh_announced: bool,
     models_refresh_failing: bool,
+    /// The first router listing moves the selection to the resident model.
+    selected_resident_once: bool,
     model_action_pending: bool,
     loaded_model_id: Option<String>,
 
@@ -1351,6 +1353,7 @@ impl App {
             models_last_started: None,
             models_refresh_announced: false,
             models_refresh_failing: false,
+            selected_resident_once: false,
             model_action_pending: false,
             loaded_model_id: None,
             bench_scripts: Vec::new(),
@@ -1702,6 +1705,10 @@ impl App {
                                 .iter()
                                 .find(|model| model.state == "loaded")
                                 .map(|model| model.id.clone());
+                            if !self.selected_resident_once {
+                                self.selected_resident_once = true;
+                                self.select_resident_model();
+                            }
                             if std::mem::take(&mut self.models_refresh_announced) {
                                 self.status = format!("llama-swap: {} model(s)", self.models.len());
                             }
@@ -2134,6 +2141,10 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
+        if self.load_armed.is_some() && !(key.code == KeyCode::Char('L') && self.sidebar_focused) {
+            self.load_armed = None;
+            self.status = "Load cancelled".into();
+        }
         if !self.is_script_reload_shortcut(key) {
             self.script_reload_armed = None;
         }
@@ -2198,8 +2209,11 @@ impl App {
             self.handle_download_input_key(key);
             return Ok(());
         }
+        // Download uses Tab for its own fields; Esc on its table reaches the
+        // sidebar instead.
         if matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
             && matches!(self.input_mode, InputMode::Normal | InputMode::ChatMessage)
+            && (self.sidebar_focused || self.view != View::Download)
         {
             self.toggle_focus();
             return Ok(());
@@ -2332,6 +2346,23 @@ impl App {
         self.stack_catalog_state.select(first);
     }
 
+    /// Select the resident model when the sidebar shows it.
+    fn select_resident_model(&mut self) {
+        let Some(resident) = self.loaded_model_id.clone() else {
+            return;
+        };
+        let Some(catalog) = self.stack_catalog.as_ref() else {
+            return;
+        };
+        let profiles = catalog.list();
+        if let Some(index) = self.sidebar_model_indices().into_iter().find(|index| {
+            profiles[*index].key.lane == Lane::Language
+                && profiles[*index].key.profile_id.as_str() == resident
+        }) {
+            self.stack_catalog_state.select(Some(index));
+        }
+    }
+
     /// Keep the selection on a row the sidebar shows.
     fn ensure_visible_model_selection(&mut self) {
         let visible = self.sidebar_model_indices();
@@ -2418,7 +2449,6 @@ impl App {
     }
 
     fn handle_sidebar_key(&mut self, key: KeyEvent) -> Result<()> {
-        let armed = self.load_armed.clone();
         let command = match key.code {
             KeyCode::Up | KeyCode::Char('k') => Some(CommandId::SidebarSelectPrevious),
             KeyCode::Down | KeyCode::Char('j') => Some(CommandId::SidebarSelectNext),
@@ -2440,10 +2470,6 @@ impl App {
             KeyCode::Char(character) => toolbar::command_for_key(character),
             _ => None,
         };
-        if armed.is_some() && command != Some(CommandId::ModelLoad) {
-            self.load_armed = None;
-            self.status = "Load cancelled".into();
-        }
         if let Some(command) = command {
             self.execute_command(command)?;
         }
@@ -3613,6 +3639,10 @@ impl App {
 
     fn handle_download_key(&mut self, key: KeyEvent) -> Result<()> {
         if key.code == KeyCode::Esc && self.cancel_download_preflight() {
+            return Ok(());
+        }
+        if key.code == KeyCode::Esc {
+            self.toggle_focus();
             return Ok(());
         }
         match key.code {
@@ -6344,7 +6374,8 @@ impl App {
     }
 
     /// Read `llama-swap.yaml` and bench results once: note unlisted alias
-    /// entries and keep each llama-swap model's newest decode rate. A result belongs to a model only when its GGUF path is exactly
+    /// entries and keep each llama-swap model's newest decode rate (see
+    /// [`bench_rates_by_entry`]). A result belongs to a model only when its GGUF path is exactly
     /// the `-m` path of that model's yaml entry; anything else stays
     /// "not benched" rather than being guessed.
     fn refresh_bench_rates(&mut self) {
@@ -6362,21 +6393,7 @@ impl App {
         let Ok(load) = crate::bench_results::load_results(&self.root) else {
             return;
         };
-        for entry in entries {
-            let Some(path) = entry.model_path.as_deref() else {
-                continue;
-            };
-            let path = expand_tilde(path);
-            // Results are sorted newest first.
-            if let Some(rate) = load
-                .results
-                .iter()
-                .filter(|result| expand_tilde(&result.model) == path)
-                .find_map(|result| result.tg_ts)
-            {
-                self.bench_rates.insert(entry.id, rate);
-            }
-        }
+        self.bench_rates = bench_rates_by_entry(&entries, &load.results);
     }
 
     /// System view: GPU, memory and SSD spill in detail.
@@ -7638,6 +7655,8 @@ impl App {
             "type to filter · Enter keep · Esc done"
         } else if self.sidebar_focused {
             "j/k move · [/] section · Enter open · L load · Tab pane · Ctrl+P"
+        } else if self.view == View::Download {
+            "Tab fields · Esc sidebar · F1–F9 views · Ctrl+P palette"
         } else {
             "Tab sidebar · F1–F9 views · Ctrl+P palette · ? help"
         };
@@ -7871,6 +7890,39 @@ impl App {
 }
 
 /// Lane signature colour: marks where a profile lives, never its runtime state.
+/// Newest decode rate per llama-swap entry. A result belongs to an entry only
+/// when its GGUF path is exactly the entry's `-m` path; when several entries
+/// share that GGUF (different flags), the result's `model_key` must also name
+/// the entry. Anything else stays "not benched" rather than being guessed.
+fn bench_rates_by_entry(
+    entries: &[crate::swap_yaml::SwapYamlEntry],
+    results: &[crate::bench_results::BenchResult],
+) -> HashMap<String, f64> {
+    let path_of =
+        |entry: &crate::swap_yaml::SwapYamlEntry| entry.model_path.as_deref().map(expand_tilde);
+    let mut rates = HashMap::new();
+    for entry in entries {
+        let Some(path) = path_of(entry) else {
+            continue;
+        };
+        let shared = entries
+            .iter()
+            .filter(|other| path_of(other).as_deref() == Some(path.as_str()))
+            .count()
+            > 1;
+        // Results are sorted newest first.
+        if let Some(rate) = results
+            .iter()
+            .filter(|result| expand_tilde(&result.model) == path)
+            .filter(|result| !shared || result.model_key == entry.id)
+            .find_map(|result| result.tg_ts)
+        {
+            rates.insert(entry.id.clone(), rate);
+        }
+    }
+    rates
+}
+
 fn lane_style(lane: Lane) -> Style {
     match lane {
         Lane::Language => theme::lane_language(),
@@ -13845,6 +13897,123 @@ mod tests {
                 .filter(|line| line.contains("router down"))
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn bench_rates_need_an_exact_path_and_a_named_entry_when_paths_are_shared() {
+        let entry = |id: &str, path: &str| crate::swap_yaml::SwapYamlEntry {
+            id: id.into(),
+            disabled: false,
+            unlisted: false,
+            model_path: Some(path.into()),
+            tasks: vec!["chat".into()],
+        };
+        let result = |key: &str, path: &str, rate: f64| crate::bench_results::BenchResult {
+            model_key: key.into(),
+            model: path.into(),
+            tg_ts: Some(rate),
+            ..Default::default()
+        };
+        let entries = [
+            entry("solo", "/m/solo.gguf"),
+            entry("shared-a", "/m/shared.gguf"),
+            entry("shared-b", "/m/shared.gguf"),
+        ];
+        let results = [
+            result("solo_fit", "/m/solo.gguf", 40.0),
+            result("shared-b", "/m/shared.gguf", 77.0),
+            result("some-script", "/m/shared.gguf", 99.0),
+            result("other", "/m/other.gguf", 10.0),
+        ];
+        let rates = bench_rates_by_entry(&entries, &results);
+        assert_eq!(rates.get("solo"), Some(&40.0));
+        assert_eq!(rates.get("shared-b"), Some(&77.0));
+        assert_eq!(rates.get("shared-a"), None);
+        assert_eq!(rates.len(), 2);
+    }
+
+    #[test]
+    fn download_keeps_tab_for_fields_and_esc_reaches_the_sidebar() {
+        let fixture = AppFixture::new();
+        let mut app = fixture.app();
+        app.view = View::Download;
+        assert_eq!(app.download.focus(), DownloadFocus::Table);
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert!(!app.sidebar_focused);
+        assert_ne!(app.download.focus(), DownloadFocus::Table);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.download.focus(), DownloadFocus::Table);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.sidebar_focused);
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert!(!app.sidebar_focused);
+        assert_eq!(app.view, View::Download);
+    }
+
+    #[test]
+    fn a_pending_load_is_cancelled_by_leaving_the_sidebar() {
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        let mut app = fixture.app();
+        app.refresh_stack_catalog();
+        app.models = vec![test_chat_model("local-chat", "unloaded", false)];
+        focus_stack_profile_by_id(&mut app, "local-chat");
+        app.sidebar_focused = true;
+        app.handle_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.load_armed.is_some());
+        app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.load_armed, None);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.sidebar_focused);
+        app.handle_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE))
+            .unwrap();
+        // The next L after leaving only re-arms, showing the warning again.
+        assert!(app.status.contains("press L again"), "{}", app.status);
+        assert!(!app.model_action_pending);
+    }
+
+    #[test]
+    fn the_first_router_listing_selects_the_resident_model() {
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        let mut app = fixture.app();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.loading_models && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+            app.drain_background_events();
+        }
+        app.refresh_stack_catalog();
+        app.selected_resident_once = false;
+        let listing =
+            || BackgroundEvent::Models(Ok(vec![test_chat_model("local-chat", "loaded", false)]));
+        focus_stack_profile_by_id(&mut app, "breeze");
+        app.loading_models = true;
+        app.sender.send(listing()).unwrap();
+        app.drain_background_events();
+        assert_eq!(
+            app.selected_stack_profile()
+                .map(|profile| profile.key.profile_id.as_str()),
+            Some("local-chat")
+        );
+        // Later listings leave the user's selection alone.
+        focus_stack_profile_by_id(&mut app, "breeze");
+        app.loading_models = true;
+        app.sender.send(listing()).unwrap();
+        app.drain_background_events();
+        assert_eq!(
+            app.selected_stack_profile()
+                .map(|profile| profile.key.profile_id.as_str()),
+            Some("breeze")
         );
     }
 }

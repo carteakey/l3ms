@@ -7,7 +7,8 @@
   a sidebar (Models by lane with router state dots, then Jobs), one pane for the
   current view, a message line and a status bar. `Tab` moves focus between the
   sidebar and the pane; below 100 columns only the focused side is shown. L3MS
-  opens with the sidebar focused. See `docs/workbench-design.md`.
+  opens with the sidebar focused. The Download view keeps `Tab` for its fields;
+  `Esc` on its table returns to the sidebar. See `docs/workbench-design.md`.
 - Views replace tabs, with new function keys: `F1` Model, `F2` Chat, `F3` Jobs,
   `F4` Bench, `F5` Download, `F6` Model files, `F7` Maintenance, `F8` System,
   `F9` Log (`Alt+1`–`Alt+9` likewise).
@@ -18,7 +19,7 @@
   every former Workbench and Model Ops command to its new home.
 - Enter on a model opens it (Chat for a language chat profile, the task form
   otherwise) and never loads it. Loading is `L`, which first names the model the
-  load would evict and needs a second `L` to confirm.
+  load would evict and needs a second `L` to confirm; any other key cancels.
 - Jobs `s` no longer unloads the resident model when nothing else is running;
   unloading is `U` in the sidebar.
 
@@ -27,7 +28,9 @@
   `/home`, `/mnt/dev` and the models root, CPU governor and router endpoint, with
   warning and critical thresholds kept in one tested table (`src/ui/statusbar.rs`).
 - Sidebar model rows show the newest bench decode rate for a llama-swap entry
-  whose `-m` GGUF path exactly matches a bench result, or "not benched".
+  whose `-m` GGUF path exactly matches a bench result (and, when several entries
+  share that GGUF, whose bench key names the entry), or "not benched".
+- On launch the sidebar selects the resident model once the router reports it.
 - Router state (sidebar dots, status bar, the load warning) refreshes every 5 s
   from `GET /v1/models`, which never loads a model, so swaps by other clients
   show up; the router is authoritative for the resident model. Background
