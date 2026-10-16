@@ -31,6 +31,16 @@
   whose `-m` GGUF path exactly matches a bench result (and, when several entries
   share that GGUF, whose bench key names the entry), or "not benched".
 - On launch the sidebar selects the resident model once the router reports it.
+- The Model view shows what a profile is: the yaml entry's name and description,
+  the server build (the `vendor/` checkout behind its `${…_server}` macro), GGUF
+  file and size, notable flags (ctx, ngl, ncmoe, KV types, draft), Strata
+  config, idle TTL, tasks, and up to five matching bench runs. Native task and
+  result panels appear only for profiles that run foreground tasks.
+- Sidebar rows take one line (rate right-aligned, `off` for disabled entries);
+  the selected row adds a detail line. Engine entries (`proxy:` in
+  `llama-swap.yaml`: ComfyUI, audio.cpp) get their own `engines` group, and media
+  profiles show their engine's router state.
+- The message line clips a long status instead of dropping its key hints.
 - Router state (sidebar dots, status bar, the load warning) refreshes every 5 s
   from `GET /v1/models`, which never loads a model, so swaps by other clients
   show up; the router is authoritative for the resident model. Background

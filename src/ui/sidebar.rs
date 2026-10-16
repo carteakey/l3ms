@@ -37,8 +37,12 @@ pub enum ModelRow {
         id: String,
         dot: &'static str,
         dot_style: Style,
-        /// Runtime, tasks and last steady decode rate, e.g.
-        /// `chat · 61.2 t/s`.
+        /// Short right-aligned note, e.g. `61 t/s` or `off`.
+        note: String,
+        /// Disabled entries are drawn dim.
+        muted: bool,
+        /// Second line, shown only under the selected row, e.g.
+        /// `chat · llama.cpp master`.
         detail: String,
     },
 }
@@ -185,21 +189,44 @@ pub fn draw(frame: &mut Frame, area: Rect, model: &SidebarModel) {
                     id,
                     dot,
                     dot_style,
+                    note,
+                    muted,
                     detail,
                 } => {
-                    if Some(*catalog_index) == model.selected_catalog_index {
+                    let is_selected = Some(*catalog_index) == model.selected_catalog_index;
+                    if is_selected {
                         selected = Some(index);
                     }
-                    ListItem::new(vec![
-                        Line::from(vec![
-                            Span::styled(format!(" {dot} "), *dot_style),
-                            Span::styled(clip(id, width.saturating_sub(3)), theme::text()),
-                        ]),
-                        Line::from(Span::styled(
+                    // One line per model: dot, id, then the note right-aligned.
+                    let note_width = if note.is_empty() {
+                        0
+                    } else {
+                        note.chars().count() + 1
+                    };
+                    let id_width = width.saturating_sub(3 + note_width);
+                    let shown = clip(id, id_width);
+                    let pad = id_width.saturating_sub(shown.chars().count());
+                    let id_style = if *muted { theme::dim() } else { theme::text() };
+                    let mut lines = vec![Line::from(vec![
+                        Span::styled(format!(" {dot} "), *dot_style),
+                        Span::styled(shown, id_style),
+                        Span::raw(" ".repeat(pad)),
+                        Span::styled(
+                            if note.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" {note}")
+                            },
+                            theme::dim(),
+                        ),
+                    ])];
+                    if is_selected && !detail.is_empty() {
+                        lines.push(Line::from(Span::styled(
                             format!("   {}", clip(detail, width.saturating_sub(3))),
                             theme::dim(),
-                        )),
-                    ])
+                        )));
+                    }
+                    ListItem::new(lines)
                 }
             })
             .collect();
@@ -294,7 +321,13 @@ mod tests {
                 id: format!("model-{index}-with-a-rather-long-identifier"),
                 dot: "○",
                 dot_style: theme::dim(),
-                detail: "chat · not benched".into(),
+                note: if index % 2 == 0 {
+                    "61 t/s".into()
+                } else {
+                    String::new()
+                },
+                muted: false,
+                detail: "chat · llama.cpp master".into(),
             });
         }
         rows
@@ -340,6 +373,9 @@ mod tests {
         let text = screen(&terminal);
         assert!(text.contains("model-25-"), "{text}");
         assert!(text.contains('…'), "{text}");
+        // Only the selected row carries the detail line; rates stay visible.
+        assert_eq!(text.matches("chat · llama.cpp master").count(), 1, "{text}");
+        assert!(text.contains("61 t/s"), "{text}");
         assert!(text.contains("Jobs 1"), "{text}");
         assert!(text.contains("model-load · plat"), "{text}");
     }

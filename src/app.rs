@@ -65,7 +65,7 @@ use crate::{
     text_buffer::TextBuffer,
     theme,
     ui::{
-        shell,
+        model_view, shell,
         sidebar::{self, JobRow, ModelRow, Section as SidebarSection, SidebarModel},
         statusbar::{self, StatusInputs},
         toolbar,
@@ -1263,6 +1263,14 @@ struct App {
     /// llama-swap entries marked `unlisted: true` (aliases); the sidebar
     /// hides them like the router does.
     unlisted_models: HashSet<String>,
+    /// Parsed `llama-swap.yaml` entries by id, for the Model view.
+    yaml_entries: HashMap<String, crate::swap_yaml::SwapYamlEntry>,
+    /// Matching bench runs per entry, newest first (at most five).
+    bench_runs: HashMap<String, Vec<crate::bench_results::BenchResult>>,
+    /// On-disk size of each entry's GGUF (shard sets summed).
+    model_sizes: HashMap<String, u64>,
+    /// `llama-swap.yaml` macros, to name the build behind `${…_server}`.
+    yaml_macros: HashMap<String, String>,
     host: HostTelemetry,
     cpu_percent: Option<f64>,
     gpu_telemetry: Option<GpuTelemetry>,
@@ -1442,6 +1450,10 @@ impl App {
             chat_handoff_pending: None,
             bench_rates: HashMap::new(),
             unlisted_models: HashSet::new(),
+            yaml_entries: HashMap::new(),
+            bench_runs: HashMap::new(),
+            model_sizes: HashMap::new(),
+            yaml_macros: HashMap::new(),
             host: HostTelemetry::default(),
             cpu_percent: None,
             gpu_telemetry: None,
@@ -1470,6 +1482,12 @@ impl App {
         app.refresh_stack_catalog();
         app.refresh_bench_rates();
         app.ensure_visible_model_selection();
+        if app.stack_catalog.is_some() {
+            app.status = format!(
+                "{} models · Enter open · L load · ? help",
+                app.sidebar_model_indices().len()
+            );
+        }
         if refresh_models_on_start {
             app.refresh_models_quietly();
         }
@@ -2311,13 +2329,29 @@ impl App {
         }
     }
 
+    /// Sidebar group of a profile: its lane, or `engines` for llama-swap
+    /// entries that proxy a non-OpenAI engine (ComfyUI, audio.cpp).
+    fn sidebar_group(&self, profile: &CatalogProfile) -> (&'static str, u8, Style) {
+        let engine = profile.key.lane == Lane::Language
+            && self
+                .yaml_entries
+                .get(profile.key.profile_id.as_str())
+                .is_some_and(|entry| entry.proxy);
+        match profile.key.lane {
+            Lane::Language if engine => ("engines", 3, theme::dim()),
+            Lane::Language => ("language", 0, theme::lane_language()),
+            Lane::Media => ("media", 1, theme::lane_media()),
+            Lane::Decisions => ("decisions", 2, theme::lane_decisions()),
+        }
+    }
+
     /// Catalog indices of the models the sidebar shows, in display order.
     fn sidebar_model_indices(&self) -> Vec<usize> {
         let Some(catalog) = self.stack_catalog.as_ref() else {
             return Vec::new();
         };
         let filter = self.model_filter.trim().to_ascii_lowercase();
-        catalog
+        let mut indices = catalog
             .list()
             .iter()
             .enumerate()
@@ -2338,7 +2372,9 @@ impl App {
                     || profile.name.to_ascii_lowercase().contains(&filter)
             })
             .map(|(index, _)| index)
-            .collect()
+            .collect::<Vec<_>>();
+        indices.sort_by_key(|index| self.sidebar_group(&catalog.list()[*index]).1);
+        indices
     }
 
     fn select_first_visible_model(&mut self) {
@@ -3405,6 +3441,10 @@ impl App {
                 self.refresh_stack_catalog();
                 self.refresh_bench_rates();
                 self.ensure_visible_model_selection();
+                if self.stack_catalog.is_some() {
+                    self.status =
+                        format!("Refreshed · {} models", self.sidebar_model_indices().len());
+                }
             }
             ModelLoad => self.model_action(true),
             ModelUnload => self.model_action(false),
@@ -4447,7 +4487,7 @@ impl App {
                 self.stack_catalog = Some(catalog);
                 self.stack_catalog_error = None;
                 clamp_table_selection(&mut self.stack_catalog_state, count);
-                self.status = format!("Stack catalog refreshed · {count} manifest-only profile(s)");
+                self.status = format!("Manifests loaded · {count} profile(s)");
             }
             Err(error) => {
                 self.stack_catalog = None;
@@ -6276,40 +6316,41 @@ impl App {
         };
         let profiles = catalog.list();
         let mut rows = Vec::new();
-        let mut lane = None;
+        let mut group = None;
         for index in self.sidebar_model_indices() {
             let profile = &profiles[index];
-            if lane != Some(profile.key.lane) {
-                lane = Some(profile.key.lane);
-                rows.push(ModelRow::Lane {
-                    name: profile.key.lane.as_str(),
-                    style: lane_style(profile.key.lane),
-                });
+            let (name, _, style) = self.sidebar_group(profile);
+            if group != Some(name) {
+                group = Some(name);
+                rows.push(ModelRow::Lane { name, style });
             }
             let id = profile.key.profile_id.as_str();
-            let state = (profile.key.lane == Lane::Language)
-                .then(|| {
-                    self.models
-                        .iter()
-                        .find(|model| model.id == id)
-                        .map(|model| model.state.as_str())
-                })
-                .flatten();
-            let (dot, dot_style) = sidebar::model_dot(state);
+            let (dot, dot_style) = sidebar::model_dot(self.profile_router_state(profile));
             let tasks = profile
                 .tasks
                 .iter()
                 .map(|task| task.as_str())
                 .collect::<Vec<_>>()
                 .join(",");
-            let detail = match profile.key.lane {
-                Lane::Language => {
-                    let rate = self
-                        .bench_rates
-                        .get(id)
-                        .map_or_else(|| "not benched".to_owned(), |rate| format!("{rate:.1} t/s"));
-                    let disabled = if profile.disabled { " · disabled" } else { "" };
-                    format!("{tasks} · {rate}{disabled}")
+            let entry = self.yaml_entries.get(id);
+            let note = if profile.disabled {
+                "off".to_owned()
+            } else {
+                self.bench_rates
+                    .get(id)
+                    .map(|rate| format!("{rate:.0} t/s"))
+                    .unwrap_or_default()
+            };
+            let detail = match (profile.key.lane, entry) {
+                (Lane::Language, Some(entry)) if entry.proxy => {
+                    "engine · used by media profiles".to_owned()
+                }
+                (Lane::Language, Some(entry)) => {
+                    let (server, _) = model_view::cmd_facts(&entry.cmd);
+                    match server {
+                        Some(server) => format!("{tasks} · {}", self.server_display(&server)),
+                        None => tasks,
+                    }
                 }
                 _ => format!("{} · {tasks}", profile.runtime.as_str()),
             };
@@ -6318,6 +6359,8 @@ impl App {
                 id: id.to_owned(),
                 dot,
                 dot_style,
+                note,
+                muted: profile.disabled,
                 detail,
             });
         }
@@ -6374,26 +6417,46 @@ impl App {
     }
 
     /// Read `llama-swap.yaml` and bench results once: note unlisted alias
-    /// entries and keep each llama-swap model's newest decode rate (see
-    /// [`bench_rates_by_entry`]). A result belongs to a model only when its GGUF path is exactly
+    /// entries, entry facts, macros, GGUF sizes and each model's matching
+    /// bench runs (see [`bench_runs_by_entry`]). A result belongs to a model only when its GGUF path is exactly
     /// the `-m` path of that model's yaml entry; anything else stays
     /// "not benched" rather than being guessed.
     fn refresh_bench_rates(&mut self) {
         self.bench_rates.clear();
         self.unlisted_models.clear();
+        self.yaml_entries.clear();
+        self.bench_runs.clear();
+        self.model_sizes.clear();
         let Ok(yaml) = fs::read_to_string(self.root.join("llama-swap.yaml")) else {
             return;
         };
         let entries = crate::swap_yaml::parse_entries(&yaml);
+        self.yaml_macros = crate::swap_yaml::parse_macros(&yaml);
         self.unlisted_models = entries
             .iter()
             .filter(|entry| entry.unlisted)
             .map(|entry| entry.id.clone())
             .collect();
+        self.model_sizes = entries
+            .iter()
+            .filter_map(|entry| {
+                let path = expand_tilde(entry.model_path.as_deref()?);
+                Some((entry.id.clone(), crate::swap_yaml::disk_size(&path)?))
+            })
+            .collect();
+        self.yaml_entries = entries
+            .iter()
+            .map(|entry| (entry.id.clone(), entry.clone()))
+            .collect();
         let Ok(load) = crate::bench_results::load_results(&self.root) else {
             return;
         };
-        self.bench_rates = bench_rates_by_entry(&entries, &load.results);
+        self.bench_runs = bench_runs_by_entry(&entries, &load.results);
+        self.bench_rates = self
+            .bench_runs
+            .iter()
+            .filter_map(|(id, runs)| Some((id.clone(), runs.iter().find_map(|run| run.tg_ts)?)))
+            .collect();
     }
 
     /// System view: GPU, memory and SSD spill in detail.
@@ -6935,15 +6998,11 @@ impl App {
         );
     }
 
-    /// Model view: the profile selected in the sidebar, its task guidance and
-    /// the last foreground result. The model list itself is the sidebar.
+    /// Model view: what the profile selected in the sidebar is, how it is
+    /// served and benched, and (for native task profiles) the foreground task
+    /// and its last result. The model list itself is the sidebar.
     fn draw_stack_catalog(&mut self, frame: &mut Frame, area: Rect) {
-        let sections = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-            .split(area);
-
-        let Some(catalog) = self.stack_catalog.as_ref() else {
+        if self.stack_catalog.is_none() {
             let message = self.stack_catalog_error.as_deref().unwrap_or(
                 "Model manifests have not been loaded. Press r in the sidebar to refresh.",
             );
@@ -6955,37 +7014,16 @@ impl App {
                 area,
             );
             return;
-        };
-        let profiles = catalog.list();
-        let details = self
-            .stack_catalog_state
-            .selected()
-            .and_then(|index| profiles.get(index))
-            .map_or_else(
-                || Text::from("No manifest profiles are available."),
-                stack_profile_details,
+        }
+        let Some(profile) = self.selected_stack_profile().cloned() else {
+            frame.render_widget(
+                Paragraph::new("No model selected. Pick one in the sidebar.")
+                    .style(theme::dim())
+                    .block(theme::block().title("Model").borders(Borders::ALL)),
+                area,
             );
-        let info = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
-            .split(sections[0]);
-        let selected_lane = self
-            .stack_catalog_state
-            .selected()
-            .and_then(|index| profiles.get(index))
-            .map(|profile| lane_style(profile.key.lane));
-        frame.render_widget(
-            Paragraph::new(details)
-                .style(theme::text())
-                .block(
-                    theme::block()
-                        .border_style(selected_lane.unwrap_or_else(theme::border))
-                        .title(self.selected_profile_title())
-                        .borders(Borders::ALL),
-                )
-                .wrap(Wrap { trim: false }),
-            info[0],
-        );
+            return;
+        };
         #[cfg(target_os = "linux")]
         let show_direct_native = {
             let native_busy_or_uncertain =
@@ -7021,7 +7059,7 @@ impl App {
         #[cfg(target_os = "linux")]
         let (action_text, action_title) = if show_direct_native {
             let text = self.direct_native_summary.as_ref().map_or_else(
-                || "One foreground job: routed language/decisions, audio.cpp speech/music, and ComfyUI image/video/music workflows. LTX and YuE2 share ComfyUI. Only advanced direct jobs require an operator-managed idle GPU window; Blender Python is not sandboxed.\nf open task · c cancels an active run".to_owned(),
+                || "One task runs at a time, in the foreground, through llama-swap.\nEnter opens the task form · Ctrl+Enter runs it · c cancels".to_owned(),
                 |summary| {
                     let operator_note = if summary.native_id.is_some() {
                         "\nComfyUI shared engine · llama-swap by default"
@@ -7080,55 +7118,250 @@ impl App {
         #[cfg(not(target_os = "linux"))]
         let (action_text, action_title) =
             (native_chat_guidance.to_owned(), "Native / Chat guidance");
-        frame.render_widget(
-            Paragraph::new(action_text)
-                .style(theme::text())
-                .block(theme::block().title(action_title).borders(Borders::ALL))
-                .wrap(Wrap { trim: false }),
-            info[1],
-        );
-        let output_text = if show_direct_native {
-            if direct_result_visible {
-                self.direct_native_summary
-                    .as_ref()
-                    .and_then(|summary| summary.result.as_ref())
-                    .map(direct_native_result_preview)
-                    .unwrap_or_else(|| "Foreground native result is not available.".into())
+        let facts_area = if show_direct_native {
+            // Facts, then the task, then the result at full width (result
+            // paths are long).
+            let sections = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Percentage(40),
+                    Constraint::Percentage(25),
+                    Constraint::Percentage(35),
+                ])
+                .split(area);
+            frame.render_widget(
+                Paragraph::new(action_text)
+                    .style(theme::text())
+                    .block(theme::block().title(action_title).borders(Borders::ALL))
+                    .wrap(Wrap { trim: false }),
+                sections[1],
+            );
+            let output_text = if show_direct_native {
+                if direct_result_visible {
+                    self.direct_native_summary
+                        .as_ref()
+                        .and_then(|summary| summary.result.as_ref())
+                        .map(direct_native_result_preview)
+                        .unwrap_or_else(|| "Foreground native result is not available.".into())
+                } else {
+                    "Foreground native result is hidden until its completed profile is selected."
+                        .into()
+                }
             } else {
-                "Foreground native result is hidden until its completed profile is selected.".into()
-            }
+                "Foreground native results appear here after a supported task completes.".to_owned()
+            };
+            frame.render_widget(
+                Paragraph::new(output_text)
+                    .style(theme::text())
+                    .block(
+                        theme::block()
+                            .title(if direct_result_visible {
+                                "Foreground native result"
+                            } else {
+                                "Native task results"
+                            })
+                            .borders(Borders::ALL),
+                    )
+                    .wrap(Wrap { trim: false }),
+                sections[2],
+            );
+            sections[0]
         } else {
-            "Foreground native results appear here after a supported task completes.".to_owned()
+            area
         };
-        frame.render_widget(
-            Paragraph::new(output_text)
-                .style(theme::text())
-                .block(
-                    theme::block()
-                        .title(if show_direct_native {
-                            "Foreground native result"
-                        } else {
-                            "Native task results"
-                        })
-                        .borders(Borders::ALL),
-                )
-                .wrap(Wrap { trim: false }),
-            sections[1],
-        );
+        self.draw_model_facts(frame, facts_area, &profile);
     }
 
-    fn selected_profile_title(&self) -> String {
-        let state = self
-            .selected_stack_profile()
-            .filter(|profile| profile.key.lane == Lane::Language)
-            .and_then(|profile| {
-                self.models
-                    .iter()
-                    .find(|model| model.id == profile.key.profile_id.as_str())
+    /// `qwen38_mtp` → `llama.cpp-exp-stack-v2` when the `${qwen38_mtp_server}`
+    /// macro points into `vendor/`; otherwise the stem itself.
+    fn server_display(&self, stem: &str) -> String {
+        self.yaml_macros
+            .get(&format!("{stem}_server"))
+            .map(|value| model_view::macro_display(value))
+            .unwrap_or_else(|| stem.to_owned())
+    }
+
+    /// The llama-swap engine entry serving a media profile, by runtime.
+    fn media_engine(&self, profile: &CatalogProfile) -> Option<&'static str> {
+        if profile.key.lane != Lane::Media {
+            return None;
+        }
+        let runtime = profile.runtime.as_str().to_ascii_lowercase();
+        if runtime.contains("comfy") {
+            Some("comfyui_auto")
+        } else if runtime.contains("audio.cpp") {
+            Some("audiocpp_auto")
+        } else {
+            None
+        }
+    }
+
+    /// Router state of a profile: its own for language entries, its engine's
+    /// for media profiles served through one.
+    fn profile_router_state(&self, profile: &CatalogProfile) -> Option<&str> {
+        let id = match profile.key.lane {
+            Lane::Language => profile.key.profile_id.as_str(),
+            _ => self.media_engine(profile)?,
+        };
+        self.models
+            .iter()
+            .find(|model| model.id == id)
+            .map(|model| model.state.as_str())
+    }
+
+    fn draw_model_facts(&self, frame: &mut Frame, area: Rect, profile: &CatalogProfile) {
+        let id = profile.key.profile_id.as_str();
+        let entry = (profile.key.lane == Lane::Language)
+            .then(|| self.yaml_entries.get(id))
+            .flatten();
+        let state = self.profile_router_state(profile);
+        let tasks = profile
+            .tasks
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let home = env::var("HOME").unwrap_or_default();
+        let short = |path: &str| -> String {
+            if !home.is_empty() {
+                if let Some(rest) = path.strip_prefix(&home) {
+                    return format!("~{rest}");
+                }
+            }
+            path.to_owned()
+        };
+        let mut facts: Vec<(&'static str, String)> = Vec::new();
+        match entry {
+            Some(entry) if entry.proxy => {
+                facts.push((
+                    "engine",
+                    "proxied by llama-swap; media profiles route to it".into(),
+                ));
+            }
+            Some(entry) => {
+                let (server, flags) = model_view::cmd_facts(&entry.cmd);
+                if let Some(server) = server {
+                    facts.push(("server", self.server_display(&server)));
+                }
+                if let Some(path) = entry.model_path.as_deref() {
+                    let size = self
+                        .model_sizes
+                        .get(id)
+                        .map(|bytes| format!(" · {}", model_view::human_bytes(*bytes)))
+                        .unwrap_or_else(|| " · file not found".into());
+                    let file = path.rsplit('/').next().unwrap_or(path);
+                    facts.push(("model", format!("{file}{size}")));
+                }
+                let mut config = None;
+                let mut shown = Vec::new();
+                for (label, value) in flags {
+                    match label {
+                        "config" => config = Some(value),
+                        "override" => shown.push("-ot …".to_owned()),
+                        "engine" => {}
+                        _ => shown.push(format!("{label} {value}")),
+                    }
+                }
+                if let Some(config) = config {
+                    let shown = self
+                        .yaml_macros
+                        .get(&config)
+                        .map(|value| model_view::macro_display(value))
+                        .unwrap_or(config);
+                    facts.push(("config", shown));
+                }
+                if !shown.is_empty() {
+                    facts.push(("flags", shown.join(" · ")));
+                }
+                facts.push((
+                    "idle",
+                    entry
+                        .ttl
+                        .map(|ttl| format!("unloads after {}", model_view::human_ttl(ttl)))
+                        .unwrap_or_else(|| "router default ttl".into()),
+                ));
+            }
+            None => {
+                if let Some(engine) = self.media_engine(profile) {
+                    facts.push(("engine", format!("{engine} (state shown is the engine's)")));
+                }
+                facts.push(("runtime", profile.runtime.as_str().to_owned()));
+                let device = match &profile.device {
+                    Some(Device::Cpu) => "cpu",
+                    Some(Device::Cuda) => "cuda",
+                    Some(Device::Remote) => "remote",
+                    Some(Device::Other(device)) => device.as_str(),
+                    None => "not declared",
+                };
+                facts.push(("device", device.to_owned()));
+                facts.push((
+                    "manifest",
+                    short(&profile.source_path.display().to_string()),
+                ));
+            }
+        }
+        if !tasks.is_empty() && !entry.is_some_and(|entry| entry.proxy) {
+            facts.push(("tasks", tasks));
+        }
+        if profile.disabled {
+            facts.push(("status", "disabled in llama-swap.yaml".into()));
+        }
+        let bench: Vec<model_view::BenchRow> = self
+            .bench_runs
+            .get(id)
+            .map(|runs| {
+                runs.iter()
+                    .map(|run| {
+                        let mut setup = Vec::new();
+                        if !run.strategy.is_empty() {
+                            setup.push(run.strategy.clone());
+                        }
+                        if !run.ctx.is_empty() {
+                            setup.push(format!("ctx {}", run.ctx));
+                        }
+                        if !run.ctk.is_empty() || !run.ctv.is_empty() {
+                            setup.push(format!("kv {}/{}", run.ctk, run.ctv));
+                        }
+                        model_view::BenchRow {
+                            date: run.ts.chars().take(10).collect(),
+                            tg: run.tg_ts,
+                            pp: run.pp_ts,
+                            setup: setup.join(" · "),
+                        }
+                    })
+                    .collect()
             })
-            .map(|model| format!(" · {}", model.state))
             .unwrap_or_default();
-        format!("Model{state} · f open · L load · U unload")
+        if bench.is_empty() && entry.is_some_and(|entry| !entry.proxy) {
+            facts.push((
+                "bench",
+                "no matching runs in bench-models/logs/results".into(),
+            ));
+        }
+        let chat = profile.key.lane == Lane::Language
+            && profile.tasks.len() == 1
+            && profile.tasks.iter().any(|task| task.as_str() == "chat");
+        let keys = match (profile.key.lane, entry) {
+            (Lane::Language, Some(entry)) if entry.proxy => "L load · U unload".to_owned(),
+            (Lane::Language, _) if chat => "Enter chat · L load · U unload · b bench".to_owned(),
+            (Lane::Language, _) => "Enter task form · L load · U unload".to_owned(),
+            _ => "Enter task form · c cancel a running task".to_owned(),
+        };
+        let data = model_view::ModelViewData {
+            id,
+            lane_style: lane_style(profile.key.lane),
+            state,
+            routed: profile.key.lane == Lane::Language || self.media_engine(profile).is_some(),
+            title: entry
+                .and_then(|entry| entry.name.as_deref())
+                .or(Some(profile.name.as_str()).filter(|name| *name != id)),
+            description: entry.and_then(|entry| entry.description.as_deref()),
+            facts,
+            bench: &bench,
+            keys,
+            focused: !self.sidebar_focused,
+        };
+        model_view::draw(frame, area, &data);
     }
 
     fn draw_task_form(&self, frame: &mut Frame) {
@@ -7654,22 +7887,46 @@ impl App {
         } else if self.input_mode == InputMode::ModelFilter {
             "type to filter · Enter keep · Esc done"
         } else if self.sidebar_focused {
-            "j/k move · [/] section · Enter open · L load · Tab pane · Ctrl+P"
+            "j/k · [/] · Enter open · L load · Tab pane"
         } else if self.view == View::Download {
-            "Tab fields · Esc sidebar · F1–F9 views · Ctrl+P palette"
+            "Tab fields · Esc sidebar · Ctrl+P"
         } else {
-            "Tab sidebar · F1–F9 views · Ctrl+P palette · ? help"
+            "Tab sidebar · F1–F9 · Ctrl+P · ? help"
         };
         let mut spans = Vec::new();
         if !input.is_empty() {
             spans.push(Span::styled(format!(" {input} "), theme::badge()));
         }
-        spans.push(Span::styled(format!(" {}", self.status), theme::text()));
-        let used: usize = spans.iter().map(|span| span.width()).sum();
-        let keys_width = keys.width() + 1;
-        if used + keys_width + 2 <= area.width as usize {
+        // Key hints keep their place when there is room for them and at least
+        // 24 columns of status; a long status is clipped instead.
+        let width = area.width as usize;
+        let badge: usize = spans.iter().map(|span| span.width()).sum();
+        let keys_width = keys.width() + 2;
+        let show_keys = width >= badge + keys_width + 24;
+        let status_room = if show_keys {
+            width - badge - keys_width
+        } else {
+            width.saturating_sub(badge)
+        };
+        let status = format!(" {}", self.status);
+        let status = if status.width() > status_room {
+            let mut clipped = String::new();
+            for character in status.chars() {
+                if clipped.width() + 2 > status_room {
+                    break;
+                }
+                clipped.push(character);
+            }
+            clipped.push('…');
+            clipped
+        } else {
+            status
+        };
+        let used = badge + status.width();
+        spans.push(Span::styled(status, theme::text()));
+        if show_keys {
             spans.push(Span::raw(
-                " ".repeat(area.width as usize - used - keys_width),
+                " ".repeat(width.saturating_sub(used + keys_width - 1)),
             ));
             spans.push(Span::styled(format!("{keys} "), theme::dim()));
         }
@@ -7890,14 +8147,14 @@ impl App {
 }
 
 /// Lane signature colour: marks where a profile lives, never its runtime state.
-/// Newest decode rate per llama-swap entry. A result belongs to an entry only
+/// Bench runs per llama-swap entry, newest first. A result belongs to an entry only
 /// when its GGUF path is exactly the entry's `-m` path; when several entries
 /// share that GGUF (different flags), the result's `model_key` must also name
 /// the entry. Anything else stays "not benched" rather than being guessed.
-fn bench_rates_by_entry(
+fn bench_runs_by_entry(
     entries: &[crate::swap_yaml::SwapYamlEntry],
     results: &[crate::bench_results::BenchResult],
-) -> HashMap<String, f64> {
+) -> HashMap<String, Vec<crate::bench_results::BenchResult>> {
     let path_of =
         |entry: &crate::swap_yaml::SwapYamlEntry| entry.model_path.as_deref().map(expand_tilde);
     let mut rates = HashMap::new();
@@ -7911,13 +8168,15 @@ fn bench_rates_by_entry(
             .count()
             > 1;
         // Results are sorted newest first.
-        if let Some(rate) = results
+        let runs: Vec<_> = results
             .iter()
             .filter(|result| expand_tilde(&result.model) == path)
             .filter(|result| !shared || result.model_key == entry.id)
-            .find_map(|result| result.tg_ts)
-        {
-            rates.insert(entry.id.clone(), rate);
+            .take(5)
+            .cloned()
+            .collect();
+        if !runs.is_empty() {
+            rates.insert(entry.id.clone(), runs);
         }
     }
     rates
@@ -8444,36 +8703,6 @@ fn create_private_direct_output_directory(
         return Ok(output_directory);
     }
     Err(())
-}
-
-fn stack_profile_details(profile: &CatalogProfile) -> Text<'static> {
-    let tasks = profile
-        .tasks
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(", ");
-    let device = match &profile.device {
-        Some(Device::Cpu) => "cpu",
-        Some(Device::Cuda) => "cuda",
-        Some(Device::Remote) => "remote",
-        Some(Device::Other(device)) => device,
-        None => "not declared",
-    };
-    Text::from(vec![
-        Line::from(format!("{} · {}", profile.key, profile.name)),
-        Line::from(format!("Runtime: {} · Device: {device}", profile.runtime)),
-        Line::from(format!(
-            "Tasks: {tasks} · {}",
-            if profile.disabled {
-                "disabled"
-            } else {
-                "declared"
-            }
-        )),
-        Line::from(format!("Source: {}", profile.source_path.display())),
-        Line::from("Manifest-only: installation and runtime health have not been checked."),
-    ])
 }
 
 impl Drop for App {
@@ -11163,7 +11392,7 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(140, 45)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
-        assert!(terminal_text(&terminal).contains("Device: remote"));
+        assert!(terminal_text(&terminal).contains("device    remote"));
 
         open_direct_decision_form_for_profile(&mut app, "jev-api");
         assert!(app.status.contains("Foreground native decision form open"));
@@ -11729,9 +11958,9 @@ mod tests {
             terminal.draw(|frame| app.draw(frame)).unwrap();
             if size.0 == 140 {
                 let text = terminal_text(&terminal);
-                assert!(text.contains("Manifest-only"));
-                assert!(text.contains("media:breeze"));
-                assert!(text.contains("tts, clon, design"));
+                assert!(text.contains(" breeze "), "{text}");
+                assert!(text.contains("runtime   audio.cpp"), "{text}");
+                assert!(text.contains("tts, clon, design"), "{text}");
             }
         }
         app.execute_command(CommandId::OpenLog).unwrap();
@@ -11752,29 +11981,21 @@ mod tests {
     }
 
     #[test]
-    fn stack_catalog_without_coordinator_shows_native_chat_guidance() {
+    fn chat_profiles_show_serving_facts_and_keys_without_native_panels() {
         let fixture = AppFixture::new();
         write_stack_fixture(&fixture);
         let mut app = fixture.app();
         focus_stack_profile_by_id(&mut app, "local-chat");
-
-        let mut narrow = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        narrow.draw(|frame| app.draw(frame)).unwrap();
-        let narrow_text = (0..24)
-            .map(|row| terminal_row(&narrow, row))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(narrow_text.contains("Native / Chat guidance"));
-        assert!(narrow_text.contains("f opens Chat/task"));
-        assert!(narrow_text.contains("Native task results"));
-        assert!(!narrow_text.contains("Coordinator · observation/cancel only"));
-        assert!(!narrow_text.contains("results are shown here only after pressing o"));
-
-        let mut wide = Terminal::new(TestBackend::new(120, 40)).unwrap();
-        wide.draw(|frame| app.draw(frame)).unwrap();
-        let wide_text = terminal_text(&wide);
-        assert!(wide_text.contains("Language chat profiles open in"));
-        assert!(wide_text.contains("f opens Chat/task"));
+        for (width, height) in [(80, 24), (120, 40)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+            let text = terminal_text(&terminal);
+            assert!(text.contains("local-chat"), "{text}");
+            assert!(text.contains("Enter chat · L load · U unload"), "{text}");
+            assert!(text.contains("tasks     chat"), "{text}");
+            assert!(!text.contains("Native task results"), "{text}");
+            assert!(!text.contains("Coordinator · observation/cancel only"));
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -11968,7 +12189,7 @@ mod tests {
         terminal.draw(|frame| app.draw(frame)).unwrap();
         let text = terminal_text(&terminal);
         assert!(!text.contains("observe"), "removed key still advertised");
-        assert!(text.contains("f open · L load · U unload"), "{text}");
+        assert!(text.contains("Enter chat · L load · U unload"), "{text}");
         let buffer = terminal.backend().buffer();
         let fg_of = |word: &str| {
             for y in 0..buffer.area.height {
@@ -12043,7 +12264,7 @@ mod tests {
         terminal.draw(|frame| app.draw(frame)).unwrap();
         let screen = rows(&terminal);
         assert!(row_of(&screen, "local-chat").contains("● local-chat"));
-        assert!(screen.iter().any(|row| row.contains("Model · loaded")));
+        assert!(screen.iter().any(|row| row.contains("local-chat ● loaded")));
         // Profiles the router does not list are unknown, not guessed.
         assert!(row_of(&screen, "breeze").contains("· breeze"));
         assert!(row_of(&screen, "nagi").contains("· nagi"));
@@ -12052,7 +12273,9 @@ mod tests {
         terminal.draw(|frame| app.draw(frame)).unwrap();
         let screen = rows(&terminal);
         assert!(row_of(&screen, "local-chat").contains("○ local-chat"));
-        assert!(screen.iter().any(|row| row.contains("Model · unloaded")));
+        assert!(screen
+            .iter()
+            .any(|row| row.contains("local-chat ○ unloaded")));
     }
 
     #[test]
@@ -13907,6 +14130,11 @@ mod tests {
             disabled: false,
             unlisted: false,
             model_path: Some(path.into()),
+            name: None,
+            description: None,
+            ttl: None,
+            proxy: false,
+            cmd: String::new(),
             tasks: vec!["chat".into()],
         };
         let result = |key: &str, path: &str, rate: f64| crate::bench_results::BenchResult {
@@ -13926,11 +14154,12 @@ mod tests {
             result("some-script", "/m/shared.gguf", 99.0),
             result("other", "/m/other.gguf", 10.0),
         ];
-        let rates = bench_rates_by_entry(&entries, &results);
-        assert_eq!(rates.get("solo"), Some(&40.0));
-        assert_eq!(rates.get("shared-b"), Some(&77.0));
-        assert_eq!(rates.get("shared-a"), None);
-        assert_eq!(rates.len(), 2);
+        let runs = bench_runs_by_entry(&entries, &results);
+        let rate = |id: &str| runs.get(id).and_then(|runs| runs[0].tg_ts);
+        assert_eq!(rate("solo"), Some(40.0));
+        assert_eq!(rate("shared-b"), Some(77.0));
+        assert_eq!(rate("shared-a"), None);
+        assert_eq!(runs.len(), 2);
     }
 
     #[test]
@@ -14015,5 +14244,65 @@ mod tests {
                 .map(|profile| profile.key.profile_id.as_str()),
             Some("breeze")
         );
+    }
+
+    #[test]
+    fn message_line_clips_a_long_status_before_dropping_key_hints() {
+        let fixture = AppFixture::new();
+        let mut app = fixture.app();
+        app.sidebar_focused = true;
+        app.status = "x".repeat(300);
+        for width in [80_u16, 110] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+            let row = terminal_row(&terminal, 22);
+            assert!(row.contains("Enter open"), "{width}: {row:?}");
+            assert!(row.contains('…'), "{width}: {row:?}");
+            assert_eq!(row.chars().count(), width as usize);
+        }
+    }
+
+    #[test]
+    fn engines_get_their_own_group_and_media_shows_its_engine_state() {
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        let mut app = fixture.app();
+        app.refresh_stack_catalog();
+        let mut engine = crate::swap_yaml::parse_entries(
+            "models:\n  \"audiocpp_auto\":\n    cmd: audiocpp-server --port ${PORT}\n    proxy: http://127.0.0.1:${PORT}\n",
+        );
+        app.yaml_entries.insert("local-chat".into(), {
+            let mut entry = engine.remove(0);
+            entry.id = "local-chat".into();
+            entry
+        });
+        let catalog = app.stack_catalog.as_ref().unwrap();
+        let chat = catalog
+            .list()
+            .iter()
+            .find(|profile| profile.key.profile_id.as_str() == "local-chat")
+            .unwrap();
+        assert_eq!(app.sidebar_group(chat).0, "engines");
+        let breeze = catalog
+            .list()
+            .iter()
+            .find(|profile| profile.key.profile_id.as_str() == "breeze")
+            .unwrap()
+            .clone();
+        assert_eq!(app.media_engine(&breeze), Some("audiocpp_auto"));
+        app.models = vec![test_chat_model("audiocpp_auto", "loaded", false)];
+        assert_eq!(app.profile_router_state(&breeze), Some("loaded"));
+        // Engines sort after every lane.
+        let order: Vec<&str> = app
+            .sidebar_model_indices()
+            .into_iter()
+            .map(|index| {
+                app.stack_catalog.as_ref().unwrap().list()[index]
+                    .key
+                    .profile_id
+                    .as_str()
+            })
+            .collect();
+        assert_eq!(order.last(), Some(&"local-chat"));
     }
 }
