@@ -11,43 +11,49 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CommandContext {
     Global,
-    Workbench,
-    ModelOps,
-    Chat,
-    Browser,
-    Download,
-    Jobs,
-    Maintenance,
-    ParamBuilder,
+    /// The always-visible sidebar (models and jobs). Its commands are
+    /// available whichever view the pane shows.
+    Sidebar,
+    /// The Model view: the selected profile, its task form and last result.
     StackCatalog,
+    Chat,
+    Jobs,
+    Bench,
+    Download,
+    Browser,
+    Maintenance,
+    System,
+    Log,
+    ParamBuilder,
 }
 
 impl CommandContext {
-    /// Command contexts used by top-level views.
-    pub const TABS: [Self; 9] = [
-        Self::Workbench,
-        Self::ModelOps,
-        Self::ParamBuilder,
-        Self::Chat,
-        Self::Browser,
-        Self::Download,
-        Self::Jobs,
-        Self::Maintenance,
+    /// Contexts of pane views that own commands.
+    pub const VIEWS: [Self; 8] = [
         Self::StackCatalog,
+        Self::Chat,
+        Self::Jobs,
+        Self::Bench,
+        Self::Download,
+        Self::Browser,
+        Self::Maintenance,
+        Self::Log,
     ];
 
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Global => "global",
-            Self::Workbench => "workbench",
-            Self::ModelOps => "model-ops",
+            Self::Sidebar => "sidebar",
+            Self::StackCatalog => "model",
             Self::Chat => "chat",
-            Self::Browser => "browser",
-            Self::Download => "download",
             Self::Jobs => "jobs",
+            Self::Bench => "bench",
+            Self::Download => "download",
+            Self::Browser => "browser",
             Self::Maintenance => "maintenance",
+            Self::System => "system",
+            Self::Log => "log",
             Self::ParamBuilder => "param-builder",
-            Self::StackCatalog => "stack-catalog",
         }
     }
 }
@@ -64,20 +70,44 @@ pub enum CommandId {
     Quit,
     ShowHelp,
     ShowPalette,
-    OpenWorkbench,
-    OpenModelOps,
-    OpenParamBuilder,
-    OpenChat,
-    OpenBrowser,
-    OpenDownload,
-    OpenJobs,
-    OpenMaintenance,
     OpenStackCatalog,
-    StackCatalogSelectPrevious,
-    StackCatalogSelectNext,
+    OpenChat,
+    OpenJobs,
+    OpenBench,
+    OpenDownload,
+    OpenBrowser,
+    OpenMaintenance,
+    OpenSystem,
+    OpenLog,
+    PreviousTab,
+    NextTab,
+    ToggleFocus,
+    ReloadRouter,
+    Tune,
+    SidebarSelectPrevious,
+    SidebarSelectNext,
+    SidebarPreviousSection,
+    SidebarNextSection,
+    SidebarToggleSection,
+    SidebarOpen,
+    SidebarFilter,
     StackCatalogRefresh,
+    ModelLoad,
+    ModelUnload,
     StackCatalogForm,
     StackCatalogCancel,
+    BenchSelectPrevious,
+    BenchSelectNext,
+    BenchRun,
+    BenchStop,
+    BenchFocusFilter,
+    BenchFocusList,
+    BenchFocusEditor,
+    BenchSaveScript,
+    BenchReloadScript,
+    BenchRestoreScript,
+    ClearLog,
+    OpenParamBuilder,
     ParamBuilderToggleFocus,
     ParamBuilderNextParam,
     ParamBuilderPrevParam,
@@ -86,33 +116,6 @@ pub enum CommandId {
     ParamBuilderImportEntry,
     ParamBuilderOpenPresets,
     ParamBuilderClearAll,
-    PreviousTab,
-    NextTab,
-
-    WorkbenchSelectPrevious,
-    WorkbenchSelectNext,
-    WorkbenchFocusFilter,
-    WorkbenchFocusTable,
-    WorkbenchRefreshModels,
-    WorkbenchLoadModel,
-    WorkbenchUnloadModel,
-    WorkbenchClearLog,
-    WorkbenchCycleLayout,
-
-    ModelOpsToggleMode,
-    ModelOpsSelectPrevious,
-    ModelOpsSelectNext,
-    ModelOpsStart,
-    ModelOpsStop,
-    ModelOpsRefreshModels,
-    ModelOpsFocusFilter,
-    ModelOpsFocusTable,
-    ModelOpsFocusEditor,
-    ModelOpsSaveScript,
-    ModelOpsReloadScript,
-    ModelOpsRestoreScript,
-    ModelOpsClearLog,
-
     ChatCompose,
     ChatSend,
     ChatRefreshModels,
@@ -129,7 +132,6 @@ pub enum CommandId {
     ChatIncreaseTemperature,
     ChatDecreaseMaxTokens,
     ChatIncreaseMaxTokens,
-
     BrowserSelectPrevious,
     BrowserSelectNext,
     BrowserScan,
@@ -138,7 +140,6 @@ pub enum CommandId {
     BrowserFocusFilter,
     BrowserChangeSort,
     BrowserToggleRecursive,
-
     DownloadSelectPrevious,
     DownloadSelectNext,
     DownloadFocusTable,
@@ -154,13 +155,11 @@ pub enum CommandId {
     DownloadSelected,
     DownloadEnabled,
     DownloadClearLog,
-
     JobsSelectPrevious,
     JobsSelectNext,
     JobsStop,
     JobsRetry,
     JobsClear,
-
     MaintenanceSelectPrevious,
     MaintenanceSelectNext,
     MaintenanceRun,
@@ -179,20 +178,44 @@ impl CommandId {
         Self::Quit,
         Self::ShowHelp,
         Self::ShowPalette,
-        Self::OpenWorkbench,
-        Self::OpenModelOps,
-        Self::OpenParamBuilder,
-        Self::OpenChat,
-        Self::OpenBrowser,
-        Self::OpenDownload,
-        Self::OpenJobs,
-        Self::OpenMaintenance,
         Self::OpenStackCatalog,
-        Self::StackCatalogSelectPrevious,
-        Self::StackCatalogSelectNext,
+        Self::OpenChat,
+        Self::OpenJobs,
+        Self::OpenBench,
+        Self::OpenDownload,
+        Self::OpenBrowser,
+        Self::OpenMaintenance,
+        Self::OpenSystem,
+        Self::OpenLog,
+        Self::PreviousTab,
+        Self::NextTab,
+        Self::ToggleFocus,
+        Self::ReloadRouter,
+        Self::Tune,
+        Self::SidebarSelectPrevious,
+        Self::SidebarSelectNext,
+        Self::SidebarPreviousSection,
+        Self::SidebarNextSection,
+        Self::SidebarToggleSection,
+        Self::SidebarOpen,
+        Self::SidebarFilter,
         Self::StackCatalogRefresh,
+        Self::ModelLoad,
+        Self::ModelUnload,
         Self::StackCatalogForm,
         Self::StackCatalogCancel,
+        Self::BenchSelectPrevious,
+        Self::BenchSelectNext,
+        Self::BenchRun,
+        Self::BenchStop,
+        Self::BenchFocusFilter,
+        Self::BenchFocusList,
+        Self::BenchFocusEditor,
+        Self::BenchSaveScript,
+        Self::BenchReloadScript,
+        Self::BenchRestoreScript,
+        Self::ClearLog,
+        Self::OpenParamBuilder,
         Self::ParamBuilderToggleFocus,
         Self::ParamBuilderNextParam,
         Self::ParamBuilderPrevParam,
@@ -201,30 +224,6 @@ impl CommandId {
         Self::ParamBuilderImportEntry,
         Self::ParamBuilderOpenPresets,
         Self::ParamBuilderClearAll,
-        Self::PreviousTab,
-        Self::NextTab,
-        Self::WorkbenchSelectPrevious,
-        Self::WorkbenchSelectNext,
-        Self::WorkbenchFocusFilter,
-        Self::WorkbenchFocusTable,
-        Self::WorkbenchRefreshModels,
-        Self::WorkbenchLoadModel,
-        Self::WorkbenchUnloadModel,
-        Self::WorkbenchClearLog,
-        Self::WorkbenchCycleLayout,
-        Self::ModelOpsToggleMode,
-        Self::ModelOpsSelectPrevious,
-        Self::ModelOpsSelectNext,
-        Self::ModelOpsStart,
-        Self::ModelOpsStop,
-        Self::ModelOpsRefreshModels,
-        Self::ModelOpsFocusFilter,
-        Self::ModelOpsFocusTable,
-        Self::ModelOpsFocusEditor,
-        Self::ModelOpsSaveScript,
-        Self::ModelOpsReloadScript,
-        Self::ModelOpsRestoreScript,
-        Self::ModelOpsClearLog,
         Self::ChatCompose,
         Self::ChatSend,
         Self::ChatRefreshModels,
@@ -286,20 +285,44 @@ impl CommandId {
             Self::Quit => "global.quit",
             Self::ShowHelp => "global.show-help",
             Self::ShowPalette => "global.show-palette",
-            Self::OpenWorkbench => "global.open-workbench",
-            Self::OpenModelOps => "global.open-model-ops",
-            Self::OpenParamBuilder => "global.open-param-builder",
+            Self::OpenStackCatalog => "global.open-model",
             Self::OpenChat => "global.open-chat",
-            Self::OpenBrowser => "global.open-browser",
-            Self::OpenDownload => "global.open-download",
             Self::OpenJobs => "global.open-jobs",
+            Self::OpenBench => "global.open-bench",
+            Self::OpenDownload => "global.open-download",
+            Self::OpenBrowser => "global.open-browser",
             Self::OpenMaintenance => "global.open-maintenance",
-            Self::OpenStackCatalog => "global.open-stack-catalog",
-            Self::StackCatalogSelectPrevious => "stack-catalog.select-previous",
-            Self::StackCatalogSelectNext => "stack-catalog.select-next",
-            Self::StackCatalogRefresh => "stack-catalog.refresh",
-            Self::StackCatalogForm => "stack-catalog.form",
-            Self::StackCatalogCancel => "stack-catalog.cancel",
+            Self::OpenSystem => "global.open-system",
+            Self::OpenLog => "global.open-log",
+            Self::PreviousTab => "global.previous-view",
+            Self::NextTab => "global.next-view",
+            Self::ToggleFocus => "global.toggle-focus",
+            Self::ReloadRouter => "global.reload-router",
+            Self::Tune => "global.tune",
+            Self::SidebarSelectPrevious => "sidebar.select-previous",
+            Self::SidebarSelectNext => "sidebar.select-next",
+            Self::SidebarPreviousSection => "sidebar.previous-section",
+            Self::SidebarNextSection => "sidebar.next-section",
+            Self::SidebarToggleSection => "sidebar.toggle-section",
+            Self::SidebarOpen => "sidebar.open",
+            Self::SidebarFilter => "sidebar.filter",
+            Self::StackCatalogRefresh => "sidebar.refresh",
+            Self::ModelLoad => "sidebar.load-model",
+            Self::ModelUnload => "sidebar.unload-model",
+            Self::StackCatalogForm => "model.form",
+            Self::StackCatalogCancel => "model.cancel",
+            Self::BenchSelectPrevious => "bench.select-previous",
+            Self::BenchSelectNext => "bench.select-next",
+            Self::BenchRun => "bench.run",
+            Self::BenchStop => "bench.stop",
+            Self::BenchFocusFilter => "bench.focus-filter",
+            Self::BenchFocusList => "bench.focus-list",
+            Self::BenchFocusEditor => "bench.focus-editor",
+            Self::BenchSaveScript => "bench.save-script",
+            Self::BenchReloadScript => "bench.reload-script",
+            Self::BenchRestoreScript => "bench.restore-script",
+            Self::ClearLog => "log.clear",
+            Self::OpenParamBuilder => "global.open-param-builder",
             Self::ParamBuilderToggleFocus => "param-builder.toggle-focus",
             Self::ParamBuilderNextParam => "param-builder.next-param",
             Self::ParamBuilderPrevParam => "param-builder.prev-param",
@@ -308,30 +331,6 @@ impl CommandId {
             Self::ParamBuilderImportEntry => "param-builder.import-entry",
             Self::ParamBuilderOpenPresets => "param-builder.open-presets",
             Self::ParamBuilderClearAll => "param-builder.clear-all",
-            Self::PreviousTab => "global.previous-tab",
-            Self::NextTab => "global.next-tab",
-            Self::WorkbenchSelectPrevious => "workbench.select-previous",
-            Self::WorkbenchSelectNext => "workbench.select-next",
-            Self::WorkbenchFocusFilter => "workbench.focus-filter",
-            Self::WorkbenchFocusTable => "workbench.focus-table",
-            Self::WorkbenchRefreshModels => "workbench.refresh-models",
-            Self::WorkbenchLoadModel => "workbench.load-model",
-            Self::WorkbenchUnloadModel => "workbench.unload-model",
-            Self::WorkbenchClearLog => "workbench.clear-log",
-            Self::WorkbenchCycleLayout => "workbench.cycle-layout",
-            Self::ModelOpsToggleMode => "model-ops.toggle-mode",
-            Self::ModelOpsSelectPrevious => "model-ops.select-previous",
-            Self::ModelOpsSelectNext => "model-ops.select-next",
-            Self::ModelOpsStart => "model-ops.start",
-            Self::ModelOpsStop => "model-ops.stop",
-            Self::ModelOpsRefreshModels => "model-ops.refresh-models",
-            Self::ModelOpsFocusFilter => "model-ops.focus-filter",
-            Self::ModelOpsFocusTable => "model-ops.focus-table",
-            Self::ModelOpsFocusEditor => "model-ops.focus-editor",
-            Self::ModelOpsSaveScript => "model-ops.save-script",
-            Self::ModelOpsReloadScript => "model-ops.reload-script",
-            Self::ModelOpsRestoreScript => "model-ops.restore-script",
-            Self::ModelOpsClearLog => "model-ops.clear-log",
             Self::ChatCompose => "chat.compose",
             Self::ChatSend => "chat.send",
             Self::ChatRefreshModels => "chat.refresh-models",
@@ -480,22 +479,337 @@ pub static COMMANDS: &[CommandSpec] = &[
         ["commands", "search"]
     ),
     command!(
-        OpenWorkbench,
+        OpenStackCatalog,
         Global,
         "F1 / Alt+1",
-        "Workbench",
-        "Open Workbench tab",
+        "Model",
+        "Open the Model view (selected profile, task and result)",
+        true,
+        ["stack", "catalog", "profile", "task", "navigate", "switch"]
+    ),
+    command!(
+        OpenChat,
+        Global,
+        "F2 / Alt+2",
+        "Chat",
+        "Open the Chat view",
         true,
         ["navigate", "switch"]
     ),
     command!(
-        OpenModelOps,
+        OpenJobs,
         Global,
-        "F2 / Alt+2",
-        "Model Ops",
-        "Open Model Ops tab",
+        "F3 / Alt+3",
+        "Jobs",
+        "Open the Jobs view",
         true,
-        ["run", "bench", "navigate", "switch"]
+        ["history", "processes", "navigate", "switch"]
+    ),
+    command!(
+        OpenBench,
+        Global,
+        "F4 / Alt+4",
+        "Bench",
+        "Open the Bench view (bench scripts)",
+        true,
+        ["benchmark", "scripts", "navigate", "switch"]
+    ),
+    command!(
+        OpenDownload,
+        Global,
+        "F5 / Alt+5",
+        "Download",
+        "Open the Download view",
+        true,
+        ["hugging face", "navigate", "switch"]
+    ),
+    command!(
+        OpenBrowser,
+        Global,
+        "F6 / Alt+6",
+        "Model files",
+        "Open the GGUF file browser view",
+        true,
+        ["gguf", "inventory", "browser", "navigate", "switch"]
+    ),
+    command!(
+        OpenMaintenance,
+        Global,
+        "F7 / Alt+7",
+        "Maintenance",
+        "Open the Maintenance view",
+        true,
+        ["scripts", "navigate", "switch"]
+    ),
+    command!(
+        OpenSystem,
+        Global,
+        "F8 / Alt+8",
+        "System",
+        "Open the System view (GPU, memory, spill)",
+        true,
+        ["gpu", "vram", "ram", "monitor", "health", "navigate", "switch"]
+    ),
+    command!(
+        OpenLog,
+        Global,
+        "F9 / Alt+9",
+        "Log",
+        "Open the activity log view",
+        true,
+        ["activity", "messages", "errors", "navigate", "switch"]
+    ),
+    command!(
+        PreviousTab,
+        Global,
+        "Alt+←",
+        "Previous view",
+        "Show the previous view",
+        true,
+        ["left", "back", "tab"]
+    ),
+    command!(
+        NextTab,
+        Global,
+        "Alt+→",
+        "Next view",
+        "Show the next view",
+        true,
+        ["right", "forward", "tab"]
+    ),
+    command!(
+        ToggleFocus,
+        Global,
+        "Tab",
+        "Sidebar / pane",
+        "Move focus between the sidebar and the pane",
+        true,
+        ["focus", "switch", "table"]
+    ),
+    command!(
+        ReloadRouter,
+        Global,
+        "R",
+        "Reload router",
+        "Reload llama-swap configuration (evicts the resident model)",
+        false,
+        ["sighup", "llama-swap", "config"]
+    ),
+    command!(
+        Tune,
+        Global,
+        "t",
+        "Tune",
+        "Tune the selected model's serving flags with snapshot and revert",
+        false,
+        ["flags", "params", "llama-server", "yaml"]
+    ),
+    command!(
+        SidebarSelectPrevious,
+        Sidebar,
+        "↑ / k",
+        "Previous row",
+        "Sidebar: select previous model or job",
+        true,
+        ["up", "navigate"]
+    ),
+    command!(
+        SidebarSelectNext,
+        Sidebar,
+        "↓ / j",
+        "Next row",
+        "Sidebar: select next model or job",
+        true,
+        ["down", "navigate"]
+    ),
+    command!(
+        SidebarPreviousSection,
+        Sidebar,
+        "[",
+        "Previous section",
+        "Sidebar: jump to the previous section",
+        true,
+        ["models", "jobs"]
+    ),
+    command!(
+        SidebarNextSection,
+        Sidebar,
+        "]",
+        "Next section",
+        "Sidebar: jump to the next section",
+        true,
+        ["models", "jobs"]
+    ),
+    command!(
+        SidebarToggleSection,
+        Sidebar,
+        "Space",
+        "Collapse section",
+        "Sidebar: collapse or expand the current section",
+        true,
+        ["fold", "expand"]
+    ),
+    command!(
+        SidebarOpen,
+        Sidebar,
+        "Enter",
+        "Open",
+        "Sidebar: open the selected model's default view or the selected job",
+        true,
+        ["view", "chat", "task"]
+    ),
+    command!(
+        SidebarFilter,
+        Sidebar,
+        "/",
+        "Filter models",
+        "Sidebar: filter models by id or name",
+        true,
+        ["find", "search"]
+    ),
+    command!(
+        StackCatalogRefresh,
+        Sidebar,
+        "r",
+        "Refresh",
+        "Refresh manifests and llama-swap model state",
+        true,
+        ["reload", "sync", "models"]
+    ),
+    command!(
+        ModelLoad,
+        Sidebar,
+        "L",
+        "Load model",
+        "Load the selected model in llama-swap (evicts the resident model)",
+        true,
+        ["start", "serve", "swap"]
+    ),
+    command!(
+        ModelUnload,
+        Sidebar,
+        "U",
+        "Unload model",
+        "Unload the resident llama-swap model",
+        true,
+        ["stop", "release"]
+    ),
+    command!(
+        StackCatalogForm,
+        StackCatalog,
+        "f",
+        "Open task",
+        "Model: open Chat for language chat or compose a native task form",
+        true,
+        ["task", "form", "language", "media", "decisions", "chat"]
+    ),
+    command!(
+        StackCatalogCancel,
+        StackCatalog,
+        "c",
+        "Cancel task",
+        "Model: cancel the active foreground native task",
+        true,
+        ["stop", "cancel", "task"]
+    ),
+    command!(
+        BenchSelectPrevious,
+        Bench,
+        "↑ / k",
+        "Previous script",
+        "Bench: select previous bench script",
+        true,
+        ["up", "navigate"]
+    ),
+    command!(
+        BenchSelectNext,
+        Bench,
+        "↓ / j",
+        "Next script",
+        "Bench: select next bench script",
+        true,
+        ["down", "navigate"]
+    ),
+    command!(
+        BenchRun,
+        Bench,
+        "Ctrl+R / Enter / r",
+        "Run bench",
+        "Bench: run the selected bench script",
+        true,
+        ["start", "execute", "launch"]
+    ),
+    command!(
+        BenchStop,
+        Bench,
+        "Ctrl+S / s",
+        "Stop bench",
+        "Bench: stop the running bench script",
+        true,
+        ["terminate", "kill"]
+    ),
+    command!(
+        BenchFocusFilter,
+        Bench,
+        "Ctrl+F / /",
+        "Filter scripts",
+        "Bench: filter bench scripts",
+        true,
+        ["find", "search"]
+    ),
+    command!(
+        BenchFocusList,
+        Bench,
+        "Ctrl+J",
+        "Script list",
+        "Bench: leave the editor for the script list",
+        true,
+        ["list"]
+    ),
+    command!(
+        BenchFocusEditor,
+        Bench,
+        "Ctrl+U",
+        "Script editor",
+        "Bench: edit the selected bench script",
+        true,
+        ["edit"]
+    ),
+    command!(
+        BenchSaveScript,
+        Bench,
+        "Alt+P",
+        "Save script",
+        "Bench: save edited script snapshot",
+        true,
+        ["version", "write"]
+    ),
+    command!(
+        BenchReloadScript,
+        Bench,
+        "Alt+O",
+        "Reload script",
+        "Bench: reload script from disk",
+        true,
+        ["discard", "refresh"]
+    ),
+    command!(
+        BenchRestoreScript,
+        Bench,
+        "Alt+V",
+        "Restore script",
+        "Bench: restore a script snapshot",
+        true,
+        ["version", "history"]
+    ),
+    command!(
+        ClearLog,
+        Log,
+        "c",
+        "Clear log",
+        "Log: clear the activity log",
+        true,
+        ["output", "activity"]
     ),
     command!(
         OpenParamBuilder,
@@ -577,328 +891,6 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Reset every parameter and custom flag to unset",
         true,
         ["reset", "wipe"]
-    ),
-    command!(
-        OpenChat,
-        Global,
-        "F3 / Alt+3",
-        "Chat",
-        "Open Chat tab",
-        true,
-        ["navigate", "switch"]
-    ),
-    command!(
-        OpenBrowser,
-        Global,
-        "F4 / Alt+4",
-        "Model Browser",
-        "Open Model Browser tab",
-        true,
-        ["gguf", "inventory", "navigate", "switch"]
-    ),
-    command!(
-        OpenDownload,
-        Global,
-        "F5 / Alt+5",
-        "Download",
-        "Open Download tab",
-        true,
-        ["hugging face", "navigate", "switch"]
-    ),
-    command!(
-        OpenJobs,
-        Global,
-        "F6 / Alt+6",
-        "Jobs",
-        "Open Jobs tab",
-        true,
-        ["history", "processes", "navigate", "switch"]
-    ),
-    command!(
-        OpenMaintenance,
-        Global,
-        "F7 / Alt+7",
-        "Maintenance",
-        "Open Maintenance tab",
-        true,
-        ["scripts", "navigate", "switch"]
-    ),
-    command!(
-        OpenStackCatalog,
-        Global,
-        "F8 / Alt+8",
-        "Stack Catalog",
-        "Open Stack Catalog tab",
-        true,
-        [
-            "language",
-            "media",
-            "tts",
-            "decisions",
-            "profiles",
-            "navigate"
-        ]
-    ),
-    command!(
-        StackCatalogSelectPrevious,
-        StackCatalog,
-        "↑ / k",
-        "Previous profile",
-        "Stack Catalog: select previous profile",
-        true,
-        ["up"]
-    ),
-    command!(
-        StackCatalogSelectNext,
-        StackCatalog,
-        "↓ / j",
-        "Next profile",
-        "Stack Catalog: select next profile",
-        true,
-        ["down"]
-    ),
-    command!(
-        StackCatalogRefresh,
-        StackCatalog,
-        "r",
-        "Refresh catalog",
-        "Stack Catalog: refresh manifests",
-        true,
-        ["reload"]
-    ),
-    command!(
-        StackCatalogForm,
-        StackCatalog,
-        "f",
-        "Open native task",
-        "Stack Catalog: open Chat for language chat or compose a native task form",
-        true,
-        ["task", "form", "language", "chat", "media", "speech", "decision"]
-    ),
-    command!(
-        StackCatalogCancel,
-        StackCatalog,
-        "c",
-        "Cancel task",
-        "Stack Catalog: cancel the active foreground native task",
-        true,
-        ["stop", "cancel", "task"]
-    ),
-    command!(
-        PreviousTab,
-        Global,
-        "Alt+←",
-        "Previous tab",
-        "Navigate to previous tab",
-        true,
-        ["left", "back"]
-    ),
-    command!(
-        NextTab,
-        Global,
-        "Alt+→",
-        "Next tab",
-        "Navigate to next tab",
-        true,
-        ["right", "forward"]
-    ),
-    command!(
-        WorkbenchSelectPrevious,
-        Workbench,
-        "↑ / k",
-        "Previous model",
-        "Workbench: select previous model",
-        true,
-        ["up", "navigate"]
-    ),
-    command!(
-        WorkbenchSelectNext,
-        Workbench,
-        "↓ / j",
-        "Next model",
-        "Workbench: select next model",
-        true,
-        ["down", "navigate"]
-    ),
-    command!(
-        WorkbenchFocusFilter,
-        Workbench,
-        "Ctrl+F / /",
-        "Filter models",
-        "Workbench: focus model filter",
-        true,
-        ["find", "search"]
-    ),
-    command!(
-        WorkbenchFocusTable,
-        Workbench,
-        "Ctrl+J",
-        "Model table",
-        "Workbench: focus model table",
-        true,
-        ["list", "models"]
-    ),
-    command!(
-        WorkbenchRefreshModels,
-        Workbench,
-        "r",
-        "Refresh models",
-        "Workbench: refresh llama-swap models",
-        true,
-        ["reload", "sync"]
-    ),
-    command!(
-        WorkbenchLoadModel,
-        Workbench,
-        "Ctrl+R / Enter / l",
-        "Load model",
-        "Workbench: load selected llama-swap model",
-        true,
-        ["start", "serve"]
-    ),
-    command!(
-        WorkbenchUnloadModel,
-        Workbench,
-        "Ctrl+S / s",
-        "Unload model",
-        "Workbench: unload active llama-swap model",
-        true,
-        ["stop", "release"]
-    ),
-    command!(
-        WorkbenchClearLog,
-        Workbench,
-        "Ctrl+L",
-        "Clear log",
-        "Workbench: clear activity log",
-        true,
-        ["output"]
-    ),
-    command!(
-        WorkbenchCycleLayout,
-        Workbench,
-        "v",
-        "Cycle layout",
-        "Workbench: cycle view layout (dashboard, split, classic, bench, jobs, gpu)",
-        true,
-        ["view", "layout", "monitor", "telemetry", "gpu"]
-    ),
-    command!(
-        ModelOpsToggleMode,
-        ModelOps,
-        "Ctrl+M / m",
-        "Toggle mode",
-        "Model Ops: toggle run and bench mode",
-        true,
-        ["switch"]
-    ),
-    command!(
-        ModelOpsSelectPrevious,
-        ModelOps,
-        "↑ / k",
-        "Previous item",
-        "Model Ops: select previous model or script",
-        true,
-        ["up", "navigate"]
-    ),
-    command!(
-        ModelOpsSelectNext,
-        ModelOps,
-        "↓ / j",
-        "Next item",
-        "Model Ops: select next model or script",
-        true,
-        ["down", "navigate"]
-    ),
-    command!(
-        ModelOpsStart,
-        ModelOps,
-        "Ctrl+R / Enter / r",
-        "Start selected",
-        "Model Ops: load model or run bench script",
-        true,
-        ["serve", "execute", "launch"]
-    ),
-    command!(
-        ModelOpsStop,
-        ModelOps,
-        "Ctrl+S / s",
-        "Stop active",
-        "Model Ops: unload model or stop bench script",
-        true,
-        ["terminate", "kill"]
-    ),
-    command!(
-        ModelOpsRefreshModels,
-        ModelOps,
-        "r (run mode)",
-        "Refresh models",
-        "Model Ops: refresh llama-swap models",
-        true,
-        ["reload", "sync"]
-    ),
-    command!(
-        ModelOpsFocusFilter,
-        ModelOps,
-        "Ctrl+F / /",
-        "Filter items",
-        "Model Ops: focus model or script filter",
-        true,
-        ["find", "search"]
-    ),
-    command!(
-        ModelOpsFocusTable,
-        ModelOps,
-        "Ctrl+J",
-        "Item table",
-        "Model Ops: focus model or script table",
-        true,
-        ["list"]
-    ),
-    command!(
-        ModelOpsFocusEditor,
-        ModelOps,
-        "Ctrl+U",
-        "Script editor",
-        "Model Ops: focus script editor",
-        true,
-        ["edit", "bench"]
-    ),
-    command!(
-        ModelOpsSaveScript,
-        ModelOps,
-        "Alt+P",
-        "Save script",
-        "Model Ops: save edited script snapshot",
-        true,
-        ["version", "bench"]
-    ),
-    command!(
-        ModelOpsReloadScript,
-        ModelOps,
-        "Alt+O",
-        "Reload script",
-        "Model Ops: reload script from disk",
-        true,
-        ["discard", "bench"]
-    ),
-    command!(
-        ModelOpsRestoreScript,
-        ModelOps,
-        "Alt+V",
-        "Restore script",
-        "Model Ops: restore a script snapshot",
-        true,
-        ["version", "history", "bench"]
-    ),
-    command!(
-        ModelOpsClearLog,
-        ModelOps,
-        "Ctrl+L",
-        "Clear log",
-        "Model Ops: clear run log",
-        true,
-        ["output"]
     ),
     command!(
         ChatCompose,
@@ -1553,7 +1545,7 @@ mod tests {
 
     #[test]
     fn every_tab_owns_commands() {
-        for context in CommandContext::TABS {
+        for context in CommandContext::VIEWS {
             assert!(
                 COMMANDS.iter().any(|spec| spec.contexts.contains(&context)),
                 "{context} has no commands"
@@ -1593,10 +1585,10 @@ mod tests {
 
     #[test]
     fn palette_search_is_case_insensitive_and_matches_all_tokens() {
-        let results = search_commands(CommandContext::Workbench, "MODEL LoAd");
+        let results = search_commands(CommandContext::Sidebar, "MODEL LoAd");
         assert_eq!(
             results.first().map(|spec| spec.id),
-            Some(CommandId::WorkbenchLoadModel)
+            Some(CommandId::ModelLoad)
         );
         assert!(results.iter().all(|spec| {
             let searchable = format!(
@@ -1620,33 +1612,24 @@ mod tests {
 
     #[test]
     fn palette_search_uses_stable_catalog_order_for_ties() {
-        let results = search_all_commands("open tab");
+        let results = search_all_commands("open view");
         let navigation: Vec<_> = results
             .iter()
-            .filter(|spec| {
-                matches!(
-                    spec.id,
-                    CommandId::OpenWorkbench
-                        | CommandId::OpenModelOps
-                        | CommandId::OpenChat
-                        | CommandId::OpenBrowser
-                        | CommandId::OpenDownload
-                        | CommandId::OpenJobs
-                        | CommandId::OpenMaintenance
-                )
-            })
+            .filter(|spec| spec.id.as_str().starts_with("global.open-"))
             .map(|spec| spec.id)
             .collect();
         assert_eq!(
             navigation,
             vec![
-                CommandId::OpenWorkbench,
-                CommandId::OpenModelOps,
+                CommandId::OpenStackCatalog,
                 CommandId::OpenChat,
-                CommandId::OpenBrowser,
-                CommandId::OpenDownload,
                 CommandId::OpenJobs,
+                CommandId::OpenBench,
+                CommandId::OpenDownload,
+                CommandId::OpenBrowser,
                 CommandId::OpenMaintenance,
+                CommandId::OpenSystem,
+                CommandId::OpenLog,
             ]
         );
 

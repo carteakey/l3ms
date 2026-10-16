@@ -23,6 +23,9 @@ use crate::llama_swap::SwapModel;
 pub struct SwapYamlEntry {
     pub id: String,
     pub disabled: bool,
+    /// `unlisted: true`: served on request but hidden from `/v1/models`
+    /// (used for short alias entries such as `plat`).
+    pub unlisted: bool,
     /// First `-m` (or `--model`) path found in the entry's cmd block.
     pub model_path: Option<String>,
     /// Tasks inferred from active flags in the entry's `cmd` value.
@@ -94,6 +97,10 @@ pub fn parse_entries(text: &str) -> Vec<SwapYamlEntry> {
         entries.push(SwapYamlEntry {
             id: id.to_owned(),
             disabled: body.iter().any(|line| is_disabled_line(line)),
+            unlisted: body.iter().any(|line| {
+                indentation(line) == indentation(lines[index]) + 2
+                    && strip_yaml_inline_comment(line.trim()).trim() == "unlisted: true"
+            }),
             model_path: body.iter().find_map(|line| model_path(line)),
             tasks: inferred_tasks(body, indentation(lines[index])),
         });
@@ -577,6 +584,15 @@ fn shard_span(file_name: &str) -> Option<((usize, usize), usize)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unlisted_is_read_only_from_the_entry_level() {
+        let yaml = "models:\n  \"plat\":\n    unlisted: true # alias\n    cmd: |\n      llama-server -m /m.gguf\n  \"full\":\n    metadata:\n      unlisted: true\n    cmd: llama-server\n";
+        let entries = super::parse_entries(yaml);
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].unlisted);
+        assert!(!entries[1].unlisted);
+    }
+
     use super::*;
 
     const SAMPLE: &str = r#"apiKeys: []

@@ -2,7 +2,38 @@
 
 ## [Unreleased]
 
+### Changed (breaking workflow)
+- The TUI is now one workbench frame instead of eight fixed tabs: a toolbar row,
+  a sidebar (Models by lane with router state dots, then Jobs), one pane for the
+  current view, a message line and a status bar. `Tab` moves focus between the
+  sidebar and the pane; below 100 columns only the focused side is shown. L3MS
+  opens with the sidebar focused. See `docs/workbench-design.md`.
+- Views replace tabs, with new function keys: `F1` Model, `F2` Chat, `F3` Jobs,
+  `F4` Bench, `F5` Download, `F6` Model files, `F7` Maintenance, `F8` System,
+  `F9` Log (`Alt+1`–`Alt+9` likewise).
+- The Workbench and Model Ops tabs are removed. Their commands moved: model
+  selection, filter (`/`), refresh (`r`), load (`L`) and unload (`U`) to the
+  sidebar; bench scripts to the Bench view; GPU detail to the System view; the
+  Activity box to the Log view; its layouts (`v`, `1`–`6`) to views. A test maps
+  every former Workbench and Model Ops command to its new home.
+- Enter on a model opens it (Chat for a language chat profile, the task form
+  otherwise) and never loads it. Loading is `L`, which first names the model the
+  load would evict and needs a second `L` to confirm.
+- Jobs `s` no longer unloads the resident model when nothing else is running;
+  unloading is `U` in the sidebar.
+
+### Added
+- Status bar: resident model, VRAM and RAM gauges, CPU usage, the fullest of
+  `/home`, `/mnt/dev` and the models root, CPU governor and router endpoint, with
+  warning and critical thresholds kept in one tested table (`src/ui/statusbar.rs`).
+- Sidebar model rows show the newest bench decode rate for a llama-swap entry
+  whose `-m` GGUF path exactly matches a bench result, or "not benched".
+- Toolbar buttons come from the command registry; Reload router and Tune are
+  listed but dim until built (workbench plan step 2).
+
 ### Removed
+- Param Builder commands are hidden from the palette and help: their tab was
+  removed earlier and they did nothing. The Tune utility replaces them.
 - The layered stack-settings layer: `media_toolkit_root`, `decisions_toolkit_root`,
   `artifact_root`, `gpu_policy` and `task_defaults`, with `L3MS_MEDIA_TOOLKIT_ROOT`,
   `L3MS_DECISIONS_TOOLKIT_ROOT`, `L3MS_ARTIFACT_ROOT`, `L3MS_GPU_POLICY` and
@@ -11,7 +42,6 @@
   key still loads (unknown fields are ignored) and drops it on the next save.
 
 ### Changed
-- L3MS now opens on the Stack tab (the unified lane inventory with live router state).
 - Flatter, denser chrome: the boxed three-row tab strip is now a single row of
   numbered chips (selected tab filled), returning two rows to every screen, and
   the header shows the currently loaded model. Model and router states carry a

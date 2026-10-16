@@ -54,6 +54,121 @@ pub struct SystemTelemetrySnapshot {
     pub gpu: Option<GpuTelemetry>,
     pub memory: Option<SystemMemoryTelemetry>,
     pub server_io: Option<ServerIoTelemetry>,
+    pub host: HostTelemetry,
+}
+
+/// Local machine readings the router does not report: CPU time counters,
+/// the CPU frequency governor and free space on watched mounts.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HostTelemetry {
+    /// Aggregate `/proc/stat` CPU counters as (busy, total) jiffies. Usage is
+    /// the delta between two readings.
+    pub cpu_jiffies: Option<(u64, u64)>,
+    /// `scaling_governor` of cpu0.
+    pub governor: Option<String>,
+    pub disks: Vec<DiskFree>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiskFree {
+    /// The watched path, as configured (e.g. `/home`).
+    pub path: String,
+    pub free_bytes: u64,
+    pub total_bytes: u64,
+}
+
+impl DiskFree {
+    pub fn used_percent(&self) -> u64 {
+        if self.total_bytes == 0 {
+            return 0;
+        }
+        (self.total_bytes.saturating_sub(self.free_bytes) as u128 * 100 / self.total_bytes as u128)
+            as u64
+    }
+}
+
+/// CPU busy percentage between two `/proc/stat` readings.
+pub fn cpu_percent_between(previous: (u64, u64), current: (u64, u64)) -> Option<f64> {
+    let busy = current.0.checked_sub(previous.0)?;
+    let total = current.1.checked_sub(previous.1)?;
+    (total > 0).then(|| busy as f64 * 100.0 / total as f64)
+}
+
+/// Parse the aggregate `cpu` line of `/proc/stat` into (busy, total) jiffies.
+/// Idle and iowait count as not busy.
+pub fn parse_proc_stat_cpu(text: &str) -> Option<(u64, u64)> {
+    let line = text.lines().find(|line| line.starts_with("cpu "))?;
+    let values = line
+        .split_whitespace()
+        .skip(1)
+        .map(|value| value.parse::<u64>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    if values.len() < 4 {
+        return None;
+    }
+    // user nice system idle iowait irq softirq steal (guest time is already
+    // counted in user and nice).
+    let total: u64 = values.iter().take(8).sum();
+    let idle = values[3] + values.get(4).copied().unwrap_or(0);
+    Some((total.saturating_sub(idle), total))
+}
+
+/// Read host telemetry. `watched` paths that do not exist are skipped, and
+/// paths on the same filesystem are reported once.
+pub fn query_host_telemetry(watched: &[String]) -> HostTelemetry {
+    #[cfg(target_os = "linux")]
+    {
+        let cpu_jiffies = fs::read_to_string("/proc/stat")
+            .ok()
+            .and_then(|text| parse_proc_stat_cpu(&text));
+        let governor = fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        let mut seen = HashSet::new();
+        let mut disks = Vec::new();
+        for path in watched {
+            if let Some((fsid, disk)) = statvfs_free(path) {
+                if seen.insert(fsid) {
+                    disks.push(disk);
+                }
+            }
+        }
+        HostTelemetry {
+            cpu_jiffies,
+            governor,
+            disks,
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = watched;
+        HostTelemetry::default()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn statvfs_free(path: &str) -> Option<(u64, DiskFree)> {
+    use std::ffi::CString;
+    use std::os::unix::fs::MetadataExt;
+
+    let device = fs::metadata(path).ok()?.dev();
+    let c_path = CString::new(path).ok()?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `c_path` is a valid NUL-terminated string and `stat` is a
+    // properly sized, writable statvfs buffer.
+    if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } != 0 {
+        return None;
+    }
+    let block = stat.f_frsize as u64;
+    Some((
+        device,
+        DiskFree {
+            path: path.to_owned(),
+            free_bytes: stat.f_bavail as u64 * block,
+            total_bytes: stat.f_blocks as u64 * block,
+        },
+    ))
 }
 
 impl ResourceSnapshot {
@@ -443,6 +558,29 @@ pub fn parse_proc_io(text: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn proc_stat_cpu_counts_idle_and_iowait_as_not_busy() {
+        let text = "cpu  100 0 50 800 50 0 0 0 0 0\ncpu0 1 2 3 4 5 6 7 8 9 10\n";
+        assert_eq!(super::parse_proc_stat_cpu(text), Some((150, 1000)));
+        assert_eq!(super::parse_proc_stat_cpu("cpu0 1 2 3 4\n"), None);
+        assert_eq!(
+            super::cpu_percent_between((150, 1000), (250, 1200)),
+            Some(50.0)
+        );
+        assert_eq!(super::cpu_percent_between((150, 1000), (150, 1000)), None);
+    }
+
+    #[test]
+    fn host_telemetry_reports_one_disk_per_filesystem() {
+        let watched = vec!["/".to_owned(), "/".to_owned(), "/does/not/exist".to_owned()];
+        let host = super::query_host_telemetry(&watched);
+        assert!(host.disks.len() <= 1);
+        if let Some(disk) = host.disks.first() {
+            assert!(disk.free_bytes <= disk.total_bytes);
+            assert!(disk.used_percent() <= 100);
+        }
+    }
+
     use super::*;
 
     fn sample_processes() -> Vec<ProcessSample> {

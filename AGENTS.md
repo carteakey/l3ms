@@ -180,7 +180,9 @@ snapshot and candidates: `docs/decision-models.md`. The decision code (the forme
 
 ## Structure
 
-- `src/app.rs`: Ratatui layout, keybindings, workflows, and process supervision
+- `src/app.rs`: TUI state, keybindings, views, workflows, and process supervision
+- `src/ui/`: workbench shell (frame layout, sidebar, toolbar, status bar and its
+  thresholds); draws plain data handed over by `app.rs`
 - `src/cli.rs`: launcher + interactive CLI (`--run`, `--bench`, `--list`)
 - `src/param_registry.rs`: curated `llama-server` flag table (control kinds,
   categories, house presets) for the Param Builder tab

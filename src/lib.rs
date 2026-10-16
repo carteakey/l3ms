@@ -27,3 +27,4 @@ pub mod swap_yaml;
 pub mod telemetry;
 pub mod text_buffer;
 pub mod theme;
+pub mod ui;
