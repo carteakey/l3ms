@@ -28,6 +28,10 @@
   warning and critical thresholds kept in one tested table (`src/ui/statusbar.rs`).
 - Sidebar model rows show the newest bench decode rate for a llama-swap entry
   whose `-m` GGUF path exactly matches a bench result, or "not benched".
+- Router state (sidebar dots, status bar, the load warning) refreshes every 5 s
+  from `GET /v1/models`, which never loads a model, so swaps by other clients
+  show up; the router is authoritative for the resident model. Background
+  refreshes leave the message line alone and log a failure once.
 - Toolbar buttons come from the command registry; Reload router and Tune are
   listed but dim until built (workbench plan step 2).
 

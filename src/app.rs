@@ -97,6 +97,10 @@ const EVENTS_PER_TICK: usize = 128;
 const MAX_PROCESS_LINE_BYTES: usize = 16 * 1024;
 const MAX_CHAT_PREVIEW_BYTES: usize = 64 * 1024;
 const TELEMETRY_INTERVAL: Duration = Duration::from_secs(1);
+/// Router state refresh. `GET /v1/models` never loads a model, so polling it is
+/// safe; other clients swap models, and the sidebar and the load warning must
+/// not go stale.
+const MODELS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const DOWNLOAD_PAGE_SIZE: usize = 50;
 const DOWNLOAD_ESTIMATE_TIMEOUT: Duration = Duration::from_secs(180);
 const DOWNLOAD_DISK_TIMEOUT: Duration = Duration::from_secs(3);
@@ -1150,6 +1154,11 @@ struct App {
     /// Sidebar model filter (`/`).
     model_filter: String,
     loading_models: bool,
+    models_last_started: Option<Instant>,
+    /// The pending refresh was asked for (startup, `r`), so its result is
+    /// reported on the message line.
+    models_refresh_announced: bool,
+    models_refresh_failing: bool,
     model_action_pending: bool,
     loaded_model_id: Option<String>,
 
@@ -1339,6 +1348,9 @@ impl App {
             models: Vec::new(),
             model_filter: String::new(),
             loading_models: false,
+            models_last_started: None,
+            models_refresh_announced: false,
+            models_refresh_failing: false,
             model_action_pending: false,
             loaded_model_id: None,
             bench_scripts: Vec::new(),
@@ -1456,7 +1468,7 @@ impl App {
         app.refresh_bench_rates();
         app.ensure_visible_model_selection();
         if refresh_models_on_start {
-            app.refresh_models();
+            app.refresh_models_quietly();
         }
         Ok(app)
     }
@@ -1465,6 +1477,12 @@ impl App {
         while !self.should_quit {
             self.drain_background_events();
             self.refresh_telemetry_if_due();
+            if self
+                .models_last_started
+                .is_none_or(|started| started.elapsed() >= MODELS_REFRESH_INTERVAL)
+            {
+                self.refresh_models_quietly();
+            }
             terminal.draw(|frame| self.draw(frame))?;
             if event::poll(Duration::from_millis(100))? {
                 if let Event::Key(key) = event::read()? {
@@ -1494,8 +1512,18 @@ impl App {
         if self.loading_models {
             return;
         }
-        self.loading_models = true;
         self.status = "Refreshing llama-swap models…".into();
+        self.models_refresh_announced = true;
+        self.refresh_models_quietly();
+    }
+
+    /// Refresh router state without touching the status line.
+    fn refresh_models_quietly(&mut self) {
+        if self.loading_models {
+            return;
+        }
+        self.loading_models = true;
+        self.models_last_started = Some(Instant::now());
         let sender = self.sender.clone();
         thread::spawn(move || {
             let result = SwapClient::from_env()
@@ -1667,22 +1695,28 @@ impl App {
                     match result {
                         Ok(models) => {
                             self.models = models;
-                            if self.loaded_model_id.is_none() {
-                                self.loaded_model_id = self
-                                    .models
-                                    .iter()
-                                    .find(|model| model.state == "loaded")
-                                    .map(|model| model.id.clone());
-                            }
-                            if self.view == View::Model {
+                            // The router is authoritative: other clients load
+                            // and unload models too.
+                            self.loaded_model_id = self
+                                .models
+                                .iter()
+                                .find(|model| model.state == "loaded")
+                                .map(|model| model.id.clone());
+                            if std::mem::take(&mut self.models_refresh_announced) {
                                 self.status = format!("llama-swap: {} model(s)", self.models.len());
                             }
+                            self.models_refresh_failing = false;
                         }
                         Err(error) => {
-                            if self.view == View::Model {
+                            // Background polls report a failure once, not every tick.
+                            let announced = std::mem::take(&mut self.models_refresh_announced);
+                            if announced {
                                 self.status = "llama-swap unavailable".into();
                             }
-                            self.push_log(format!("Model refresh failed: {error}"));
+                            if announced || !self.models_refresh_failing {
+                                self.push_log(format!("Model refresh failed: {error}"));
+                            }
+                            self.models_refresh_failing = true;
                         }
                     }
                 }
@@ -13771,5 +13805,46 @@ mod tests {
             .unwrap();
         assert!(app.status.contains("not a llama-swap model"));
         assert!(!app.model_action_pending);
+    }
+
+    #[test]
+    fn background_router_refresh_tracks_other_clients_without_touching_status() {
+        let fixture = AppFixture::new();
+        let mut app = fixture.app();
+        // Let the fixture's own startup refresh settle first.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.loading_models && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+            app.drain_background_events();
+        }
+        app.loaded_model_id = Some("ours".into());
+        app.status = "press L again to confirm".into();
+        app.loading_models = true;
+        app.sender
+            .send(BackgroundEvent::Models(Ok(vec![
+                test_chat_model("ours", "unloaded", false),
+                test_chat_model("someone-elses", "loaded", false),
+            ])))
+            .unwrap();
+        app.drain_background_events();
+        assert_eq!(app.loaded_model_id.as_deref(), Some("someone-elses"));
+        assert_eq!(app.status, "press L again to confirm");
+
+        app.loading_models = true;
+        for _ in 0..3 {
+            app.loading_models = true;
+            app.sender
+                .send(BackgroundEvent::Models(Err("router down".into())))
+                .unwrap();
+            app.drain_background_events();
+        }
+        assert_eq!(app.status, "press L again to confirm");
+        assert_eq!(
+            app.log
+                .iter()
+                .filter(|line| line.contains("router down"))
+                .count(),
+            1
+        );
     }
 }
