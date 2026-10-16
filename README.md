@@ -423,6 +423,12 @@ The workbench is one frame (see [workbench design](docs/workbench-design.md)):
   resident model is selected.
   Entries marked `unlisted: true` in `llama-swap.yaml` (aliases) are hidden like
   the router hides them. The **Jobs** section lists runs newest first.
+  Rows take one line (the bench rate right-aligned); the selected row adds a
+  detail line. Entries with their own `proxy:` (ComfyUI, audio.cpp) are listed
+  under `engines`, and media profiles show their engine's state.
+- **Model view** (`F1`): the selected profile's yaml name and description, server
+  build (the `vendor/` checkout behind its macro), GGUF file and size, notable
+  flags, idle TTL, tasks and matching bench runs.
 - **Pane**: the current view. `F1`–`F9` (or `Alt+1`–`Alt+9`) open Model, Chat,
   Jobs, Bench, Download, Model files, Maintenance, System and Log.
 - **Message line**: the latest status and the keys for where focus is.
