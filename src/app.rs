@@ -1091,6 +1091,10 @@ enum BackgroundEvent {
         load: bool,
         result: Result<String, String>,
     },
+    RouterReload {
+        job_id: u64,
+        result: Result<String, String>,
+    },
     BrowserScan(Result<Vec<GgufFile>, String>),
     ChatConnected {
         request_id: u64,
@@ -1254,6 +1258,8 @@ struct App {
     jobs_collapsed: bool,
     /// Profile id awaiting a second `L` to confirm a model load.
     load_armed: Option<String>,
+    /// Set after the first `R`; a second `R` reloads the router.
+    reload_armed: bool,
     /// Catalog index whose Chat opens once the pending Chat connection
     /// (a model listing, never a load) succeeds.
     chat_handoff_pending: Option<usize>,
@@ -1447,6 +1453,7 @@ impl App {
             models_collapsed: false,
             jobs_collapsed: false,
             load_armed: None,
+            reload_armed: false,
             chat_handoff_pending: None,
             bench_rates: HashMap::new(),
             unlisted_models: HashSet::new(),
@@ -1773,6 +1780,22 @@ impl App {
                             self.push_log(error);
                         }
                     }
+                }
+                BackgroundEvent::RouterReload { job_id, result } => {
+                    self.model_action_pending = false;
+                    match result {
+                        Ok(message) => {
+                            self.finish_job(job_id, 0);
+                            self.status = message.clone();
+                            self.push_log(message);
+                        }
+                        Err(error) => {
+                            self.finish_job(job_id, 1);
+                            self.status = "Router reload not confirmed · see Log".into();
+                            self.push_log(error);
+                        }
+                    }
+                    self.refresh_models();
                 }
                 BackgroundEvent::BrowserScan(result) => {
                     self.browser_scanning = false;
@@ -2162,6 +2185,10 @@ impl App {
         if self.load_armed.is_some() && !(key.code == KeyCode::Char('L') && self.sidebar_focused) {
             self.load_armed = None;
             self.status = "Load cancelled".into();
+        }
+        if self.reload_armed && key.code != KeyCode::Char('R') {
+            self.reload_armed = false;
+            self.status = "Reload cancelled".into();
         }
         if !self.is_script_reload_shortcut(key) {
             self.script_reload_armed = None;
@@ -3418,7 +3445,8 @@ impl App {
             }
             NextTab => self.open_view(View::from_index(self.view.index() + 1)),
             ToggleFocus => self.toggle_focus(),
-            ReloadRouter | Tune => {}
+            ReloadRouter => self.reload_router_command(),
+            Tune => {}
             SidebarSelectPrevious => self.move_sidebar_selection(-1),
             SidebarSelectNext => self.move_sidebar_selection(1),
             SidebarPreviousSection | SidebarNextSection => {
@@ -4405,6 +4433,71 @@ impl App {
         }
         self.load_armed = None;
         self.begin_model_action(model_id, true);
+    }
+
+    /// Reload the router (SIGHUP). The first press names what the reload
+    /// evicts and preloads; a second `R` sends the signal and a job tracks
+    /// the confirmation. `model_action_pending` also blocks Load/Unload.
+    fn reload_router_command(&mut self) {
+        if self.model_action_pending {
+            self.status = "A llama-swap action is already in progress".into();
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        if self.direct_native_job.is_some() || self.direct_native_admission_closed {
+            self.status =
+                "Finish or recover foreground native work before reloading the router".into();
+            return;
+        }
+        let resident = self.loaded_model_id.clone();
+        if !self.reload_armed {
+            let loading = self
+                .models
+                .iter()
+                .find(|model| model.model_state().is_loading())
+                .map(|model| model.id.clone());
+            let preload = fs::read_to_string(self.root.join("llama-swap.yaml"))
+                .map(|yaml| crate::swap_yaml::startup_preload(&yaml))
+                .unwrap_or_default();
+            let evicts = match (&resident, &loading) {
+                (Some(id), _) => format!("evicts {id}"),
+                (None, Some(id)) => format!("interrupts the load of {id}"),
+                (None, None) => "nothing is resident".into(),
+            };
+            let then = if preload.is_empty() {
+                String::new()
+            } else {
+                format!(" · then preloads {}", preload.join(", "))
+            };
+            self.status = format!("Reload router? {evicts}{then} · press R again to confirm");
+            self.reload_armed = true;
+            return;
+        }
+        self.reload_armed = false;
+        self.model_action_pending = true;
+        self.status = "Reloading router…".into();
+        let job_id = self.job_history.begin(
+            "llama-swap".into(),
+            "router-reload".into(),
+            vec!["llama-swap".into(), "reload".into()],
+            "run".into(),
+            String::new(),
+        );
+        self.jobs_state.select(Some(0));
+        self.persist_jobs("router reload start");
+        let sender = self.sender.clone();
+        thread::spawn(move || {
+            let result = SwapClient::from_env()
+                .and_then(|client| {
+                    crate::swap_yaml::reload_router_confirmed(
+                        &client,
+                        resident.as_deref(),
+                        Duration::from_secs(30),
+                    )
+                })
+                .map_err(|error| format!("{error:#}"));
+            let _ = sender.send(BackgroundEvent::RouterReload { job_id, result });
+        });
     }
 
     /// The llama-swap model id of the selected sidebar profile, when the
@@ -14016,7 +14109,10 @@ mod tests {
 
         // Toolbar keys work from the sidebar; unbuilt utilities say so.
         key(&mut app, KeyCode::Char('R'));
-        assert!(app.status.contains("not built yet"), "{}", app.status);
+        assert!(app.status.contains("press R again"), "{}", app.status);
+        key(&mut app, KeyCode::Char('j'));
+        assert!(!app.reload_armed);
+        assert!(app.status.contains("Reload cancelled"), "{}", app.status);
         key(&mut app, KeyCode::Char('h'));
         assert_eq!(app.view, View::System);
         assert!(!app.sidebar_focused);
@@ -14182,6 +14278,25 @@ mod tests {
             .unwrap();
         assert!(!app.sidebar_focused);
         assert_eq!(app.view, View::Download);
+    }
+
+    #[test]
+    fn reload_router_arms_names_the_eviction_and_refuses_during_actions() {
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        let mut app = fixture.app();
+        app.loaded_model_id = Some("resident-one".into());
+        app.reload_router_command();
+        assert!(app.reload_armed);
+        assert!(app.status.contains("evicts resident-one"), "{}", app.status);
+        assert!(app.status.contains("press R again"), "{}", app.status);
+        assert!(!app.model_action_pending);
+
+        app.reload_armed = false;
+        app.model_action_pending = true;
+        app.reload_router_command();
+        assert!(!app.reload_armed);
+        assert!(app.status.contains("already in progress"), "{}", app.status);
     }
 
     #[test]

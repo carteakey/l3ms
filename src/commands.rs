@@ -592,7 +592,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         "R",
         "Reload router",
         "Reload llama-swap configuration (evicts the resident model)",
-        false,
+        true,
         ["sighup", "llama-swap", "config"]
     ),
     command!(

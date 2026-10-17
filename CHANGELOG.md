@@ -45,8 +45,17 @@
   from `GET /v1/models`, which never loads a model, so swaps by other clients
   show up; the router is authoritative for the resident model. Background
   refreshes leave the message line alone and log a failure once.
-- Toolbar buttons come from the command registry; Reload router and Tune are
-  listed but dim until built (workbench plan step 2).
+- Toolbar buttons come from the command registry; Tune is listed but dim until
+  built (workbench plan step 2).
+- Reload router (`R` in the sidebar, or the palette): the first press names the
+  resident model it evicts and the `hooks.on_startup.preload` model it starts, a
+  second `R` sends SIGHUP and runs as a Jobs entry. Any other key cancels. The
+  job succeeds once the router answers with the resident model gone, and fails
+  if the router journal reports `failed to reload config` (the old config keeps
+  serving then). The preview uses the cached router listing; llama-swap's
+  `/running` exposes no in-flight request count, so none is shown. It is blocked
+  during Load/Unload and foreground native work. `l3ms do reload-router` and
+  registry-level preconditions are deferred.
 - `media-models/qwen_image_21.py` gained reference-image conditioning and a swappable
   encoder: `--ref-image PATH` (repeatable, up to 16) stages the file into ComfyUI's
   `models/input/` under a content-hashed name and feeds `TextEncodeQwenImage21`'s

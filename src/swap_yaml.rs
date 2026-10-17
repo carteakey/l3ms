@@ -539,6 +539,113 @@ pub fn reload_router() -> Result<usize> {
     Ok(signalled)
 }
 
+/// Model ids under `hooks: on_startup: preload:` — loaded after every start
+/// and every reload of the router.
+pub fn startup_preload(text: &str) -> Vec<String> {
+    let mut in_hooks = false;
+    let mut in_preload = false;
+    let mut ids = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        if indent == 0 {
+            in_hooks = trimmed == "hooks:";
+            in_preload = false;
+        } else if in_hooks && trimmed == "preload:" {
+            in_preload = true;
+        } else if in_preload {
+            let Some(item) = trimmed.strip_prefix("- ") else {
+                in_preload = false;
+                continue;
+            };
+            ids.push(item.trim().trim_matches('"').trim_matches('\'').to_owned());
+        }
+    }
+    ids
+}
+
+/// Journal cursor before a reload, so only lines written after the signal are
+/// scanned. `None` when the journal is unreadable; the reload then relies on
+/// the router listing alone.
+fn journal_cursor() -> Option<String> {
+    let output = Command::new("journalctl")
+        .args(["--user", "-u", "llama-swap.service", "-n", "0", "--show-cursor"])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("-- cursor: "))
+        .map(|cursor| cursor.trim().to_owned())
+}
+
+/// First router log line after `cursor` that reports a failed reload.
+fn journal_reload_failure(cursor: &str) -> Option<String> {
+    let output = Command::new("journalctl")
+        .args([
+            "--user",
+            "-u",
+            "llama-swap.service",
+            "-o",
+            "cat",
+            "--no-pager",
+            "--after-cursor",
+            cursor,
+        ])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find(|line| line.contains("failed to reload config"))
+        .map(|line| line.trim().to_owned())
+}
+
+/// SIGHUP the router, then confirm it took effect. A failed reload only logs
+/// a warning while the old config keeps serving, so the journal is checked for
+/// `failed to reload config`; success is the previously resident model leaving
+/// the router listing (a reload evicts it) while `/v1/models` keeps answering.
+/// Returns a one-line summary naming the signal that confirmed it.
+pub fn reload_router_confirmed(
+    client: &crate::llama_swap::SwapClient,
+    resident: Option<&str>,
+    timeout: std::time::Duration,
+) -> Result<String> {
+    let cursor = journal_cursor();
+    let signalled = reload_router()?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if let Some(line) = cursor.as_deref().and_then(journal_reload_failure) {
+            bail!("router rejected the new config and kept the old one: {line}");
+        }
+        if let Ok(models) = client.list_models() {
+            let evicted = resident.is_none_or(|id| {
+                !models
+                    .iter()
+                    .any(|model| model.id == id && model.model_state().is_loaded())
+            });
+            if evicted {
+                return Ok(format!(
+                    "Router reloaded ({signalled} process signalled) · {}",
+                    if resident.is_some() {
+                        "resident model evicted, router answering"
+                    } else {
+                        "router answering; nothing was resident"
+                    }
+                ));
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!(
+                "reload signalled but not confirmed within {}s: the resident model is still loaded; check `journalctl --user -u llama-swap`",
+                timeout.as_secs()
+            );
+        }
+    }
+}
+
 /// Match a top-level (exactly 2-space indented, non-comment) entry key line
 /// under `models:` and return its unquoted id. Model entries are mappings,
 /// so the key must end with a bare colon — scalar children like
@@ -649,6 +756,15 @@ fn shard_span(file_name: &str) -> Option<((usize, usize), usize)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn startup_preload_lists_the_hook_ids() {
+        let yaml = "models:\n  a:\n    preload:\n      - \"not-this\"\n\
+                    hooks:\n  # note\n  on_startup:\n    preload:\n      - \"plat\"\n      - other\n\
+                    groups:\n  g: {}\n";
+        assert_eq!(startup_preload(yaml), vec!["plat", "other"]);
+        assert!(startup_preload("models: {}\n").is_empty());
+    }
+
     #[test]
     fn entry_facts_come_from_entry_level_keys_and_the_cmd_block() {
         let yaml = "models:\n  \"m\":\n    name: \"Model M\"\n    description: 'A model' # note\n    ttl: 3600\n    metadata:\n      name: nested\n    cmd: |\n      ${server}\n      -m /m.gguf -c 4096\n  \"engine\":\n    cmd: >-\n      engine --port ${PORT}\n    proxy: http://127.0.0.1:${PORT}\n";
