@@ -48,9 +48,10 @@ run_probe() {
   # Inspect what layers were offloaded from log
   grep -aoE 'offloaded [0-9]+/[0-9]+ layers to CUDA|CUDA0 model buffer size = [^,]+|llm_load_tensors: [a-z0-9_ ]+ = [0-9.]+' "$log" | head -n 5 || true
 
-  # Run quick benchmark: 2 warmups, then 2 measured probes (1 code, 1 story)
+  # Record to summary TSV
+  local offload_info=$(grep -aoE 'offloaded [0-9]+/[0-9]+ layers to CUDA|CUDA0 model buffer size = [^,]+' "$log" | head -n 1 | tr '\t' ' ' || echo "unknown")
   python3 -c "
-import urllib.request, json, time
+import urllib.request, json, time, sys
 url = 'http://127.0.0.1:$PORT/v1/chat/completions'
 
 def send(prompt, max_tokens):
@@ -63,13 +64,21 @@ def send(prompt, max_tokens):
         ms = max(t.get('predicted_ms', 1), 1)
         return n / ms * 1000.0
 
-# warmup
-send('Count from 1 to 20.', 32)
-send('Count from 1 to 20.', 32)
+try:
+    # warmup
+    send('Count from 1 to 20.', 64)
+    send('Count from 1 to 20.', 64)
 
-t_code = send('Refactor a Python function that reads JSON with open() into a pathlib implementation. Add useful exception handling and return typed data. Answer with code only.', 192)
-t_story = send('Write a restrained 180-word scene about a radio operator receiving a transmission from an abandoned polar station.', 192)
-print(f'   PROBE RESULTS: code = {t_code:.2f} t/s, story = {t_story:.2f} t/s, mean = {(t_code+t_story)/2:.2f} t/s')
+    t_code = send('Refactor a Python function that reads JSON with open() into a pathlib implementation. Add useful exception handling and return typed data. Answer with code only.', 192)
+    t_story = send('Write a restrained 180-word scene about a radio operator receiving a transmission from an abandoned polar station.', 192)
+    mean = (t_code + t_story) / 2.0
+    print(f'   PROBE RESULTS: code = {t_code:.2f} t/s, story = {t_story:.2f} t/s, mean = {mean:.2f} t/s')
+    with open('$LOGDIR/fit-summary.tsv', 'a') as f:
+        f.write(f'$label\t$vram\t$offload_info\t{t_code:.2f}\t{t_story:.2f}\t{mean:.2f}\n')
+except Exception as e:
+    print(f'   PROBE ERROR: {e}')
+    with open('$LOGDIR/fit-summary.tsv', 'a') as f:
+        f.write(f'$label\t$vram\t$offload_info\tERROR\tERROR\tERROR\n')
 "
   kill $srv_pid 2>/dev/null || true
   wait $srv_pid 2>/dev/null || true
@@ -77,13 +86,32 @@ print(f'   PROBE RESULTS: code = {t_code:.2f} t/s, story = {t_story:.2f} t/s, me
   sleep 3
 }
 
-# Test 16k context layer ladder
+# Initialize summary TSV
+echo -e "Label\tVRAM\tOffload\tCode_ts\tStory_ts\tMean_ts" > "$LOGDIR/fit-summary.tsv"
+
+echo "Running system environment check..."
+bash "$REPO/bench-models/bench-env.sh" || true
+
+echo "=== 1. 16k Context: Placement Ladder & Fit-Target Sweep ==="
 run_probe "16k-ncmoe46" -ngl 99 -ncmoe 46 -c 16384 -b 2048 -ub 512 -fa on --jinja -ctk q8_0 -ctv q8_0 -t 10 --threads-batch 12 --lazy-mode on --no-warmup || true
 run_probe "16k-ncmoe45" -ngl 99 -ncmoe 45 -c 16384 -b 2048 -ub 512 -fa on --jinja -ctk q8_0 -ctv q8_0 -t 10 --threads-batch 12 --lazy-mode on --no-warmup || true
 run_probe "16k-ncmoe44" -ngl 99 -ncmoe 44 -c 16384 -b 2048 -ub 512 -fa on --jinja -ctk q8_0 -ctv q8_0 -t 10 --threads-batch 12 --lazy-mode on --no-warmup || true
 run_probe "16k-fit512" --fit on --fit-target 512 -c 16384 -b 2048 -ub 512 -fa on --jinja -ctk q8_0 -ctv q8_0 -t 10 --threads-batch 12 --lazy-mode on --no-warmup || true
+run_probe "16k-fit256" --fit on --fit-target 256 -c 16384 -b 2048 -ub 512 -fa on --jinja -ctk q8_0 -ctv q8_0 -t 10 --threads-batch 12 --lazy-mode on --no-warmup || true
+run_probe "16k-fit128" --fit on --fit-target 128 -c 16384 -b 2048 -ub 512 -fa on --jinja -ctk q8_0 -ctv q8_0 -t 10 --threads-batch 12 --lazy-mode on --no-warmup || true
 
-# Test 64k context (production gold config)
-run_probe "64k-fit512" --fit on --fit-target 512 -c 65536 -b 4096 -ub 1024 -fa on --jinja -ctk q8_0 -ctv q8_0 -t 10 --threads-batch 12 --lazy-mode on --no-warmup || true
-run_probe "64k-ncmoe46" -ngl 99 -ncmoe 46 -c 65536 -b 4096 -ub 1024 -fa on --jinja -ctk q8_0 -ctv q8_0 -t 10 --threads-batch 12 --lazy-mode on --no-warmup || true
+echo "=== 2. 32k Context: Placement Ladder & Fit-Target Sweep ==="
+run_probe "32k-ncmoe46" -ngl 99 -ncmoe 46 -c 32768 -b 2048 -ub 512 -fa on --jinja -ctk q8_0 -ctv q8_0 -t 10 --threads-batch 12 --lazy-mode on --no-warmup || true
+run_probe "32k-ncmoe45" -ngl 99 -ncmoe 45 -c 32768 -b 2048 -ub 512 -fa on --jinja -ctk q8_0 -ctv q8_0 -t 10 --threads-batch 12 --lazy-mode on --no-warmup || true
+run_probe "32k-ncmoe44" -ngl 99 -ncmoe 44 -c 32768 -b 2048 -ub 512 -fa on --jinja -ctk q8_0 -ctv q8_0 -t 10 --threads-batch 12 --lazy-mode on --no-warmup || true
+run_probe "32k-fit512" --fit on --fit-target 512 -c 32768 -b 2048 -ub 512 -fa on --jinja -ctk q8_0 -ctv q8_0 -t 10 --threads-batch 12 --lazy-mode on --no-warmup || true
+run_probe "32k-fit256" --fit on --fit-target 256 -c 32768 -b 2048 -ub 512 -fa on --jinja -ctk q8_0 -ctv q8_0 -t 10 --threads-batch 12 --lazy-mode on --no-warmup || true
+run_probe "32k-fit128" --fit on --fit-target 128 -c 32768 -b 2048 -ub 512 -fa on --jinja -ctk q8_0 -ctv q8_0 -t 10 --threads-batch 12 --lazy-mode on --no-warmup || true
+
+echo ""
+echo "=================================================================="
+echo "FINAL RESULTS SUMMARY"
+echo "=================================================================="
+column -t -s $'\t' "$LOGDIR/fit-summary.tsv"
+
 

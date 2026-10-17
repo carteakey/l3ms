@@ -1,0 +1,20 @@
+0.00.000.226 I srv  llama_server: initializing ...
+0.00.078.696 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.00.078.931 W srv  llama_server: security: no API key is set and CORS allows all origins (see https://github.com/ggml-org/llama.cpp/pull/25655)
+0.00.080.962 I srv    load_model: loading model '/home/kchauhan/models/qwen38-flash-next/AD-4.27bpw-Q4_K_M-M64/Qwen3.8-Flash-Next-AD-4.27bpw-Q4_K_M-M64-00001-of-00033.gguf'
+0.04.665.857 W llama_model_loader: tensor overrides to CPU are used with mmap enabled - consider using --load-mode none for better performance
+0.07.640.862 I cmn          init: llama threadpool init, n_threads = 10
+0.07.826.582 I srv    load_model: initializing, n_slots = 1, n_ctx_slot = 65536, kv_unified = 'false'
+0.07.836.595 I srv  llama_server: model loaded
+0.07.836.601 I srv  llama_server: listening on http://127.0.0.1:8025
+0.08.010.827 I slot get_availabl: id  0 | task -1 | selected slot by LRU, t_last = -1
+0.08.010.883 I slot launch_slot_: id  0 | task 0 | processing task, is_child = 0
+0.18.522.695 I slot print_timing: id  0 | task 0 | n_gen =    100, tg =  12.43 t/s, tg_3s =  12.55 t/s
+0.21.524.994 I slot print_timing: id  0 | task 0 | n_gen =    137, tg =  12.40 t/s, tg_3s =  12.32 t/s
+0.24.588.763 I slot print_timing: id  0 | task 0 | n_gen =    175, tg =  12.40 t/s, tg_3s =  12.40 t/s
+0.25.982.820 I slot print_timing: id  0 | task 0 | prompt eval time =    2544.86 ms /    67 tokens (   37.98 ms per token,    26.33 tokens per second)
+0.25.982.823 I slot print_timing: id  0 | task 0 |        eval time =   15427.06 ms /   192 tokens (   80.77 ms per token,    12.38 tokens per second)
+0.25.982.824 I slot print_timing: id  0 | task 0 |       total time =   17971.92 ms /   259 tokens
+0.25.982.825 I slot print_timing: id  0 | task 0 |    graphs reused =        189
+0.25.982.880 I slot      release: id  0 | task 0 | stop processing: n_tokens = 258, truncated = 0
+Received second interrupt, terminating immediately.

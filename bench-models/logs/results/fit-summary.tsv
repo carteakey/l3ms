@@ -1,0 +1,10 @@
+Label	VRAM	Offload	Code_ts	Story_ts	Mean_ts
+16k-ncmoe46	9075 MiB	unknown	8.25	8.89	8.57
+16k-fit512	10743 MiB	unknown	8.53	8.04	8.29
+16k-fit256	11137 MiB	unknown	9.08	9.52	9.30
+16k-fit128	11137 MiB	unknown	10.04	9.62	9.83
+32k-ncmoe46	11449 MiB	unknown	9.81	9.25	9.53
+32k-ncmoe44	11448 MiB	unknown	13.87	13.29	13.58
+32k-fit512	10622 MiB	unknown	15.63	15.09	15.36
+32k-fit256	11038 MiB	unknown	15.58	15.80	15.69
+32k-fit128	11308 MiB	unknown	15.52	15.50	15.51

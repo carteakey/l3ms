@@ -1,0 +1,12 @@
+0.00.000.305 I srv  llama_server: initializing ...
+0.00.096.197 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.00.096.422 W srv  llama_server: security: no API key is set and CORS allows all origins (see https://github.com/ggml-org/llama.cpp/pull/25655)
+0.00.098.358 I srv    load_model: loading model '/home/kchauhan/models/qwen38-flash-next/AD-4.27bpw-Q4_K_M-M64/Qwen3.8-Flash-Next-AD-4.27bpw-Q4_K_M-M64-00001-of-00033.gguf'
+0.04.477.381 W llama_model_loader: tensor overrides to CPU are used with mmap enabled - consider using --load-mode none for better performance
+0.07.150.405 I cmn          init: llama threadpool init, n_threads = 10
+0.07.291.489 I srv    load_model: initializing, n_slots = 1, n_ctx_slot = 65536, kv_unified = 'false'
+0.07.294.888 W srv          init: chat template supports preserving reasoning, it is enabled by default (may use more tokens, disable via --no-reasoning-preserve)
+0.07.294.896 I srv  llama_server: model loaded
+0.07.294.900 I srv  llama_server: listening on http://127.0.0.1:8025
+0.24.669.881 I slot get_availabl: id  0 | task -1 | selected slot by LRU, t_last = -1
+0.24.669.929 I slot launch_slot_: id  0 | task 0 | processing task, is_child = 0

@@ -35,6 +35,9 @@ engine route over a new executor; see `docs/migration/runtime-policy.md`.
   against CPU governor, RAM speed, available memory, and thermals.
 - Treat keyboard control as first-class; mouse workflows are optional.
 - Preserve existing files by default for downloads unless explicitly overridden.
+- Adult (NSFW) prompt text, per-render verdicts and experiment write-ups live in the
+  sibling `~/repos/l2m2-nsfw` checkout, which depends on this tree through `L2M2_ROOT`.
+  Keep explicit prompt strings and adult grading notes out of this repository.
 - Keep version snapshots for both model configs and scripts before writes.
 
 ## llama-swap Operations

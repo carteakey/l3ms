@@ -320,6 +320,21 @@
       "force_download": false,
       "max_workers": 2,
       "description": "DiffusionGemma 26B-A4B IT GGUF (Q4_K_M)"
+    },
+    {
+      "enabled": true,
+      "repo_id": "jialinyyzz/humanizer",
+      "local_dir": "/home/kchauhan/models/jialinyyzz/humanizer",
+      "allow_patterns": [
+        "humanizer-12b-Q6_K.gguf",
+        "humanizer-12b-Q8_0.gguf",
+        "prompt_format.json"
+      ],
+      "ignore_patterns": [],
+      "revision": "",
+      "force_download": false,
+      "max_workers": 2,
+      "description": "Humanizer 12B (Gemma 4 fine-tune text-rewriting model)"
     }
   ]
 }

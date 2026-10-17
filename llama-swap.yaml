@@ -453,17 +453,18 @@ models:
       --fit-max-tokens
       --port ${PORT}
 
-  "qwen38-flash-next-plat-iq3s":
-    name: "Qwen3.8-Flash-Next Plat IQ3_S (Strata v0.1.44.1, ISTA-DASLab IQ3_S, 128k ctx, 46-75 t/s)"
-    description: "Platinum Full-Fidelity: Strata v0.1.44.1 with ISTA-DASLab IQ3_S (highest precision quant, matching full 16-bit model performance) + dynamic expert VRAM caching + native MTP speculative decoding + K8V4 KV cache + 128k context. See docs/strata-evaluation-internal.md."
-    unlisted: true
-    cmd: |
-      taskset -c ${cpu_range} ${strata_python}
-      ${strata_server}
-      --engine strata
-      --config ${strata_iq3s_config}
-      --fit-max-tokens
-      --port ${PORT}
+  # [retired 2026-10-15 — IQ3_S files deleted from disk to reclaim 78 GB SSD; primary daily driver remains IQ3_XXS plat]
+  # "qwen38-flash-next-plat-iq3s":
+  #   name: "Qwen3.8-Flash-Next Plat IQ3_S (Strata v0.1.44.1, ISTA-DASLab IQ3_S, 128k ctx, 46-75 t/s)"
+  #   description: "Platinum Full-Fidelity: Strata v0.1.44.1 with ISTA-DASLab IQ3_S (highest precision quant, matching full 16-bit model performance) + dynamic expert VRAM caching + native MTP speculative decoding + K8V4 KV cache + 128k context. See docs/strata-evaluation-internal.md."
+  #   unlisted: true
+  #   cmd: |
+  #     taskset -c ${cpu_range} ${strata_python}
+  #     ${strata_server}
+  #     --engine strata
+  #     --config ${strata_iq3s_config}
+  #     --fit-max-tokens
+  #     --port ${PORT}
 
   ## ===========================================================================
   ## Qwen3.8 Flash Next (177B: 125B-A6B MoE + 51B ngram table on SSD)
@@ -626,29 +627,30 @@ models:
   #    --prio 2 --no-warmup
 # [retired 2026-08-31 — model files deleted from disk, see docs/bench-results.md archive]
 
-  "qwen3-6-mtp-q6":
-    name: "Qwen3.6-35B-A3B MTP (UD-Q6_K)"
-    env:
-      - "GGML_CUDA_GRAPH_OPT=1"
-    cmd: |
-      taskset -c ${cpu_range} ${llama_server}
-      -m /home/kchauhan/models/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q6_K.gguf
-      --alias "unsloth/Qwen3.6-35B-A3B MTP (Q6_K)"
-      --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.00
-      --presence-penalty 0.0 --repeat-penalty 1.0
-      --host 0.0.0.0 --port ${PORT}
-      --jinja
-      --chat-template-kwargs '{"preserve_thinking": true}'
-      --ctx-size 131072 --n-predict 32768
-      --fit on --fit-ctx 131072 --fit-target 1536
-      -ctk q8_0 -ctv q8_0
-      --load-mode mlock
-      --threads 10 --threads-batch 12
-      --flash-attn on
-      --spec-type draft-mtp --spec-draft-n-max 2
-      --parallel 1
-      --batch-size 1024 --ubatch-size 512
-      --prio 2 --no-warmup
+  # [retired 2026-10-15 — Qwen3.6-35B-A3B files deleted from disk to reclaim 28 GiB]
+  # "qwen3-6-mtp-q6":
+  #   name: "Qwen3.6-35B-A3B MTP (UD-Q6_K)"
+  #   env:
+  #     - "GGML_CUDA_GRAPH_OPT=1"
+  #   cmd: |
+  #     taskset -c ${cpu_range} ${llama_server}
+  #     -m /home/kchauhan/models/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q6_K.gguf
+  #     --alias "unsloth/Qwen3.6-35B-A3B MTP (Q6_K)"
+  #     --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.00
+  #     --presence-penalty 0.0 --repeat-penalty 1.0
+  #     --host 0.0.0.0 --port ${PORT}
+  #     --jinja
+  #     --chat-template-kwargs '{"preserve_thinking": true}'
+  #     --ctx-size 131072 --n-predict 32768
+  #     --fit on --fit-ctx 131072 --fit-target 1536
+  #     -ctk q8_0 -ctv q8_0
+  #     --load-mode mlock
+  #     --threads 10 --threads-batch 12
+  #     --flash-attn on
+  #     --spec-type draft-mtp --spec-draft-n-max 2
+  #     --parallel 1
+  #     --batch-size 1024 --ubatch-size 512
+  #     --prio 2 --no-warmup
 
   "qwen3-8-27b-iq3-xxs":
     name: "Qwen3.8-27B UD-IQ3_XXS (long-context + quality, fit-target 128)"

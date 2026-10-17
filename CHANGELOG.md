@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Added
+- `media-models/qwen_image_21.py` gained reference-image conditioning and a swappable
+  encoder: `--ref-image PATH` (repeatable, up to 16) stages the file into ComfyUI's
+  `models/input/` under a content-hashed name and feeds `TextEncodeQwenImage21`'s
+  `image_1..16` slots, so the text encoder sees the reference and its VAE latents ride
+  through every sampling step; the node's own `latent` output (sized to the first
+  reference) then replaces `EmptyLatentImage`. `--ref-resolution` sets the reference
+  pixel budget (default 1024, `0` keeps each reference's own size). Also `--extra-lora
+  NAME[:STRENGTH]` (repeatable, chained through `LoraLoaderModelOnly`), `--te NAME`
+  to swap the text encoder for A/B, and `--url`.
+- The same generator now speaks llama-swap's language: with no `--url` and no
+  `L2M2_COMFY_URL` it targets `$LLAMA_SWAP_URL/comfyui` and authenticates with
+  `Authorization: Bearer $LLAMA_SWAP_API_KEY`, because ComfyUI is the router's
+  `comfyui_auto` engine. GPU exclusivity is therefore skipped in router mode (the
+  router arbitrates the swap itself); direct-ComfyUI runs still refuse a busy card.
+  The no-reference, no-LoRA workflow graph is byte-for-byte the stock one.
+
 ### Removed
 - The layered stack-settings layer: `media_toolkit_root`, `decisions_toolkit_root`,
   `artifact_root`, `gpu_policy` and `task_defaults`, with `L3MS_MEDIA_TOOLKIT_ROOT`,

@@ -96,6 +96,7 @@ download_models() {
     command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required"
 
     mkdir -p "${YUE_MODEL_DIR}"
+    export HF_HUB_ENABLE_HF_TRANSFER=1
     local venv="${YUE_ROOT}/.venv"
     local hf_cli=""
     if [[ -x "${venv}/bin/hf" ]]; then
@@ -128,7 +129,7 @@ download_models() {
 
         log "Downloading ${repo}@${revision} file ${repo_file} -> ${target}"
         mkdir -p "$(dirname "${target}")"
-        if ! ${hf_cli} download "${repo}" "${repo_file}" --revision "${revision}" --local-dir "$(dirname "${target}")" >/dev/null; then
+        if ! ${hf_cli} download "${repo}" "${repo_file}" --revision "${revision}" --local-dir "$(dirname "${target}")" < /dev/null >/dev/null; then
             die "Failed to download ${repo_file} from ${repo}"
         fi
 
