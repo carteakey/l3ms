@@ -384,7 +384,13 @@ def wait_for_image(prompt_id: str, timeout: float) -> dict[str, str]:
     started = time.monotonic()
     last_notice = started
     while time.monotonic() - started < timeout:
-        history = request_json("/history/" + quote(prompt_id), timeout=30)
+        try:
+            # While the router is still loading the image model ComfyUI can sit on a request
+            # for minutes; one slow poll is not a failure, the deadline is.
+            history = request_json("/history/" + quote(prompt_id), timeout=30)
+        except OSError:
+            time.sleep(5)
+            continue
         if isinstance(history, dict):
             record = history.get(prompt_id)
             if isinstance(record, dict):
@@ -584,7 +590,10 @@ def main() -> int:
             edit_name=edit_name,
             denoise=args.denoise,
         )
-        response = request_json("/prompt", {"prompt": workflow}, timeout=60)
+        # The router holds this open while it evicts the resident model and loads the image
+        # model (measured cold: 246s before /system_stats answered), so the accept-wait is
+        # budgeted like a boot rather than like a request.
+        response = request_json("/prompt", {"prompt": workflow}, timeout=max(60.0, args.warm_timeout))
         if not isinstance(response, dict) or not response.get("prompt_id"):
             raise RuntimeError(f"ComfyUI did not accept the workflow: {response}")
         prompt_id = str(response["prompt_id"])

@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Changed (media lane)
+
+- `media-models/qwen_image_21.py` budgets the router's cold start instead of reading it as a
+  dead engine: the health check and the `/prompt` POST now wait like a boot (measured 246 s
+  before `/system_stats` answered cold; the router holds `/prompt` open while it swaps — 5m45s
+  observed, and a client that hangs up leaves a `499`, which is not an engine failure), and a
+  slow `/history` round-trip is retried because the deadline, not one request, is the contract.
+  `AGENTS.md` and `docs/migration/media-through-llama-swap.md` record the ComfyUI-through-the-
+  router facts: cold boot, no LLM request while a batch runs (it evicts ComfyUI mid-render),
+  dotted autogrow reference ids (`images.image_1`), input dir `vendor/ComfyUI/input/`, and
+  `systemctl --user` for the router unit.
+
 ### Changed (breaking workflow)
 - The TUI is now one workbench frame instead of eight fixed tabs: a toolbar row,
   a sidebar (Models by lane with router state dots, then Jobs), one pane for the

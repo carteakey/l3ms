@@ -106,3 +106,26 @@ scripts remain toolkit-only, with no root fallback. See [runtime policy](runtime
 HeartMuLa and H3 audio use `audiocpp_auto` on this branch, subject to the live
 acceptance gate above. Blender headless is the only lane left in the window;
 CUDA Nagi/Laya decisions and H3 video were retired from the root workbench.
+
+## Driving ComfyUI through the router (measured 2026-10-15 / 2026-10-17)
+
+- **Endpoint**: `http://127.0.0.1:8080/comfyui` (`/history`, `/prompt`, `/view` …), with
+  `Authorization: Bearer $LLAMA_SWAP_API_KEY` when the running service reports a key. Both NSFW
+  and SFW media-models generators resolve this from the service's own command line so the key
+  never has to be copied.
+- **Cold boot is ~246 s**: journal shows spawn → ComfyUI health check → router `ready` 32 s
+  apart, then the first model load costs more. A client with a fixed 30-60 s timeout reads a
+  healthy-but-loading engine as dead. Budget the boot in the health check (`--warm-timeout`), in
+  the `/prompt` POST (the router holds it open while it swaps — measured 5m45s, and a client that
+  hangs up leaves a `499`, which is *not* an engine failure) and in the history poll (a slow
+  round-trip is tolerated; the deadline is the contract).
+- **Every request you make while a batch runs costs the batch**: requesting another model
+  (`/v1/chat/completions` for the agent's own vision tier) evicts ComfyUI mid-render. Run a batch
+  as one blocking call with no LLM request in between, and expect ~1-2 min for the language tier
+  to reload afterwards.
+- **Graph facts**: `TextEncodeQwenImage21` reference slots arrive as dotted ids
+  (`images.image_1`); its latent output is sized to the first reference (`resolution: 0` keeps
+  the reference's own size, so the frame follows the anchor); its input directory is
+  `vendor/ComfyUI/input/`. LoRAs chain as `LoraLoaderModelOnly` after the base UNet — on
+  `int8_convrot` builds each merge requantizes, so chain order is not numerically neutral and an
+  extra LoRA must be proven to change output by md5, not by opinion.

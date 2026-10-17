@@ -15,8 +15,20 @@ their old guides are kept in `docs/migration/history/`.
   LLMs and embeddings. `llama-swap.yaml` is the serving source of truth.
 - Media: `media-runtimes.json`, `media-models/`, `workflows/` and `maintenance/`.
   Images and LTX/YuE2 run on ComfyUI (`comfyui_auto`), speech and music on audio.cpp
-  (`audiocpp_auto`), both through llama-swap. Setup guides are in `docs/`
-  (start at `docs/media-models.md`).
+  (`audiocpp_auto`), both through llama-swap. Setup guides are in `docs/` (start at
+  `docs/media-models.md`).
+- ComfyUI through the router, measured 2026-10-15/17 (details:
+  `docs/migration/media-through-llama-swap.md`):
+  - Cold start is **~246 s** (`--check` and any client must budget the boot, not a request).
+  - Requesting `/comfyui/` evicts the resident language/vision model — including the one this
+    agent runs on. A batch is **one blocking call**: no LLM request until it returns, or the
+    router swaps ComfyUI off the card mid-batch (`NVRM: Out of memory`).
+  - `TextEncodeQwenImage21` autogrow reference slots are addressed by their **dotted finalized
+    id** (`"images.image_1"`); bare `image_1` is an unexpected kwarg and a nested dict arrives
+    empty (`_io.py:1183/2022` + `execution.py:295`).
+  - ComfyUI's input dir is `vendor/ComfyUI/input/`, not `models/input/`.
+  - `systemctl is-active llama-swap.service` needs `--user` — without it a running unit reads
+    as `inactive`.
 - Decisions: `decision-runtimes.json`, `decision-models/` and `suites/`. The
   preferred local models run on llama.cpp through llama-swap; the Python runner
   serves the CPU and hosted profiles (`docs/decision-toolkit.md`).
