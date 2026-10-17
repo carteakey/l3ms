@@ -23,8 +23,21 @@ use crate::llama_swap::SwapModel;
 pub struct SwapYamlEntry {
     pub id: String,
     pub disabled: bool,
+    /// `unlisted: true`: served on request but hidden from `/v1/models`
+    /// (used for short alias entries such as `plat`).
+    pub unlisted: bool,
     /// First `-m` (or `--model`) path found in the entry's cmd block.
     pub model_path: Option<String>,
+    /// Entry-level `name:` and `description:` scalars.
+    pub name: Option<String>,
+    pub description: Option<String>,
+    /// Entry-level `ttl:` in seconds.
+    pub ttl: Option<u64>,
+    /// The entry declares its own `proxy:`: a non-OpenAI engine (ComfyUI,
+    /// audio.cpp) that llama-swap swaps like a model.
+    pub proxy: bool,
+    /// The entry's `cmd` with block indentation removed (first `cmd` only).
+    pub cmd: String,
     /// Tasks inferred from active flags in the entry's `cmd` value.
     ///
     /// The current serving convention is `--embedding`/`--embeddings` for
@@ -72,6 +85,33 @@ pub(crate) fn entry_span(lines: &[&str], id: &str) -> Option<(usize, usize)> {
     None
 }
 
+/// The top-level `macros:` map (`"name": "value"` lines), values unquoted.
+pub fn parse_macros(text: &str) -> std::collections::HashMap<String, String> {
+    let mut macros = std::collections::HashMap::new();
+    let mut inside = false;
+    for line in text.lines() {
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() || trimmed.trim_start().starts_with('#') {
+            continue;
+        }
+        if !trimmed.starts_with(' ') {
+            inside = trimmed == "macros:";
+            continue;
+        }
+        if !inside || indentation(trimmed) != 2 {
+            continue;
+        }
+        if let Some((key, value)) = trimmed.trim().split_once(':') {
+            let key = unquote_yaml_scalar(key.trim());
+            let value = unquote_yaml_scalar(strip_yaml_inline_comment(value.trim()).trim());
+            if !key.is_empty() && !value.is_empty() {
+                macros.insert(key.to_owned(), value.to_owned());
+            }
+        }
+    }
+    macros
+}
+
 /// Parse every active (non-commented) top-level model entry.
 pub fn parse_entries(text: &str) -> Vec<SwapYamlEntry> {
     let lines: Vec<&str> = text.lines().collect();
@@ -94,7 +134,20 @@ pub fn parse_entries(text: &str) -> Vec<SwapYamlEntry> {
         entries.push(SwapYamlEntry {
             id: id.to_owned(),
             disabled: body.iter().any(|line| is_disabled_line(line)),
+            unlisted: body.iter().any(|line| {
+                indentation(line) == indentation(lines[index]) + 2
+                    && strip_yaml_inline_comment(line.trim()).trim() == "unlisted: true"
+            }),
             model_path: body.iter().find_map(|line| model_path(line)),
+            name: entry_scalar(body, indentation(lines[index]), "name"),
+            description: entry_scalar(body, indentation(lines[index]), "description"),
+            ttl: entry_scalar(body, indentation(lines[index]), "ttl")
+                .and_then(|value| value.parse().ok()),
+            proxy: entry_scalar(body, indentation(lines[index]), "proxy").is_some(),
+            cmd: entry_commands(body, indentation(lines[index]))
+                .into_iter()
+                .next()
+                .unwrap_or_default(),
             tasks: inferred_tasks(body, indentation(lines[index])),
         });
         index = end;
@@ -131,7 +184,26 @@ fn inferred_tasks(body: &[&str], entry_indent: usize) -> Vec<String> {
 /// The parser deliberately handles this narrow YAML/shell subset without
 /// treating comments, metadata, descriptions, or quoted option values as
 /// executable flags.
-fn cmd_has_embedding_flag(body: &[&str], entry_indent: usize) -> bool {
+/// A one-line scalar `key: value` directly under the entry, unquoted.
+fn entry_scalar(body: &[&str], entry_indent: usize, key: &str) -> Option<String> {
+    body.iter().find_map(|line| {
+        if indentation(line) != entry_indent + 2 {
+            return None;
+        }
+        let (name, value) = line.trim().split_once(':')?;
+        if name.trim() != key {
+            return None;
+        }
+        let value = unquote_yaml_scalar(strip_yaml_inline_comment(value.trim()).trim());
+        (!value.is_empty()).then(|| value.to_owned())
+    })
+}
+
+/// Every `cmd` value of an entry, as shell text. Literal and folded blocks
+/// keep their lines; malformed block indentation yields no command, since it
+/// is not executable input.
+fn entry_commands(body: &[&str], entry_indent: usize) -> Vec<String> {
+    let mut commands = Vec::new();
     let mut index = 0;
     while index < body.len() {
         let line = body[index];
@@ -156,35 +228,35 @@ fn cmd_has_embedding_flag(body: &[&str], entry_indent: usize) -> bool {
                     break;
                 }
                 if !next.trim().is_empty() {
-                    // Malformed block indentation is not executable input.
                     // Check indentation before slicing so a shorter prefix
                     // followed by UTF-8 text cannot panic at a byte boundary.
                     if indentation(next) < content_indent {
-                        return false;
+                        return commands;
                     }
                     let Some(content) = next.get(content_indent..) else {
-                        return false;
+                        return commands;
                     };
                     command.push_str(content);
                 }
                 command.push('\n');
                 index += 1;
             }
-            if shell_has_embedding_flag(&command) {
-                return true;
-            }
+            commands.push(command);
         } else {
             // YAML permits one-line `cmd` scalars as well as literal blocks.
             // Remove only an outer YAML quote pair; shell-level quotes inside
             // the value remain visible to the shell token scanner.
-            let command = unquote_yaml_scalar(strip_yaml_inline_comment(value));
-            if shell_has_embedding_flag(command) {
-                return true;
-            }
+            commands.push(unquote_yaml_scalar(strip_yaml_inline_comment(value)).to_owned());
             index += 1;
         }
     }
-    false
+    commands
+}
+
+fn cmd_has_embedding_flag(body: &[&str], entry_indent: usize) -> bool {
+    entry_commands(body, entry_indent)
+        .iter()
+        .any(|command| shell_has_embedding_flag(command))
 }
 
 fn cmd_value(line: &str, expected_indent: usize) -> Option<(usize, &str)> {
@@ -519,7 +591,7 @@ fn model_path(line: &str) -> Option<String> {
 
 /// Size in bytes of the model file at `raw`, expanding GGUF shard sets so a
 /// `-00001-of-00033.gguf` entry reports the full shard set size.
-fn disk_size(raw: &str) -> Option<u64> {
+pub fn disk_size(raw: &str) -> Option<u64> {
     let path = Path::new(raw.trim());
     if let Some(((start, end), count)) = shard_span(&path.file_name()?.to_string_lossy()) {
         if count > 1 {
@@ -577,6 +649,41 @@ fn shard_span(file_name: &str) -> Option<((usize, usize), usize)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn entry_facts_come_from_entry_level_keys_and_the_cmd_block() {
+        let yaml = "models:\n  \"m\":\n    name: \"Model M\"\n    description: 'A model' # note\n    ttl: 3600\n    metadata:\n      name: nested\n    cmd: |\n      ${server}\n      -m /m.gguf -c 4096\n  \"engine\":\n    cmd: >-\n      engine --port ${PORT}\n    proxy: http://127.0.0.1:${PORT}\n";
+        let entries = super::parse_entries(yaml);
+        assert_eq!(entries[0].name.as_deref(), Some("Model M"));
+        assert_eq!(entries[0].description.as_deref(), Some("A model"));
+        assert_eq!(entries[0].ttl, Some(3600));
+        assert!(!entries[0].proxy);
+        assert_eq!(entries[0].cmd, "${server}\n-m /m.gguf -c 4096\n");
+        assert!(entries[1].proxy);
+        assert_eq!(entries[1].name, None);
+        assert!(entries[1].cmd.starts_with("engine --port"));
+    }
+
+    #[test]
+    fn macros_are_read_from_the_top_level_map_only() {
+        let yaml = "macros:\n  # binaries\n  \"llama_server\":  \"${env.L3MS_ROOT}/vendor/llama.cpp/build/bin/llama-server\"\n  cpu_range: 0-11 # pinned\nmodels:\n  \"m\":\n    cmd: x\n";
+        let macros = super::parse_macros(yaml);
+        assert_eq!(macros.len(), 2);
+        assert_eq!(
+            macros.get("llama_server").map(String::as_str),
+            Some("${env.L3MS_ROOT}/vendor/llama.cpp/build/bin/llama-server")
+        );
+        assert_eq!(macros.get("cpu_range").map(String::as_str), Some("0-11"));
+    }
+
+    #[test]
+    fn unlisted_is_read_only_from_the_entry_level() {
+        let yaml = "models:\n  \"plat\":\n    unlisted: true # alias\n    cmd: |\n      llama-server -m /m.gguf\n  \"full\":\n    metadata:\n      unlisted: true\n    cmd: llama-server\n";
+        let entries = super::parse_entries(yaml);
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].unlisted);
+        assert!(!entries[1].unlisted);
+    }
+
     use super::*;
 
     const SAMPLE: &str = r#"apiKeys: []

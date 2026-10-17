@@ -2,7 +2,51 @@
 
 ## [Unreleased]
 
+### Changed (breaking workflow)
+- The TUI is now one workbench frame instead of eight fixed tabs: a toolbar row,
+  a sidebar (Models by lane with router state dots, then Jobs), one pane for the
+  current view, a message line and a status bar. `Tab` moves focus between the
+  sidebar and the pane; below 100 columns only the focused side is shown. L3MS
+  opens with the sidebar focused. The Download view keeps `Tab` for its fields;
+  `Esc` on its table returns to the sidebar. See `docs/workbench-design.md`.
+- Views replace tabs, with new function keys: `F1` Model, `F2` Chat, `F3` Jobs,
+  `F4` Bench, `F5` Download, `F6` Model files, `F7` Maintenance, `F8` System,
+  `F9` Log (`Alt+1`–`Alt+9` likewise).
+- The Workbench and Model Ops tabs are removed. Their commands moved: model
+  selection, filter (`/`), refresh (`r`), load (`L`) and unload (`U`) to the
+  sidebar; bench scripts to the Bench view; GPU detail to the System view; the
+  Activity box to the Log view; its layouts (`v`, `1`–`6`) to views. A test maps
+  every former Workbench and Model Ops command to its new home.
+- Enter on a model opens it (Chat for a language chat profile, the task form
+  otherwise) and never loads it. Loading is `L`, which first names the model the
+  load would evict and needs a second `L` to confirm; any other key cancels.
+- Jobs `s` no longer unloads the resident model when nothing else is running;
+  unloading is `U` in the sidebar.
+
 ### Added
+- Status bar: resident model, VRAM and RAM gauges, CPU usage, the fullest of
+  `/home`, `/mnt/dev` and the models root, CPU governor and router endpoint, with
+  warning and critical thresholds kept in one tested table (`src/ui/statusbar.rs`).
+- Sidebar model rows show the newest bench decode rate for a llama-swap entry
+  whose `-m` GGUF path exactly matches a bench result (and, when several entries
+  share that GGUF, whose bench key names the entry), or "not benched".
+- On launch the sidebar selects the resident model once the router reports it.
+- The Model view shows what a profile is: the yaml entry's name and description,
+  the server build (the `vendor/` checkout behind its `${…_server}` macro), GGUF
+  file and size, notable flags (ctx, ngl, ncmoe, KV types, draft), Strata
+  config, idle TTL, tasks, and up to five matching bench runs. Native task and
+  result panels appear only for profiles that run foreground tasks.
+- Sidebar rows take one line (rate right-aligned, `off` for disabled entries);
+  the selected row adds a detail line. Engine entries (`proxy:` in
+  `llama-swap.yaml`: ComfyUI, audio.cpp) get their own `engines` group, and media
+  profiles show their engine's router state.
+- The message line clips a long status instead of dropping its key hints.
+- Router state (sidebar dots, status bar, the load warning) refreshes every 5 s
+  from `GET /v1/models`, which never loads a model, so swaps by other clients
+  show up; the router is authoritative for the resident model. Background
+  refreshes leave the message line alone and log a failure once.
+- Toolbar buttons come from the command registry; Reload router and Tune are
+  listed but dim until built (workbench plan step 2).
 - `media-models/qwen_image_21.py` gained reference-image conditioning and a swappable
   encoder: `--ref-image PATH` (repeatable, up to 16) stages the file into ComfyUI's
   `models/input/` under a content-hashed name and feeds `TextEncodeQwenImage21`'s
@@ -20,6 +64,8 @@
   The no-reference, no-LoRA workflow graph is byte-for-byte the stock one.
 
 ### Removed
+- Param Builder commands are hidden from the palette and help: their tab was
+  removed earlier and they did nothing. The Tune utility replaces them.
 - The layered stack-settings layer: `media_toolkit_root`, `decisions_toolkit_root`,
   `artifact_root`, `gpu_policy` and `task_defaults`, with `L3MS_MEDIA_TOOLKIT_ROOT`,
   `L3MS_DECISIONS_TOOLKIT_ROOT`, `L3MS_ARTIFACT_ROOT`, `L3MS_GPU_POLICY` and
@@ -28,7 +74,6 @@
   key still loads (unknown fields are ignored) and drops it on the next save.
 
 ### Changed
-- L3MS now opens on the Stack tab (the unified lane inventory with live router state).
 - Flatter, denser chrome: the boxed three-row tab strip is now a single row of
   numbered chips (selected tab filled), returning two rows to every screen, and
   the header shows the currently loaded model. Model and router states carry a

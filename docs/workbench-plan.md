@@ -102,6 +102,18 @@ shows its source host and age; a stale or remote reading is labelled as such.
 
 ## Step 1 — shell
 
+Status (2026-10-15): done on `feature/l3ms-monorepo`. `src/ui/` holds the frame
+layout, sidebar, toolbar and status bar (with the threshold table); the old tabs
+are views (`F1`–`F9`); Workbench and Model Ops are gone, with a test mapping each
+of their commands to its new home; the shell and every view have render tests at
+80×24 and 60×18. Differences from the list below: the sidebar hides
+`unlisted: true` alias entries like the router does; bench rates match a result
+only when its GGUF path equals the entry's `-m` path (most Strata tiers show
+"not benched" because their runs are not in `bench-models/logs/results`); Enter
+on a language model connects Chat by listing models when needed, never loading.
+Status bar uses L3MS's own `nvidia-smi` and `/proc` polling for now;
+`/api/performance` comes with step 2's Health work.
+
 Replace the tab bar and per-tab chrome with the new frame. Keep existing views
 working inside the pane.
 

@@ -115,11 +115,12 @@ dependencies, or service are ready. Both manifests live at the repository root.
 
 ### Stack language chat
 
-Connect to your chosen endpoint in the existing Chat tab first. In Stack Catalog
-(`F8`), select a language chat profile and press `f`: L3MS selects that exact
-advertised model and opens Chat, preserving your draft and conversation. It does
-not connect, send a prompt or load a model automatically. Missing/disabled models,
-a pending connection or active work are refused rather than choosing a default.
+Select a language chat profile in the sidebar and press `Enter` (or `f`): L3MS
+selects that exact advertised model and opens the Chat view, preserving your draft
+and conversation. If Chat is not connected yet it first lists the router's models
+(`GET /v1/models`); it never sends a prompt or loads a model by itself.
+Missing/disabled models, a pending connection or active work are refused rather
+than choosing a default.
 
 This uses the current committed Chat connection, not an uncommitted endpoint
 draft, and needs no coordinator socket. Chat keeps its existing streaming,
@@ -141,7 +142,7 @@ directory is accepted. Stdout contains `vectors` and native `usage`, with a
 No runtime is installed or service managed; the existing endpoint may load or
 swap models normally in response to the explicit request.
 
-In Stack Catalog, select an embedding profile, press `f`, enter a text-batch
+In the sidebar, select an embedding profile, press `f`, enter a text-batch
 JSON array and run with `Ctrl+Enter`. Connect Chat first: embeddings reuse its
 committed endpoint and captured credentials, require the exact enabled
 advertised model, and need no coordinator socket or caller ID. History stores
@@ -229,8 +230,7 @@ media scripts use the same foreground owner with an
 GPU/handoff acceptance are still required. Unsupported tasks refuse, never fall
 back or simulate answers.
 
-In the TUI, open Stack Catalog (`F8`), select a supported CPU decision profile,
-press `f`, choose `decision`, fill the native fields and press `Ctrl+Enter`.
+In the TUI, select a supported CPU decision profile in the sidebar, press `f`, choose `decision`, fill the native fields and press `Ctrl+Enter`.
 Press `c` to cancel; the job stays busy until cleanup is confirmed. History stores
 metadata only, while native answers stay in the in-memory result panel.
 
@@ -282,7 +282,7 @@ chunks, use `--task tts` with `{"text":"Hello.","mode":"streaming"}`; `offline`
 is the default. The final WAV and chunk paths arrive after completion, not as
 live playback. CUDA profiles/script defaults are unchanged.
 
-In Stack Catalog (`F8`), select `breeze-tts-2-cpu`, press `f`, choose `tts`, enter
+In the sidebar, select `breeze-tts-2-cpu`, press `f`, choose `tts`, enter
 text, choose `tts`, `design` or `clon`, and press `Ctrl+Enter`. TTS selects offline
 or streaming; design shows instruction; cloning shows reference audio/transcript.
 Hidden retained fields are not sent when switching tasks.
@@ -307,8 +307,8 @@ HeartMuLa music and H3 audio also use `/audiocpp/v1/tasks/run` on this branch;
 their real-model acceptance is still pending. LTX and YuE2 share ComfyUI; no
 separate workbench Python runtimes are needed. See [remaining gates](TODO.md).
 
-In Stack Catalog (`F8`), `f` opens Chat or a typed native task form and `c`
-cancels the active foreground task. CPU-local decisions use `--run-profile` or
+In the sidebar or the Model view (`F1`), `f` opens Chat or a typed native task
+form and `c` cancels the active foreground task. CPU-local decisions use `--run-profile` or
 the form directly, without a daemon; see
 [native CPU workflows](docs/cpu-native-workflows.md). Scripts that llama-swap
 cannot host (Blender headless work) run in an
@@ -410,45 +410,38 @@ and Linear issue `CAR-97` for the authoritative remaining-work checklist.
 
 ## TUI Scope
 
-- Workbench shell:
-  - persistent command bar with context-specific shortcut hints
-  - richer `Ctrl+P` command palette with shortcut column and token filtering
-- `Workbench` tab:
-  - default first screen for quick llama-swap model loading
-  - live model table from the configured llama-swap endpoint
-  - fast actions for load, unload, chat, bench, browser, downloads, and jobs
-  - delegates model loads to Model Ops so job history and resource telemetry stay consistent
-- `Download` tab:
-  - config load/save/validate/restore
-  - model row add/apply/delete
-  - download selected or enabled models
-  - asynchronous cache-aware download-size and target-disk preflight
-  - responsive wide, compact, and focused-pane layouts
-  - repeat-action confirmation before dirty reload or restore
-  - restore validates the snapshot and saves displaced config bytes for undo
-    before atomic replacement
-  - per-config snapshot namespaces in `.toolkit/download_config_versions/`,
-    with existing legacy history still visible and restorable
-  - snapshot-list failures surface as warnings without converting a completed
-    load, save, or restore into a failure
-- `Model Ops` tab:
-  - llama-swap run mode and bench script mode
-  - live run logs + start/stop
-  - current running model + resource telemetry (CPU/RAM/GPU when available)
-  - script editor and per-script snapshots in `.toolkit/script_versions/` for bench mode
-  - paged model tables (`[` / `]`) keep large llama-swap inventories responsive
-- `Model Browser` tab:
-  - scan any local directory for `.gguf` files
-  - inspect size, quantization, params, architecture, and modified timestamp in a table
-  - filter/sort results and inspect per-file metadata details
-- `Chat` tab:
-  - edit and connect an authenticated OpenAI-compatible endpoint
-  - detect local llama-server ports and choose a Chat model independently
-  - `K` terminates a freshly detected external llama-server only after PID and
-    command-line identity checks
-  - `l` opens the bounded local system-prompt library
-  - stream, stop, clear, save, and restore conversations with stale-result guards
-- Additional tabs: `Maintenance`, `Jobs`
+The workbench is one frame (see [workbench design](docs/workbench-design.md)):
+
+- **Toolbar** (top row): the utilities as buttons, pressed from the sidebar with
+  their key: `R` reload router, `b` bench, `t` tune, `d` download, `h` system.
+  Reload router and Tune are shown dim until they are built.
+- **Sidebar**: the **Models** section lists every manifest profile by lane
+  (language, media, decisions) with a router state dot (`●` loaded, `◐` loading,
+  `○` unloaded, `·` not listed by the router) and a detail line (tasks and the
+  newest bench decode rate whose GGUF path matches the entry, or "not benched";
+  when entries share a GGUF the bench key must name the entry). On launch the
+  resident model is selected.
+  Entries marked `unlisted: true` in `llama-swap.yaml` (aliases) are hidden like
+  the router hides them. The **Jobs** section lists runs newest first.
+  Rows take one line (the bench rate right-aligned); the selected row adds a
+  detail line. Entries with their own `proxy:` (ComfyUI, audio.cpp) are listed
+  under `engines`, and media profiles show their engine's state.
+- **Model view** (`F1`): the selected profile's yaml name and description, server
+  build (the `vendor/` checkout behind its macro), GGUF file and size, notable
+  flags, idle TTL, tasks and matching bench runs.
+- **Pane**: the current view. `F1`–`F9` (or `Alt+1`–`Alt+9`) open Model, Chat,
+  Jobs, Bench, Download, Model files, Maintenance, System and Log.
+- **Message line**: the latest status and the keys for where focus is.
+- **Status bar**: resident model, VRAM and RAM gauges, CPU, the fullest of
+  `/home`, `/mnt/dev` and the models root, CPU governor and router endpoint.
+  Readings turn amber or red at the thresholds in `src/ui/statusbar.rs`.
+
+Below 100 columns the sidebar and the pane share the body: whichever has focus
+is shown. The views keep their earlier behaviour: Download (config editing,
+preflight, snapshots), Model files (GGUF scan and metadata), Chat (endpoint,
+streaming, sessions, prompt library), Bench and Maintenance (script lists with
+an editor and per-script snapshots in `.toolkit/script_versions/`), Jobs (stop,
+retry, clear), System (GPU, memory and SSD spill detail) and Log (activity).
 
 Download output parses Hugging Face progress lines when available and displays
 an ETA beside the disk-space status; the preflight estimate remains the source
@@ -460,29 +453,37 @@ retains warnings in the activity log without blocking a safe snapshot save.
 
 Global:
 
-- `Ctrl+P`: command palette
+- `Tab` / `Shift+Tab`: move focus between the sidebar and the pane (in the
+  Download view `Tab` moves between its fields; `Esc` on its table returns to
+  the sidebar)
+- `Ctrl+P`: command palette (every command, current view first)
 - `?`: key binding help
-- `F1`: Workbench tab
-- `F2`: Model Ops tab
-- `F3`: Chat tab
-- `F4`: Model Browser tab
-- `F5`: Download tab
-- `F6`: Jobs tab
-- `F7`: Maintenance tab
-- `Alt+1..Alt+7`: tab fallback when F-keys are unreliable
-- `Alt+←` / `Alt+→`: previous / next tab
+- `F1`–`F9` / `Alt+1`–`Alt+9`: Model, Chat, Jobs, Bench, Download, Model files,
+  Maintenance, System, Log
+- `Alt+←` / `Alt+→`: previous / next view
 
-Workbench:
+Sidebar:
 
-- `Ctrl+R` / `Enter`: load selected llama-swap model
-- `Ctrl+S`: unload selected llama-swap model
-- `Ctrl+F`: focus model filter
-- `Ctrl+J`: focus model table
-- `Ctrl+L`: clear workbench log
-- `F3`: chat with the loaded model endpoint
-- `F2`: open full Model Ops
+- `j` / `k` or `↓` / `↑`: move in the current section
+- `[` / `]`: previous / next section; `Space`: collapse or expand it
+- `Enter` / `f`: open the selected model (Chat for a language chat profile, the
+  task form otherwise) or the selected job; it never loads a model
+- `L`: load the selected model; the first press names the model it would evict,
+  the second confirms, any other key cancels
+- `U`: unload the resident model
+- `/`: filter models by id or name (`Esc` clears)
+- `r`: refresh manifests, router state and bench rates
+- `c`: cancel the active foreground task
+- `R`, `b`, `t`, `d`, `h`: toolbar buttons
 
-Download (active only on Download tab):
+Bench view:
+
+- `/` or `Ctrl+F`: filter bench scripts; `Ctrl+J`: back to the list
+- `Enter` / `r` / `Ctrl+R`: run the selected script; `s` / `Ctrl+S`: stop it
+- `Ctrl+U`: edit the script; `Alt+P` save, `Alt+O` reload (twice discards
+  dirty edits), `Alt+V` choose or restore a snapshot
+
+Download view:
 
 - `Alt+T`: focus models table
 - `Alt+I`: focus model editor
@@ -498,33 +499,20 @@ Download (active only on Download tab):
 - `Alt+Y`: clear download log
 - `Esc`: cancel a pending download preflight
 
-Model Ops (active only on Model Ops tab):
-
-- `Ctrl+F` / `/` (Bench): focus the model or benchmark-script filter
-- `Ctrl+J`: focus model/script table
-- `Ctrl+U`: focus detail/script editor
-- `Ctrl+M`: toggle run/bench mode
-- `Ctrl+R`: load selected llama-swap model or run selected bench script
-- `Ctrl+S`: unload selected llama-swap model or stop running bench
-- `Alt+P`: save edited bench script snapshot
-- `Alt+O`: reload the selected bench script (`Alt+O` twice discards dirty edits)
-- `Alt+V`: choose or restore a bench script snapshot
-- `Ctrl+L`: clear run log
-
-Chat (active only on Chat tab):
+Chat view:
 
 - `e`: edit the endpoint draft
 - `Ctrl+G`: connect to the draft endpoint and refresh its model list
 - `Ctrl+B`: detect a local llama-server and connect to it
 - `r`: refresh models on the committed Chat endpoint
-- `↑` / `↓` or `k` / `j`: choose the Chat model independently of Workbench
+- `↑` / `↓` or `k` / `j`: choose the Chat model
 - `i` / `Enter`: focus the message composer
 - `Esc`: stop an active response, or leave the current Chat editor
 - `Ctrl+X` / `x`: clear the transcript and stop an active response
 - `Alt+S`: save the current session
 - `o`: browse saved sessions
 
-Maintenance (active only on Maintenance tab):
+Maintenance view:
 
 - `Ctrl+U`: focus or leave the script editor
 - `Ctrl+R` / `Enter`: run selected maintenance script
@@ -534,11 +522,13 @@ Maintenance (active only on Maintenance tab):
 - `Alt+V`: choose or restore a script snapshot
 - `Ctrl+L`: clear activity output
 
-Model Browser (active only on Model Browser tab):
+Model files view:
 
 - `Alt+R`: scan selected GGUF directory
 - `Alt+G`: focus directory path input
 - `Alt+J`: focus GGUF table
+
+Log view: `c` clears the activity log.
 
 ## Project Layout
 

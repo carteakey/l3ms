@@ -13,7 +13,7 @@ l3ms --run-profile decisions:nagi-smol-cpu --task decision --input input.json --
 ```
 
 Input is native JSON with exactly `state` and `questions`; output contains
-native answers and optional latency/usage. Stack Catalog (`F8`) also exposes
+native answers and optional latency/usage. The sidebar (and the Model view, `F1`) also exposes
 the native decision form with `f`, run with `Ctrl+Enter`, cancel with `c`.
 History stores metadata, not decision payloads.
 

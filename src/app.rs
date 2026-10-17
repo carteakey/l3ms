@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, HashSet, VecDeque},
     env,
     ffi::OsString,
     fs,
@@ -39,7 +39,7 @@ use crate::{
         MAX_TASK_FORM_TOTAL_BYTES,
     },
     control::{
-        catalog::{Catalog, CatalogProfile, Device, Lane, Readiness},
+        catalog::{Catalog, CatalogProfile, Device, Lane},
         routes::{resolve_profile_route, NativeRoute},
     },
     download_editor::DownloadEditor,
@@ -57,12 +57,19 @@ use crate::{
     script_store::{collect_scripts_in, command_for_script, pretty_name, ScriptMode},
     state_store::{self, ChatSession, ChatSessionList, ChatSessionSummary, SavedChatSession},
     telemetry::{
-        find_process_named, query_gpu_telemetry, query_server_io, query_system_memory,
-        snapshot_descendants, snapshot_process_group, GpuTelemetry, ServerIoTelemetry,
-        SystemMemoryTelemetry, SystemTelemetrySnapshot,
+        cpu_percent_between, find_process_named, query_gpu_telemetry, query_host_telemetry,
+        query_server_io, query_system_memory, snapshot_descendants, snapshot_process_group,
+        GpuTelemetry, HostTelemetry, ServerIoTelemetry, SystemMemoryTelemetry,
+        SystemTelemetrySnapshot,
     },
     text_buffer::TextBuffer,
     theme,
+    ui::{
+        model_view, shell,
+        sidebar::{self, JobRow, ModelRow, Section as SidebarSection, SidebarModel},
+        statusbar::{self, StatusInputs},
+        toolbar,
+    },
 };
 use anyhow::{Context, Result};
 use crossterm::{
@@ -72,7 +79,7 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Style, Stylize},
     text::{Line, Span, Text},
     widgets::{
@@ -85,32 +92,15 @@ use unicode_width::UnicodeWidthStr;
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
 
-const TAB_NAMES: [&str; 8] = [
-    "Workbench",
-    "Model Ops",
-    "Chat",
-    "Model Browser",
-    "Download",
-    "Jobs",
-    "Maintenance",
-    "Stack Catalog",
-];
-const TAB_SHORT_NAMES: [&str; 8] = [
-    "Work",
-    "Model Ops",
-    "Chat",
-    "Browse",
-    "Download",
-    "Jobs",
-    "Maint",
-    "Stack",
-];
 const BACKGROUND_QUEUE_CAPACITY: usize = 512;
 const EVENTS_PER_TICK: usize = 128;
 const MAX_PROCESS_LINE_BYTES: usize = 16 * 1024;
 const MAX_CHAT_PREVIEW_BYTES: usize = 64 * 1024;
 const TELEMETRY_INTERVAL: Duration = Duration::from_secs(1);
-const MODEL_PAGE_SIZE: usize = 50;
+/// Router state refresh. `GET /v1/models` never loads a model, so polling it is
+/// safe; other clients swap models, and the sidebar and the load warning must
+/// not go stale.
+const MODELS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const DOWNLOAD_PAGE_SIZE: usize = 50;
 const DOWNLOAD_ESTIMATE_TIMEOUT: Duration = Duration::from_secs(180);
 const DOWNLOAD_DISK_TIMEOUT: Duration = Duration::from_secs(3);
@@ -123,83 +113,56 @@ struct DownloadProgressSnapshot {
     speed_bytes_per_second: Option<f64>,
 }
 
+/// What the pane shows. The sidebar is always there; views replace the old
+/// fixed tabs and keep their F-key order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Tab {
-    Workbench,
-    ModelOps,
+enum View {
+    Model,
     Chat,
-    Browser,
-    Download,
     Jobs,
+    Bench,
+    Download,
+    Browser,
     Maintenance,
-    StackCatalog,
+    System,
+    Log,
 }
 
-impl Tab {
+impl View {
+    const ALL: [Self; 9] = [
+        Self::Model,
+        Self::Chat,
+        Self::Jobs,
+        Self::Bench,
+        Self::Download,
+        Self::Browser,
+        Self::Maintenance,
+        Self::System,
+        Self::Log,
+    ];
+
     fn index(self) -> usize {
-        match self {
-            Self::Workbench => 0,
-            Self::ModelOps => 1,
-            Self::Chat => 2,
-            Self::Browser => 3,
-            Self::Download => 4,
-            Self::Jobs => 5,
-            Self::Maintenance => 6,
-            Self::StackCatalog => 7,
-        }
+        Self::ALL
+            .iter()
+            .position(|view| *view == self)
+            .unwrap_or_default()
     }
 
     fn from_index(index: usize) -> Self {
-        match index % TAB_NAMES.len() {
-            0 => Self::Workbench,
-            1 => Self::ModelOps,
-            2 => Self::Chat,
-            3 => Self::Browser,
-            4 => Self::Download,
-            5 => Self::Jobs,
-            6 => Self::Maintenance,
-            _ => Self::StackCatalog,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OpsMode {
-    Run,
-    Bench,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum WorkbenchLayout {
-    #[default]
-    Dashboard,
-    SplitVertical,
-    Classic,
-    FocusBench,
-    FocusJobs,
-    FocusGpu,
-}
-
-impl WorkbenchLayout {
-    pub fn next(self) -> Self {
-        match self {
-            Self::Dashboard => Self::SplitVertical,
-            Self::SplitVertical => Self::Classic,
-            Self::Classic => Self::FocusBench,
-            Self::FocusBench => Self::FocusJobs,
-            Self::FocusJobs => Self::FocusGpu,
-            Self::FocusGpu => Self::Dashboard,
-        }
+        Self::ALL[index % Self::ALL.len()]
     }
 
-    pub fn label(self) -> &'static str {
+    fn name(self) -> &'static str {
         match self {
-            Self::Dashboard => "Dashboard (4-pane)",
-            Self::SplitVertical => "Split Vertical",
-            Self::Classic => "Classic (2-pane)",
-            Self::FocusBench => "Focus: Benchmarks",
-            Self::FocusJobs => "Focus: Jobs",
-            Self::FocusGpu => "Focus: GPU Monitor",
+            Self::Model => "Model",
+            Self::Chat => "Chat",
+            Self::Jobs => "Jobs",
+            Self::Bench => "Bench",
+            Self::Download => "Download",
+            Self::Browser => "Model files",
+            Self::Maintenance => "Maintenance",
+            Self::System => "System",
+            Self::Log => "Log",
         }
     }
 }
@@ -1174,7 +1137,7 @@ enum BackgroundEvent {
 struct App {
     root: PathBuf,
     data_root: PathBuf,
-    tab: Tab,
+    view: View,
     input_mode: InputMode,
     should_quit: bool,
     show_quit_confirmation: bool,
@@ -1188,14 +1151,19 @@ struct App {
     receiver: mpsc::Receiver<BackgroundEvent>,
 
     models: Vec<SwapModel>,
+    /// Sidebar model filter (`/`).
     model_filter: String,
-    model_page: usize,
-    model_state: TableState,
     loading_models: bool,
+    models_last_started: Option<Instant>,
+    /// The pending refresh was asked for (startup, `r`), so its result is
+    /// reported on the message line.
+    models_refresh_announced: bool,
+    models_refresh_failing: bool,
+    /// The first router listing moves the selection to the resident model.
+    selected_resident_once: bool,
     model_action_pending: bool,
     loaded_model_id: Option<String>,
 
-    ops_mode: OpsMode,
     bench_scripts: Vec<PathBuf>,
     bench_filter: String,
     bench_state: ListState,
@@ -1279,7 +1247,32 @@ struct App {
     telemetry: String,
     telemetry_pending: bool,
     telemetry_last_started: Option<Instant>,
-    workbench_layout: WorkbenchLayout,
+    /// Focus is on the sidebar (true) or the pane.
+    sidebar_focused: bool,
+    sidebar_section: SidebarSection,
+    models_collapsed: bool,
+    jobs_collapsed: bool,
+    /// Profile id awaiting a second `L` to confirm a model load.
+    load_armed: Option<String>,
+    /// Catalog index whose Chat opens once the pending Chat connection
+    /// (a model listing, never a load) succeeds.
+    chat_handoff_pending: Option<usize>,
+    /// Last steady decode rate per llama-swap model id, from bench results
+    /// whose GGUF path matches the entry's `-m` path.
+    bench_rates: HashMap<String, f64>,
+    /// llama-swap entries marked `unlisted: true` (aliases); the sidebar
+    /// hides them like the router does.
+    unlisted_models: HashSet<String>,
+    /// Parsed `llama-swap.yaml` entries by id, for the Model view.
+    yaml_entries: HashMap<String, crate::swap_yaml::SwapYamlEntry>,
+    /// Matching bench runs per entry, newest first (at most five).
+    bench_runs: HashMap<String, Vec<crate::bench_results::BenchResult>>,
+    /// On-disk size of each entry's GGUF (shard sets summed).
+    model_sizes: HashMap<String, u64>,
+    /// `llama-swap.yaml` macros, to name the build behind `${…_server}`.
+    yaml_macros: HashMap<String, String>,
+    host: HostTelemetry,
+    cpu_percent: Option<f64>,
     gpu_telemetry: Option<GpuTelemetry>,
     sys_memory: Option<SystemMemoryTelemetry>,
     server_io: Option<ServerIoTelemetry>,
@@ -1350,7 +1343,7 @@ impl App {
         let mut app = Self {
             root,
             data_root,
-            tab: Tab::StackCatalog,
+            view: View::Model,
             input_mode: InputMode::Normal,
             should_quit: false,
             show_quit_confirmation: false,
@@ -1364,12 +1357,13 @@ impl App {
             receiver,
             models: Vec::new(),
             model_filter: String::new(),
-            model_page: 0,
-            model_state: TableState::default().with_selected(Some(0)),
             loading_models: false,
+            models_last_started: None,
+            models_refresh_announced: false,
+            models_refresh_failing: false,
+            selected_resident_once: false,
             model_action_pending: false,
             loaded_model_id: None,
-            ops_mode: OpsMode::Run,
             bench_scripts: Vec::new(),
             bench_filter: String::new(),
             bench_state: ListState::default().with_selected(Some(0)),
@@ -1448,7 +1442,20 @@ impl App {
             telemetry: "Resources: idle".into(),
             telemetry_pending: false,
             telemetry_last_started: None,
-            workbench_layout: WorkbenchLayout::default(),
+            sidebar_focused: true,
+            sidebar_section: SidebarSection::Models,
+            models_collapsed: false,
+            jobs_collapsed: false,
+            load_armed: None,
+            chat_handoff_pending: None,
+            bench_rates: HashMap::new(),
+            unlisted_models: HashSet::new(),
+            yaml_entries: HashMap::new(),
+            bench_runs: HashMap::new(),
+            model_sizes: HashMap::new(),
+            yaml_macros: HashMap::new(),
+            host: HostTelemetry::default(),
+            cpu_percent: None,
             gpu_telemetry: None,
             sys_memory: None,
             server_io: None,
@@ -1472,8 +1479,17 @@ impl App {
         app.sync_download_table_state();
         app.refresh_download_disk_space();
         app.refresh_local_inventories();
+        app.refresh_stack_catalog();
+        app.refresh_bench_rates();
+        app.ensure_visible_model_selection();
+        if app.stack_catalog.is_some() {
+            app.status = format!(
+                "{} models · Enter open · L load · ? help",
+                app.sidebar_model_indices().len()
+            );
+        }
         if refresh_models_on_start {
-            app.refresh_models();
+            app.refresh_models_quietly();
         }
         Ok(app)
     }
@@ -1482,6 +1498,12 @@ impl App {
         while !self.should_quit {
             self.drain_background_events();
             self.refresh_telemetry_if_due();
+            if self
+                .models_last_started
+                .is_none_or(|started| started.elapsed() >= MODELS_REFRESH_INTERVAL)
+            {
+                self.refresh_models_quietly();
+            }
             terminal.draw(|frame| self.draw(frame))?;
             if event::poll(Duration::from_millis(100))? {
                 if let Event::Key(key) = event::read()? {
@@ -1511,8 +1533,18 @@ impl App {
         if self.loading_models {
             return;
         }
-        self.loading_models = true;
         self.status = "Refreshing llama-swap models…".into();
+        self.models_refresh_announced = true;
+        self.refresh_models_quietly();
+    }
+
+    /// Refresh router state without touching the status line.
+    fn refresh_models_quietly(&mut self) {
+        if self.loading_models {
+            return;
+        }
+        self.loading_models = true;
+        self.models_last_started = Some(Instant::now());
         let sender = self.sender.clone();
         thread::spawn(move || {
             let result = SwapClient::from_env()
@@ -1684,27 +1716,32 @@ impl App {
                     match result {
                         Ok(models) => {
                             self.models = models;
-                            self.model_page = self
-                                .model_page
-                                .min(self.model_page_count().saturating_sub(1));
-                            if self.loaded_model_id.is_none() {
-                                self.loaded_model_id = self
-                                    .models
-                                    .iter()
-                                    .find(|model| model.state == "loaded")
-                                    .map(|model| model.id.clone());
+                            // The router is authoritative: other clients load
+                            // and unload models too.
+                            self.loaded_model_id = self
+                                .models
+                                .iter()
+                                .find(|model| model.state == "loaded")
+                                .map(|model| model.id.clone());
+                            if !self.selected_resident_once {
+                                self.selected_resident_once = true;
+                                self.select_resident_model();
                             }
-                            let visible_count = self.visible_model_count();
-                            clamp_table_selection(&mut self.model_state, visible_count);
-                            if matches!(self.tab, Tab::Workbench | Tab::ModelOps) {
+                            if std::mem::take(&mut self.models_refresh_announced) {
                                 self.status = format!("llama-swap: {} model(s)", self.models.len());
                             }
+                            self.models_refresh_failing = false;
                         }
                         Err(error) => {
-                            if matches!(self.tab, Tab::Workbench | Tab::ModelOps) {
+                            // Background polls report a failure once, not every tick.
+                            let announced = std::mem::take(&mut self.models_refresh_announced);
+                            if announced {
                                 self.status = "llama-swap unavailable".into();
                             }
-                            self.push_log(format!("Model refresh failed: {error}"));
+                            if announced || !self.models_refresh_failing {
+                                self.push_log(format!("Model refresh failed: {error}"));
+                            }
+                            self.models_refresh_failing = true;
                         }
                     }
                 }
@@ -1784,6 +1821,11 @@ impl App {
                         "Connected to {endpoint} · {} model(s)",
                         self.chat_picker_model_indices().len()
                     );
+                    if let Some(index) = self.chat_handoff_pending.take() {
+                        if self.stack_catalog_state.selected() == Some(index) {
+                            self.open_sidebar_selection();
+                        }
+                    }
                 }
                 BackgroundEvent::ChatConnectionFailed {
                     request_id,
@@ -1794,6 +1836,7 @@ impl App {
                         continue;
                     }
                     self.chat_connection_pending = false;
+                    self.chat_handoff_pending = None;
                     self.status = format!("Chat {operation} failed");
                     self.push_log(error);
                 }
@@ -2019,6 +2062,12 @@ impl App {
                             self.gpu_telemetry = snapshot.gpu;
                             self.sys_memory = snapshot.memory;
                             self.server_io = snapshot.server_io;
+                            if let (Some(previous), Some(current)) =
+                                (self.host.cpu_jiffies, snapshot.host.cpu_jiffies)
+                            {
+                                self.cpu_percent = cpu_percent_between(previous, current);
+                            }
+                            self.host = snapshot.host;
                         }
                         Err(error) => {
                             self.telemetry = format!("Resources: unavailable ({error})");
@@ -2029,6 +2078,17 @@ impl App {
         }
         #[cfg(target_os = "linux")]
         self.drain_direct_native_result();
+    }
+
+    /// Filesystems whose free space the status bar watches: home, the
+    /// development volume and the model store.
+    fn watched_disks(&self) -> Vec<String> {
+        let mut paths = vec!["/home".to_owned(), "/mnt/dev".to_owned()];
+        let models = expand_tilde(&self.download.config().base_models_dir);
+        if !models.trim().is_empty() {
+            paths.push(models);
+        }
+        paths
     }
 
     fn refresh_telemetry_if_due(&mut self) {
@@ -2051,6 +2111,7 @@ impl App {
             (running.process_group, elapsed)
         });
         let monitor_swap = self.loaded_model_id.is_some();
+        let watched_disks = self.watched_disks();
         let last_server_read = self.last_server_read_bytes;
         let last_server_time = self.last_server_read_time;
 
@@ -2091,12 +2152,17 @@ impl App {
                 gpu,
                 memory,
                 server_io,
+                host: query_host_telemetry(&watched_disks),
             };
             let _ = sender.send(BackgroundEvent::Telemetry(Ok(snapshot)));
         });
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
+        if self.load_armed.is_some() && !(key.code == KeyCode::Char('L') && self.sidebar_focused) {
+            self.load_armed = None;
+            self.status = "Load cancelled".into();
+        }
         if !self.is_script_reload_shortcut(key) {
             self.script_reload_armed = None;
         }
@@ -2154,8 +2220,20 @@ impl App {
         if let Some(command_id) = self.modified_key_command(key) {
             return self.execute_command(command_id);
         }
-        if self.tab == Tab::Download && self.download.focus() != DownloadFocus::Table {
+        if !self.sidebar_focused
+            && self.view == View::Download
+            && self.download.focus() != DownloadFocus::Table
+        {
             self.handle_download_input_key(key);
+            return Ok(());
+        }
+        // Download uses Tab for its own fields; Esc on its table reaches the
+        // sidebar instead.
+        if matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
+            && matches!(self.input_mode, InputMode::Normal | InputMode::ChatMessage)
+            && (self.sidebar_focused || self.view != View::Download)
+        {
+            self.toggle_focus();
             return Ok(());
         }
         if self.input_mode == InputMode::Normal
@@ -2168,6 +2246,9 @@ impl App {
         if self.input_mode != InputMode::Normal {
             return self.handle_input_key(key);
         }
+        if self.sidebar_focused {
+            return self.handle_sidebar_key(key);
+        }
         match key.code {
             KeyCode::Char('q') => self.request_quit(),
             KeyCode::Char('?') => self.show_help = true,
@@ -2179,11 +2260,11 @@ impl App {
     fn is_script_reload_shortcut(&self, key: KeyEvent) -> bool {
         key.code == KeyCode::Char('o')
             && key.modifiers.contains(KeyModifiers::ALT)
-            && matches!(self.tab, Tab::ModelOps | Tab::Maintenance)
+            && matches!(self.view, View::Bench | View::Maintenance)
     }
 
     fn is_download_reload_trigger(&self, key: KeyEvent) -> bool {
-        self.tab == Tab::Download
+        self.view == View::Download
             && ((key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::ALT))
                 || (self.download.focus() == DownloadFocus::ConfigPath
                     && key.code == KeyCode::Enter
@@ -2191,7 +2272,7 @@ impl App {
     }
 
     fn is_download_restore_trigger(&self, key: KeyEvent) -> bool {
-        self.tab == Tab::Download
+        self.view == View::Download
             && ((key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::ALT))
                 || (self.download.focus() == DownloadFocus::Versions
                     && key.code == KeyCode::Enter
@@ -2199,40 +2280,236 @@ impl App {
     }
 
     fn handle_global_navigation_key(&mut self, key: KeyEvent) -> bool {
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
         let destination = match key.code {
-            KeyCode::F(number @ 1..=8) => Some(number as usize - 1),
-            KeyCode::Char('1') if key.modifiers.contains(KeyModifiers::ALT) => Some(0),
-            KeyCode::Char('2') if key.modifiers.contains(KeyModifiers::ALT) => Some(1),
-            KeyCode::Char('3') if key.modifiers.contains(KeyModifiers::ALT) => Some(2),
-            KeyCode::Char('4') if key.modifiers.contains(KeyModifiers::ALT) => Some(3),
-            KeyCode::Char('5') if key.modifiers.contains(KeyModifiers::ALT) => Some(4),
-            KeyCode::Char('6') if key.modifiers.contains(KeyModifiers::ALT) => Some(5),
-            KeyCode::Char('7') if key.modifiers.contains(KeyModifiers::ALT) => Some(6),
-            KeyCode::Char('8') if key.modifiers.contains(KeyModifiers::ALT) => Some(7),
-            KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) => {
-                Some((self.tab.index() + TAB_NAMES.len() - 1) % TAB_NAMES.len())
+            KeyCode::F(number @ 1..=9) => Some(View::from_index(number as usize - 1)),
+            KeyCode::Char(digit @ '1'..='9') if alt => {
+                Some(View::from_index(digit as usize - '1' as usize))
             }
-            KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) => {
-                Some(self.tab.index() + 1)
-            }
+            KeyCode::Left if alt => Some(View::from_index(self.view.index() + View::ALL.len() - 1)),
+            KeyCode::Right if alt => Some(View::from_index(self.view.index() + 1)),
             _ => None,
         };
         let Some(destination) = destination else {
             return false;
         };
-        self.leave_tab_inputs();
-        self.tab = Tab::from_index(destination);
-        if self.tab == Tab::Chat {
-            self.input_mode = InputMode::ChatMessage;
-            if self.chat_client.is_none() && !self.chat_connection_pending {
-                self.start_chat_connect();
-            }
-        } else if self.tab == Tab::Browser {
-            self.ensure_browser_scan();
-        } else if self.tab == Tab::StackCatalog {
-            self.refresh_stack_catalog();
-        }
+        self.open_view(destination);
         true
+    }
+
+    /// Show `view` in the pane and move focus there.
+    fn open_view(&mut self, view: View) {
+        self.leave_tab_inputs();
+        self.view = view;
+        self.sidebar_focused = false;
+        match view {
+            View::Chat => {
+                self.input_mode = InputMode::ChatMessage;
+                if self.chat_client.is_none() && !self.chat_connection_pending {
+                    self.start_chat_connect();
+                }
+            }
+            View::Browser => self.ensure_browser_scan(),
+            View::Model if self.stack_catalog.is_none() => self.refresh_stack_catalog(),
+            _ => {}
+        }
+    }
+
+    /// Tab: move focus between the sidebar and the pane. Leaving the pane
+    /// drops a half-typed chat line's input mode but keeps its text.
+    fn toggle_focus(&mut self) {
+        if self.sidebar_focused {
+            self.sidebar_focused = false;
+            if self.view == View::Chat {
+                self.input_mode = InputMode::ChatMessage;
+            }
+        } else {
+            self.leave_tab_inputs();
+            self.sidebar_focused = true;
+        }
+    }
+
+    /// Sidebar group of a profile: its lane, or `engines` for llama-swap
+    /// entries that proxy a non-OpenAI engine (ComfyUI, audio.cpp).
+    fn sidebar_group(&self, profile: &CatalogProfile) -> (&'static str, u8, Style) {
+        let engine = profile.key.lane == Lane::Language
+            && self
+                .yaml_entries
+                .get(profile.key.profile_id.as_str())
+                .is_some_and(|entry| entry.proxy);
+        match profile.key.lane {
+            Lane::Language if engine => ("engines", 3, theme::dim()),
+            Lane::Language => ("language", 0, theme::lane_language()),
+            Lane::Media => ("media", 1, theme::lane_media()),
+            Lane::Decisions => ("decisions", 2, theme::lane_decisions()),
+        }
+    }
+
+    /// Catalog indices of the models the sidebar shows, in display order.
+    fn sidebar_model_indices(&self) -> Vec<usize> {
+        let Some(catalog) = self.stack_catalog.as_ref() else {
+            return Vec::new();
+        };
+        let filter = self.model_filter.trim().to_ascii_lowercase();
+        let mut indices = catalog
+            .list()
+            .iter()
+            .enumerate()
+            .filter(|(_, profile)| {
+                !(profile.key.lane == Lane::Language
+                    && self
+                        .unlisted_models
+                        .contains(profile.key.profile_id.as_str()))
+            })
+            .filter(|(_, profile)| {
+                filter.is_empty()
+                    || profile
+                        .key
+                        .profile_id
+                        .as_str()
+                        .to_ascii_lowercase()
+                        .contains(&filter)
+                    || profile.name.to_ascii_lowercase().contains(&filter)
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        indices.sort_by_key(|index| self.sidebar_group(&catalog.list()[*index]).1);
+        indices
+    }
+
+    fn select_first_visible_model(&mut self) {
+        let first = self.sidebar_model_indices().first().copied();
+        self.stack_catalog_state.select(first);
+    }
+
+    /// Select the resident model when the sidebar shows it.
+    fn select_resident_model(&mut self) {
+        let Some(resident) = self.loaded_model_id.clone() else {
+            return;
+        };
+        let Some(catalog) = self.stack_catalog.as_ref() else {
+            return;
+        };
+        let profiles = catalog.list();
+        if let Some(index) = self.sidebar_model_indices().into_iter().find(|index| {
+            profiles[*index].key.lane == Lane::Language
+                && profiles[*index].key.profile_id.as_str() == resident
+        }) {
+            self.stack_catalog_state.select(Some(index));
+        }
+    }
+
+    /// Keep the selection on a row the sidebar shows.
+    fn ensure_visible_model_selection(&mut self) {
+        let visible = self.sidebar_model_indices();
+        if !self
+            .stack_catalog_state
+            .selected()
+            .is_some_and(|selected| visible.contains(&selected))
+        {
+            self.stack_catalog_state.select(visible.first().copied());
+        }
+    }
+
+    fn move_sidebar_selection(&mut self, direction: isize) {
+        self.load_armed = None;
+        match self.sidebar_section {
+            SidebarSection::Models => {
+                let visible = self.sidebar_model_indices();
+                if visible.is_empty() {
+                    return;
+                }
+                let next = match self
+                    .stack_catalog_state
+                    .selected()
+                    .and_then(|selected| visible.iter().position(|index| *index == selected))
+                {
+                    Some(position) => (position as isize + direction)
+                        .clamp(0, visible.len() as isize - 1)
+                        as usize,
+                    None => 0,
+                };
+                self.stack_catalog_state.select(Some(visible[next]));
+            }
+            SidebarSection::Jobs => {
+                let count = self.job_history.records().len();
+                if direction < 0 {
+                    select_previous_table(&mut self.jobs_state, count);
+                } else {
+                    select_next_table(&mut self.jobs_state, count);
+                }
+            }
+        }
+    }
+
+    /// Enter in the sidebar. A model opens its default view: Chat for a
+    /// language chat profile, the task form otherwise. It never loads a model;
+    /// that is `L`. A job opens the Jobs view on that job.
+    fn open_sidebar_selection(&mut self) {
+        match self.sidebar_section {
+            SidebarSection::Models => {
+                if self.stack_catalog_state.selected().is_none() {
+                    self.status = "No model selected".into();
+                    return;
+                }
+                self.view = View::Model;
+                let wants_chat = self.selected_stack_profile().is_some_and(|profile| {
+                    profile.key.lane == Lane::Language
+                        && profile.tasks.len() == 1
+                        && profile.tasks.iter().any(|task| task.as_str() == "chat")
+                });
+                if wants_chat && self.chat_client.is_none() {
+                    self.chat_handoff_pending = self.stack_catalog_state.selected();
+                    if !self.chat_connection_pending {
+                        // Lists models only (GET /v1/models); never loads one.
+                        self.start_chat_connect();
+                    }
+                    self.status = "Connecting to llama-swap to open Chat…".into();
+                    return;
+                }
+                self.begin_task_form();
+                if self.view == View::Chat || self.input_mode == InputMode::TaskForm {
+                    self.sidebar_focused = false;
+                }
+            }
+            SidebarSection::Jobs => {
+                if self.jobs_state.selected().is_none() {
+                    self.status = "No job selected".into();
+                    return;
+                }
+                let selected = self.jobs_state.selected();
+                self.open_view(View::Jobs);
+                self.jobs_state.select(selected);
+            }
+        }
+    }
+
+    fn handle_sidebar_key(&mut self, key: KeyEvent) -> Result<()> {
+        let command = match key.code {
+            KeyCode::Up | KeyCode::Char('k') => Some(CommandId::SidebarSelectPrevious),
+            KeyCode::Down | KeyCode::Char('j') => Some(CommandId::SidebarSelectNext),
+            KeyCode::Char('[') => Some(CommandId::SidebarPreviousSection),
+            KeyCode::Char(']') => Some(CommandId::SidebarNextSection),
+            KeyCode::Char(' ') => Some(CommandId::SidebarToggleSection),
+            KeyCode::Enter | KeyCode::Char('f') => Some(CommandId::SidebarOpen),
+            KeyCode::Char('/') => Some(CommandId::SidebarFilter),
+            KeyCode::Char('r') => Some(CommandId::StackCatalogRefresh),
+            KeyCode::Char('L') => Some(CommandId::ModelLoad),
+            KeyCode::Char('U') => Some(CommandId::ModelUnload),
+            KeyCode::Char('c') => Some(CommandId::StackCatalogCancel),
+            KeyCode::Char('q') => Some(CommandId::Quit),
+            KeyCode::Esc if !self.model_filter.is_empty() => {
+                self.model_filter.clear();
+                self.status = "Model filter cleared".into();
+                None
+            }
+            KeyCode::Char(character) => toolbar::command_for_key(character),
+            _ => None,
+        };
+        if let Some(command) = command {
+            self.execute_command(command)?;
+        }
+        Ok(())
     }
 
     fn leave_tab_inputs(&mut self) {
@@ -2298,56 +2575,53 @@ impl App {
     fn modified_key_command(&self, key: KeyEvent) -> Option<CommandId> {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
-        match (self.tab, key.code, control, alt) {
-            (Tab::Workbench, KeyCode::Char('r'), true, _) => Some(CommandId::WorkbenchLoadModel),
-            (Tab::Workbench, KeyCode::Char('s'), true, _) => Some(CommandId::WorkbenchUnloadModel),
-            (Tab::Workbench, KeyCode::Char('f'), true, _) => Some(CommandId::WorkbenchFocusFilter),
-            (Tab::Workbench, KeyCode::Char('j'), true, _) => Some(CommandId::WorkbenchFocusTable),
-            (Tab::Workbench, KeyCode::Char('l'), true, _) => Some(CommandId::WorkbenchClearLog),
-            (Tab::ModelOps, KeyCode::Char('r'), true, _) => Some(CommandId::ModelOpsStart),
-            (Tab::ModelOps, KeyCode::Char('s'), true, _) => Some(CommandId::ModelOpsStop),
-            (Tab::ModelOps, KeyCode::Char('m'), true, _) => Some(CommandId::ModelOpsToggleMode),
-            (Tab::ModelOps, KeyCode::Char('f'), true, _) => Some(CommandId::ModelOpsFocusFilter),
-            (Tab::ModelOps, KeyCode::Char('j'), true, _) => Some(CommandId::ModelOpsFocusTable),
-            (Tab::ModelOps, KeyCode::Char('u'), true, _) => Some(CommandId::ModelOpsFocusEditor),
-            (Tab::ModelOps, KeyCode::Char('p'), _, true) => Some(CommandId::ModelOpsSaveScript),
-            (Tab::ModelOps, KeyCode::Char('o'), _, true) => Some(CommandId::ModelOpsReloadScript),
-            (Tab::ModelOps, KeyCode::Char('v'), _, true) => Some(CommandId::ModelOpsRestoreScript),
-            (Tab::ModelOps, KeyCode::Char('l'), true, _) => Some(CommandId::ModelOpsClearLog),
-            (Tab::Chat, KeyCode::Char('g'), true, _) => Some(CommandId::ChatConnect),
-            (Tab::Chat, KeyCode::Char('b'), true, _) => Some(CommandId::ChatDetect),
-            (Tab::Chat, KeyCode::Char('x'), true, _) => Some(CommandId::ChatClear),
-            (Tab::Chat, KeyCode::Char('s'), _, true) => Some(CommandId::ChatSave),
-            (Tab::Browser, KeyCode::Char('r'), _, true) => Some(CommandId::BrowserScan),
-            (Tab::Browser, KeyCode::Char('g'), _, true) => Some(CommandId::BrowserFocusPath),
-            (Tab::Browser, KeyCode::Char('j'), _, true) => Some(CommandId::BrowserFocusTable),
-            (Tab::Download, KeyCode::Char('d'), _, true) => Some(CommandId::DownloadSelected),
-            (Tab::Download, KeyCode::Char('e'), _, true) => Some(CommandId::DownloadEnabled),
-            (Tab::Download, KeyCode::Char('w'), _, true) => Some(CommandId::DownloadSaveConfig),
-            (Tab::Download, KeyCode::Char('v'), _, true) => Some(CommandId::DownloadValidateConfig),
-            (Tab::Download, KeyCode::Char('t'), _, true) => Some(CommandId::DownloadFocusTable),
-            (Tab::Download, KeyCode::Char('i'), _, true) => Some(CommandId::DownloadFocusEditor),
-            (Tab::Download, KeyCode::Char('o'), _, true) => Some(CommandId::DownloadLoadConfig),
-            (Tab::Download, KeyCode::Char('r'), _, true) => Some(CommandId::DownloadRestoreConfig),
-            (Tab::Download, KeyCode::Char('n'), _, true) => Some(CommandId::DownloadAddModel),
-            (Tab::Download, KeyCode::Char('a'), _, true) => Some(CommandId::DownloadApplyEdit),
-            (Tab::Download, KeyCode::Char('k'), _, true) => Some(CommandId::DownloadDeleteModel),
-            (Tab::Download, KeyCode::Char('y'), _, true) => Some(CommandId::DownloadClearLog),
-            (Tab::Maintenance, KeyCode::Char('r'), true, _) => Some(CommandId::MaintenanceRun),
-            (Tab::Maintenance, KeyCode::Char('s'), true, _) => Some(CommandId::MaintenanceStop),
-            (Tab::Maintenance, KeyCode::Char('u'), true, _) => {
+        match (self.view, key.code, control, alt) {
+            (View::Bench, KeyCode::Char('r'), true, _) => Some(CommandId::BenchRun),
+            (View::Bench, KeyCode::Char('s'), true, _) => Some(CommandId::BenchStop),
+            (View::Bench, KeyCode::Char('f'), true, _) => Some(CommandId::BenchFocusFilter),
+            (View::Bench, KeyCode::Char('j'), true, _) => Some(CommandId::BenchFocusList),
+            (View::Bench, KeyCode::Char('u'), true, _) => Some(CommandId::BenchFocusEditor),
+            (View::Bench, KeyCode::Char('p'), _, true) => Some(CommandId::BenchSaveScript),
+            (View::Bench, KeyCode::Char('o'), _, true) => Some(CommandId::BenchReloadScript),
+            (View::Bench, KeyCode::Char('v'), _, true) => Some(CommandId::BenchRestoreScript),
+            (View::Chat, KeyCode::Char('g'), true, _) => Some(CommandId::ChatConnect),
+            (View::Chat, KeyCode::Char('b'), true, _) => Some(CommandId::ChatDetect),
+            (View::Chat, KeyCode::Char('x'), true, _) => Some(CommandId::ChatClear),
+            (View::Chat, KeyCode::Char('s'), _, true) => Some(CommandId::ChatSave),
+            (View::Browser, KeyCode::Char('r'), _, true) => Some(CommandId::BrowserScan),
+            (View::Browser, KeyCode::Char('g'), _, true) => Some(CommandId::BrowserFocusPath),
+            (View::Browser, KeyCode::Char('j'), _, true) => Some(CommandId::BrowserFocusTable),
+            (View::Download, KeyCode::Char('d'), _, true) => Some(CommandId::DownloadSelected),
+            (View::Download, KeyCode::Char('e'), _, true) => Some(CommandId::DownloadEnabled),
+            (View::Download, KeyCode::Char('w'), _, true) => Some(CommandId::DownloadSaveConfig),
+            (View::Download, KeyCode::Char('v'), _, true) => {
+                Some(CommandId::DownloadValidateConfig)
+            }
+            (View::Download, KeyCode::Char('t'), _, true) => Some(CommandId::DownloadFocusTable),
+            (View::Download, KeyCode::Char('i'), _, true) => Some(CommandId::DownloadFocusEditor),
+            (View::Download, KeyCode::Char('o'), _, true) => Some(CommandId::DownloadLoadConfig),
+            (View::Download, KeyCode::Char('r'), _, true) => Some(CommandId::DownloadRestoreConfig),
+            (View::Download, KeyCode::Char('n'), _, true) => Some(CommandId::DownloadAddModel),
+            (View::Download, KeyCode::Char('a'), _, true) => Some(CommandId::DownloadApplyEdit),
+            (View::Download, KeyCode::Char('k'), _, true) => Some(CommandId::DownloadDeleteModel),
+            (View::Download, KeyCode::Char('y'), _, true) => Some(CommandId::DownloadClearLog),
+            (View::Maintenance, KeyCode::Char('r'), true, _) => Some(CommandId::MaintenanceRun),
+            (View::Maintenance, KeyCode::Char('s'), true, _) => Some(CommandId::MaintenanceStop),
+            (View::Maintenance, KeyCode::Char('u'), true, _) => {
                 Some(CommandId::MaintenanceFocusEditor)
             }
-            (Tab::Maintenance, KeyCode::Char('p'), _, true) => {
+            (View::Maintenance, KeyCode::Char('p'), _, true) => {
                 Some(CommandId::MaintenanceSaveScript)
             }
-            (Tab::Maintenance, KeyCode::Char('o'), _, true) => {
+            (View::Maintenance, KeyCode::Char('o'), _, true) => {
                 Some(CommandId::MaintenanceReloadScript)
             }
-            (Tab::Maintenance, KeyCode::Char('v'), _, true) => {
+            (View::Maintenance, KeyCode::Char('v'), _, true) => {
                 Some(CommandId::MaintenanceRestoreScript)
             }
-            (Tab::Maintenance, KeyCode::Char('l'), true, _) => Some(CommandId::MaintenanceClearLog),
+            (View::Maintenance, KeyCode::Char('l'), true, _) => {
+                Some(CommandId::MaintenanceClearLog)
+            }
             _ => None,
         }
     }
@@ -2448,7 +2722,7 @@ impl App {
     fn handle_input_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
             KeyCode::Esc => {
-                if self.tab == Tab::Chat && self.cancel_chat_request() {
+                if self.view == View::Chat && self.cancel_chat_request() {
                     return Ok(());
                 }
                 if self.input_mode == InputMode::TaskForm {
@@ -2515,8 +2789,7 @@ impl App {
             KeyCode::Backspace => match self.input_mode {
                 InputMode::ModelFilter => {
                     self.model_filter.pop();
-                    self.model_page = 0;
-                    self.model_state.select(Some(0));
+                    self.select_first_visible_model();
                 }
                 InputMode::BenchFilter => {
                     let mut filter = self.bench_filter.clone();
@@ -2551,8 +2824,7 @@ impl App {
                 match self.input_mode {
                     InputMode::ModelFilter => {
                         self.model_filter.push(character);
-                        self.model_page = 0;
-                        self.model_state.select(Some(0));
+                        self.select_first_visible_model();
                     }
                     InputMode::BenchFilter => {
                         let mut filter = self.bench_filter.clone();
@@ -2742,10 +3014,6 @@ impl App {
     }
 
     fn focus_script_editor(&mut self, target: ScriptEditorTarget) {
-        if target == ScriptEditorTarget::Bench && self.ops_mode != OpsMode::Bench {
-            self.status = "Run mode is read-only; switch to Bench to edit scripts".into();
-            return;
-        }
         if !self.sync_script_editor_selection(target) {
             self.status = format!("No {} script selected", target.label().to_ascii_lowercase());
             return;
@@ -3053,40 +3321,74 @@ impl App {
     }
 
     fn handle_tab_key(&mut self, key: KeyEvent) -> Result<()> {
-        match self.tab {
-            Tab::Workbench => self.handle_workbench_key(key),
-            Tab::ModelOps => self.handle_ops_key(key),
-            Tab::Chat => self.handle_chat_key(key),
-            Tab::Browser => self.handle_browser_key(key),
-            Tab::Download => self.handle_download_key(key)?,
-            Tab::Jobs => self.handle_jobs_key(key),
-            Tab::Maintenance => self.handle_maintenance_key(key),
-            Tab::StackCatalog => self.handle_stack_catalog_key(key),
+        match self.view {
+            View::Model => self.handle_stack_catalog_key(key),
+            View::Chat => self.handle_chat_key(key),
+            View::Jobs => self.handle_jobs_key(key),
+            View::Bench => self.handle_bench_key(key),
+            View::Download => self.handle_download_key(key)?,
+            View::Browser => self.handle_browser_key(key),
+            View::Maintenance => self.handle_maintenance_key(key),
+            View::System => {}
+            View::Log => {
+                if key.code == KeyCode::Char('c') {
+                    self.execute_command(CommandId::ClearLog)?;
+                }
+            }
         }
         Ok(())
     }
 
-    fn command_context(&self) -> CommandContext {
-        match self.tab {
-            Tab::Workbench => CommandContext::Workbench,
-            Tab::ModelOps => CommandContext::ModelOps,
-            Tab::Chat => CommandContext::Chat,
-            Tab::Browser => CommandContext::Browser,
-            Tab::Download => CommandContext::Download,
-            Tab::Jobs => CommandContext::Jobs,
-            Tab::Maintenance => CommandContext::Maintenance,
-            Tab::StackCatalog => CommandContext::StackCatalog,
+    fn handle_bench_key(&mut self, key: KeyEvent) {
+        let command = match key.code {
+            KeyCode::Up | KeyCode::Char('k') => Some(CommandId::BenchSelectPrevious),
+            KeyCode::Down | KeyCode::Char('j') => Some(CommandId::BenchSelectNext),
+            KeyCode::Char('/') => Some(CommandId::BenchFocusFilter),
+            KeyCode::Enter | KeyCode::Char('r') => Some(CommandId::BenchRun),
+            KeyCode::Char('s') => Some(CommandId::BenchStop),
+            _ => None,
+        };
+        if let Some(command) = command {
+            if let Err(error) = self.execute_command(command) {
+                self.status = format!("Bench: {error:#}");
+            }
         }
+    }
+
+    fn command_context(&self) -> CommandContext {
+        match self.view {
+            View::Model => CommandContext::StackCatalog,
+            View::Chat => CommandContext::Chat,
+            View::Jobs => CommandContext::Jobs,
+            View::Bench => CommandContext::Bench,
+            View::Download => CommandContext::Download,
+            View::Browser => CommandContext::Browser,
+            View::Maintenance => CommandContext::Maintenance,
+            View::System => CommandContext::System,
+            View::Log => CommandContext::Log,
+        }
+    }
+
+    /// Whether a command can run now: global and sidebar commands always,
+    /// Model-view commands while the sidebar is focused, and everything else
+    /// in its own view.
+    fn command_available(&self, spec: &crate::commands::CommandSpec) -> bool {
+        spec.is_available_in(self.command_context())
+            || spec.contexts.contains(&CommandContext::Sidebar)
+            || (self.sidebar_focused && spec.contexts.contains(&CommandContext::StackCatalog))
     }
 
     fn execute_command(&mut self, command_id: CommandId) -> Result<()> {
         use CommandId::*;
 
         if let Some(spec) = command(command_id) {
-            let context = self.command_context();
-            if !spec.is_available_in(context) {
+            if !spec.is_visible() {
+                self.status = format!("{} is not built yet (workbench plan step 2)", spec.label);
+                return Ok(());
+            }
+            if !self.command_available(spec) {
                 self.status = format!(
-                    "{} is only available in its {} context",
+                    "{} is only available in its {} view",
                     spec.palette_label,
                     spec.contexts
                         .first()
@@ -3097,154 +3399,82 @@ impl App {
             }
         }
 
-        if matches!(
-            command_id,
-            OpenWorkbench
-                | OpenModelOps
-                | OpenChat
-                | OpenBrowser
-                | OpenDownload
-                | OpenJobs
-                | OpenMaintenance
-                | OpenStackCatalog
-                | PreviousTab
-                | NextTab
-        ) {
-            self.leave_tab_inputs();
-        }
-
         match command_id {
             Quit => self.request_quit(),
             ShowHelp => self.show_help = true,
             ShowPalette => self.open_palette(),
-            OpenWorkbench => self.tab = Tab::Workbench,
-            OpenModelOps => self.tab = Tab::ModelOps,
-            OpenChat => self.tab = Tab::Chat,
-            OpenBrowser => {
-                self.tab = Tab::Browser;
-                self.ensure_browser_scan();
+            OpenStackCatalog => self.open_view(View::Model),
+            OpenChat => self.open_view(View::Chat),
+            OpenJobs => self.open_view(View::Jobs),
+            OpenBench => self.open_view(View::Bench),
+            OpenDownload => self.open_view(View::Download),
+            OpenBrowser => self.open_view(View::Browser),
+            OpenMaintenance => self.open_view(View::Maintenance),
+            OpenSystem => self.open_view(View::System),
+            OpenLog => self.open_view(View::Log),
+            PreviousTab => {
+                let count = View::ALL.len();
+                self.open_view(View::from_index(self.view.index() + count - 1));
             }
-            OpenDownload => self.tab = Tab::Download,
-            OpenJobs => self.tab = Tab::Jobs,
-            OpenMaintenance => self.tab = Tab::Maintenance,
-            OpenStackCatalog => {
-                self.tab = Tab::StackCatalog;
-                self.refresh_stack_catalog();
+            NextTab => self.open_view(View::from_index(self.view.index() + 1)),
+            ToggleFocus => self.toggle_focus(),
+            ReloadRouter | Tune => {}
+            SidebarSelectPrevious => self.move_sidebar_selection(-1),
+            SidebarSelectNext => self.move_sidebar_selection(1),
+            SidebarPreviousSection | SidebarNextSection => {
+                self.sidebar_section = self.sidebar_section.other();
             }
-            StackCatalogSelectPrevious => {
-                let count = self
-                    .stack_catalog
-                    .as_ref()
-                    .map_or(0, |catalog| catalog.list().len());
-                select_previous_table(&mut self.stack_catalog_state, count);
-            }
-            StackCatalogSelectNext => {
-                let count = self
-                    .stack_catalog
-                    .as_ref()
-                    .map_or(0, |catalog| catalog.list().len());
-                select_next_table(&mut self.stack_catalog_state, count);
+            SidebarToggleSection => match self.sidebar_section {
+                SidebarSection::Models => self.models_collapsed = !self.models_collapsed,
+                SidebarSection::Jobs => self.jobs_collapsed = !self.jobs_collapsed,
+            },
+            SidebarOpen => self.open_sidebar_selection(),
+            SidebarFilter => {
+                self.sidebar_section = SidebarSection::Models;
+                self.models_collapsed = false;
+                self.sidebar_focused = true;
+                self.input_mode = InputMode::ModelFilter;
             }
             StackCatalogRefresh => {
-                // Router state in the Router column comes from the model list.
+                // Router state in the sidebar comes from the model list.
                 self.refresh_models();
                 self.refresh_stack_catalog();
+                self.refresh_bench_rates();
+                self.ensure_visible_model_selection();
+                if self.stack_catalog.is_some() {
+                    self.status =
+                        format!("Refreshed · {} models", self.sidebar_model_indices().len());
+                }
             }
+            ModelLoad => self.model_action(true),
+            ModelUnload => self.model_action(false),
             StackCatalogForm => self.begin_task_form(),
             StackCatalogCancel => {
                 #[cfg(target_os = "linux")]
                 self.begin_direct_native_cancel();
             }
-            PreviousTab => {
-                self.tab =
-                    Tab::from_index((self.tab.index() + TAB_NAMES.len() - 1) % TAB_NAMES.len());
-                self.ensure_browser_scan();
-                if self.tab == Tab::StackCatalog {
-                    self.refresh_stack_catalog();
-                }
-            }
-            NextTab => {
-                self.tab = Tab::from_index(self.tab.index() + 1);
-                self.ensure_browser_scan();
-                if self.tab == Tab::StackCatalog {
-                    self.refresh_stack_catalog();
-                }
-            }
-            WorkbenchSelectPrevious => {
-                let count = self.visible_model_count();
-                select_previous_table(&mut self.model_state, count);
-            }
-            WorkbenchSelectNext => {
-                let count = self.visible_model_count();
-                select_next_table(&mut self.model_state, count);
-            }
-            WorkbenchFocusFilter => self.input_mode = InputMode::ModelFilter,
-            WorkbenchFocusTable => self.input_mode = InputMode::Normal,
-            WorkbenchRefreshModels => self.refresh_models(),
-            WorkbenchLoadModel => self.model_action(true),
-            WorkbenchUnloadModel => self.model_action(false),
-            WorkbenchClearLog => self.clear_activity_log("Workbench"),
-            WorkbenchCycleLayout => {
-                self.workbench_layout = self.workbench_layout.next();
-                self.status = format!("Workbench layout: {}", self.workbench_layout.label());
-            }
-            ModelOpsToggleMode => {
-                if self.script_input_target == Some(ScriptEditorTarget::Bench) {
-                    self.leave_script_editor();
-                }
-                self.ops_mode = match self.ops_mode {
-                    OpsMode::Run => OpsMode::Bench,
-                    OpsMode::Bench => OpsMode::Run,
-                };
-                self.input_mode = InputMode::Normal;
-            }
-            ModelOpsSelectPrevious => match self.ops_mode {
-                OpsMode::Run => {
-                    let count = self.visible_model_count();
-                    select_previous_table(&mut self.model_state, count);
-                }
-                OpsMode::Bench => self.move_script_selection(ScriptEditorTarget::Bench, true),
-            },
-            ModelOpsSelectNext => match self.ops_mode {
-                OpsMode::Run => {
-                    let count = self.visible_model_count();
-                    select_next_table(&mut self.model_state, count);
-                }
-                OpsMode::Bench => self.move_script_selection(ScriptEditorTarget::Bench, false),
-            },
-            ModelOpsStart => match self.ops_mode {
-                OpsMode::Run => self.model_action(true),
-                OpsMode::Bench => self.run_selected_bench(),
-            },
-            ModelOpsStop => match self.ops_mode {
-                OpsMode::Run => self.model_action(false),
-                OpsMode::Bench => self.stop_running_process(),
-            },
-            ModelOpsRefreshModels => self.refresh_models(),
-            ModelOpsFocusFilter => {
-                if self.ops_mode == OpsMode::Run {
-                    self.input_mode = InputMode::ModelFilter;
-                } else {
-                    self.input_mode = InputMode::BenchFilter;
-                }
-            }
-            ModelOpsFocusTable => {
+            BenchSelectPrevious => self.move_script_selection(ScriptEditorTarget::Bench, true),
+            BenchSelectNext => self.move_script_selection(ScriptEditorTarget::Bench, false),
+            BenchRun => self.run_selected_bench(),
+            BenchStop => self.stop_running_process(),
+            BenchFocusFilter => self.input_mode = InputMode::BenchFilter,
+            BenchFocusList => {
                 if self.script_input_target == Some(ScriptEditorTarget::Bench) {
                     self.leave_script_editor();
                 }
                 self.input_mode = InputMode::Normal;
             }
-            ModelOpsFocusEditor => {
+            BenchFocusEditor => {
                 if self.script_input_target == Some(ScriptEditorTarget::Bench) {
                     self.leave_script_editor();
                 } else {
                     self.focus_script_editor(ScriptEditorTarget::Bench);
                 }
             }
-            ModelOpsSaveScript => self.save_script_editor(ScriptEditorTarget::Bench),
-            ModelOpsReloadScript => self.reload_script_editor(ScriptEditorTarget::Bench),
-            ModelOpsRestoreScript => self.open_script_versions(ScriptEditorTarget::Bench),
-            ModelOpsClearLog => self.clear_activity_log("Model Ops"),
+            BenchSaveScript => self.save_script_editor(ScriptEditorTarget::Bench),
+            BenchReloadScript => self.reload_script_editor(ScriptEditorTarget::Bench),
+            BenchRestoreScript => self.open_script_versions(ScriptEditorTarget::Bench),
+            ClearLog => self.clear_activity_log("Log"),
             ChatCompose => self.input_mode = InputMode::ChatMessage,
             ChatSend => {
                 if self.chat_input.trim().is_empty() {
@@ -3364,97 +3594,7 @@ impl App {
             | ParamBuilderOpenPresets
             | ParamBuilderClearAll => {}
         }
-        if matches!(
-            command_id,
-            OpenWorkbench
-                | OpenModelOps
-                | OpenChat
-                | OpenBrowser
-                | OpenDownload
-                | OpenJobs
-                | OpenMaintenance
-                | PreviousTab
-                | NextTab
-        ) {
-            self.store_active_script_view();
-            self.input_mode = InputMode::Normal;
-            self.script_input_target = None;
-            self.script_versions_target = None;
-            self.show_help = false;
-        }
         Ok(())
-    }
-
-    fn handle_workbench_key(&mut self, key: KeyEvent) {
-        let visible_count = self.visible_model_count();
-        match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                select_previous_table(&mut self.model_state, visible_count)
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                select_next_table(&mut self.model_state, visible_count)
-            }
-            KeyCode::Char('/') => self.input_mode = InputMode::ModelFilter,
-            KeyCode::PageUp | KeyCode::Char('[') => self.previous_model_page(),
-            KeyCode::PageDown | KeyCode::Char(']') => self.next_model_page(),
-            KeyCode::Char('r') => self.refresh_models(),
-            KeyCode::Enter | KeyCode::Char('l') => self.model_action(true),
-            KeyCode::Char('s') => self.model_action(false),
-            KeyCode::Char('v') => {
-                let _ = self.execute_command(CommandId::WorkbenchCycleLayout);
-            }
-            KeyCode::Char('1') => {
-                self.workbench_layout = WorkbenchLayout::Dashboard;
-                self.status = format!("Workbench layout: {}", self.workbench_layout.label());
-            }
-            KeyCode::Char('2') => {
-                self.workbench_layout = WorkbenchLayout::SplitVertical;
-                self.status = format!("Workbench layout: {}", self.workbench_layout.label());
-            }
-            KeyCode::Char('3') => {
-                self.workbench_layout = WorkbenchLayout::Classic;
-                self.status = format!("Workbench layout: {}", self.workbench_layout.label());
-            }
-            KeyCode::Char('4') => {
-                self.workbench_layout = WorkbenchLayout::FocusBench;
-                self.status = format!("Workbench layout: {}", self.workbench_layout.label());
-            }
-            KeyCode::Char('5') => {
-                self.workbench_layout = WorkbenchLayout::FocusJobs;
-                self.status = format!("Workbench layout: {}", self.workbench_layout.label());
-            }
-            KeyCode::Char('6') => {
-                self.workbench_layout = WorkbenchLayout::FocusGpu;
-                self.status = format!("Workbench layout: {}", self.workbench_layout.label());
-            }
-            KeyCode::Char('b') => self.run_selected_bench(),
-            _ => {}
-        }
-    }
-
-    fn handle_ops_key(&mut self, key: KeyEvent) {
-        if matches!(key.code, KeyCode::Char('m')) {
-            self.ops_mode = match self.ops_mode {
-                OpsMode::Run => OpsMode::Bench,
-                OpsMode::Bench => OpsMode::Run,
-            };
-            return;
-        }
-        match self.ops_mode {
-            OpsMode::Run => self.handle_workbench_key(key),
-            OpsMode::Bench => match key.code {
-                KeyCode::Up | KeyCode::Char('k') => {
-                    self.move_script_selection(ScriptEditorTarget::Bench, true)
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    self.move_script_selection(ScriptEditorTarget::Bench, false)
-                }
-                KeyCode::Char('/') => self.input_mode = InputMode::BenchFilter,
-                KeyCode::Enter | KeyCode::Char('r') => self.run_selected_bench(),
-                KeyCode::Char('s') => self.stop_running_process(),
-                _ => {}
-            },
-        }
     }
 
     fn handle_chat_key(&mut self, key: KeyEvent) {
@@ -3539,6 +3679,10 @@ impl App {
 
     fn handle_download_key(&mut self, key: KeyEvent) -> Result<()> {
         if key.code == KeyCode::Esc && self.cancel_download_preflight() {
+            return Ok(());
+        }
+        if key.code == KeyCode::Esc {
+            self.toggle_focus();
             return Ok(());
         }
         match key.code {
@@ -4150,52 +4294,6 @@ impl App {
         }
     }
 
-    fn filtered_models(&self) -> Vec<&SwapModel> {
-        let filter = self.model_filter.to_ascii_lowercase();
-        self.models
-            .iter()
-            .filter(|model| filter.is_empty() || model.id.to_ascii_lowercase().contains(&filter))
-            .collect()
-    }
-
-    fn visible_models(&self) -> Vec<&SwapModel> {
-        let filtered = self.filtered_models();
-        let start = self.model_page.saturating_mul(MODEL_PAGE_SIZE);
-        filtered
-            .into_iter()
-            .skip(start)
-            .take(MODEL_PAGE_SIZE)
-            .collect()
-    }
-
-    fn visible_model_count(&self) -> usize {
-        self.visible_models().len()
-    }
-
-    fn model_page_count(&self) -> usize {
-        self.filtered_models()
-            .len()
-            .div_ceil(MODEL_PAGE_SIZE)
-            .max(1)
-    }
-
-    fn previous_model_page(&mut self) {
-        self.model_page = self.model_page.saturating_sub(1);
-        self.model_state.select(Some(0));
-    }
-
-    fn next_model_page(&mut self) {
-        self.model_page = (self.model_page + 1).min(self.model_page_count().saturating_sub(1));
-        self.model_state.select(Some(0));
-    }
-
-    fn selected_model(&self) -> Option<SwapModel> {
-        let index = self.model_state.selected()?;
-        self.visible_models()
-            .get(index)
-            .map(|model| (*model).clone())
-    }
-
     fn selected_chat_model(&self) -> Option<SwapModel> {
         let selectable = self.chat_picker_model_indices();
         let model_index = *selectable.get(self.chat_model_state.selected()?)?;
@@ -4274,29 +4372,54 @@ impl App {
         self.visible_browser_files().get(index).cloned()
     }
 
+    /// Load the selected sidebar model (`load`) or unload the resident one.
+    /// A load asks for a second `L` first, naming the model it will evict.
     fn model_action(&mut self, load: bool) {
         if self.model_action_pending {
             self.status = "A llama-swap action is already in progress".into();
             return;
         }
-        let model_id = if load {
-            self.selected_model().map(|model| model.id)
-        } else {
-            self.loaded_model_id
-                .clone()
-                .or_else(|| self.selected_model().map(|model| model.id))
-        };
-        let Some(model_id) = model_id else {
-            self.status = if load {
-                "No model selected".into()
-            } else {
-                "No loaded model is known".into()
+        if !load {
+            let Some(model_id) = self.loaded_model_id.clone() else {
+                self.status = "No loaded model is known".into();
+                return;
             };
+            self.begin_model_action(model_id, false);
+            return;
+        }
+        let Some(model_id) = self.selected_swap_model_id() else {
+            self.status = "The selected profile is not a llama-swap model".into();
             return;
         };
-        self.begin_model_action(model_id, load);
+        if self.load_armed.as_deref() != Some(model_id.as_str()) {
+            let evicts = match self.loaded_model_id.as_deref() {
+                Some(resident) if resident == model_id => {
+                    format!("{model_id} is already resident")
+                }
+                Some(resident) => format!("this evicts {resident}"),
+                None => "nothing is resident".into(),
+            };
+            self.status = format!("Load {model_id}? {evicts} · press L again to confirm");
+            self.load_armed = Some(model_id);
+            return;
+        }
+        self.load_armed = None;
+        self.begin_model_action(model_id, true);
     }
 
+    /// The llama-swap model id of the selected sidebar profile, when the
+    /// router lists it.
+    fn selected_swap_model_id(&self) -> Option<String> {
+        let profile = self.selected_stack_profile()?;
+        if profile.key.lane != Lane::Language {
+            return None;
+        }
+        let id = profile.key.profile_id.as_str();
+        self.models
+            .iter()
+            .any(|model| model.id == id)
+            .then(|| id.to_owned())
+    }
     fn begin_model_action(&mut self, model_id: String, load: bool) {
         #[cfg(target_os = "linux")]
         if self.direct_native_job.is_some() || self.direct_native_admission_closed {
@@ -4364,7 +4487,7 @@ impl App {
                 self.stack_catalog = Some(catalog);
                 self.stack_catalog_error = None;
                 clamp_table_selection(&mut self.stack_catalog_state, count);
-                self.status = format!("Stack catalog refreshed · {count} manifest-only profile(s)");
+                self.status = format!("Manifests loaded · {count} profile(s)");
             }
             Err(error) => {
                 self.stack_catalog = None;
@@ -4380,8 +4503,14 @@ impl App {
 
     fn handle_stack_catalog_key(&mut self, key: KeyEvent) {
         let command = match key.code {
-            KeyCode::Up | KeyCode::Char('k') => Some(CommandId::StackCatalogSelectPrevious),
-            KeyCode::Down | KeyCode::Char('j') => Some(CommandId::StackCatalogSelectNext),
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.sidebar_section = SidebarSection::Models;
+                Some(CommandId::SidebarSelectPrevious)
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.sidebar_section = SidebarSection::Models;
+                Some(CommandId::SidebarSelectNext)
+            }
             KeyCode::Char('r') => Some(CommandId::StackCatalogRefresh),
             KeyCode::Char('f') => Some(CommandId::StackCatalogForm),
             KeyCode::Char('c') => Some(CommandId::StackCatalogCancel),
@@ -4389,7 +4518,7 @@ impl App {
         };
         if let Some(command) = command {
             if let Err(error) = self.execute_command(command) {
-                self.status = format!("Stack Catalog: {error:#}");
+                self.status = format!("Model: {error:#}");
             }
         }
     }
@@ -4488,7 +4617,7 @@ impl App {
         }
     }
 
-    /// Hand a chat-only language profile to the existing Chat tab, without
+    /// Hand a chat-only language profile to the Chat view, without
     /// creating a request or changing any conversation state. `true` means
     /// this profile owns Chat and the user should not fall through to a form.
     fn handoff_chat_profile_to_chat(&mut self, captured_profile: &CatalogProfile) -> bool {
@@ -4599,7 +4728,7 @@ impl App {
         };
 
         self.chat_model_state.select(Some(picker_index));
-        self.tab = Tab::Chat;
+        self.view = View::Chat;
         self.input_mode = InputMode::ChatMessage;
         self.status = format!(
             "Chat selected {} · no message sent; existing draft and session preserved",
@@ -6027,10 +6156,8 @@ impl App {
             self.cancel_download_preflight();
         } else if self.model_action_pending {
             self.status = "The current llama-swap request cannot be cancelled safely".into();
-        } else if self.loaded_model_id.is_some() {
-            self.model_action(false);
         } else {
-            self.status = "No active job to stop".into();
+            self.status = "No active job to stop (U in the sidebar unloads the model)".into();
         }
     }
 
@@ -6098,34 +6225,37 @@ impl App {
 
     fn draw(&mut self, frame: &mut Frame) {
         frame.render_widget(Block::default().style(theme::surface()), frame.area());
-        // Activity fits its content (one to three lines plus borders) so an empty
-        // log does not take working space from every tab.
-        let activity_height = (self.log.len() as u16).saturating_add(2).clamp(3, 5);
-        let areas = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Min(8),
-                Constraint::Length(activity_height),
-                Constraint::Length(1),
-            ])
-            .split(frame.area());
-
-        self.draw_header(frame, areas[0]);
-        self.draw_tabs(frame, areas[1]);
-        match self.tab {
-            Tab::Workbench => self.draw_workbench(frame, areas[2]),
-            Tab::ModelOps => self.draw_model_ops(frame, areas[2]),
-            Tab::Chat => self.draw_chat(frame, areas[2]),
-            Tab::Browser => self.draw_browser(frame, areas[2]),
-            Tab::Download => self.draw_download(frame, areas[2]),
-            Tab::Jobs => self.draw_jobs(frame, areas[2]),
-            Tab::Maintenance => self.draw_maintenance(frame, areas[2]),
-            Tab::StackCatalog => self.draw_stack_catalog(frame, areas[2]),
+        let areas = shell::layout(frame.area(), self.sidebar_focused);
+        frame.render_widget(
+            Paragraph::new(toolbar::toolbar_line(self.view.name(), areas.toolbar.width))
+                .style(theme::text()),
+            areas.toolbar,
+        );
+        if let Some(area) = areas.sidebar {
+            self.draw_sidebar(frame, area);
         }
-        self.draw_log(frame, areas[3]);
-        self.draw_footer(frame, areas[4]);
+        if let Some(area) = areas.pane {
+            match self.view {
+                View::Model => self.draw_stack_catalog(frame, area),
+                View::Chat => self.draw_chat(frame, area),
+                View::Jobs => self.draw_jobs(frame, area),
+                View::Bench => self.draw_bench(frame, area),
+                View::Download => self.draw_download(frame, area),
+                View::Browser => self.draw_browser(frame, area),
+                View::Maintenance => self.draw_maintenance(frame, area),
+                View::System => self.draw_system(frame, area),
+                View::Log => self.draw_log(frame, area),
+            }
+        }
+        self.draw_footer(frame, areas.message);
+        frame.render_widget(
+            Paragraph::new(statusbar::status_line(
+                &self.status_inputs(),
+                areas.status.width,
+            ))
+            .style(theme::surface()),
+            areas.status,
+        );
         if self.show_palette {
             self.draw_palette(frame);
         } else if self.show_quit_confirmation {
@@ -6143,323 +6273,195 @@ impl App {
         }
     }
 
-    fn draw_header(&self, frame: &mut Frame, area: Rect) {
-        let endpoint =
-            env::var("LLAMA_SWAP_URL").unwrap_or_else(|_| "http://localhost:8080".into());
-        let line = Line::from(vec![
-            Span::styled(" L3MS ", theme::badge()),
-            Span::raw(format!(" v{}  ", env!("CARGO_PKG_VERSION"))),
-            Span::styled("language", theme::lane_language()),
-            Span::styled(" · ", theme::dim()),
-            Span::styled("media", theme::lane_media()),
-            Span::styled(" · ", theme::dim()),
-            Span::styled("decisions", theme::lane_decisions()),
-            Span::raw("  "),
-            Span::styled(endpoint, theme::dim()),
-        ]);
-        frame.render_widget(Paragraph::new(line).style(theme::text()), area);
-        if let Some(model) = self.models.iter().find(|model| model.state == "loaded") {
-            let label = format!("● {} ", model.id);
-            let width = label.chars().count() as u16;
-            if area.width > width + 50 {
-                let right = Rect::new(area.x + area.width - width, area.y, width, 1);
-                frame.render_widget(Paragraph::new(Span::styled(label, theme::title())), right);
-            }
-        }
-    }
-
-    fn draw_tabs(&self, frame: &mut Frame, area: Rect) {
-        // One flat row: the selected tab is a filled chip, the rest are dim.
-        // Numbers (the F-key for each tab) are dropped before names are clipped.
-        let width = area.width as usize;
-        let chips = |names: &[&str], numbered: bool| -> (Vec<Span<'static>>, usize) {
-            let mut spans = Vec::new();
-            let mut used = 0;
-            for (index, name) in names.iter().enumerate() {
-                let label = if numbered {
-                    format!(" {} {name} ", index + 1)
-                } else {
-                    format!(" {name} ")
-                };
-                used += label.chars().count();
-                let style = if index == self.tab.index() {
-                    theme::selected()
-                } else {
-                    theme::dim()
-                };
-                spans.push(Span::styled(label, style));
-            }
-            (spans, used)
-        };
-        let (mut spans, used) = chips(&TAB_NAMES, true);
-        if used > width {
-            (spans, _) = chips(&TAB_SHORT_NAMES, true);
-        }
-        if spans
-            .iter()
-            .map(|s| s.content.chars().count())
-            .sum::<usize>()
-            > width
-        {
-            (spans, _) = chips(&TAB_SHORT_NAMES, false);
-        }
-        frame.render_widget(Paragraph::new(Line::from(spans)).style(theme::text()), area);
-    }
-
-    fn draw_workbench(&mut self, frame: &mut Frame, area: Rect) {
-        match self.workbench_layout {
-            WorkbenchLayout::Dashboard => {
-                let rows = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
-                    .split(area);
-                let top_cols = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
-                    .split(rows[0]);
-                let bot_cols = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                    .split(rows[1]);
-
-                self.draw_models_table(frame, top_cols[0], "Models");
-                self.draw_gpu_monitor(frame, top_cols[1]);
-                self.draw_workbench_fast_actions(frame, bot_cols[0]);
-                self.draw_workbench_ops(frame, bot_cols[1]);
-            }
-            WorkbenchLayout::SplitVertical => {
-                let cols = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-                    .split(area);
-                self.draw_models_table(frame, cols[0], "Models");
-                let right_rows = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
-                    .split(cols[1]);
-                self.draw_gpu_monitor(frame, right_rows[0]);
-                self.draw_workbench_fast_actions(frame, right_rows[1]);
-            }
-            WorkbenchLayout::Classic => {
-                let chunks = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
-                    .split(area);
-                self.draw_models_table(frame, chunks[0], "Models");
-                self.draw_workbench_fast_actions(frame, chunks[1]);
-            }
-            WorkbenchLayout::FocusBench => {
-                let panes = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
-                    .split(area);
-                self.draw_bench_list_widget(frame, panes[0]);
-                self.draw_script_editor(frame, panes[1], ScriptEditorTarget::Bench);
-            }
-            WorkbenchLayout::FocusJobs => {
-                self.draw_jobs(frame, area);
-            }
-            WorkbenchLayout::FocusGpu => {
-                self.draw_gpu_monitor_expanded(frame, area);
-            }
-        }
-    }
-
-    fn draw_gpu_monitor(&self, frame: &mut Frame, area: Rect) {
-        let title = format!("GPU · v layout ({})", self.workbench_layout.label());
-        let block = theme::block().title(title).borders(Borders::ALL);
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-
-        if inner.height < 2 || inner.width < 10 {
-            return;
-        }
-
-        let mut lines = Vec::new();
-
-        if let Some(gpu) = &self.gpu_telemetry {
-            lines.push(Line::from(vec![
-                Span::styled("GPU:  ", theme::title()),
-                Span::styled(
-                    format!(
-                        "{} · {}°C · {:.1}W",
-                        gpu.name, gpu.temperature_c, gpu.power_watts
-                    ),
-                    theme::text(),
-                ),
-            ]));
-
-            let vram_used_gib = gpu.used_vram_mib as f64 / 1024.0;
-            let vram_total_gib = gpu.total_vram_mib as f64 / 1024.0;
-            let vram_pct = (gpu.used_vram_mib * 100)
-                .checked_div(gpu.total_vram_mib)
-                .unwrap_or(0);
-            let vram_style = if vram_pct > 90 {
-                theme::warning()
-            } else {
-                theme::text()
-            };
-            lines.push(Line::from(vec![
-                Span::styled("VRAM: ", theme::title()),
-                Span::styled(gauge(vram_pct, 12), vram_style),
-                Span::styled(
-                    format!(" {vram_used_gib:.1}/{vram_total_gib:.1} GiB {vram_pct}%"),
-                    vram_style,
-                ),
-                Span::raw("  Load: "),
-                Span::styled(
-                    format!("{}%", gpu.gpu_util_percent),
-                    if gpu.gpu_util_percent > 80 {
-                        theme::title()
-                    } else {
-                        theme::dim()
-                    },
-                ),
-            ]));
-        } else {
-            lines.push(Line::from(Span::styled(
-                "GPU: nvidia-smi polling / idle",
-                theme::dim(),
-            )));
-        }
-
-        if let Some(mem) = &self.sys_memory {
-            let ram_used = mem.used_ram_mib as f64 / 1024.0;
-            let ram_total = mem.total_ram_mib as f64 / 1024.0;
-            let ram_pct = (mem.used_ram_mib * 100)
-                .checked_div(mem.total_ram_mib)
-                .unwrap_or(0);
-            let swap_used = mem.used_swap_mib as f64 / 1024.0;
-            lines.push(Line::from(vec![
-                Span::styled("RAM:  ", theme::title()),
-                Span::styled(
-                    gauge(ram_pct, 12),
-                    if ram_pct > 90 {
-                        theme::warning()
-                    } else {
-                        theme::text()
-                    },
-                ),
-                Span::raw(format!(
-                    " {ram_used:.1}/{ram_total:.1} GiB {ram_pct}% · zram {swap_used:.1}"
-                )),
-            ]));
-        }
-
-        if let Some(io) = &self.server_io {
-            let io_text = io.read_rate_bytes_per_sec.map_or_else(
-                || format!("read: {:.1} MB", io.read_bytes as f64 / (1024.0 * 1024.0)),
-                |rate| {
-                    if rate < 1024.0 * 1024.0 {
-                        format!("read: {:.1} KB/s (PLE normal)", rate / 1024.0)
-                    } else {
-                        format!(
-                            "read: {:.1} MB/s (HOT EXPERT SPILL!)",
-                            rate / (1024.0 * 1024.0)
-                        )
-                    }
-                },
-            );
-            lines.push(Line::from(vec![
-                Span::styled("IO:   ", theme::title()),
-                Span::styled(io_text, theme::dim()),
-            ]));
-        }
-
-        let text_height = (lines.len() as u16).min(inner.height);
-        if inner.height > text_height + 1 && !self.gpu_util_history.is_empty() {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(text_height), Constraint::Min(1)])
-                .split(inner);
-
-            frame.render_widget(Paragraph::new(lines).style(theme::text()), chunks[0]);
-
-            let spark_data: Vec<u64> = self.gpu_util_history.iter().copied().collect();
-            let sparkline = Sparkline::default()
-                .block(
-                    Block::default()
-                        .title("GPU Util Trend (60s)")
-                        .title_style(theme::dim())
-                        .borders(Borders::NONE),
-                )
-                .data(&spark_data)
-                .max(100)
-                .style(theme::title());
-            frame.render_widget(sparkline, chunks[1]);
-        } else {
-            frame.render_widget(Paragraph::new(lines).style(theme::text()), inner);
-        }
-    }
-
-    fn draw_workbench_fast_actions(&self, frame: &mut Frame, area: Rect) {
-        let model = self.selected_model();
-        let text = if let Some(model) = model {
-            Text::from(vec![
-                Line::from(Span::styled(model.id, theme::title())),
-                Line::from(format!("state: {}", model.state)),
-                Line::from(format!("name: {}", value_or_dash(&model.name))),
-                Line::from(""),
-                Line::from(model.description),
-                Line::from(""),
-                Line::from("Enter/l load · s unload · r refresh · b run bench"),
-                Line::from("v cycle layout · 1-6 layout · / filter · F3 chat"),
-            ])
-        } else {
-            Text::from(
-                "No model selected\n\nr refreshes llama-swap\nv cycles workbench layout\n1-6 jumps between views",
-            )
-        };
-        frame.render_widget(
-            Paragraph::new(text)
-                .style(theme::text())
-                .block(
-                    theme::block()
-                        .title("Fast actions & profile")
-                        .borders(Borders::ALL),
-                )
-                .wrap(Wrap { trim: false }),
-            area,
-        );
-    }
-
-    fn draw_workbench_ops(&mut self, frame: &mut Frame, area: Rect) {
-        let running_label = self.running_process.as_ref().map_or_else(
-            || "idle".to_string(),
-            |p| format!("PID {} active", p.process_group),
-        );
-        let title = format!("Benchmarks & Quick Ops ({running_label})");
-        let visible = self
-            .visible_bench_scripts()
-            .into_iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        let items = if visible.is_empty() {
-            vec![ListItem::new("No bench scripts match the filter")]
-        } else {
-            visible
+    fn status_inputs(&self) -> StatusInputs {
+        let endpoint = env::var("LLAMA_SWAP_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_owned());
+        let endpoint = endpoint
+            .trim_start_matches("http://")
+            .trim_start_matches("https://")
+            .trim_start_matches("localhost")
+            .trim_start_matches("127.0.0.1")
+            .trim_end_matches('/')
+            .to_owned();
+        StatusInputs {
+            resident_model: self
+                .models
                 .iter()
-                .take(10)
-                .map(|path| ListItem::new(relative_display(&self.root, path)))
-                .collect::<Vec<_>>()
-        };
-        let list = List::new(items)
-            .style(theme::text())
-            .block(
-                theme::block()
-                    .title(format!("{title} · b run bench · 4 bench · 5 jobs"))
-                    .borders(Borders::ALL),
-            )
-            .highlight_symbol("▶ ")
-            .highlight_style(theme::title());
-        frame.render_stateful_widget(list, area, &mut self.bench_state);
+                .find(|model| model.state == "loaded")
+                .map(|model| model.id.clone()),
+            vram_mib: self
+                .gpu_telemetry
+                .as_ref()
+                .map(|gpu| (gpu.used_vram_mib, gpu.total_vram_mib)),
+            ram_mib: self
+                .sys_memory
+                .as_ref()
+                .map(|memory| (memory.used_ram_mib, memory.total_ram_mib)),
+            cpu_percent: self.cpu_percent,
+            governor: self.host.governor.clone(),
+            fullest_disk: self
+                .host
+                .disks
+                .iter()
+                .max_by_key(|disk| disk.used_percent())
+                .map(|disk| (disk.path.clone(), disk.used_percent())),
+            endpoint,
+        }
     }
 
-    fn draw_gpu_monitor_expanded(&self, frame: &mut Frame, area: Rect) {
-        let title = format!(
-            "Hardware & GPU Performance Analyzer · nvidia-smi · v layout ({})",
-            self.workbench_layout.label()
-        );
+    /// Sidebar model rows: lane headings, then each profile with its router
+    /// state dot and a detail line (tasks or runtime, last steady t/s).
+    fn sidebar_model_rows(&self) -> Vec<ModelRow> {
+        let Some(catalog) = self.stack_catalog.as_ref() else {
+            return Vec::new();
+        };
+        let profiles = catalog.list();
+        let mut rows = Vec::new();
+        let mut group = None;
+        for index in self.sidebar_model_indices() {
+            let profile = &profiles[index];
+            let (name, _, style) = self.sidebar_group(profile);
+            if group != Some(name) {
+                group = Some(name);
+                rows.push(ModelRow::Lane { name, style });
+            }
+            let id = profile.key.profile_id.as_str();
+            let (dot, dot_style) = sidebar::model_dot(self.profile_router_state(profile));
+            let tasks = profile
+                .tasks
+                .iter()
+                .map(|task| task.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            let entry = self.yaml_entries.get(id);
+            let note = if profile.disabled {
+                "off".to_owned()
+            } else {
+                self.bench_rates
+                    .get(id)
+                    .map(|rate| format!("{rate:.0} t/s"))
+                    .unwrap_or_default()
+            };
+            let detail = match (profile.key.lane, entry) {
+                (Lane::Language, Some(entry)) if entry.proxy => {
+                    "engine · used by media profiles".to_owned()
+                }
+                (Lane::Language, Some(entry)) => {
+                    let (server, _) = model_view::cmd_facts(&entry.cmd);
+                    match server {
+                        Some(server) => format!("{tasks} · {}", self.server_display(&server)),
+                        None => tasks,
+                    }
+                }
+                _ => format!("{} · {tasks}", profile.runtime.as_str()),
+            };
+            rows.push(ModelRow::Model {
+                catalog_index: index,
+                id: id.to_owned(),
+                dot,
+                dot_style,
+                note,
+                muted: profile.disabled,
+                detail,
+            });
+        }
+        rows
+    }
+
+    fn sidebar_job_rows(&self) -> Vec<JobRow> {
+        self.job_history
+            .records()
+            .iter()
+            .map(|job| {
+                let (dot, dot_style) = sidebar::job_dot(&job.status);
+                let subject = if job.name.is_empty() {
+                    job.kind.clone()
+                } else {
+                    format!("{} · {}", job.kind, job.name)
+                };
+                JobRow {
+                    dot,
+                    dot_style,
+                    label: subject,
+                    age: job.elapsed_label.clone(),
+                }
+            })
+            .collect()
+    }
+
+    fn draw_sidebar(&self, frame: &mut Frame, area: Rect) {
+        let models = self.sidebar_model_rows();
+        let jobs = self.sidebar_job_rows();
+        let model = SidebarModel {
+            focused: self.sidebar_focused,
+            section: self.sidebar_section,
+            models_collapsed: self.models_collapsed,
+            jobs_collapsed: self.jobs_collapsed,
+            models: &models,
+            selected_catalog_index: self.stack_catalog_state.selected(),
+            filter: &self.model_filter,
+            filter_editing: self.input_mode == InputMode::ModelFilter,
+            jobs: &jobs,
+            selected_job: self.jobs_state.selected(),
+        };
+        sidebar::draw(frame, area, &model);
+    }
+
+    /// Bench view: bench scripts beside the selected script.
+    fn draw_bench(&mut self, frame: &mut Frame, area: Rect) {
+        let panes = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
+            .split(area);
+        self.draw_bench_list_widget(frame, panes[0]);
+        self.draw_script_editor(frame, panes[1], ScriptEditorTarget::Bench);
+    }
+
+    /// Read `llama-swap.yaml` and bench results once: note unlisted alias
+    /// entries, entry facts, macros, GGUF sizes and each model's matching
+    /// bench runs (see [`bench_runs_by_entry`]). A result belongs to a model only when its GGUF path is exactly
+    /// the `-m` path of that model's yaml entry; anything else stays
+    /// "not benched" rather than being guessed.
+    fn refresh_bench_rates(&mut self) {
+        self.bench_rates.clear();
+        self.unlisted_models.clear();
+        self.yaml_entries.clear();
+        self.bench_runs.clear();
+        self.model_sizes.clear();
+        let Ok(yaml) = fs::read_to_string(self.root.join("llama-swap.yaml")) else {
+            return;
+        };
+        let entries = crate::swap_yaml::parse_entries(&yaml);
+        self.yaml_macros = crate::swap_yaml::parse_macros(&yaml);
+        self.unlisted_models = entries
+            .iter()
+            .filter(|entry| entry.unlisted)
+            .map(|entry| entry.id.clone())
+            .collect();
+        self.model_sizes = entries
+            .iter()
+            .filter_map(|entry| {
+                let path = expand_tilde(entry.model_path.as_deref()?);
+                Some((entry.id.clone(), crate::swap_yaml::disk_size(&path)?))
+            })
+            .collect();
+        self.yaml_entries = entries
+            .iter()
+            .map(|entry| (entry.id.clone(), entry.clone()))
+            .collect();
+        let Ok(load) = crate::bench_results::load_results(&self.root) else {
+            return;
+        };
+        self.bench_runs = bench_runs_by_entry(&entries, &load.results);
+        self.bench_rates = self
+            .bench_runs
+            .iter()
+            .filter_map(|(id, runs)| Some((id.clone(), runs.iter().find_map(|run| run.tg_ts)?)))
+            .collect();
+    }
+
+    /// System view: GPU, memory and SSD spill in detail.
+    fn draw_system(&self, frame: &mut Frame, area: Rect) {
+        let title = "System · GPU, memory and spill · nvidia-smi and /proc";
         let block = theme::block().title(title).borders(Borders::ALL);
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -6626,11 +6628,18 @@ impl App {
             self.bench_state.select(None);
         }
         let items = if visible.is_empty() {
-            vec![ListItem::new("No bench scripts match the current filter")]
+            vec![ListItem::new("No matching scripts")]
         } else {
             visible
                 .iter()
-                .map(|path| ListItem::new(relative_display(&self.root, path)))
+                .map(|path| {
+                    let shown = relative_display(&self.root, path);
+                    let shown = shown
+                        .strip_prefix("bench-models/")
+                        .map(str::to_owned)
+                        .unwrap_or(shown);
+                    ListItem::new(shown)
+                })
                 .collect::<Vec<_>>()
         };
         let filter = if self.bench_filter.is_empty() {
@@ -6650,36 +6659,6 @@ impl App {
             .highlight_symbol("▶ ")
             .highlight_style(theme::title());
         frame.render_stateful_widget(list, area, &mut self.bench_state);
-    }
-
-    fn draw_model_ops(&mut self, frame: &mut Frame, area: Rect) {
-        let mode = match self.ops_mode {
-            OpsMode::Run => "RUN · llama-swap",
-            OpsMode::Bench => "BENCH · scripts",
-        };
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(4)])
-            .split(area);
-        frame.render_widget(
-            Paragraph::new(format!(
-                " {mode}   m toggle mode · r/Enter start · s stop\n {}",
-                self.telemetry
-            ))
-            .style(theme::warning()),
-            chunks[0],
-        );
-        match self.ops_mode {
-            OpsMode::Run => self.draw_models_table(frame, chunks[1], "Servable models"),
-            OpsMode::Bench => {
-                let panes = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
-                    .split(chunks[1]);
-                self.draw_bench_list_widget(frame, panes[0]);
-                self.draw_script_editor(frame, panes[1], ScriptEditorTarget::Bench);
-            }
-        }
     }
 
     fn draw_script_editor(&mut self, frame: &mut Frame, area: Rect, target: ScriptEditorTarget) {
@@ -6783,42 +6762,6 @@ impl App {
                 ));
             }
         }
-    }
-
-    fn draw_models_table(&mut self, frame: &mut Frame, area: Rect, title: &str) {
-        let filter = if self.model_filter.is_empty() {
-            String::new()
-        } else {
-            format!(" · filter: {}", self.model_filter)
-        };
-        let page = format!(
-            " · page {}/{} · [/] page",
-            self.model_page + 1,
-            self.model_page_count()
-        );
-        let rows = self
-            .visible_models()
-            .into_iter()
-            .map(|model| Row::new(vec![Cell::from(model.id.clone()), state_cell(&model.state)]))
-            .collect::<Vec<_>>();
-        let table = Table::new(
-            rows,
-            [Constraint::Percentage(76), Constraint::Percentage(24)],
-        )
-        .style(theme::text())
-        .header(
-            Row::new(["Model", "State"])
-                .style(theme::title())
-                .bottom_margin(1),
-        )
-        .block(
-            theme::block()
-                .title(format!("{title}{filter}{page}"))
-                .borders(Borders::ALL),
-        )
-        .row_highlight_style(theme::selected())
-        .highlight_symbol("▶ ");
-        frame.render_stateful_widget(table, area, &mut self.model_state);
     }
 
     fn draw_chat(&self, frame: &mut Frame, area: Rect) {
@@ -7055,107 +6998,32 @@ impl App {
         );
     }
 
+    /// Model view: what the profile selected in the sidebar is, how it is
+    /// served and benched, and (for native task profiles) the foreground task
+    /// and its last result. The model list itself is the sidebar.
     fn draw_stack_catalog(&mut self, frame: &mut Frame, area: Rect) {
-        let sections = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(48),
-                Constraint::Percentage(24),
-                Constraint::Percentage(28),
-            ])
-            .split(area);
-
-        let Some(catalog) = self.stack_catalog.as_ref() else {
+        if self.stack_catalog.is_none() {
             let message = self.stack_catalog_error.as_deref().unwrap_or(
-                "Stack Catalog has not been loaded. Reopen this tab or press r to refresh.",
+                "Model manifests have not been loaded. Press r in the sidebar to refresh.",
             );
             frame.render_widget(
                 Paragraph::new(message)
                     .style(theme::warning())
-                    .block(
-                        theme::block()
-                            .title("Stack Catalog · manifest view")
-                            .borders(Borders::ALL),
-                    )
+                    .block(theme::block().title("Model").borders(Borders::ALL))
                     .wrap(Wrap { trim: false }),
                 area,
             );
             return;
-        };
-
-        let profiles = catalog.list();
-        let count_for = |lane| {
-            profiles
-                .iter()
-                .filter(|profile| profile.key.lane == lane)
-                .count()
-        };
-        let title = format!(
-            "{} profile(s) · language {} · media {} · decisions {} · r refresh · f Chat/task · c cancel",
-            profiles.len(),
-            count_for(Lane::Language),
-            count_for(Lane::Media),
-            count_for(Lane::Decisions),
-        );
-        let models = &self.models;
-        let rows = profiles.iter().map(|profile| {
-            let (router, router_style) = router_state(models, profile.key.profile_id.as_str());
-            Row::new(vec![
-                Cell::from(profile.key.lane.as_str()).style(lane_style(profile.key.lane)),
-                Cell::from(profile.key.profile_id.to_string()),
-                Cell::from(profile.name.as_str()),
-                Cell::from(readiness_label(profile.readiness)),
-                Cell::from(router).style(router_style),
-            ])
-        });
-        let table = Table::new(
-            rows,
-            [
-                Constraint::Percentage(12),
-                Constraint::Percentage(28),
-                Constraint::Percentage(30),
-                Constraint::Percentage(16),
-                Constraint::Percentage(14),
-            ],
-        )
-        .style(theme::text())
-        .header(
-            Row::new(["Lane", "Profile ID", "Name", "Readiness", "Router"]).style(theme::title()),
-        )
-        .block(theme::block().title(title).borders(Borders::ALL))
-        .row_highlight_style(theme::selected())
-        .highlight_symbol("▶ ");
-        frame.render_stateful_widget(table, sections[0], &mut self.stack_catalog_state);
-
-        let details = self
-            .stack_catalog_state
-            .selected()
-            .and_then(|index| profiles.get(index))
-            .map_or_else(
-                || Text::from("No manifest profiles are available."),
-                stack_profile_details,
+        }
+        let Some(profile) = self.selected_stack_profile().cloned() else {
+            frame.render_widget(
+                Paragraph::new("No model selected. Pick one in the sidebar.")
+                    .style(theme::dim())
+                    .block(theme::block().title("Model").borders(Borders::ALL)),
+                area,
             );
-        let info = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
-            .split(sections[1]);
-        let selected_lane = self
-            .stack_catalog_state
-            .selected()
-            .and_then(|index| profiles.get(index))
-            .map(|profile| lane_style(profile.key.lane));
-        frame.render_widget(
-            Paragraph::new(details)
-                .style(theme::text())
-                .block(
-                    theme::block()
-                        .border_style(selected_lane.unwrap_or_else(theme::border))
-                        .title("Selected profile · ↑/↓ or j/k select")
-                        .borders(Borders::ALL),
-                )
-                .wrap(Wrap { trim: false }),
-            info[0],
-        );
+            return;
+        };
         #[cfg(target_os = "linux")]
         let show_direct_native = {
             let native_busy_or_uncertain =
@@ -7185,13 +7053,13 @@ impl App {
         #[cfg(not(target_os = "linux"))]
         let direct_result_visible = false;
         #[cfg(target_os = "linux")]
-        let native_chat_guidance = "f opens Chat/task\nChat handoff uses the existing Chat tab.\nSupported native tasks run foreground; unsupported profiles are refused.";
+        let native_chat_guidance = "f opens Chat/task\nLanguage chat profiles open in the Chat view.\nSupported native tasks run foreground; unsupported profiles are refused.";
         #[cfg(not(target_os = "linux"))]
-        let native_chat_guidance = "f opens Chat\nChat handoff uses the existing Chat tab.\nNative task forms are unavailable here; unsupported profiles are refused.";
+        let native_chat_guidance = "f opens Chat\nLanguage chat profiles open in the Chat view.\nNative task forms are unavailable here; unsupported profiles are refused.";
         #[cfg(target_os = "linux")]
         let (action_text, action_title) = if show_direct_native {
             let text = self.direct_native_summary.as_ref().map_or_else(
-                || "One foreground job: routed language/decisions, audio.cpp speech/music, and ComfyUI image/video/music workflows. LTX and YuE2 share ComfyUI. Only advanced direct jobs require an operator-managed idle GPU window; Blender Python is not sandboxed.\nf open task · c cancels an active run".to_owned(),
+                || "One task runs at a time, in the foreground, through llama-swap.\nEnter opens the task form · Ctrl+Enter runs it · c cancels".to_owned(),
                 |summary| {
                     let operator_note = if summary.native_id.is_some() {
                         "\nComfyUI shared engine · llama-swap by default"
@@ -7250,41 +7118,250 @@ impl App {
         #[cfg(not(target_os = "linux"))]
         let (action_text, action_title) =
             (native_chat_guidance.to_owned(), "Native / Chat guidance");
-        frame.render_widget(
-            Paragraph::new(action_text)
-                .style(theme::text())
-                .block(theme::block().title(action_title).borders(Borders::ALL))
-                .wrap(Wrap { trim: false }),
-            info[1],
-        );
-        let output_text = if show_direct_native {
-            if direct_result_visible {
-                self.direct_native_summary
-                    .as_ref()
-                    .and_then(|summary| summary.result.as_ref())
-                    .map(direct_native_result_preview)
-                    .unwrap_or_else(|| "Foreground native result is not available.".into())
+        let facts_area = if show_direct_native {
+            // Facts, then the task, then the result at full width (result
+            // paths are long).
+            let sections = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Percentage(40),
+                    Constraint::Percentage(25),
+                    Constraint::Percentage(35),
+                ])
+                .split(area);
+            frame.render_widget(
+                Paragraph::new(action_text)
+                    .style(theme::text())
+                    .block(theme::block().title(action_title).borders(Borders::ALL))
+                    .wrap(Wrap { trim: false }),
+                sections[1],
+            );
+            let output_text = if show_direct_native {
+                if direct_result_visible {
+                    self.direct_native_summary
+                        .as_ref()
+                        .and_then(|summary| summary.result.as_ref())
+                        .map(direct_native_result_preview)
+                        .unwrap_or_else(|| "Foreground native result is not available.".into())
+                } else {
+                    "Foreground native result is hidden until its completed profile is selected."
+                        .into()
+                }
             } else {
-                "Foreground native result is hidden until its completed profile is selected.".into()
-            }
+                "Foreground native results appear here after a supported task completes.".to_owned()
+            };
+            frame.render_widget(
+                Paragraph::new(output_text)
+                    .style(theme::text())
+                    .block(
+                        theme::block()
+                            .title(if direct_result_visible {
+                                "Foreground native result"
+                            } else {
+                                "Native task results"
+                            })
+                            .borders(Borders::ALL),
+                    )
+                    .wrap(Wrap { trim: false }),
+                sections[2],
+            );
+            sections[0]
         } else {
-            "Foreground native results appear here after a supported task completes.".to_owned()
+            area
         };
-        frame.render_widget(
-            Paragraph::new(output_text)
-                .style(theme::text())
-                .block(
-                    theme::block()
-                        .title(if show_direct_native {
-                            "Foreground native result"
-                        } else {
-                            "Native task results"
-                        })
-                        .borders(Borders::ALL),
-                )
-                .wrap(Wrap { trim: false }),
-            sections[2],
-        );
+        self.draw_model_facts(frame, facts_area, &profile);
+    }
+
+    /// `qwen38_mtp` → `llama.cpp-exp-stack-v2` when the `${qwen38_mtp_server}`
+    /// macro points into `vendor/`; otherwise the stem itself.
+    fn server_display(&self, stem: &str) -> String {
+        self.yaml_macros
+            .get(&format!("{stem}_server"))
+            .map(|value| model_view::macro_display(value))
+            .unwrap_or_else(|| stem.to_owned())
+    }
+
+    /// The llama-swap engine entry serving a media profile, by runtime.
+    fn media_engine(&self, profile: &CatalogProfile) -> Option<&'static str> {
+        if profile.key.lane != Lane::Media {
+            return None;
+        }
+        let runtime = profile.runtime.as_str().to_ascii_lowercase();
+        if runtime.contains("comfy") {
+            Some("comfyui_auto")
+        } else if runtime.contains("audio.cpp") {
+            Some("audiocpp_auto")
+        } else {
+            None
+        }
+    }
+
+    /// Router state of a profile: its own for language entries, its engine's
+    /// for media profiles served through one.
+    fn profile_router_state(&self, profile: &CatalogProfile) -> Option<&str> {
+        let id = match profile.key.lane {
+            Lane::Language => profile.key.profile_id.as_str(),
+            _ => self.media_engine(profile)?,
+        };
+        self.models
+            .iter()
+            .find(|model| model.id == id)
+            .map(|model| model.state.as_str())
+    }
+
+    fn draw_model_facts(&self, frame: &mut Frame, area: Rect, profile: &CatalogProfile) {
+        let id = profile.key.profile_id.as_str();
+        let entry = (profile.key.lane == Lane::Language)
+            .then(|| self.yaml_entries.get(id))
+            .flatten();
+        let state = self.profile_router_state(profile);
+        let tasks = profile
+            .tasks
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let home = env::var("HOME").unwrap_or_default();
+        let short = |path: &str| -> String {
+            if !home.is_empty() {
+                if let Some(rest) = path.strip_prefix(&home) {
+                    return format!("~{rest}");
+                }
+            }
+            path.to_owned()
+        };
+        let mut facts: Vec<(&'static str, String)> = Vec::new();
+        match entry {
+            Some(entry) if entry.proxy => {
+                facts.push((
+                    "engine",
+                    "proxied by llama-swap; media profiles route to it".into(),
+                ));
+            }
+            Some(entry) => {
+                let (server, flags) = model_view::cmd_facts(&entry.cmd);
+                if let Some(server) = server {
+                    facts.push(("server", self.server_display(&server)));
+                }
+                if let Some(path) = entry.model_path.as_deref() {
+                    let size = self
+                        .model_sizes
+                        .get(id)
+                        .map(|bytes| format!(" · {}", model_view::human_bytes(*bytes)))
+                        .unwrap_or_else(|| " · file not found".into());
+                    let file = path.rsplit('/').next().unwrap_or(path);
+                    facts.push(("model", format!("{file}{size}")));
+                }
+                let mut config = None;
+                let mut shown = Vec::new();
+                for (label, value) in flags {
+                    match label {
+                        "config" => config = Some(value),
+                        "override" => shown.push("-ot …".to_owned()),
+                        "engine" => {}
+                        _ => shown.push(format!("{label} {value}")),
+                    }
+                }
+                if let Some(config) = config {
+                    let shown = self
+                        .yaml_macros
+                        .get(&config)
+                        .map(|value| model_view::macro_display(value))
+                        .unwrap_or(config);
+                    facts.push(("config", shown));
+                }
+                if !shown.is_empty() {
+                    facts.push(("flags", shown.join(" · ")));
+                }
+                facts.push((
+                    "idle",
+                    entry
+                        .ttl
+                        .map(|ttl| format!("unloads after {}", model_view::human_ttl(ttl)))
+                        .unwrap_or_else(|| "router default ttl".into()),
+                ));
+            }
+            None => {
+                if let Some(engine) = self.media_engine(profile) {
+                    facts.push(("engine", format!("{engine} (state shown is the engine's)")));
+                }
+                facts.push(("runtime", profile.runtime.as_str().to_owned()));
+                let device = match &profile.device {
+                    Some(Device::Cpu) => "cpu",
+                    Some(Device::Cuda) => "cuda",
+                    Some(Device::Remote) => "remote",
+                    Some(Device::Other(device)) => device.as_str(),
+                    None => "not declared",
+                };
+                facts.push(("device", device.to_owned()));
+                facts.push((
+                    "manifest",
+                    short(&profile.source_path.display().to_string()),
+                ));
+            }
+        }
+        if !tasks.is_empty() && !entry.is_some_and(|entry| entry.proxy) {
+            facts.push(("tasks", tasks));
+        }
+        if profile.disabled {
+            facts.push(("status", "disabled in llama-swap.yaml".into()));
+        }
+        let bench: Vec<model_view::BenchRow> = self
+            .bench_runs
+            .get(id)
+            .map(|runs| {
+                runs.iter()
+                    .map(|run| {
+                        let mut setup = Vec::new();
+                        if !run.strategy.is_empty() {
+                            setup.push(run.strategy.clone());
+                        }
+                        if !run.ctx.is_empty() {
+                            setup.push(format!("ctx {}", run.ctx));
+                        }
+                        if !run.ctk.is_empty() || !run.ctv.is_empty() {
+                            setup.push(format!("kv {}/{}", run.ctk, run.ctv));
+                        }
+                        model_view::BenchRow {
+                            date: run.ts.chars().take(10).collect(),
+                            tg: run.tg_ts,
+                            pp: run.pp_ts,
+                            setup: setup.join(" · "),
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if bench.is_empty() && entry.is_some_and(|entry| !entry.proxy) {
+            facts.push((
+                "bench",
+                "no matching runs in bench-models/logs/results".into(),
+            ));
+        }
+        let chat = profile.key.lane == Lane::Language
+            && profile.tasks.len() == 1
+            && profile.tasks.iter().any(|task| task.as_str() == "chat");
+        let keys = match (profile.key.lane, entry) {
+            (Lane::Language, Some(entry)) if entry.proxy => "L load · U unload".to_owned(),
+            (Lane::Language, _) if chat => "Enter chat · L load · U unload · b bench".to_owned(),
+            (Lane::Language, _) => "Enter task form · L load · U unload".to_owned(),
+            _ => "Enter task form · c cancel a running task".to_owned(),
+        };
+        let data = model_view::ModelViewData {
+            id,
+            lane_style: lane_style(profile.key.lane),
+            state,
+            routed: profile.key.lane == Lane::Language || self.media_engine(profile).is_some(),
+            title: entry
+                .and_then(|entry| entry.name.as_deref())
+                .or(Some(profile.name.as_str()).filter(|name| *name != id)),
+            description: entry.and_then(|entry| entry.description.as_deref()),
+            facts,
+            bench: &bench,
+            keys,
+            focused: !self.sidebar_focused,
+        };
+        model_view::draw(frame, area, &data);
     }
 
     fn draw_task_form(&self, frame: &mut Frame) {
@@ -7754,60 +7831,106 @@ impl App {
     }
 
     fn draw_log(&self, frame: &mut Frame, area: Rect) {
+        let height = area.height.saturating_sub(2) as usize;
         let lines = self
             .log
             .iter()
             .rev()
-            .take(area.height.saturating_sub(2) as usize)
+            .take(height)
             .rev()
             .map(|line| Line::from(line.as_str()))
             .collect::<Vec<_>>();
+        let lines = if lines.is_empty() {
+            vec![Line::from(Span::styled("No activity yet.", theme::dim()))]
+        } else {
+            lines
+        };
         frame.render_widget(
             Paragraph::new(lines)
                 .style(theme::text())
-                .block(theme::block().title("Activity").borders(Borders::ALL))
+                .block(theme::block().title("Log · c clear").borders(Borders::ALL))
                 .wrap(Wrap { trim: false }),
             area,
         );
     }
 
+    /// Message line: the latest status, the active input mode and the keys
+    /// for where focus is.
     fn draw_footer(&self, frame: &mut Frame, area: Rect) {
         let input = if let Some(target) = self.script_input_target {
             match target {
-                ScriptEditorTarget::Bench => "  BENCH SCRIPT INPUT",
-                ScriptEditorTarget::Maintenance => "  MAINTENANCE SCRIPT INPUT",
+                ScriptEditorTarget::Bench => "BENCH SCRIPT INPUT",
+                ScriptEditorTarget::Maintenance => "MAINTENANCE SCRIPT INPUT",
             }
-        } else if self.tab == Tab::Download && self.download.focus() != DownloadFocus::Table {
-            "  DOWNLOAD INPUT"
+        } else if !self.sidebar_focused
+            && self.view == View::Download
+            && self.download.focus() != DownloadFocus::Table
+        {
+            "DOWNLOAD INPUT"
         } else {
             match self.input_mode {
                 InputMode::Normal => "",
-                InputMode::ModelFilter => "  FILTER",
-                InputMode::BenchFilter => "  BENCH FILTER",
-                InputMode::BrowserPath => "  PATH INPUT",
-                InputMode::BrowserFilter => "  GGUF FILTER",
-                InputMode::ChatMessage => "  CHAT INPUT",
-                InputMode::ChatEndpoint => "  CHAT ENDPOINT",
-                InputMode::ChatSystemPrompt => "  SYSTEM PROMPT INPUT",
-                InputMode::TaskForm => "  NATIVE TASK FORM",
+                InputMode::ModelFilter => "FILTER",
+                InputMode::BenchFilter => "BENCH FILTER",
+                InputMode::BrowserPath => "PATH INPUT",
+                InputMode::BrowserFilter => "GGUF FILTER",
+                InputMode::ChatMessage => "CHAT INPUT",
+                InputMode::ChatEndpoint => "CHAT ENDPOINT",
+                InputMode::ChatSystemPrompt => "SYSTEM PROMPT INPUT",
+                InputMode::TaskForm => "TASK FORM",
             }
         };
-        let controls = if self.script_input_target.is_some() {
-            "Esc list │ F1–F8 tabs │ Ctrl+P palette │ Ctrl+C quit"
+        let keys = if self.script_input_target.is_some() {
+            "Esc list · Ctrl+P palette"
         } else if self.input_mode == InputMode::TaskForm {
-            "Tab/Shift+Tab fields │ Enter newline │ Ctrl+Enter run once │ Esc discard"
-        } else if self.tab == Tab::Download && self.download.focus() != DownloadFocus::Table {
-            "Tab/Shift+Tab fields │ Esc table │ Ctrl+P palette │ Ctrl+C quit"
+            "Tab fields · Ctrl+Enter run · Esc discard"
+        } else if self.input_mode == InputMode::ModelFilter {
+            "type to filter · Enter keep · Esc done"
+        } else if self.sidebar_focused {
+            "j/k · [/] · Enter open · L load · Tab pane"
+        } else if self.view == View::Download {
+            "Tab fields · Esc sidebar · Ctrl+P"
         } else {
-            "F1–F8 tabs │ Alt+←/→ cycle │ Ctrl+P palette │ ? help │ q quit"
+            "Tab sidebar · F1–F9 · Ctrl+P · ? help"
         };
-        let footer = format!(" {}{}  │ {controls} ", self.status, input);
-        frame.render_widget(
-            Paragraph::new(footer)
-                .style(theme::badge())
-                .alignment(Alignment::Left),
-            area,
-        );
+        let mut spans = Vec::new();
+        if !input.is_empty() {
+            spans.push(Span::styled(format!(" {input} "), theme::badge()));
+        }
+        // Key hints keep their place when there is room for them and at least
+        // 24 columns of status; a long status is clipped instead.
+        let width = area.width as usize;
+        let badge: usize = spans.iter().map(|span| span.width()).sum();
+        let keys_width = keys.width() + 2;
+        let show_keys = width >= badge + keys_width + 24;
+        let status_room = if show_keys {
+            width - badge - keys_width
+        } else {
+            width.saturating_sub(badge)
+        };
+        let status = format!(" {}", self.status);
+        let status = if status.width() > status_room {
+            let mut clipped = String::new();
+            for character in status.chars() {
+                if clipped.width() + 2 > status_room {
+                    break;
+                }
+                clipped.push(character);
+            }
+            clipped.push('…');
+            clipped
+        } else {
+            status
+        };
+        let used = badge + status.width();
+        spans.push(Span::styled(status, theme::text()));
+        if show_keys {
+            spans.push(Span::raw(
+                " ".repeat(width.saturating_sub(used + keys_width - 1)),
+            ));
+            spans.push(Span::styled(format!("{keys} "), theme::dim()));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
     fn draw_help(&self, frame: &mut Frame) {
@@ -7815,27 +7938,62 @@ impl App {
         frame.render_widget(Clear, area);
         let context = self.command_context();
         let mut help = vec![
-            Line::from(Span::styled("L3MS Rust key bindings", theme::title())),
+            Line::from(Span::styled("L3MS key bindings", theme::title())),
             Line::from(""),
-            Line::from("Global  F1–F8/Alt+1–8 tabs · Alt+←/→ cycle · Ctrl+P palette · q quit"),
+            Line::from("Tab sidebar ↔ pane · F1–F9/Alt+1–9 views · Alt+←/→ cycle · Ctrl+P palette · q quit"),
             Line::from(""),
         ];
-        if self.tab == Tab::StackCatalog {
-            help.push(Line::from("Stack Catalog  ↑/↓ or j/k select · r refresh"));
-        }
+        let section = |help: &mut Vec<Line<'static>>,
+                       title: String,
+                       specs: Vec<&'static crate::commands::CommandSpec>| {
+            help.push(Line::from(Span::styled(title, theme::title())));
+            for spec in specs {
+                help.push(Line::from(vec![
+                    Span::styled(format!("  {:<20}", spec.shortcut), theme::border_focused()),
+                    Span::raw(spec.label),
+                ]));
+            }
+            help.push(Line::from(""));
+        };
+        section(
+            &mut help,
+            format!("{} view", self.view.name()),
+            visible_commands(context)
+                .into_iter()
+                .filter(|spec| !spec.contexts.contains(&CommandContext::Global))
+                .collect(),
+        );
+        section(
+            &mut help,
+            "Sidebar".into(),
+            visible_commands(CommandContext::Sidebar)
+                .into_iter()
+                .filter(|spec| spec.contexts.contains(&CommandContext::Sidebar))
+                .collect(),
+        );
+        let toolbar = toolbar::BUTTONS
+            .iter()
+            .map(|button| {
+                let enabled = command(button.id).is_some_and(|spec| spec.is_visible());
+                let label = command(button.id).map_or("", |spec| spec.label);
+                Line::from(vec![
+                    Span::styled(format!("  {:<20}", button.key), theme::border_focused()),
+                    Span::styled(
+                        format!(
+                            "{} {label}{}",
+                            button.glyph,
+                            if enabled { "" } else { " (coming)" }
+                        ),
+                        if enabled { theme::text() } else { theme::dim() },
+                    ),
+                ])
+            })
+            .collect::<Vec<_>>();
         help.push(Line::from(Span::styled(
-            format!("{} commands", context),
+            "Toolbar (from the sidebar)",
             theme::title(),
         )));
-        for spec in visible_commands(context)
-            .into_iter()
-            .filter(|spec| !spec.contexts.contains(&CommandContext::Global))
-        {
-            help.push(Line::from(vec![
-                Span::styled(format!("  {:<20}", spec.shortcut), theme::border_focused()),
-                Span::raw(spec.label),
-            ]));
-        }
+        help.extend(toolbar);
         help.push(Line::from(""));
         help.push(Line::from("Press any key to close."));
         frame.render_widget(
@@ -7989,54 +8147,46 @@ impl App {
 }
 
 /// Lane signature colour: marks where a profile lives, never its runtime state.
+/// Bench runs per llama-swap entry, newest first. A result belongs to an entry only
+/// when its GGUF path is exactly the entry's `-m` path; when several entries
+/// share that GGUF (different flags), the result's `model_key` must also name
+/// the entry. Anything else stays "not benched" rather than being guessed.
+fn bench_runs_by_entry(
+    entries: &[crate::swap_yaml::SwapYamlEntry],
+    results: &[crate::bench_results::BenchResult],
+) -> HashMap<String, Vec<crate::bench_results::BenchResult>> {
+    let path_of =
+        |entry: &crate::swap_yaml::SwapYamlEntry| entry.model_path.as_deref().map(expand_tilde);
+    let mut rates = HashMap::new();
+    for entry in entries {
+        let Some(path) = path_of(entry) else {
+            continue;
+        };
+        let shared = entries
+            .iter()
+            .filter(|other| path_of(other).as_deref() == Some(path.as_str()))
+            .count()
+            > 1;
+        // Results are sorted newest first.
+        let runs: Vec<_> = results
+            .iter()
+            .filter(|result| expand_tilde(&result.model) == path)
+            .filter(|result| !shared || result.model_key == entry.id)
+            .take(5)
+            .cloned()
+            .collect();
+        if !runs.is_empty() {
+            rates.insert(entry.id.clone(), runs);
+        }
+    }
+    rates
+}
+
 fn lane_style(lane: Lane) -> Style {
     match lane {
         Lane::Language => theme::lane_language(),
         Lane::Media => theme::lane_media(),
         Lane::Decisions => theme::lane_decisions(),
-    }
-}
-
-/// Fixed-width gauge such as `████░░░░░░`; callers pair it with a numeric label.
-fn gauge(percent: u64, cells: usize) -> String {
-    let filled = ((percent.min(100) as usize) * cells)
-        .div_ceil(100)
-        .min(cells);
-    format!("{}{}", "█".repeat(filled), "░".repeat(cells - filled))
-}
-
-/// Dot plus state word, colored by state; the word always carries the meaning.
-fn state_cell(state: &str) -> Cell<'static> {
-    let (text, style) = match state {
-        "loaded" => ("● loaded", theme::title()),
-        "loading" => ("◐ loading", theme::warning()),
-        "unloaded" => ("○ unloaded", theme::dim()),
-        other => return Cell::from(other.to_owned()).style(theme::dim()),
-    };
-    Cell::from(text).style(style)
-}
-
-/// Live llama-swap state for a profile the router serves under the same id.
-/// Anything the router does not list is shown as unknown, never guessed.
-fn router_state(models: &[SwapModel], profile_id: &str) -> (&'static str, Style) {
-    match models
-        .iter()
-        .find(|model| model.id == profile_id)
-        .map(|model| model.state.as_str())
-    {
-        Some("loaded") => ("● loaded", theme::title()),
-        Some("loading") => ("◐ loading", theme::warning()),
-        Some("unloaded") => ("○ unloaded", theme::dim()),
-        Some(_) => ("unknown", theme::dim()),
-        None => ("—", theme::dim()),
-    }
-}
-
-fn readiness_label(readiness: Readiness) -> &'static str {
-    match readiness {
-        Readiness::ManifestPresent => "manifest-only",
-        Readiness::Installed => "installed",
-        Readiness::Healthy => "healthy",
     }
 }
 
@@ -8553,36 +8703,6 @@ fn create_private_direct_output_directory(
         return Ok(output_directory);
     }
     Err(())
-}
-
-fn stack_profile_details(profile: &CatalogProfile) -> Text<'static> {
-    let tasks = profile
-        .tasks
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(", ");
-    let device = match &profile.device {
-        Some(Device::Cpu) => "cpu",
-        Some(Device::Cuda) => "cuda",
-        Some(Device::Remote) => "remote",
-        Some(Device::Other(device)) => device,
-        None => "not declared",
-    };
-    Text::from(vec![
-        Line::from(format!("{} · {}", profile.key, profile.name)),
-        Line::from(format!("Runtime: {} · Device: {device}", profile.runtime)),
-        Line::from(format!(
-            "Tasks: {tasks} · {}",
-            if profile.disabled {
-                "disabled"
-            } else {
-                "declared"
-            }
-        )),
-        Line::from(format!("Source: {}", profile.source_path.display())),
-        Line::from("Manifest-only: installation and runtime health have not been checked."),
-    ])
 }
 
 impl Drop for App {
@@ -9679,6 +9799,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 mod tests {
     use super::*;
     use crate::config_store::{load_config_strict, ModelConfig};
+    use crate::control::catalog::Readiness;
     use ratatui::backend::TestBackend;
     use tempfile::TempDir;
 
@@ -9769,8 +9890,12 @@ mod tests {
             }
         }
 
+        /// An app with the pane focused, so view tests see their view at any
+        /// width. Sidebar tests focus the sidebar themselves.
         fn app(&self) -> App {
-            App::new_in(self.root.clone(), self.data.path().to_path_buf()).unwrap()
+            let mut app = App::new_in(self.root.clone(), self.data.path().to_path_buf()).unwrap();
+            app.sidebar_focused = false;
+            app
         }
 
         fn app_without_model_refresh(&self) -> App {
@@ -9937,7 +10062,7 @@ mod tests {
     }
 
     fn focus_stack_profile_by_id(app: &mut App, profile_id: &str) {
-        app.handle_key(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE))
+        app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE))
             .unwrap();
         let index = app
             .stack_catalog
@@ -9948,34 +10073,6 @@ mod tests {
             .position(|profile| profile.key.profile_id.as_str() == profile_id)
             .unwrap();
         app.stack_catalog_state.select(Some(index));
-    }
-
-    #[test]
-    fn narrow_tab_bar_keeps_all_eight_tabs_and_selected_stack_visible() {
-        let fixture = AppFixture::new();
-        let mut app = fixture.app();
-        app.tab = Tab::StackCatalog;
-
-        let mut narrow = Terminal::new(TestBackend::new(80, 1)).unwrap();
-        narrow
-            .draw(|frame| app.draw_tabs(frame, Rect::new(0, 0, 80, 1)))
-            .unwrap();
-        let narrow_row = terminal_row(&narrow, 0);
-        for label in TAB_SHORT_NAMES {
-            assert!(narrow_row.contains(label), "missing narrow tab {label:?}");
-        }
-        assert!(
-            narrow_row.contains("Stack"),
-            "selected Stack tab was clipped"
-        );
-
-        let mut wide = Terminal::new(TestBackend::new(120, 1)).unwrap();
-        wide.draw(|frame| app.draw_tabs(frame, Rect::new(0, 0, 120, 1)))
-            .unwrap();
-        let wide_row = terminal_row(&wide, 0);
-        for label in TAB_NAMES {
-            assert!(wide_row.contains(label), "missing full-width tab {label:?}");
-        }
     }
 
     fn connect_test_chat_at(
@@ -10076,7 +10173,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn open_direct_cpu_speech_form(app: &mut App, text: &str) {
-        app.handle_key(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE))
+        app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE))
             .unwrap();
         let index = app
             .stack_catalog
@@ -10505,7 +10602,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn open_direct_decision_form_for_profile(app: &mut App, profile_id: &str) {
-        app.handle_key(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE))
+        app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE))
             .unwrap();
         let index = app
             .stack_catalog
@@ -11295,7 +11392,7 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(140, 45)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
-        assert!(terminal_text(&terminal).contains("Device: remote"));
+        assert!(terminal_text(&terminal).contains("device    remote"));
 
         open_direct_decision_form_for_profile(&mut app, "jev-api");
         assert!(app.status.contains("Foreground native decision form open"));
@@ -11842,9 +11939,9 @@ mod tests {
         let fixture = AppFixture::new();
         write_stack_fixture(&fixture);
         let mut app = fixture.app();
-        app.handle_key(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE))
+        app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE))
             .unwrap();
-        assert_eq!(app.tab, Tab::StackCatalog);
+        assert_eq!(app.view, View::Model);
         assert_eq!(app.stack_catalog.as_ref().unwrap().list().len(), 3);
         assert!(app
             .stack_catalog
@@ -11861,14 +11958,14 @@ mod tests {
             terminal.draw(|frame| app.draw(frame)).unwrap();
             if size.0 == 140 {
                 let text = terminal_text(&terminal);
-                assert!(text.contains("manifest-only"));
-                assert!(text.contains("media:breeze"));
-                assert!(text.contains("tts, clon, design"));
+                assert!(text.contains(" breeze "), "{text}");
+                assert!(text.contains("runtime   audio.cpp"), "{text}");
+                assert!(text.contains("tts, clon, design"), "{text}");
             }
         }
-        app.execute_command(CommandId::OpenMaintenance).unwrap();
+        app.execute_command(CommandId::OpenLog).unwrap();
         app.execute_command(CommandId::NextTab).unwrap();
-        assert_eq!(app.tab, Tab::StackCatalog);
+        assert_eq!(app.view, View::Model);
         app.execute_command(CommandId::OpenStackCatalog).unwrap();
         app.execute_command(CommandId::OpenMaintenance).unwrap();
         app.focus_script_editor(ScriptEditorTarget::Maintenance);
@@ -11884,29 +11981,21 @@ mod tests {
     }
 
     #[test]
-    fn stack_catalog_without_coordinator_shows_native_chat_guidance() {
+    fn chat_profiles_show_serving_facts_and_keys_without_native_panels() {
         let fixture = AppFixture::new();
         write_stack_fixture(&fixture);
         let mut app = fixture.app();
         focus_stack_profile_by_id(&mut app, "local-chat");
-
-        let mut narrow = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        narrow.draw(|frame| app.draw(frame)).unwrap();
-        let narrow_text = (0..24)
-            .map(|row| terminal_row(&narrow, row))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(narrow_text.contains("Native / Chat guidance"));
-        assert!(narrow_text.contains("f opens Chat/task"));
-        assert!(narrow_text.contains("Native task results"));
-        assert!(!narrow_text.contains("Coordinator · observation/cancel only"));
-        assert!(!narrow_text.contains("results are shown here only after pressing o"));
-
-        let mut wide = Terminal::new(TestBackend::new(120, 40)).unwrap();
-        wide.draw(|frame| app.draw(frame)).unwrap();
-        let wide_text = terminal_text(&wide);
-        assert!(wide_text.contains("existing Chat tab"));
-        assert!(wide_text.contains("f opens Chat/task"));
+        for (width, height) in [(80, 24), (120, 40)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+            let text = terminal_text(&terminal);
+            assert!(text.contains("local-chat"), "{text}");
+            assert!(text.contains("Enter chat · L load · U unload"), "{text}");
+            assert!(text.contains("tasks     chat"), "{text}");
+            assert!(!text.contains("Native task results"), "{text}");
+            assert!(!text.contains("Coordinator · observation/cancel only"));
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -12064,22 +12153,29 @@ mod tests {
     #[test]
     fn signal_theme_fills_the_frame_and_marks_the_three_lanes_at_80x24() {
         let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
         let mut app = fixture.app();
+        app.refresh_stack_catalog();
+        app.sidebar_focused = true;
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
         let buffer = terminal.backend().buffer();
-        let header: String = (0..80)
-            .map(|x| buffer[(x, 0)].symbol().to_string())
-            .collect();
-        for lane in ["language", "media", "decisions"] {
-            assert!(header.contains(lane), "header missing {lane}: {header:?}");
-        }
-        assert!(header.contains("L3MS"));
+        let toolbar = terminal_row(&terminal, 0);
+        assert!(toolbar.contains("L3MS"));
         assert_eq!(buffer[(79, 12)].bg, theme::BG);
-        let find = |word: &str| header.find(word).unwrap() as u16;
-        assert_eq!(buffer[(find("language"), 0)].fg, theme::PHOSPHOR);
-        assert_eq!(buffer[(find("media"), 0)].fg, theme::CYAN);
-        assert_eq!(buffer[(find("decisions"), 0)].fg, theme::AMBER);
+        // Lane headings in the sidebar carry the lane colour.
+        let lane_fg = |lane: &str| {
+            (0..24).find_map(|y| {
+                let row = terminal_row(&terminal, y);
+                (row.trim_end_matches([' ', '│']).trim() == lane).then(|| {
+                    let x = row.find(lane).unwrap() as u16;
+                    buffer[(x, y)].fg
+                })
+            })
+        };
+        assert_eq!(lane_fg("language"), Some(theme::PHOSPHOR));
+        assert_eq!(lane_fg("media"), Some(theme::CYAN));
+        assert_eq!(lane_fg("decisions"), Some(theme::AMBER));
     }
 
     #[test]
@@ -12088,12 +12184,12 @@ mod tests {
         write_stack_fixture(&fixture);
         let mut app = fixture.app();
         app.refresh_stack_catalog();
-        app.tab = Tab::StackCatalog;
+        app.view = View::Model;
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
         let text = terminal_text(&terminal);
         assert!(!text.contains("observe"), "removed key still advertised");
-        assert!(text.contains("c cancel"));
+        assert!(text.contains("Enter chat · L load · U unload"), "{text}");
         let buffer = terminal.backend().buffer();
         let fg_of = |word: &str| {
             for y in 0..buffer.area.height {
@@ -12101,14 +12197,13 @@ mod tests {
                     .map(|x| buffer[(x, y)].symbol().to_string())
                     .collect();
                 let line = row.concat();
-                // Table rows start with the lane after the border and highlight gutter.
+                // Sidebar lane headings start in the first columns.
                 if let Some(x) = line.find(word).filter(|x| *x < 12) {
                     return Some(buffer[(x as u16, y)].fg);
                 }
             }
             None
         };
-        // The first row is selected, which restyles it; the others keep lane colour.
         assert_eq!(fg_of("media"), Some(theme::CYAN));
         assert_eq!(fg_of("decisions"), Some(theme::AMBER));
     }
@@ -12117,11 +12212,11 @@ mod tests {
     fn palette_lists_current_screen_commands_first_but_keeps_every_command_searchable() {
         let fixture = AppFixture::new();
         let mut app = fixture.app();
-        app.tab = Tab::Workbench;
+        app.view = View::Model;
         let owned_here = |spec: &crate::commands::CommandSpec| {
             spec.contexts
                 .iter()
-                .any(|c| *c == CommandContext::Global || *c == CommandContext::Workbench)
+                .any(|c| *c == CommandContext::Global || *c == CommandContext::StackCatalog)
         };
         let all = app.palette_commands();
         let first_foreign = all.iter().position(|spec| !owned_here(spec)).unwrap();
@@ -12150,51 +12245,44 @@ mod tests {
         write_stack_fixture(&fixture);
         let mut app = fixture.app();
         app.refresh_stack_catalog();
-        app.tab = Tab::StackCatalog;
+        app.view = View::Model;
+        focus_stack_profile_by_id(&mut app, "local-chat");
         app.models = vec![test_chat_model("local-chat", "loaded", false)];
         let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
-        terminal.draw(|frame| app.draw(frame)).unwrap();
-        let rows: Vec<String> = {
-            let buffer = terminal.backend().buffer();
-            (0..buffer.area.height)
-                .map(|y| {
-                    (0..buffer.area.width)
-                        .map(|x| buffer[(x, y)].symbol().to_string())
-                        .collect()
-                })
-                .collect()
+        let rows = |terminal: &Terminal<TestBackend>| -> Vec<String> {
+            (0..30).map(|y| terminal_row(terminal, y)).collect()
         };
-        let row_of = |id: &str| {
-            rows.iter()
-                .find(|row| row.contains(id) && row.contains("manifest-only"))
-                .unwrap()
+        // The sidebar is the first 31 columns of each row.
+        let row_of = |screen: &[String], id: &str| {
+            screen
+                .iter()
+                .map(|row| row.chars().take(31).collect::<String>())
+                .find(|row| row.contains(&format!(" {id} ")))
+                .unwrap_or_else(|| panic!("{id} missing from sidebar: {screen:#?}"))
                 .clone()
         };
-        assert!(rows.iter().any(|row| row.contains("Router")));
-        assert!(
-            row_of("local-chat").contains("loaded"),
-            "{}",
-            row_of("local-chat")
-        );
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let screen = rows(&terminal);
+        assert!(row_of(&screen, "local-chat").contains("● local-chat"));
+        assert!(screen.iter().any(|row| row.contains("local-chat ● loaded")));
         // Profiles the router does not list are unknown, not guessed.
-        assert!(row_of("breeze").contains('—'));
-        assert!(row_of("nagi").contains('—'));
+        assert!(row_of(&screen, "breeze").contains("· breeze"));
+        assert!(row_of(&screen, "nagi").contains("· nagi"));
 
         app.models = vec![test_chat_model("local-chat", "unloaded", false)];
         terminal.draw(|frame| app.draw(frame)).unwrap();
-        let buffer = terminal.backend().buffer();
-        let text: String = (0..buffer.area.height)
-            .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
-            .map(|(x, y)| buffer[(x, y)].symbol().to_string())
-            .collect();
-        assert!(text.contains("unloaded"));
+        let screen = rows(&terminal);
+        assert!(row_of(&screen, "local-chat").contains("○ local-chat"));
+        assert!(screen
+            .iter()
+            .any(|row| row.contains("local-chat ○ unloaded")));
     }
 
     #[test]
     fn maintenance_panes_end_on_the_same_row_and_empty_chat_values_show_a_dash() {
         let fixture = AppFixture::new();
         let mut app = fixture.app();
-        app.tab = Tab::Maintenance;
+        app.view = View::Maintenance;
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
         let buffer = terminal.backend().buffer();
@@ -12214,7 +12302,7 @@ mod tests {
             "list and editor boxes end on different rows"
         );
 
-        app.tab = Tab::Chat;
+        app.view = View::Chat;
         app.chat_system_prompt.clear();
         terminal.draw(|frame| app.draw(frame)).unwrap();
         let text = terminal_text(&terminal);
@@ -12235,16 +12323,7 @@ mod tests {
             ),
             test_chat_model("short", "unloaded", false),
         ];
-        let tabs = [
-            Tab::Workbench,
-            Tab::ModelOps,
-            Tab::Chat,
-            Tab::Browser,
-            Tab::Download,
-            Tab::Jobs,
-            Tab::Maintenance,
-            Tab::StackCatalog,
-        ];
+        let tabs = View::ALL;
         for (width, height) in [
             (1, 1),
             (10, 3),
@@ -12256,7 +12335,7 @@ mod tests {
         ] {
             for tab in tabs {
                 for overlay in [0, 1, 2] {
-                    app.tab = tab;
+                    app.view = tab;
                     app.show_palette = overlay == 1;
                     app.show_help = overlay == 2;
                     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -12352,7 +12431,7 @@ mod tests {
     fn download_keyboard_editor_crud_and_snapshot_actions_stay_synchronized() {
         let fixture = AppFixture::new();
         let mut app = fixture.app();
-        app.tab = Tab::Download;
+        app.view = View::Download;
 
         app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::ALT))
             .unwrap();
@@ -12416,7 +12495,7 @@ mod tests {
     fn failed_runtime_download_reload_retains_valid_dirty_state_and_allows_recovery() {
         let fixture = AppFixture::new();
         let mut app = fixture.app();
-        app.tab = Tab::Download;
+        app.view = View::Download;
         app.download
             .draft_mut()
             .buffer_mut(ModelField::Description)
@@ -12486,7 +12565,7 @@ mod tests {
     fn dirty_download_restore_requires_two_consecutive_triggers() {
         let fixture = AppFixture::new();
         let mut app = fixture.app();
-        app.tab = Tab::Download;
+        app.view = View::Download;
         app.download
             .draft_mut()
             .buffer_mut(ModelField::Description)
@@ -12594,7 +12673,7 @@ mod tests {
     fn selected_and_enabled_downloads_use_supervision_speed_args_and_dedicated_logs() {
         let fixture = AppFixture::new();
         let mut app = fixture.app();
-        app.tab = Tab::Download;
+        app.view = View::Download;
         app.download.global_workers_buffer_mut().set_content("7");
 
         app.download_selected();
@@ -12661,7 +12740,7 @@ mod tests {
         )
         .unwrap();
         let mut app = fixture.app();
-        app.tab = Tab::Download;
+        app.view = View::Download;
 
         app.download_selected();
         wait_for_download(&mut app);
@@ -12696,7 +12775,7 @@ mod tests {
         )
         .unwrap();
         let mut app = fixture.app();
-        app.tab = Tab::Download;
+        app.view = View::Download;
         app.download_selected();
         assert!(app.download_preflight_pending.is_some());
 
@@ -12828,7 +12907,7 @@ mod tests {
     fn chat_keyboard_and_persistence_guards_prioritize_stop() {
         let fixture = AppFixture::new();
         let mut app = fixture.app();
-        app.tab = Tab::Chat;
+        app.view = View::Chat;
         app.chat_pending = true;
         app.chat_history.push("user", "in progress");
         app.chat_stream_cancellation = Some(Arc::new(AtomicBool::new(false)));
@@ -12891,7 +12970,7 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
             .unwrap();
 
-        assert_eq!(app.tab, Tab::Chat);
+        assert_eq!(app.view, View::Chat);
         assert_eq!(app.input_mode, InputMode::ChatMessage);
         assert_eq!(app.selected_chat_model().unwrap().id, "local-chat");
         assert_eq!(app.chat_endpoint_draft, "http://uncommitted-draft.example");
@@ -12991,7 +13070,7 @@ mod tests {
             app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
                 .unwrap();
 
-            assert_eq!(app.tab, Tab::StackCatalog, "case: {expected_status}");
+            assert_eq!(app.view, View::Model, "case: {expected_status}");
             assert_eq!(app.input_mode, InputMode::Normal, "case: {expected_status}");
             assert!(app.task_form_editor.is_none(), "case: {expected_status}");
             assert!(app.status.contains(expected_status), "{}", app.status);
@@ -13135,14 +13214,14 @@ mod tests {
     }
 
     #[test]
-    fn chat_shortcuts_keep_f3_composer_focus_and_modified_key_precedence() {
+    fn chat_shortcuts_keep_f2_composer_focus_and_modified_key_precedence() {
         let fixture = AppFixture::new();
         let mut app = fixture.app();
         app.chat_client = Some(ChatClient::new("http://chat.example", None).unwrap());
 
-        app.handle_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE))
+        app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))
             .unwrap();
-        assert_eq!(app.tab, Tab::Chat);
+        assert_eq!(app.view, View::Chat);
         assert_eq!(app.input_mode, InputMode::ChatMessage);
         assert_eq!(
             app.modified_key_command(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL,)),
@@ -13189,7 +13268,7 @@ mod tests {
     fn dirty_download_quit_confirmation_closes_palette_and_consumes_choice() {
         let fixture = AppFixture::new();
         let mut app = fixture.app();
-        app.tab = Tab::Download;
+        app.view = View::Download;
         app.focus_download_editor();
         app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
             .unwrap();
@@ -13211,9 +13290,10 @@ mod tests {
     fn download_view_renders_controls_editor_table_and_dedicated_log() {
         let fixture = AppFixture::new();
         let mut app = fixture.app();
-        app.tab = Tab::Download;
+        app.view = View::Download;
         app.push_download_log("download-only-marker");
-        let backend = TestBackend::new(150, 48);
+        // A 150-column pane beside the sidebar.
+        let backend = TestBackend::new(150 + shell::SIDEBAR_WIDTH, 48);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
 
@@ -13240,7 +13320,7 @@ mod tests {
     fn compact_download_view_keeps_late_model_field_and_cursor_visible_at_80x24() {
         let fixture = AppFixture::new();
         let mut app = fixture.app();
-        app.tab = Tab::Download;
+        app.view = View::Download;
         app.push_download_log("compact-download-marker");
         app.download
             .draft_mut()
@@ -13289,7 +13369,7 @@ mod tests {
     fn compact_download_view_scrolls_focused_setting_at_100x30() {
         let fixture = AppFixture::new();
         let mut app = fixture.app();
-        app.tab = Tab::Download;
+        app.view = View::Download;
         let long_base = format!("/models/{}/TAIL100", "nested-directory/".repeat(10));
         app.download
             .base_models_dir_buffer_mut()
@@ -13297,7 +13377,8 @@ mod tests {
         app.download.set_focus(DownloadFocus::BaseModelsDir);
         app.push_download_log("compact-settings-marker");
 
-        let backend = TestBackend::new(100, 30);
+        // A 100-column pane beside the sidebar.
+        let backend = TestBackend::new(100 + shell::SIDEBAR_WIDTH, 30);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
 
@@ -13320,7 +13401,10 @@ mod tests {
         }
 
         let cursor = terminal.get_cursor_position().unwrap();
-        assert!(cursor.x < 100 && cursor.y < 30, "cursor out of bounds");
+        assert!(
+            cursor.x < 100 + shell::SIDEBAR_WIDTH && cursor.y < 30,
+            "cursor out of bounds"
+        );
         let cursor_row = terminal_row(&terminal, cursor.y);
         assert!(cursor_row.contains("Base:"));
         assert!(cursor_row.contains("TAIL100"));
@@ -13330,7 +13414,7 @@ mod tests {
     fn compact_download_view_uses_focused_editor_when_too_narrow_for_both_panes() {
         let fixture = AppFixture::new();
         let mut app = fixture.app();
-        app.tab = Tab::Download;
+        app.view = View::Download;
         app.download
             .draft_mut()
             .buffer_mut(ModelField::MaxWorkers)
@@ -13382,9 +13466,8 @@ mod tests {
     fn script_editor_input_navigation_and_snapshot_save_are_consistent() {
         let fixture = AppFixture::new();
         let mut app = fixture.app();
-        app.tab = Tab::ModelOps;
-        app.ops_mode = OpsMode::Bench;
-        app.execute_command(CommandId::ModelOpsFocusEditor).unwrap();
+        app.view = View::Bench;
+        app.execute_command(CommandId::BenchFocusEditor).unwrap();
 
         let before = app.bench_editor.content().to_owned();
         app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
@@ -13401,9 +13484,9 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::F(7), KeyModifiers::NONE))
             .unwrap();
-        assert_eq!(app.tab, Tab::Maintenance);
+        assert_eq!(app.view, View::Maintenance);
         assert!(app.bench_editor.is_dirty());
-        app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))
+        app.handle_key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE))
             .unwrap();
         app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL))
             .unwrap();
@@ -13419,8 +13502,7 @@ mod tests {
     fn dirty_script_blocks_selection_until_explicit_reload() {
         let fixture = AppFixture::new();
         let mut app = fixture.app();
-        app.tab = Tab::ModelOps;
-        app.ops_mode = OpsMode::Bench;
+        app.view = View::Bench;
         app.focus_script_editor(ScriptEditorTarget::Bench);
         app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
             .unwrap();
@@ -13454,8 +13536,7 @@ mod tests {
     fn bench_filter_tracks_keyboard_selection_editor_and_no_results() {
         let fixture = AppFixture::new();
         let mut app = fixture.app();
-        app.tab = Tab::ModelOps;
-        app.ops_mode = OpsMode::Bench;
+        app.view = View::Bench;
 
         app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
             .unwrap();
@@ -13516,7 +13597,7 @@ mod tests {
         let backend = TestBackend::new(120, 36);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
-        assert!(terminal_text(&terminal).contains("No bench scripts match the current filter"));
+        assert!(terminal_text(&terminal).contains("No matching scripts"));
     }
 
     #[test]
@@ -13549,8 +13630,7 @@ mod tests {
     fn bench_filter_runs_the_filtered_script() {
         let fixture = AppFixture::new();
         let mut app = fixture.app();
-        app.tab = Tab::ModelOps;
-        app.ops_mode = OpsMode::Bench;
+        app.view = View::Bench;
         app.set_bench_filter("bench-b".into());
 
         app.run_selected_bench();
@@ -13569,21 +13649,20 @@ mod tests {
     fn bench_filter_is_available_in_palette_and_help() {
         let fixture = AppFixture::new();
         let mut app = fixture.app();
-        app.tab = Tab::ModelOps;
-        app.ops_mode = OpsMode::Bench;
+        app.view = View::Bench;
 
-        assert!(visible_commands(CommandContext::ModelOps)
+        assert!(visible_commands(CommandContext::Bench)
             .iter()
-            .any(|spec| spec.id == CommandId::ModelOpsFocusFilter));
+            .any(|spec| spec.id == CommandId::BenchFocusFilter));
         app.open_palette();
         app.palette_query = "script filter".into();
         assert!(app
             .palette_commands()
             .iter()
-            .any(|spec| spec.id == CommandId::ModelOpsFocusFilter));
+            .any(|spec| spec.id == CommandId::BenchFocusFilter));
 
         app.show_palette = false;
-        app.execute_command(CommandId::ModelOpsFocusFilter).unwrap();
+        app.execute_command(CommandId::BenchFocusFilter).unwrap();
         assert_eq!(app.input_mode, InputMode::BenchFilter);
         app.input_mode = InputMode::Normal;
         app.show_help = true;
@@ -13592,15 +13671,14 @@ mod tests {
         terminal.draw(|frame| app.draw(frame)).unwrap();
         let rendered = terminal_text(&terminal);
         assert!(rendered.contains("Ctrl+F / /"));
-        assert!(rendered.contains("Filter items"));
+        assert!(rendered.contains("Filter scripts"));
     }
 
     #[test]
     fn dirty_quit_requires_an_explicit_choice() {
         let fixture = AppFixture::new();
         let mut app = fixture.app();
-        app.tab = Tab::ModelOps;
-        app.ops_mode = OpsMode::Bench;
+        app.view = View::Bench;
         app.focus_script_editor(ScriptEditorTarget::Bench);
         app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
             .unwrap();
@@ -13624,11 +13702,11 @@ mod tests {
     fn contextual_palette_actions_cannot_create_hidden_editors() {
         let fixture = AppFixture::new();
         let mut app = fixture.app();
-        app.tab = Tab::Workbench;
+        app.view = View::Model;
         app.execute_command(CommandId::MaintenanceFocusEditor)
             .unwrap();
         assert_eq!(app.script_input_target, None);
-        assert!(app.status.contains("maintenance context"));
+        assert!(app.status.contains("maintenance view"));
     }
 
     #[test]
@@ -13696,44 +13774,10 @@ mod tests {
     }
 
     #[test]
-    fn workbench_layout_cycles_and_shortcuts_work() {
+    fn system_view_renders_gpu_memory_and_spill() {
         let fixture = AppFixture::new();
         let mut app = fixture.app();
-        app.tab = Tab::Workbench;
-        assert_eq!(app.workbench_layout, WorkbenchLayout::Dashboard);
-
-        // Press 'v' to cycle
-        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE))
-            .unwrap();
-        assert_eq!(app.workbench_layout, WorkbenchLayout::SplitVertical);
-
-        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE))
-            .unwrap();
-        assert_eq!(app.workbench_layout, WorkbenchLayout::Classic);
-
-        // Direct jumps via 1-6
-        app.handle_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE))
-            .unwrap();
-        assert_eq!(app.workbench_layout, WorkbenchLayout::FocusBench);
-
-        app.handle_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE))
-            .unwrap();
-        assert_eq!(app.workbench_layout, WorkbenchLayout::FocusJobs);
-
-        app.handle_key(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::NONE))
-            .unwrap();
-        assert_eq!(app.workbench_layout, WorkbenchLayout::FocusGpu);
-
-        app.handle_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE))
-            .unwrap();
-        assert_eq!(app.workbench_layout, WorkbenchLayout::Dashboard);
-    }
-
-    #[test]
-    fn workbench_renders_all_layouts_without_panics() {
-        let fixture = AppFixture::new();
-        let mut app = fixture.app();
-        app.tab = Tab::Workbench;
+        app.view = View::System;
 
         // Populate sample telemetry
         app.gpu_telemetry = Some(GpuTelemetry {
@@ -13767,16 +13811,498 @@ mod tests {
         let backend = TestBackend::new(140, 45);
         let mut terminal = Terminal::new(backend).unwrap();
 
-        for layout in [
-            WorkbenchLayout::Dashboard,
-            WorkbenchLayout::SplitVertical,
-            WorkbenchLayout::Classic,
-            WorkbenchLayout::FocusBench,
-            WorkbenchLayout::FocusJobs,
-            WorkbenchLayout::FocusGpu,
-        ] {
-            app.workbench_layout = layout;
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let text = terminal_text(&terminal);
+        assert!(text.contains("RTX 4070"), "{text}");
+        assert!(text.contains("PLE"), "{text}");
+        // The status bar carries the same readings in compact form.
+        assert!(text.contains("11.4/12G"), "{text}");
+        assert!(text.contains("RAM"), "{text}");
+    }
+
+    fn screen_rows(terminal: &Terminal<TestBackend>) -> Vec<String> {
+        let height = terminal.backend().buffer().area.height;
+        (0..height).map(|y| terminal_row(terminal, y)).collect()
+    }
+
+    #[test]
+    fn shell_and_every_view_render_readably_at_80x24_and_60x18() {
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        let mut app = fixture.app();
+        app.refresh_stack_catalog();
+        app.models = vec![test_chat_model("local-chat", "loaded", false)];
+        for (width, height) in [(80, 24), (60, 18)] {
+            // Sidebar focused: below 100 columns the sidebar takes the body.
+            app.sidebar_focused = true;
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal.draw(|frame| app.draw(frame)).unwrap();
+            let rows = screen_rows(&terminal);
+            assert!(rows[0].contains("L3MS"), "{width}x{height}: {rows:#?}");
+            assert!(rows.iter().any(|row| row.contains("Models 3")), "{rows:#?}");
+            assert!(
+                rows.iter().any(|row| row.contains("● local-chat")),
+                "{rows:#?}"
+            );
+            assert!(rows.iter().any(|row| row.contains("Jobs 0")), "{rows:#?}");
+            assert!(
+                rows[height as usize - 1].contains("● local-chat"),
+                "status bar: {rows:#?}"
+            );
+
+            // Pane focused: every view shows its name and some content.
+            app.sidebar_focused = false;
+            for view in View::ALL {
+                app.view = view;
+                terminal.draw(|frame| app.draw(frame)).unwrap();
+                let rows = screen_rows(&terminal);
+                assert!(
+                    rows[0].contains(view.name()),
+                    "{view:?} at {width}x{height}: {rows:#?}"
+                );
+                let body: String = rows[1..height as usize - 2].concat();
+                let visible = body.chars().filter(|c| c.is_alphanumeric()).count();
+                assert!(
+                    visible > 20,
+                    "{view:?} at {width}x{height} is blank: {rows:#?}"
+                );
+                assert!(rows.iter().all(|row| row.chars().count() == width as usize));
+            }
         }
+    }
+
+    #[test]
+    fn every_former_workbench_and_model_ops_command_has_a_new_home() {
+        let fixture = AppFixture::new();
+        let mut app = fixture.app();
+        // (former command, its replacement, the view the replacement lives in)
+        let mapping = [
+            (
+                "workbench.select-previous",
+                CommandId::SidebarSelectPrevious,
+                View::Model,
+            ),
+            (
+                "workbench.select-next",
+                CommandId::SidebarSelectNext,
+                View::Model,
+            ),
+            (
+                "workbench.focus-filter",
+                CommandId::SidebarFilter,
+                View::Model,
+            ),
+            ("workbench.focus-table", CommandId::ToggleFocus, View::Model),
+            (
+                "workbench.refresh-models",
+                CommandId::StackCatalogRefresh,
+                View::Model,
+            ),
+            ("workbench.load-model", CommandId::ModelLoad, View::Model),
+            (
+                "workbench.unload-model",
+                CommandId::ModelUnload,
+                View::Model,
+            ),
+            ("workbench.clear-log", CommandId::ClearLog, View::Log),
+            ("workbench.cycle-layout", CommandId::OpenSystem, View::Model),
+            ("model-ops.toggle-mode", CommandId::OpenBench, View::Model),
+            (
+                "model-ops.select-previous",
+                CommandId::BenchSelectPrevious,
+                View::Bench,
+            ),
+            (
+                "model-ops.select-next",
+                CommandId::BenchSelectNext,
+                View::Bench,
+            ),
+            ("model-ops.start", CommandId::BenchRun, View::Bench),
+            ("model-ops.stop", CommandId::BenchStop, View::Bench),
+            (
+                "model-ops.refresh-models",
+                CommandId::StackCatalogRefresh,
+                View::Bench,
+            ),
+            (
+                "model-ops.focus-filter",
+                CommandId::BenchFocusFilter,
+                View::Bench,
+            ),
+            (
+                "model-ops.focus-table",
+                CommandId::BenchFocusList,
+                View::Bench,
+            ),
+            (
+                "model-ops.focus-editor",
+                CommandId::BenchFocusEditor,
+                View::Bench,
+            ),
+            (
+                "model-ops.save-script",
+                CommandId::BenchSaveScript,
+                View::Bench,
+            ),
+            (
+                "model-ops.reload-script",
+                CommandId::BenchReloadScript,
+                View::Bench,
+            ),
+            (
+                "model-ops.restore-script",
+                CommandId::BenchRestoreScript,
+                View::Bench,
+            ),
+            ("model-ops.clear-log", CommandId::ClearLog, View::Log),
+        ];
+        for (former, replacement, view) in mapping {
+            let spec = command(replacement).unwrap();
+            assert!(spec.is_visible(), "{former} → {replacement} is hidden");
+            app.view = view;
+            assert!(
+                app.command_available(spec),
+                "{former} → {replacement} is unavailable in {view:?}"
+            );
+            app.palette_query = spec.label.to_owned();
+            assert!(
+                app.palette_commands()
+                    .iter()
+                    .any(|found| found.id == replacement),
+                "{former} → {replacement} is not in the palette"
+            );
+        }
+        assert!(!CommandId::ALL.iter().any(
+            |id| id.as_str().starts_with("workbench.") || id.as_str().starts_with("model-ops.")
+        ));
+    }
+
+    #[test]
+    fn sidebar_keys_move_sections_collapse_filter_and_open_views() {
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        let mut app = fixture.app();
+        app.refresh_stack_catalog();
+        app.sidebar_focused = true;
+        let key = |app: &mut App, code: KeyCode| {
+            app.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+                .unwrap();
+        };
+        app.stack_catalog_state.select(Some(0));
+        key(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.stack_catalog_state.selected(), Some(1));
+        key(&mut app, KeyCode::Char('k'));
+        key(&mut app, KeyCode::Char('k'));
+        assert_eq!(app.stack_catalog_state.selected(), Some(0));
+
+        // The filter narrows navigation to matching profiles.
+        key(&mut app, KeyCode::Char('/'));
+        assert_eq!(app.input_mode, InputMode::ModelFilter);
+        for character in "nag".chars() {
+            key(&mut app, KeyCode::Char(character));
+        }
+        key(&mut app, KeyCode::Enter);
+        let selected = app.selected_stack_profile().unwrap();
+        assert_eq!(selected.key.profile_id.as_str(), "nagi");
+        key(&mut app, KeyCode::Esc);
+        assert!(app.model_filter.is_empty());
+
+        key(&mut app, KeyCode::Char(']'));
+        assert_eq!(app.sidebar_section, SidebarSection::Jobs);
+        key(&mut app, KeyCode::Char(' '));
+        assert!(app.jobs_collapsed);
+        key(&mut app, KeyCode::Char('['));
+        assert_eq!(app.sidebar_section, SidebarSection::Models);
+
+        // Toolbar keys work from the sidebar; unbuilt utilities say so.
+        key(&mut app, KeyCode::Char('R'));
+        assert!(app.status.contains("not built yet"), "{}", app.status);
+        key(&mut app, KeyCode::Char('h'));
+        assert_eq!(app.view, View::System);
+        assert!(!app.sidebar_focused);
+
+        // Tab returns to the sidebar; q there still quits.
+        key(&mut app, KeyCode::Tab);
+        assert!(app.sidebar_focused);
+        key(&mut app, KeyCode::Char('q'));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn enter_on_a_chat_model_opens_chat_without_loading_it() {
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        let mut app = fixture.app();
+        app.refresh_stack_catalog();
+        connect_test_chat(
+            &mut app,
+            vec![test_chat_model("local-chat", "unloaded", false)],
+        );
+        app.models = vec![test_chat_model("local-chat", "unloaded", false)];
+        focus_stack_profile_by_id(&mut app, "local-chat");
+        app.sidebar_focused = true;
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.view, View::Chat, "{}", app.status);
+        assert!(!app.sidebar_focused);
+        assert!(!app.model_action_pending);
+        assert!(app.job_history.records().is_empty());
+    }
+
+    #[test]
+    fn loading_a_model_names_what_it_evicts_and_needs_a_second_press() {
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        let mut app = fixture.app();
+        app.refresh_stack_catalog();
+        app.models = vec![
+            test_chat_model("local-chat", "unloaded", false),
+            test_chat_model("resident", "loaded", false),
+        ];
+        app.loaded_model_id = Some("resident".into());
+        focus_stack_profile_by_id(&mut app, "local-chat");
+        app.sidebar_focused = true;
+        app.handle_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.status.contains("evicts resident"), "{}", app.status);
+        assert!(app.status.contains("press L again"));
+        assert!(!app.model_action_pending);
+        // Any other key cancels.
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.load_armed, None);
+        assert_eq!(app.status, "Load cancelled");
+
+        // Media and decision profiles are not llama-swap models.
+        focus_stack_profile_by_id(&mut app, "breeze");
+        app.sidebar_focused = true;
+        app.handle_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.status.contains("not a llama-swap model"));
+        assert!(!app.model_action_pending);
+    }
+
+    #[test]
+    fn background_router_refresh_tracks_other_clients_without_touching_status() {
+        let fixture = AppFixture::new();
+        let mut app = fixture.app();
+        // Let the fixture's own startup refresh settle first.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.loading_models && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+            app.drain_background_events();
+        }
+        app.loaded_model_id = Some("ours".into());
+        app.status = "press L again to confirm".into();
+        app.loading_models = true;
+        app.sender
+            .send(BackgroundEvent::Models(Ok(vec![
+                test_chat_model("ours", "unloaded", false),
+                test_chat_model("someone-elses", "loaded", false),
+            ])))
+            .unwrap();
+        app.drain_background_events();
+        assert_eq!(app.loaded_model_id.as_deref(), Some("someone-elses"));
+        assert_eq!(app.status, "press L again to confirm");
+
+        app.loading_models = true;
+        for _ in 0..3 {
+            app.loading_models = true;
+            app.sender
+                .send(BackgroundEvent::Models(Err("router down".into())))
+                .unwrap();
+            app.drain_background_events();
+        }
+        assert_eq!(app.status, "press L again to confirm");
+        assert_eq!(
+            app.log
+                .iter()
+                .filter(|line| line.contains("router down"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn bench_rates_need_an_exact_path_and_a_named_entry_when_paths_are_shared() {
+        let entry = |id: &str, path: &str| crate::swap_yaml::SwapYamlEntry {
+            id: id.into(),
+            disabled: false,
+            unlisted: false,
+            model_path: Some(path.into()),
+            name: None,
+            description: None,
+            ttl: None,
+            proxy: false,
+            cmd: String::new(),
+            tasks: vec!["chat".into()],
+        };
+        let result = |key: &str, path: &str, rate: f64| crate::bench_results::BenchResult {
+            model_key: key.into(),
+            model: path.into(),
+            tg_ts: Some(rate),
+            ..Default::default()
+        };
+        let entries = [
+            entry("solo", "/m/solo.gguf"),
+            entry("shared-a", "/m/shared.gguf"),
+            entry("shared-b", "/m/shared.gguf"),
+        ];
+        let results = [
+            result("solo_fit", "/m/solo.gguf", 40.0),
+            result("shared-b", "/m/shared.gguf", 77.0),
+            result("some-script", "/m/shared.gguf", 99.0),
+            result("other", "/m/other.gguf", 10.0),
+        ];
+        let runs = bench_runs_by_entry(&entries, &results);
+        let rate = |id: &str| runs.get(id).and_then(|runs| runs[0].tg_ts);
+        assert_eq!(rate("solo"), Some(40.0));
+        assert_eq!(rate("shared-b"), Some(77.0));
+        assert_eq!(rate("shared-a"), None);
+        assert_eq!(runs.len(), 2);
+    }
+
+    #[test]
+    fn download_keeps_tab_for_fields_and_esc_reaches_the_sidebar() {
+        let fixture = AppFixture::new();
+        let mut app = fixture.app();
+        app.view = View::Download;
+        assert_eq!(app.download.focus(), DownloadFocus::Table);
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert!(!app.sidebar_focused);
+        assert_ne!(app.download.focus(), DownloadFocus::Table);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.download.focus(), DownloadFocus::Table);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.sidebar_focused);
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert!(!app.sidebar_focused);
+        assert_eq!(app.view, View::Download);
+    }
+
+    #[test]
+    fn a_pending_load_is_cancelled_by_leaving_the_sidebar() {
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        let mut app = fixture.app();
+        app.refresh_stack_catalog();
+        app.models = vec![test_chat_model("local-chat", "unloaded", false)];
+        focus_stack_profile_by_id(&mut app, "local-chat");
+        app.sidebar_focused = true;
+        app.handle_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.load_armed.is_some());
+        app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.load_armed, None);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.sidebar_focused);
+        app.handle_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE))
+            .unwrap();
+        // The next L after leaving only re-arms, showing the warning again.
+        assert!(app.status.contains("press L again"), "{}", app.status);
+        assert!(!app.model_action_pending);
+    }
+
+    #[test]
+    fn the_first_router_listing_selects_the_resident_model() {
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        let mut app = fixture.app();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.loading_models && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+            app.drain_background_events();
+        }
+        app.refresh_stack_catalog();
+        app.selected_resident_once = false;
+        let listing =
+            || BackgroundEvent::Models(Ok(vec![test_chat_model("local-chat", "loaded", false)]));
+        focus_stack_profile_by_id(&mut app, "breeze");
+        app.loading_models = true;
+        app.sender.send(listing()).unwrap();
+        app.drain_background_events();
+        assert_eq!(
+            app.selected_stack_profile()
+                .map(|profile| profile.key.profile_id.as_str()),
+            Some("local-chat")
+        );
+        // Later listings leave the user's selection alone.
+        focus_stack_profile_by_id(&mut app, "breeze");
+        app.loading_models = true;
+        app.sender.send(listing()).unwrap();
+        app.drain_background_events();
+        assert_eq!(
+            app.selected_stack_profile()
+                .map(|profile| profile.key.profile_id.as_str()),
+            Some("breeze")
+        );
+    }
+
+    #[test]
+    fn message_line_clips_a_long_status_before_dropping_key_hints() {
+        let fixture = AppFixture::new();
+        let mut app = fixture.app();
+        app.sidebar_focused = true;
+        app.status = "x".repeat(300);
+        for width in [80_u16, 110] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+            let row = terminal_row(&terminal, 22);
+            assert!(row.contains("Enter open"), "{width}: {row:?}");
+            assert!(row.contains('…'), "{width}: {row:?}");
+            assert_eq!(row.chars().count(), width as usize);
+        }
+    }
+
+    #[test]
+    fn engines_get_their_own_group_and_media_shows_its_engine_state() {
+        let fixture = AppFixture::new();
+        write_stack_fixture(&fixture);
+        let mut app = fixture.app();
+        app.refresh_stack_catalog();
+        let mut engine = crate::swap_yaml::parse_entries(
+            "models:\n  \"audiocpp_auto\":\n    cmd: audiocpp-server --port ${PORT}\n    proxy: http://127.0.0.1:${PORT}\n",
+        );
+        app.yaml_entries.insert("local-chat".into(), {
+            let mut entry = engine.remove(0);
+            entry.id = "local-chat".into();
+            entry
+        });
+        let catalog = app.stack_catalog.as_ref().unwrap();
+        let chat = catalog
+            .list()
+            .iter()
+            .find(|profile| profile.key.profile_id.as_str() == "local-chat")
+            .unwrap();
+        assert_eq!(app.sidebar_group(chat).0, "engines");
+        let breeze = catalog
+            .list()
+            .iter()
+            .find(|profile| profile.key.profile_id.as_str() == "breeze")
+            .unwrap()
+            .clone();
+        assert_eq!(app.media_engine(&breeze), Some("audiocpp_auto"));
+        app.models = vec![test_chat_model("audiocpp_auto", "loaded", false)];
+        assert_eq!(app.profile_router_state(&breeze), Some("loaded"));
+        // Engines sort after every lane.
+        let order: Vec<&str> = app
+            .sidebar_model_indices()
+            .into_iter()
+            .map(|index| {
+                app.stack_catalog.as_ref().unwrap().list()[index]
+                    .key
+                    .profile_id
+                    .as_str()
+            })
+            .collect();
+        assert_eq!(order.last(), Some(&"local-chat"));
     }
 }
