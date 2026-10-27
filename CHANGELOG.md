@@ -26,6 +26,35 @@
   PR #30966 CPU-shared MoE cache misses (24.53 t/s mean, 26.99 t/s peak), and evaluated Strata
   v0.2.6 (65.53 t/s) against production v0.1.45 (63.83 t/s), retaining v0.1.45 for daily serving.
 
+### Added (media lane)
+
+- `media-models/minimax_h3_video.py`: MiniMax-H3 Ref2VA graph builder for the ComfyUI engine
+  (`comfyui_auto` through llama-swap), plus `test_minimax_h3_video.py` (20 tests). It builds the API
+  graph in Python (int8 ConvRot DiT via `UNETLoader`, `CLIPLoader` type `minimax`, video and audio
+  `VAELoader`s, `MiniMaxH3ReferenceToVideo` with up to 9 `--ref-image` values addressed by their dotted
+  finalized ids, `RandomNoise`/`BasicScheduler`/`KSamplerSelect`/`SamplerCustomAdvanced`/`BasicGuider`,
+  then `VAEDecode` + `VAEDecodeAudio` + `CreateVideo` + `SaveVideo`) because the two shipped
+  `workflows/minimax-h3/*.json` files are one 29-node UI document that differs only in the LoRA
+  loader's `mode` field. It enforces the engine's own contracts instead of trusting the tooltip:
+  frame counts must be `5 + 17k` at 24 fps (video VAE temporal compression; `--seconds 5` = 124 frames,
+  `--seconds 10` = 243), dimensions are multiples of 32, `--ref-image-size` is `match|max`, and there is
+  no negative prompt (the node outputs positive conditioning plus latent and `BasicGuider` takes one
+  input, so wording is a content lever and not a veto lever). Other flags: `--turbo-lora
+  NAME[:STRENGTH]`, `--sigma-shift VIDEO:AUDIO`, `--no-audio`, `--scheduler`, `--sampler`, `--te`,
+  `--megapixels/--aspect` (default 0.2 MP = 608x352), `--check`, `--dry-run`, and `--warm-timeout`,
+  which budgets the measured 246 s router cold boot.
+  Measured on the RTX 4070 with this box's weights: 121-147 s per 5.17 s clip (124 frames, 0.2 MP,
+  20 steps, warm engine, no Turbo LoRA), 96 s for a 39-frame clip when it is a session's first row
+  (that row pays the 19.53 GiB DiT and 14.61 GiB text-encoder load), and holding the lane open costs
+  ~22 GiB system RAM for the offloaded DiT plus 10.5 GiB VRAM. The identical 124-frame config measured
+  136 s and 175 s in two sessions, so single-run deltas under ~30% are noise. Both installed
+  text-encoder filenames (`qwen3vl_32b_minimax_h3_nvfp4_awq` and
+  `qwen3vl_32b_heretic_minimax_h3_nvfp4`) resolve to the same inode on `/mnt/dev`, i.e. there is one
+  uncensored encoder here, so `--te` has no stock counterpart to switch to until a 15.7 GB download
+  lands. The harness, prompt packs, contact-sheet and motion-metric tools and the measured write-up
+  live in the sibling `l2m2-nsfw` checkout: `runners/run-h3-ab.sh`, `tools/clip-sheet.py`,
+  `tools/clip-motion.py`, `docs/experiments/h3-reference-to-video.md`.
+
 ### Changed (media lane)
 
 - `media-models/qwen_image_21.py` budgets the router's cold start instead of reading it as a
