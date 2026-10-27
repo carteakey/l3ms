@@ -4,14 +4,15 @@
 
 ### Added (serving)
 
-- Strata `v0.1.45-lean-4070` (`carteakey/Strata`): created lean Ada-focused fork branch
+- Strata `4070-main-lite` (`carteakey/Strata`): created lean Ada-focused fork branch
   rooted on tag `v0.1.45`, cherry-picking hyper-connection launch reduction (`8645328d`, folding
   inject into down GEMV and merging gate/mean, cutting launches from 6 to 4 per HC read) and
-  `STRATA_GR_NORM_FAST=1` register-split norm (`7ce60ad3`). Gated unreleased Qwen3.5 engine code
-  (`src/qwen35/`), defaulted tests to `OFF`, set default CUDA arch to `89`, and stripped 172,853 lines
-  of unused backends (Metal, SYCL, and ROCm tuning headers). Delivers 65.08 t/s steady decode
-  and 72.9 t/s peak with a 73 MB binary (down from 78.7 MB), matching upstream v0.2.6 performance
-  without any cross-architecture bloat. Switched `llama-swap.yaml` to serve this lean binary for
+  `STRATA_GR_NORM_FAST=1` register-split norm (`7ce60ad3`). Cherry-picked reasoning loop recovery
+  fix (`9aafcbf0`, wrapping thinking into answer on repeated tokens inside `<think>`). Gated unreleased
+  Qwen3.5 engine code (`src/qwen35/`), defaulted tests to `OFF`, set default CUDA arch to `89`, and
+  stripped 172,853 lines of unused backends (Metal, SYCL, and ROCm tuning headers). Delivers 65.08 t/s
+  steady decode and 72.9 t/s peak with a 73 MB binary (down from 78.7 MB), matching upstream v0.2.6
+  performance without cross-architecture bloat. Switched `llama-swap.yaml` to serve this lean binary for
   the Platinum tier.
 
 ### Added (documentation)

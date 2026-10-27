@@ -90,15 +90,15 @@ Deep detail, decisions and next steps: `docs/qwen38-flash-next-internal.md` and 
 
 Seven router tiers:
 
-- plat `qwen38-flash-next-plat` (alias `strata`): Strata v0.1.45-lean-4070 (`carteakey/Strata`)
+- plat `qwen38-flash-next-plat` (alias `strata`): Strata 4070-main-lite (`carteakey/Strata`)
   with ISTA-DASLab GSQ-RCO IQ3_XXS quant, unquantized Q8_0 PLE table on NVMe, dynamic VRAM expert
   caching (2,444 to 3,086 hot experts in VRAM), native MTP speculative decoding (Q2_0 draft head),
   fused hyper-connections (down GEMV inject folding and gate/mean fusion reducing kernel launches
-  from 6 to 4), STRATA_GR_NORM_FAST=1 register-split norm, K8V4 KV cache @ 128k ctx (`131072`),
-  StrataGP 2 MB Transparent Huge Page (`MADV_HUGEPAGE`) kernel acceleration, 4-slot / 3 GiB
-  host-RAM conversation parking, and `ttl: 3600` (1-hour idle timeout). **65.08 t/s steady decode on real code, 72.9 t/s peak, pp=1,887 to 1,894 t/s**,
-  11.7 GB VRAM, 47 GB RAM (14 GB headroom). All non-Ada backends (Metal, SYCL, ROCm tuning headers)
-  and unreleased Qwen3.5 engine code stripped.
+  from 6 to 4), STRATA_GR_NORM_FAST=1 register-split norm, thinking wrap-up on repeat loops inside <think>,
+  K8V4 KV cache @ 128k ctx (`131072`), StrataGP 2 MB Transparent Huge Page (`MADV_HUGEPAGE`) kernel
+  acceleration, 4-slot / 3 GiB host-RAM conversation parking, and `ttl: 3600` (1-hour idle timeout).
+  **65.08 t/s steady decode on real code, 72.9 t/s peak, pp=1,887 to 1,894 t/s**, 11.7 GB VRAM, 47 GB RAM (14 GB headroom).
+  All non-Ada backends (Metal, SYCL, ROCm tuning headers) and unreleased Qwen3.5 engine code stripped.
 - plat-vision `qwen38-flash-next-plat-vision` (alias `strata-vision`): Strata v0.1.44.1
   with MTMD vision support (`strata-vision` CPU encoder with `mmproj-F16.gguf`), `--vision` position table
   allocation, and `--fit-max-tokens`. Zero VRAM overhead for vision; retains all GPU experts and K8V4 KV cache.

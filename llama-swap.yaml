@@ -38,7 +38,7 @@ macros:
   "qwen38_exp_mtp_server": "${env.L3MS_ROOT}/vendor/llama.cpp-pr-test-28023-28068-27941/build/bin/llama-server"
   # decision models: master @ efe3626b1 (#30383 vllm-d3 support), worktree of llama.cpp-master
   "d3_server":             "${env.L3MS_ROOT}/vendor/llama.cpp-d3/build/bin/llama-server"
-  # strata tier: v0.1.45-lean-4070 (carteakey/Strata) dynamic expert cache + native MTP + fused hyper-connections + Q8_0 PLE table
+  # strata tier: 4070-main-lite (carteakey/Strata) dynamic expert cache + native MTP + fused hyper-connections + Q8_0 PLE table
   "strata_python":         "${env.L3MS_ROOT}/vendor/strata/.venv/bin/python"
   "strata_server":         "${env.L3MS_ROOT}/vendor/strata-lean/serve/server.py"
   "strata_iq3_config":     "${env.L3MS_ROOT}/vendor/strata-lean/strata-iq3_xxs-ple_q8.json"
