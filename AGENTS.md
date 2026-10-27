@@ -51,6 +51,12 @@ engine route over a new executor; see `docs/migration/runtime-policy.md`.
   sibling `~/repos/l2m2-nsfw` checkout, which depends on this tree through `L2M2_ROOT`.
   Keep explicit prompt strings and adult grading notes out of this repository.
 - Keep version snapshots for both model configs and scripts before writes.
+- Publishing & Blog Conventions: all public posts, mirrored blog documentation (`docs/*post*.md`), and changelogs must follow the author's writing conventions and the Human Writer skill in `~/repos/carteakey.dev/.agents/skills/human-writer/SKILL.md`:
+  - Zero em dashes (`—`): use commas, parentheses, or spaced hyphens (` - `).
+  - First-person voice (`I`, `my`), not corporate plural (`"We evaluated"`).
+  - No synthetic framing, dramatic one-line closers, or AI marketing hype (`"Not X but Y"`, `"The physics of X"`, `"game-changer"`, `"blazing"`).
+  - Natural contractions (`it's`, `didn't`, `doesn't`).
+  - Report ground-truth empirical numbers with system context; never publish single-burst anomalies (e.g. the 90.2 t/s burst) as sustained throughput.
 
 ## llama-swap Operations
 
@@ -84,12 +90,15 @@ Deep detail, decisions and next steps: `docs/qwen38-flash-next-internal.md` and 
 
 Seven router tiers:
 
-- plat `qwen38-flash-next-plat` (alias `strata`): Strata v0.1.44.1 with ISTA-DASLab
-  GSQ-RCO IQ3_XXS quant, dynamic VRAM expert caching (2,444–3,086 hot experts in VRAM),
-  native MTP speculative decoding (Q2_0 draft head), K8V4 KV cache @ 128k ctx (`131072`),
+- plat `qwen38-flash-next-plat` (alias `strata`): Strata v0.1.45-lean-4070 (`carteakey/Strata`)
+  with ISTA-DASLab GSQ-RCO IQ3_XXS quant, unquantized Q8_0 PLE table on NVMe, dynamic VRAM expert
+  caching (2,444 to 3,086 hot experts in VRAM), native MTP speculative decoding (Q2_0 draft head),
+  fused hyper-connections (down GEMV inject folding and gate/mean fusion reducing kernel launches
+  from 6 to 4), STRATA_GR_NORM_FAST=1 register-split norm, K8V4 KV cache @ 128k ctx (`131072`),
   StrataGP 2 MB Transparent Huge Page (`MADV_HUGEPAGE`) kernel acceleration, 4-slot / 3 GiB
-  host-RAM conversation parking, and `ttl: 3600` (1-hour idle timeout). **59–65 t/s steady decode on real code, 90.2 t/s peak, pp=1,138–2,013 t/s**,
-  11.5 GB VRAM, 47 GB RAM (14 GB headroom).
+  host-RAM conversation parking, and `ttl: 3600` (1-hour idle timeout). **65.08 t/s steady decode on real code, 72.9 t/s peak, pp=1,887 to 1,894 t/s**,
+  11.7 GB VRAM, 47 GB RAM (14 GB headroom). All non-Ada backends (Metal, SYCL, ROCm tuning headers)
+  and unreleased Qwen3.5 engine code stripped.
 - plat-vision `qwen38-flash-next-plat-vision` (alias `strata-vision`): Strata v0.1.44.1
   with MTMD vision support (`strata-vision` CPU encoder with `mmproj-F16.gguf`), `--vision` position table
   allocation, and `--fit-max-tokens`. Zero VRAM overhead for vision; retains all GPU experts and K8V4 KV cache.

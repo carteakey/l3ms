@@ -25,8 +25,8 @@ V="$REPO/vendor"
 MOE_CACHE_MIB="${MOE_CACHE_MIB:-2048}"
 
 declare -A BIN=(
-  [gold_old]="$V/llama.cpp-master/build/bin/llama-server-b11475-7e8324f5f"
-  [gold_new]="$V/llama.cpp-master/build/bin/llama-server-b11619-18-g683bbc0dc"
+  [gold_old]="$V/llama.cpp-master/build/bin/llama-server-b11619-18-g683bbc0dc"
+  [gold_new]="$V/llama.cpp-master/build/bin/llama-server-b11913"
   [exp_old]="$V/llama.cpp-exp-stack-v2/build/bin/llama-server"
   [exp_new]="$V/llama.cpp-exp-latest/build/bin/llama-server"
   [exp_cache]="$V/llama.cpp-exp-latest/build/bin/llama-server"
@@ -61,14 +61,35 @@ PY
   SRV=$!
 }
 
+strata_arm_cfg() { # label dir cfg_src
+  local label="$1" dir="$2" src="$3" cfg="$TMP/$1.json"
+  python3 - "$dir" "$src" "$cfg" <<'PY'
+import json, os, sys
+d, src, out = sys.argv[1], sys.argv[2], sys.argv[3]
+c = json.load(open(src))
+exe = os.path.join(d, "build/strata") if os.path.exists(os.path.join(d, "build/strata")) else os.path.join(d, "engine/strata")
+c["exe"] = exe
+c["cwd"] = d
+c["log"] = out.replace(".json", ".engine.log")
+c["port"] = 8023
+json.dump(c, open(out, "w"), indent=1)
+PY
+  taskset -c 0-11 "$V/strata/.venv/bin/python" "$dir/serve/server.py" --engine strata --config "$cfg" \
+    --port "$PORT" > "$TMP/$label.log" 2>&1 &
+  SRV=$!
+}
+
 run_arm() {
   local label="$1"
   case "$label" in
     gold_old|gold_new) llama_arm "$label" 98304 2048 ;;
     exp_old|exp_new)   llama_arm "$label" 65536 1024 ;;
     exp_cache)         llama_arm "$label" 65536 1024 --moe-cache-mib "$MOE_CACHE_MIB" ;;
-    strata_old)        strata_arm "$label" "$V/strata-latest" ;;
-    strata_new)        strata_arm "$label" "$V/strata-v0.1.44.1" ;;
+    strata_old)        strata_arm "$label" "$V/strata-v0.1.44.1" ;;
+    strata_new|strata_v145) strata_arm "$label" "$V/strata-latest" ;;
+    strata_v026)       strata_arm "$label" "$V/strata-v0.2.6" ;;
+    strata_ple_q8)     strata_arm_cfg "$label" "$V/strata-latest" "$V/strata-latest/strata-iq3_xxs-ple_q8.json" ;;
+    strata_lean)       strata_arm_cfg "$label" "$V/strata-lean" "$V/strata-lean/strata-iq3_xxs-ple_q8.json" ;;
     *) echo "unknown arm $label"; return 1 ;;
   esac
   [[ -n "${BIN[$label]:-}" && ! -x "${BIN[$label]}" ]] && { echo "== $label: binary missing"; kill $SRV 2>/dev/null; return 1; }

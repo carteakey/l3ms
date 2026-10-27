@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+### Added (serving)
+
+- Strata `v0.1.45-lean-4070` (`carteakey/Strata`): created lean Ada-focused fork branch
+  rooted on tag `v0.1.45`, cherry-picking hyper-connection launch reduction (`8645328d`, folding
+  inject into down GEMV and merging gate/mean, cutting launches from 6 to 4 per HC read) and
+  `STRATA_GR_NORM_FAST=1` register-split norm (`7ce60ad3`). Gated unreleased Qwen3.5 engine code
+  (`src/qwen35/`), defaulted tests to `OFF`, set default CUDA arch to `89`, and stripped 172,853 lines
+  of unused backends (Metal, SYCL, and ROCm tuning headers). Delivers 65.08 t/s steady decode
+  and 72.9 t/s peak with a 73 MB binary (down from 78.7 MB), matching upstream v0.2.6 performance
+  without any cross-architecture bloat. Switched `llama-swap.yaml` to serve this lean binary for
+  the Platinum tier.
+
+### Added (documentation)
+
+- `docs/qwen38-flash-next-variant-ranking.md`: ranked architectural pitch and compatibility
+  matrix comparing 30 community and upstream `Qwen3.8-Flash-Next` model variants against our
+  RTX 4070 12 GB + 64 GB DDR5 rig, evaluating PLE isolation, GSQ-RCO routing, Strata dynamic
+  VRAM caching, and llama.cpp serving constraints.
+- Qwen3.8-Flash-Next refresh benchmark evaluation: refreshed Gold master to b11913 (22.77 t/s
+  mean, 24.82 t/s peak, +77.3% decode jump over b11619), Experimental stack to b11923 with
+  PR #30966 CPU-shared MoE cache misses (24.53 t/s mean, 26.99 t/s peak), and evaluated Strata
+  v0.2.6 (65.53 t/s) against production v0.1.45 (63.83 t/s), retaining v0.1.45 for daily serving.
+
 ### Changed (media lane)
 
 - `media-models/qwen_image_21.py` budgets the router's cold start instead of reading it as a
@@ -36,6 +59,17 @@
   unloading is `U` in the sidebar.
 
 ### Added
+- Full-precision `Q8_0` Per-Layer Embedding (PLE) n-gram table evaluation for `Qwen3.8-Flash-Next`
+  (qwen4exp): added `qwen38-flash-next-plat-ple-q8` (Strata v0.1.45) and `qwen38-flash-next-ple-q8`
+  (llama.cpp master b11718) router entries with zero VRAM overhead streaming from NVMe SSD.
+- Upgraded all Platinum tiers (`qwen38-flash-next-plat`, `qwen38-flash-next-plat-vision`,
+  `qwen38-flash-next-plat-abliterated`, and `qwen38-flash-next-plat-abliterated-vision`) to default to
+  Strata v0.1.45 with the unquantized `Q8_0` PLE table and 4-slot conversation cache.
+- Cyberpunk 3D Train generative acid test suite (`bench-models/challenge_3d_train.py` and
+  `docs/challenges/`) establishing a 4-way generative matrix across Strata and llama.cpp:
+  - Strata Q8_0: 74.8 t/s decode (+31.7%), 78.3% MTP draft acceptance, 1,023 lines Three.js r160.
+  - llama.cpp Q8_0: 20.54 t/s decode (+143%), 660s wall clock (2.43× speedup), 1,009 lines Three.js.
+  - Dedicated technical deep dive published at `docs/qwen3-8-flash-next-ple-precision.md`.
 - Status bar: resident model, VRAM and RAM gauges, CPU usage, the fullest of
   `/home`, `/mnt/dev` and the models root, CPU governor and router endpoint, with
   warning and critical thresholds kept in one tested table (`src/ui/statusbar.rs`).

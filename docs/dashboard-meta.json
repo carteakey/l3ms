@@ -9,14 +9,14 @@
   "methodology": "The ranked list contains only results from the RTX 4070 node above. Historical fields that were not captured in the same run are shown as not recorded instead of being inferred. Community hardware is kept in a separate, unranked dataset. Retired profiles keep their last measured performance in the archive tab; they are no longer reproducible on this node. Qwen3.8 serving metadata was imported from original checkout commit ed7538a; these are source-reported historical measurements, not monorepo acceptance results. Referenced new benchmark harnesses were not committed in that source snapshot and have not been imported. Historical model results may use different hardware settings.",
   "models": {
     "qwen38-flash-next-plat": {
-      "displayName": "Qwen3.8-Flash-Next Plat (Strata v0.1.44.1)",
-      "summary": "Platinum tier: Strata v0.1.44.1 with online dynamic expert VRAM caching (3,086 hot experts in VRAM), native MTP draft head (Q2_0), 128k context with dynamic KV streaming, native 2 MB Transparent Huge Page (THP) memory acceleration, and #783 kernel perf suite. 62.2 t/s steady decode on code (probes: 59.6-64.8 t/s, 90.2 t/s peak burst), pp 956-1,992 t/s.",
-      "tps": 62.2,
-      "pp": 1992,
+      "displayName": "Qwen3.8-Flash-Next Plat (Strata v0.1.45)",
+      "summary": "Platinum tier: Strata v0.1.45 with online dynamic expert VRAM caching (3,086 hot experts in VRAM), native MTP draft head (Q2_0), 128k context with dynamic KV streaming, native 2 MB Transparent Huge Page (THP) memory acceleration, and planar decode kernels. 65.8 t/s steady decode on code (probes: 65.1-66.5 t/s, 70.0 t/s peak burst), pp 947-1,885 t/s on DDR5-5800.",
+      "tps": 65.8,
+      "pp": 1885,
       "testedContext": "128k",
       "cacheState": "k8v4 KV; 3,086 hot experts in VRAM; native THP 2MB pages",
       "draftAcceptance": "70-78% (native Q2_0 MTP, spec 4)",
-      "llamaCppCommit": "Strata v0.1.44.1 (native SM89 Ada + dynamic expert VRAM cache + MTP)",
+      "llamaCppCommit": "Strata v0.1.45 (native SM89 Ada + dynamic expert VRAM cache + MTP)",
       "quant": "ISTA-DASLab GSQ-RCO IQ3_XXS",
       "tags": [
         "MoE",
@@ -69,17 +69,6 @@
       ],
       "benchmark": "mtp_bench_gemma.py"
     },
-    "qwen3-6-mtp-q6": {
-      "displayName": "Qwen3.6 35B-A3B MTP Q6",
-      "summary": "Higher-precision Q6 variant; slower, but useful when Q4 quality is not enough.",
-      "tps": 43.1,
-      "quant": "UD-Q6_K",
-      "tags": [
-        "MTP",
-        "MoE"
-      ],
-      "benchmark": "mtp_bench_qwen.py"
-    },
     "qwen38-flash-next-mtp": {
       "displayName": "Qwen3.8-Flash-Next MTP",
       "summary": "PR #28243 on master with compact 1.78 GB shared-Q4_K_M draft head. Offloads 3 MoE layers to GPU (-ncmoe 45), breaking 20 t/s across all tasks: 20.65 t/s aggregate (up to 21.9-22.4 t/s on code/SQL), 77-96% draft acceptance, 11.78 GB VRAM footprint.",
@@ -98,14 +87,14 @@
       "benchmark": "bench-models/bench-llama-qwen38-flash-next-mtp.sh"
     },
     "qwen38-flash-next": {
-      "displayName": "Qwen3.8-Flash-Next (master b11475)",
-      "summary": "Plain upstream master b11475 (7e8324f5f). 17.34 t/s steady decode, pp 587 t/s @ 8k context (q8_0 KV, --fit on --fit-target 512, ub 2048). Natively includes PR #29761 (native MTP), #29824/5 (indexer memory halved), #29901 (4-head tiling), and #29599 NVMe row prefetching. VRAM reduced to 11.1 GB.",
-      "tps": 17.34,
-      "pp": 587,
+      "displayName": "Qwen3.8-Flash-Next (master b11913)",
+      "summary": "Plain upstream master b11913 (7aca0d2ea). 22.77 t/s steady decode, pp 596 t/s @ 8k context (q8_0 KV, --fit on --fit-target 512, ub 2048). Includes PR #29761, #29887 (host MoE LRU cache), #28770 (sparse FA), #29393 (RMS_NORM+SCALE fusion), #30602 (chain fusions), #30927. Peak decode 24.82 t/s with 86.3% draft acceptance.",
+      "tps": 22.77,
+      "pp": 596,
       "testedContext": "96k",
       "cacheState": "q8_0 KV, ngram-mod pool warm",
-      "draftAcceptance": "67-95% (ngram-mod)",
-      "llamaCppCommit": "b11475 7e8324f5f (llama.cpp-master)",
+      "draftAcceptance": "75-86% (ngram-mod)",
+      "llamaCppCommit": "b11913 7aca0d2ea (llama.cpp-master)",
       "quant": "ISTA-DASLab GSQ-RCO IQ3_XXS",
       "tags": [
         "MoE",
@@ -115,14 +104,14 @@
       "benchmark": "bench-models/bench-qwen38-refresh-ab.sh"
     },
     "qwen38-flash-next-exp": {
-      "displayName": "Qwen3.8-Flash-Next EXP (MoE LRU Cache #29887)",
-      "summary": "Experimental tier: master b11475 + PR #29887 (GPU LRU cache for host-offloaded MoE experts, --moe-cache-mib 2048) + PR #28671 (radix-select TOP_K). Breakthrough decode jump to 23.92 t/s (+40.1% over plain offload) within 11,454 MiB VRAM.",
-      "tps": 23.92,
-      "pp": 449,
+      "displayName": "Qwen3.8-Flash-Next EXP (MoE LRU Cache #30966)",
+      "summary": "Experimental tier: master b11923 + PR #30966 (CPU-shared MoE cache misses, --moe-cache-mib 2048) + PR #30592 (MTP fix). 24.53 t/s steady decode (26.99 t/s peak) within 11,566 MiB VRAM.",
+      "tps": 24.53,
+      "pp": 452,
       "testedContext": "64k",
       "cacheState": "warm; q8_0 KV; 2048 MiB MoE LRU cache",
-      "draftAcceptance": "68-95% (ngram-mod)",
-      "llamaCppCommit": "b11475 + #29887 + #28671 (exp-latest)",
+      "draftAcceptance": "83-100% (ngram-mod)",
+      "llamaCppCommit": "b11923 + #30966 + #30592 (exp-latest)",
       "quant": "ISTA-DASLab GSQ-RCO IQ3_XXS",
       "tags": [
         "MoE",

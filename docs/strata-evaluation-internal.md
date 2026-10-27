@@ -497,5 +497,50 @@ Interpretation:
 - If disabling lookahead wins, add it to the Strata config environment only
   after a longer code/prose/tool-call confirmation run.
 
+---
+
+## 17. Fork Strategy: v0.1.45-lean-4070 (carteakey/Strata)
+
+On 2026-10-27, I evaluated upstream Strata v0.2.6 against v0.1.45. While upstream
+added 69,000+ lines of cross-architecture churn (DeepSeek v4.1, Pascal sm_60,
+Volta sm_70 WMMA, AMD Strix Halo gfx1151 prompt chunking, Apple Metal patches,
+and Windows installers), the RTX 4070 single-node decode throughput delta was
+only +1.7 t/s (63.83 vs 65.53 t/s).
+
+To prevent software bloat and avoid regressions while capturing genuine inference
+improvements, I established the `carteakey/Strata` fork branch `v0.1.45-lean-4070`
+rooted at tag `v0.1.45`.
+
+### 17.1 Cherry-Picked Inference Fusions
+1. **Hyper-Connection Kernel Folding (`8645328d`, `src/kernels/cuda/gr.cu`)**:
+   Folds hyper-connection injection into the down GEMV grid and merges `gate` +
+   `mean` into one kernel launch. Reduces launches per hyper-connection read
+   from 6 to 4.
+2. **Fast Register-Split Norm (`7ce60ad3`, `src/kernels/cuda/fused_gr.cu`)**:
+   Enables `STRATA_GR_NORM_FAST=1` on CUDA, eliminating intermediate norm staging
+   with bitwise-identical output.
+3. **Ada Build & Architecture Hygiene (`2b829e1e`, `CMakeLists.txt`)**:
+   - Gated unreleased Qwen3.6-35B engine (`src/qwen35/`, 213 KB CUDA code) behind
+     `-DSTRATA_ENABLE_QWEN35=ON` (defaults to `OFF`).
+   - Defaulted `STRATA_BUILD_TESTS` to `OFF` (skipping compilation of 109 test binaries).
+   - Defaulted `CMAKE_CUDA_ARCHITECTURES` to `89` (Ada Lovelace RTX 4070).
+
+### 17.2 Bloat Stripped
+- Deleted 331 unused files (172,853 lines) spanning `metal/` (macOS), `sycl/`
+  (Intel Arc), and ROCm tuning headers (`hipblaslt_tuning.hpp`, `rocblas_tuning.hpp`).
+- Reduced standalone binary size to 73 MB (down from 77.5 MB on v0.1.45 and 78.7 MB on v0.2.6).
+
+### 17.3 Empirical Verification
+Benchmarked with identical system context (RTX 4070 12 GB, 64 GB DDR5-5200, Q8_0 PLE on NVMe):
+- Mean Decode: **65.08 t/s** (59.3 - 72.9 t/s)
+- Prefill @ 8192: **1,894.1 t/s**
+- Needle @ 4096: Pass (`true`)
+- VRAM: 11,698 MiB
+
+`v0.1.45-lean-4070` on `carteakey/Strata` is now the canonical serving binary for
+the Platinum tier under `llama-swap.yaml`. Future upstream releases will be audited
+and cherry-picked selectively into this branch.
+
+
 
 

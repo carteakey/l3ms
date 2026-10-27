@@ -68,14 +68,14 @@ window.L3MS_DASHBOARD = {
       "benchmarkUrl": "https://github.com/carteakey/l3ms/blob/main/mtp_bench_gemma.py"
     },
     {
-      "displayName": "Qwen3.8-Flash-Next Plat (Strata v0.1.44.1)",
-      "summary": "Platinum tier: Strata v0.1.44.1 with online dynamic expert VRAM caching (3,086 hot experts in VRAM), native MTP draft head (Q2_0), 128k context with dynamic KV streaming, native 2 MB Transparent Huge Page (THP) memory acceleration, and #783 kernel perf suite. 62.2 t/s steady decode on code (probes: 59.6-64.8 t/s, 90.2 t/s peak burst), pp 956-1,992 t/s.",
-      "tps": 62.2,
-      "pp": 1992,
+      "displayName": "Qwen3.8-Flash-Next Plat (Strata v0.1.45)",
+      "summary": "Platinum tier: Strata v0.1.45 with online dynamic expert VRAM caching (3,086 hot experts in VRAM), native MTP draft head (Q2_0), 128k context with dynamic KV streaming, native 2 MB Transparent Huge Page (THP) memory acceleration, and planar decode kernels. 65.8 t/s steady decode on code (probes: 65.1-66.5 t/s, 70.0 t/s peak burst), pp 947-1,885 t/s on DDR5-5800.",
+      "tps": 65.8,
+      "pp": 1885,
       "testedContext": "128k",
       "cacheState": "k8v4 KV; 3,086 hot experts in VRAM; native THP 2MB pages",
       "draftAcceptance": "70-78% (native Q2_0 MTP, spec 4)",
-      "llamaCppCommit": "Strata v0.1.44.1 (native SM89 Ada + dynamic expert VRAM cache + MTP)",
+      "llamaCppCommit": "Strata v0.1.45 (native SM89 Ada + dynamic expert VRAM cache + MTP)",
       "quant": "ISTA-DASLab GSQ-RCO IQ3_XXS",
       "tags": [
         "MoE",
@@ -86,17 +86,17 @@ window.L3MS_DASHBOARD = {
       ],
       "benchmark": "bench-models/bench-qwen38-refresh-ab.sh",
       "id": "qwen38-flash-next-plat",
-      "name": "Qwen3.8-Flash-Next Plat (Strata v0.1.44.1)",
-      "description": "Platinum tier: Strata v0.1.44.1 with online dynamic expert VRAM caching (3,086 hot experts in VRAM), native MTP draft head (Q2_0), 128k context with dynamic KV streaming, native 2 MB Transparent Huge Page (THP) memory acceleration, and #783 kernel perf suite. 62.2 t/s steady decode on code (probes: 59.6-64.8 t/s, 90.2 t/s peak burst), pp 956-1,992 t/s.",
+      "name": "Qwen3.8-Flash-Next Plat (Strata v0.1.45)",
+      "description": "Platinum tier: Strata v0.1.45 with online dynamic expert VRAM caching (3,086 hot experts in VRAM), native MTP draft head (Q2_0), 128k context with dynamic KV streaming, native 2 MB Transparent Huge Page (THP) memory acceleration, and planar decode kernels. 65.8 t/s steady decode on code (probes: 65.1-66.5 t/s, 70.0 t/s peak burst), pp 947-1,885 t/s on DDR5-5800.",
       "context": "128k",
       "evidence": {
         "scope": "local",
-        "pp": 1992,
-        "tg": 62.2,
+        "pp": 1885,
+        "tg": 65.8,
         "testedContext": "128k",
         "cacheState": "k8v4 KV; 3,086 hot experts in VRAM; native THP 2MB pages",
         "draftAcceptance": "70-78% (native Q2_0 MTP, spec 4)",
-        "llamaCppCommit": "Strata v0.1.44.1 (native SM89 Ada + dynamic expert VRAM cache + MTP)",
+        "llamaCppCommit": "Strata v0.1.45 (native SM89 Ada + dynamic expert VRAM cache + MTP)",
         "benchmarkCommand": "bash bench-models/bench-qwen38-refresh-ab.sh"
       },
       "command": "MODEL_PATH=\"/path/to/model.gguf\"\nCPU_RANGE=\"${CPU_RANGE:-0-11}\"\nPORT=\"${PORT:-8080}\"\nSTRATA_IQ3_CONFIG=\"/path/to/strata_iq3_config\"\nSTRATA_PYTHON=\"/path/to/strata_python\"\nSTRATA_SERVER=\"/path/to/strata_server\"\n\ntaskset -c \"$CPU_RANGE\" \"$STRATA_PYTHON\" \\\n  \"$STRATA_SERVER\" \\\n  --engine strata \\\n  --config \"$STRATA_IQ3_CONFIG\" \\\n  --fit-max-tokens \\\n  --port \"$PORT\"",
@@ -175,34 +175,6 @@ window.L3MS_DASHBOARD = {
       "benchmarkUrl": "https://github.com/carteakey/l3ms/blob/main/bench-models/bench_strata_long_horizon.py"
     },
     {
-      "displayName": "Qwen3.6 35B-A3B MTP Q6",
-      "summary": "Higher-precision Q6 variant; slower, but useful when Q4 quality is not enough.",
-      "tps": 43.1,
-      "quant": "UD-Q6_K",
-      "tags": [
-        "MTP",
-        "MoE"
-      ],
-      "benchmark": "mtp_bench_qwen.py",
-      "id": "qwen3-6-mtp-q6",
-      "name": "Qwen3.6 35B-A3B MTP Q6",
-      "description": "Higher-precision Q6 variant; slower, but useful when Q4 quality is not enough.",
-      "context": "128k",
-      "evidence": {
-        "scope": "local",
-        "pp": null,
-        "tg": 43.1,
-        "testedContext": null,
-        "cacheState": null,
-        "draftAcceptance": null,
-        "llamaCppCommit": null,
-        "benchmarkCommand": "python3 mtp_bench_qwen.py"
-      },
-      "command": "MODEL_PATH=\"/path/to/model.gguf\"\nCPU_RANGE=\"${CPU_RANGE:-0-11}\"\nPORT=\"${PORT:-8080}\"\nLLAMA_SERVER=\"${LLAMA_SERVER:-./vendor/llama.cpp/build/bin/llama-server}\"\nexport GGML_CUDA_GRAPH_OPT=1\n\ntaskset -c \"$CPU_RANGE\" \"$LLAMA_SERVER\" \\\n  -m \"$MODEL_PATH\" \\\n  --alias \"unsloth/Qwen3.6-35B-A3B MTP (Q6_K)\" \\\n  --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.00 \\\n  --presence-penalty 0.0 --repeat-penalty 1.0 \\\n  --host 127.0.0.1 --port \"$PORT\" \\\n  --jinja \\\n  --chat-template-kwargs '{\"preserve_thinking\": true}' \\\n  --ctx-size 131072 --n-predict 32768 \\\n  --fit on --fit-ctx 131072 --fit-target 1536 \\\n  -ctk q8_0 -ctv q8_0 \\\n  --load-mode mlock \\\n  --threads 10 --threads-batch 12 \\\n  --flash-attn on \\\n  --spec-type draft-mtp --spec-draft-n-max 2 \\\n  --parallel 1 \\\n  --batch-size 1024 --ubatch-size 512 \\\n  --prio 2 --no-warmup",
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/llama-swap.yaml",
-      "benchmarkUrl": "https://github.com/carteakey/l3ms/blob/main/mtp_bench_qwen.py"
-    },
-    {
       "displayName": "Qwen3.8-27B (UD-IQ3_XXS)",
       "summary": "Dense 27B hybrid; middle quant tier. Fits the native 262k window in VRAM with q5_0/q4_1 KV at ~36.7 t/s \u2014 the long-context + quality play on 12 GB.",
       "tps": 36.7,
@@ -271,14 +243,14 @@ window.L3MS_DASHBOARD = {
       "benchmarkUrl": "https://github.com/carteakey/l3ms/blob/main/bench-models/bench-llama-humanizer.sh"
     },
     {
-      "displayName": "Qwen3.8-Flash-Next EXP (MoE LRU Cache #29887)",
-      "summary": "Experimental tier: master b11475 + PR #29887 (GPU LRU cache for host-offloaded MoE experts, --moe-cache-mib 2048) + PR #28671 (radix-select TOP_K). Breakthrough decode jump to 23.92 t/s (+40.1% over plain offload) within 11,454 MiB VRAM.",
-      "tps": 23.92,
-      "pp": 449,
+      "displayName": "Qwen3.8-Flash-Next EXP (MoE LRU Cache #30966)",
+      "summary": "Experimental tier: master b11923 + PR #30966 (CPU-shared MoE cache misses, --moe-cache-mib 2048) + PR #30592 (MTP fix). 24.53 t/s steady decode (26.99 t/s peak) within 11,566 MiB VRAM.",
+      "tps": 24.53,
+      "pp": 452,
       "testedContext": "64k",
       "cacheState": "warm; q8_0 KV; 2048 MiB MoE LRU cache",
-      "draftAcceptance": "68-95% (ngram-mod)",
-      "llamaCppCommit": "b11475 + #29887 + #28671 (exp-latest)",
+      "draftAcceptance": "83-100% (ngram-mod)",
+      "llamaCppCommit": "b11923 + #30966 + #30592 (exp-latest)",
       "quant": "ISTA-DASLab GSQ-RCO IQ3_XXS",
       "tags": [
         "MoE",
@@ -287,20 +259,54 @@ window.L3MS_DASHBOARD = {
       ],
       "benchmark": "bench-models/bench-qwen38-refresh-ab.sh",
       "id": "qwen38-flash-next-exp",
-      "name": "Qwen3.8-Flash-Next EXP (MoE LRU Cache #29887)",
-      "description": "Experimental tier: master b11475 + PR #29887 (GPU LRU cache for host-offloaded MoE experts, --moe-cache-mib 2048) + PR #28671 (radix-select TOP_K). Breakthrough decode jump to 23.92 t/s (+40.1% over plain offload) within 11,454 MiB VRAM.",
+      "name": "Qwen3.8-Flash-Next EXP (MoE LRU Cache #30966)",
+      "description": "Experimental tier: master b11923 + PR #30966 (CPU-shared MoE cache misses, --moe-cache-mib 2048) + PR #30592 (MTP fix). 24.53 t/s steady decode (26.99 t/s peak) within 11,566 MiB VRAM.",
       "context": "64k",
       "evidence": {
         "scope": "local",
-        "pp": 449,
-        "tg": 23.92,
+        "pp": 452,
+        "tg": 24.53,
         "testedContext": "64k",
         "cacheState": "warm; q8_0 KV; 2048 MiB MoE LRU cache",
-        "draftAcceptance": "68-95% (ngram-mod)",
-        "llamaCppCommit": "b11475 + #29887 + #28671 (exp-latest)",
+        "draftAcceptance": "83-100% (ngram-mod)",
+        "llamaCppCommit": "b11923 + #30966 + #30592 (exp-latest)",
         "benchmarkCommand": "bash bench-models/bench-qwen38-refresh-ab.sh"
       },
       "command": "MODEL_PATH=\"/path/to/model.gguf\"\nCPU_RANGE=\"${CPU_RANGE:-0-11}\"\nPORT=\"${PORT:-8080}\"\nQWEN38_EXP_SERVER=\"/path/to/qwen38_exp_server\"\nexport GGML_CUDA_GRAPH_OPT=1\n\ntaskset -c \"$CPU_RANGE\" \"$QWEN38_EXP_SERVER\" \\\n  -m \"$MODEL_PATH\" \\\n  --alias Qwen3.8-Flash-Next-Exp \\\n  --fit on --fit-target 512 \\\n  -c 65536 --parallel 1 \\\n  -b 4096 -ub 1024 \\\n  -fa on --jinja \\\n  -ctk q8_0 -ctv q8_0 \\\n  -t 10 --threads-batch 12 --prio 2 \\\n  --lazy-mode on \\\n  --moe-cache-mib 2048 \\\n  --spec-type ngram-mod \\\n  --spec-ngram-mod-n-match 60 --spec-ngram-mod-n-min 12 --spec-ngram-mod-n-max 24 \\\n  --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 \\\n  --reasoning-effort xhigh --reasoning-budget 4000 --reasoning-preserve \\\n  --no-warmup \\\n  --host 127.0.0.1 --port \"$PORT\"",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/llama-swap.yaml",
+      "benchmarkUrl": "https://github.com/carteakey/l3ms/blob/main/bench-models/bench-qwen38-refresh-ab.sh"
+    },
+    {
+      "displayName": "Qwen3.8-Flash-Next (master b11913)",
+      "summary": "Plain upstream master b11913 (7aca0d2ea). 22.77 t/s steady decode, pp 596 t/s @ 8k context (q8_0 KV, --fit on --fit-target 512, ub 2048). Includes PR #29761, #29887 (host MoE LRU cache), #28770 (sparse FA), #29393 (RMS_NORM+SCALE fusion), #30602 (chain fusions), #30927. Peak decode 24.82 t/s with 86.3% draft acceptance.",
+      "tps": 22.77,
+      "pp": 596,
+      "testedContext": "96k",
+      "cacheState": "q8_0 KV, ngram-mod pool warm",
+      "draftAcceptance": "75-86% (ngram-mod)",
+      "llamaCppCommit": "b11913 7aca0d2ea (llama.cpp-master)",
+      "quant": "ISTA-DASLab GSQ-RCO IQ3_XXS",
+      "tags": [
+        "MoE",
+        "Master",
+        "PLE-on-SSD"
+      ],
+      "benchmark": "bench-models/bench-qwen38-refresh-ab.sh",
+      "id": "qwen38-flash-next",
+      "name": "Qwen3.8-Flash-Next (master b11913)",
+      "description": "Plain upstream master b11913 (7aca0d2ea). 22.77 t/s steady decode, pp 596 t/s @ 8k context (q8_0 KV, --fit on --fit-target 512, ub 2048). Includes PR #29761, #29887 (host MoE LRU cache), #28770 (sparse FA), #29393 (RMS_NORM+SCALE fusion), #30602 (chain fusions), #30927. Peak decode 24.82 t/s with 86.3% draft acceptance.",
+      "context": "96k",
+      "evidence": {
+        "scope": "local",
+        "pp": 596,
+        "tg": 22.77,
+        "testedContext": "96k",
+        "cacheState": "q8_0 KV, ngram-mod pool warm",
+        "draftAcceptance": "75-86% (ngram-mod)",
+        "llamaCppCommit": "b11913 7aca0d2ea (llama.cpp-master)",
+        "benchmarkCommand": "bash bench-models/bench-qwen38-refresh-ab.sh"
+      },
+      "command": "MODEL_PATH=\"/path/to/model.gguf\"\nCPU_RANGE=\"${CPU_RANGE:-0-11}\"\nPORT=\"${PORT:-8080}\"\nQWEN38_MASTER_SERVER=\"/path/to/qwen38_master_server\"\nexport GGML_CUDA_GRAPH_OPT=1\n\ntaskset -c \"$CPU_RANGE\" \"$QWEN38_MASTER_SERVER\" \\\n  -m \"$MODEL_PATH\" \\\n  --alias Qwen3.8-Flash-Next \\\n  --fit on --fit-target 512 \\\n  -c 98304 --parallel 1 \\\n  -b 4096 -ub 2048 \\\n  -fa on --jinja \\\n  -ctk q8_0 -ctv q8_0 \\\n  -t 10 --threads-batch 12 --prio 2 \\\n  --lazy-mode on \\\n  --spec-type ngram-mod \\\n  --spec-ngram-mod-n-match 60 --spec-ngram-mod-n-min 12 --spec-ngram-mod-n-max 24 \\\n  --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 \\\n  --reasoning-effort xhigh --reasoning-budget -1 --reasoning-preserve \\\n  --no-warmup \\\n  --host 127.0.0.1 --port \"$PORT\"",
       "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/llama-swap.yaml",
       "benchmarkUrl": "https://github.com/carteakey/l3ms/blob/main/bench-models/bench-qwen38-refresh-ab.sh"
     },
@@ -372,40 +378,6 @@ window.L3MS_DASHBOARD = {
       "command": "MODEL_PATH=\"/path/to/model.gguf\"\nCPU_RANGE=\"${CPU_RANGE:-0-11}\"\nPORT=\"${PORT:-8080}\"\nQWEN38_MASTER_SERVER=\"/path/to/qwen38_master_server\"\nMMPROJ_PATH=\"/path/to/mmproj.gguf\"\nexport GGML_CUDA_GRAPH_OPT=1\n\ntaskset -c \"$CPU_RANGE\" \"$QWEN38_MASTER_SERVER\" \\\n  -m \"$MODEL_PATH\" \\\n  --mmproj \"$MMPROJ_PATH\" \\\n  --alias Qwen3.8-Flash-Next-Vision \\\n  -ngl 99 -ncmoe 45 \\\n  -c 32768 --parallel 1 \\\n  -b 2048 -ub 1024 \\\n  -fa on --jinja \\\n  -ctk q8_0 -ctv q8_0 \\\n  -t 10 --threads-batch 12 --prio 2 \\\n  --lazy-mode on \\\n  --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 \\\n  --reasoning-effort xhigh --reasoning-budget 4000 --reasoning-preserve \\\n  --no-warmup \\\n  --host 127.0.0.1 --port \"$PORT\"",
       "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/llama-swap.yaml",
       "benchmarkUrl": "https://github.com/carteakey/l3ms/blob/main/bench-models/bench-llama-qwen38-flash-next-build-ab.sh"
-    },
-    {
-      "displayName": "Qwen3.8-Flash-Next (master b11475)",
-      "summary": "Plain upstream master b11475 (7e8324f5f). 17.34 t/s steady decode, pp 587 t/s @ 8k context (q8_0 KV, --fit on --fit-target 512, ub 2048). Natively includes PR #29761 (native MTP), #29824/5 (indexer memory halved), #29901 (4-head tiling), and #29599 NVMe row prefetching. VRAM reduced to 11.1 GB.",
-      "tps": 17.34,
-      "pp": 587,
-      "testedContext": "96k",
-      "cacheState": "q8_0 KV, ngram-mod pool warm",
-      "draftAcceptance": "67-95% (ngram-mod)",
-      "llamaCppCommit": "b11475 7e8324f5f (llama.cpp-master)",
-      "quant": "ISTA-DASLab GSQ-RCO IQ3_XXS",
-      "tags": [
-        "MoE",
-        "Master",
-        "PLE-on-SSD"
-      ],
-      "benchmark": "bench-models/bench-qwen38-refresh-ab.sh",
-      "id": "qwen38-flash-next",
-      "name": "Qwen3.8-Flash-Next (master b11475)",
-      "description": "Plain upstream master b11475 (7e8324f5f). 17.34 t/s steady decode, pp 587 t/s @ 8k context (q8_0 KV, --fit on --fit-target 512, ub 2048). Natively includes PR #29761 (native MTP), #29824/5 (indexer memory halved), #29901 (4-head tiling), and #29599 NVMe row prefetching. VRAM reduced to 11.1 GB.",
-      "context": "96k",
-      "evidence": {
-        "scope": "local",
-        "pp": 587,
-        "tg": 17.34,
-        "testedContext": "96k",
-        "cacheState": "q8_0 KV, ngram-mod pool warm",
-        "draftAcceptance": "67-95% (ngram-mod)",
-        "llamaCppCommit": "b11475 7e8324f5f (llama.cpp-master)",
-        "benchmarkCommand": "bash bench-models/bench-qwen38-refresh-ab.sh"
-      },
-      "command": "MODEL_PATH=\"/path/to/model.gguf\"\nCPU_RANGE=\"${CPU_RANGE:-0-11}\"\nPORT=\"${PORT:-8080}\"\nQWEN38_MASTER_SERVER=\"/path/to/qwen38_master_server\"\nexport GGML_CUDA_GRAPH_OPT=1\n\ntaskset -c \"$CPU_RANGE\" \"$QWEN38_MASTER_SERVER\" \\\n  -m \"$MODEL_PATH\" \\\n  --alias Qwen3.8-Flash-Next \\\n  --fit on --fit-target 512 \\\n  -c 98304 --parallel 1 \\\n  -b 4096 -ub 2048 \\\n  -fa on --jinja \\\n  -ctk q8_0 -ctv q8_0 \\\n  -t 10 --threads-batch 12 --prio 2 \\\n  --lazy-mode on \\\n  --spec-type ngram-mod \\\n  --spec-ngram-mod-n-match 60 --spec-ngram-mod-n-min 12 --spec-ngram-mod-n-max 24 \\\n  --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 \\\n  --reasoning-effort xhigh --reasoning-budget -1 --reasoning-preserve \\\n  --no-warmup \\\n  --host 127.0.0.1 --port \"$PORT\"",
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/llama-swap.yaml",
-      "benchmarkUrl": "https://github.com/carteakey/l3ms/blob/main/bench-models/bench-qwen38-refresh-ab.sh"
     }
   ],
   "unmeasured": [
