@@ -21,6 +21,30 @@
   six-row image batch with "GPU is busy" before the router could evict it. `LLAMA_SWAP_API_KEY`
   with no URL now means `http://127.0.0.1:8080/comfyui`; `L2M2_COMFY_URL` and an explicit `--url`
   still win. One endpoint-resolution test added (10 green).
+- **Keyframes and frame anchors on the MiniMax-H3 video generator**
+  (`media-models/minimax_h3_video.py`): `--first-frame PATH`, `--last-frame PATH` and
+  `--guide-image PATH[:FRAME_IDX]` chain `MiniMaxH3AddGuide` nodes onto the reference conditioning,
+  each anchoring one image at a frame index (negative counts from the end, up to 9 anchors). The
+  guide node is used instead of `MiniMaxH3ImageToVideo` because both nodes emit
+  `(conditioning, latent)` and only one can feed `BasicGuider`: the keyframe node would replace the
+  nine-reference conditioning rather than add to it, and only `AddGuide` takes an arbitrary frame
+  index. Guide frames are staged into `vendor/ComfyUI/input` under a `l2m2-h3-guide-` prefix, and a
+  frame index is checked against the normalized clip length before anything is submitted: measured,
+  `--guide-image a.png:999` on a 73-frame clip is refused with `lands on frame 999, outside the
+  clip's 73 frames (0..72, or negative to count from the end)`, while `:72` and `:-1` are accepted.
+  A graph with no guides keeps the original node ids and the original guider wiring, which the
+  regression test asserts. `media-models/generate-minimax-h3-video.sh` wraps the module the way
+  `generate-qwen-image-2.1.sh` wraps the image generator, so a batch runner can use it as a
+  generator.
+- **The ComfyUI endpoint rule now lives in one place** (`media-models/comfy_endpoint.py`).
+  `minimax_h3_video.py` and `qwen_image_21.py` both delegate to `resolve_endpoint()`, same
+  precedence as the bullet above with one fix: the API key is returned whenever it is set, so a
+  routed `L2M2_COMFY_URL` no longer drops its Authorization header. `flux_3_klein.py`, `krea_2.py`
+  and `qwen_image_21_turbo.py` still resolve `L2M2_COMFY_URL` or a direct `:8188` only, because
+  those three lanes send no Authorization header yet; each now says so at its `api_url()` instead of
+  leaving the next reader to diff the branches. Table-driven tests for the rule (13 cases) plus the
+  bare-key case added to the MiniMax endpoint test: 84 green across the 10 `media-models` test
+  files.
 
 ### Added (serving)
 

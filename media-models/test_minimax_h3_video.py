@@ -4,15 +4,17 @@ These check graph shape and the wire rules that the engine enforces; they do not
 ComfyUI, so they run with no GPU and no router.
 """
 
-import importlib.util
 import json
 import pathlib
+import tempfile
 import unittest
+import uuid
 
-MODULE = pathlib.Path(__file__).with_name("minimax_h3_video.py")
-SPEC = importlib.util.spec_from_file_location("minimax_h3_video", MODULE)
-H3 = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(H3)
+# Imported plainly rather than through importlib so the module's own sibling import of
+# comfy_endpoint resolves the same way it does when the script is run directly.
+import minimax_h3_video as H3
+
+MODULE = pathlib.Path(H3.__file__)
 
 MANIFEST = MODULE.parents[1] / "models" / "minimax-h3-comfyui-files.txt"
 
@@ -194,6 +196,12 @@ class EndpointResolution(unittest.TestCase):
             os.environ.pop("L2M2_COMFY_URL", None)
             self.assertEqual(H3.configure_api(), "http://127.0.0.1:8080/comfyui")
             self.assertTrue(H3.via_router())
+            os.environ.pop("LLAMA_SWAP_URL", None)
+            self.assertEqual(H3.configure_api(), "http://127.0.0.1:8080/comfyui")
+            self.assertTrue(H3.via_router(), "a bare key means the router, not a direct :8188")
+            os.environ.pop("LLAMA_SWAP_API_KEY", None)
+            self.assertEqual(H3.configure_api(), "http://127.0.0.1:8188")
+            self.assertFalse(H3.via_router())
             os.environ["L2M2_COMFY_URL"] = "http://127.0.0.1:8188"
             self.assertEqual(H3.configure_api(), "http://127.0.0.1:8188")
             self.assertFalse(H3.via_router())
@@ -260,6 +268,98 @@ class PreflightAgainstAStubbedEngine(unittest.TestCase):
                         H3.check_api(**kwargs)
         finally:
             H3.request_json = original
+
+
+class KeyframesChainAddGuideNodes(unittest.TestCase):
+    def test_guide_nodes_chain_on_the_reference_conditioning(self):
+        graph = build(guide_names=(("first.png", 0), ("mid.png", 40), ("last.png", -1)))
+        self.assertEqual(graph["180"]["inputs"]["image"], "first.png")
+        self.assertEqual(graph["160"]["class_type"], "MiniMaxH3AddGuide")
+        self.assertEqual(graph["160"]["inputs"]["positive"], ("136", 0))
+        self.assertEqual(graph["161"]["inputs"]["positive"], ("160", 0))
+        self.assertEqual(graph["162"]["inputs"]["positive"], ("161", 0))
+        for node in ("160", "161", "162"):  # each guide reads the same latent + video VAE, and
+            self.assertEqual(graph[node]["inputs"]["latent"], ("136", 1))  # threads conditioning only
+            self.assertEqual(graph[node]["inputs"]["vae"], ("119", 0))
+        self.assertEqual(graph["162"]["inputs"]["frame_idx"], -1)
+        self.assertEqual(graph["126"]["inputs"]["conditioning"], ("162", 0))
+        self.assertEqual(graph["125"]["inputs"]["latent_image"], ("136", 1))
+
+    def test_guides_and_references_do_not_collide_on_node_ids(self):
+        graph = build(ref_names=tuple(f"r{i}.png" for i in range(9)),
+                      guide_names=tuple((f"g{i}.png", i) for i in range(9)))
+        ids = sorted(graph)
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertEqual(len([n for n in graph.values() if n["class_type"] == "LoadImage"]), 18)
+        self.assertTrue(graph["136"]["inputs"]["ref_images.ref_image_8"])
+        self.assertEqual(graph["168"]["inputs"]["frame_idx"], 8)
+        self.assertEqual(graph["126"]["inputs"]["conditioning"], ("168", 0))
+
+    def test_a_graph_without_guides_is_untouched(self):
+        plain = build()
+        self.assertEqual([n for n in plain.values() if n["class_type"] == "MiniMaxH3AddGuide"], [])
+        self.assertEqual(plain["126"]["inputs"]["conditioning"], ("136", 0))
+        self.assertFalse([i for i in plain if i.startswith("16") or i.startswith("18")])
+
+    def test_too_many_guides_are_rejected(self):
+        with self.assertRaises(ValueError):
+            build(guide_names=tuple((f"g{i}.png", i) for i in range(10)))
+
+
+class GuideSpecsAndFrameIndices(unittest.TestCase):
+    def test_parse_guide_spec_splits_the_index_only_when_the_tail_is_an_integer(self):
+        self.assertEqual(H3.parse_guide_spec("mid.png:40"), ("mid.png", 40))
+        self.assertEqual(H3.parse_guide_spec("mid.png:-1"), ("mid.png", -1))
+        self.assertEqual(H3.parse_guide_spec("mid.png"), ("mid.png", 0))
+        self.assertEqual(H3.parse_guide_spec("/tmp/a dir/mid.png"), ("/tmp/a dir/mid.png", 0))
+        self.assertEqual(H3.parse_guide_spec("weird:thing.png"), ("weird:thing.png", 0))
+        for bad in (":12", "   "):
+            with self.subTest(spec=bad):
+                with self.assertRaises(ValueError):
+                    H3.parse_guide_spec(bad)
+
+    def test_first_and_last_frame_wrap_the_ends_of_the_anchor_list(self):
+        self.assertEqual(H3.parse_guides(["mid.png:40"], "start.png", "end.png", frames=124),
+                         (("start.png", 0), ("mid.png", 40), ("end.png", -1)))
+        self.assertEqual(H3.parse_guides([], frames=124), ())
+        self.assertEqual(H3.parse_guides(["a.png", "b.png:-2"], frames=124), (("a.png", 0), ("b.png", -2)))
+
+    def test_frame_indices_are_resolved_against_the_real_clip_length(self):
+        for spec in ("a.png:0", "a.png:-1", "a.png:123", "a.png:-124"):
+            with self.subTest(spec=spec):  # the ends of a 124-frame clip, both spellings
+                H3.parse_guides([spec], frames=124)
+        for spec in ("a.png:124", "a.png:-125", "a.png:100000"):
+            with self.subTest(spec=spec):
+                with self.assertRaises(ValueError) as caught:
+                    H3.parse_guides([spec], frames=124)
+                self.assertIn("outside", str(caught.exception))
+        # A frame count the CLI would round up is passed after normalization, so 73 stays 73.
+        with self.assertRaises(ValueError):
+            H3.parse_guides(["a.png:73"], frames=73)
+        H3.parse_guides(["a.png:72"], frames=73)
+
+    def test_more_than_nine_anchors_are_rejected(self):
+        with self.assertRaises(ValueError):
+            H3.parse_guides([f"a{i}.png:{i}" for i in range(10)], frames=124)
+
+
+class GuideFramesAreStagedLikeReferences(unittest.TestCase):
+    def test_guide_frames_stage_under_a_guide_prefix(self):
+        source = pathlib.Path(tempfile.mkdtemp()) / f"guide-{uuid.uuid4().hex}.png"
+        source.write_bytes(b"\x89PNG\r\n\x1a\n" + uuid.uuid4().bytes)  # unique content, not a real PNG
+        staged = H3.stage_images([str(source)], prefix="l2m2-h3-guide", label="--guide frame")
+        staged_file = H3.ROOT / "vendor" / "ComfyUI" / "input" / staged[0]
+        try:
+            self.assertTrue(staged[0].startswith("l2m2-h3-guide-1-"), staged[0])
+            self.assertEqual(staged_file.read_bytes(), source.read_bytes())
+        finally:
+            staged_file.unlink(missing_ok=True)
+            source.unlink()
+
+    def test_a_missing_guide_file_is_named(self):
+        with self.assertRaises(ValueError) as caught:
+            H3.stage_images(["/definitely/not/here.png"], prefix="l2m2-h3-guide", label="--guide frame")
+        self.assertIn("--guide frame is not a file", str(caught.exception))
 
 
 if __name__ == "__main__":

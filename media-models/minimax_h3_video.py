@@ -33,6 +33,14 @@ Wire facts verified against this ComfyUI build on 2026-10-27 (/object_info):
 - length is a 24 fps frame count with min 5, step 17, max 3600 (124 = about 5 s, the
   trained range is about 124-362), so valid lengths are 5 + 17k.
 - The official graph does not use MiniMaxH3SigmaShift; --sigma-shift opts in.
+- Keyframes are not in the official graph either. --first-frame, --last-frame and
+  --guide-image PATH[:FRAME_IDX] chain MiniMaxH3AddGuide nodes onto the reference conditioning,
+  each anchoring one image at a frame index (negative counts from the end of the clip). That node
+  is chosen over MiniMaxH3ImageToVideo on purpose: both produce (conditioning, latent) and only
+  one can feed BasicGuider, so the keyframe node would *replace* the nine-reference conditioning
+  rather than add to it, and AddGuide is the only one that takes an arbitrary frame index.
+  AddGuide cover-crops its image to the output size, unlike the keyframe node's plain stretch of
+  frame 0.
 """
 
 from __future__ import annotations
@@ -43,6 +51,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -50,6 +59,8 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
+
+from comfy_endpoint import resolve_endpoint
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL_DIR = ROOT / "vendor" / "ComfyUI" / "models"
@@ -63,6 +74,7 @@ DEFAULT_VIDEO_VAE = "minimax_h3_video_vae_fp16.safetensors"
 DEFAULT_AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
 
 MAX_REF_IMAGES = 9
+MAX_GUIDES = 9
 MIN_FRAMES = 5
 FRAME_STEP = 17
 MAX_FRAMES = 3600
@@ -174,22 +186,15 @@ def validate_settings(
 
 
 def configure_api(url: str | None = None) -> str:
-    """Resolve the ComfyUI endpoint: explicit flag, then direct URL, then llama-swap.
+    """Resolve the ComfyUI endpoint through the shared rule in comfy_endpoint.py.
 
     ComfyUI is a llama-swap engine (comfyui_auto, routed at /comfyui/), so pointing at the
     router is the normal path: the router swaps ComfyUI in and evicts whatever model was
-    resident, including the model this agent is running on.
+    resident, including the model this agent is running on. A bare LLAMA_SWAP_API_KEY with no
+    LLAMA_SWAP_URL means the house router on :8080.
     """
-    base = (url or os.environ.get("L2M2_COMFY_URL") or "").strip()
-    key = ""
-    if not base:
-        router = (os.environ.get("LLAMA_SWAP_URL") or "").strip()
-        if router:
-            base = router.rstrip("/") + "/comfyui"
-            key = (os.environ.get("LLAMA_SWAP_API_KEY") or "").strip()
-    if not base:
-        base = "http://127.0.0.1:8188"
-    API["base"] = base.rstrip("/")
+    base, key = resolve_endpoint(url)
+    API["base"] = base
     API["key"] = key
     return API["base"]
 
@@ -370,15 +375,16 @@ def wait_for_video(prompt_id: str, timeout: float) -> dict:
     raise RuntimeError(f"Generation exceeded the {timeout:g}s timeout; it may still be running in ComfyUI.")
 
 
-def stage_reference_images(paths: list[str]) -> tuple[str, ...]:
-    """Copy references into ComfyUI's input dir under a content-hashed name.
+def stage_images(paths: list[str], prefix: str = "l2m2-h3-ref", label: str = "--ref-image") -> tuple[str, ...]:
+    """Copy images into ComfyUI's input dir under a content-hashed name.
 
     LoadImage resolves bare filenames inside the server's base input directory, which for
-    this build is vendor/ComfyUI/input (not models/input), so references have to be staged
-    there; the content hash keeps different anchors apart and identical ones from copying twice.
+    this build is vendor/ComfyUI/input (not models/input), so reference and guide frames have
+    to be staged there; the content hash keeps different anchors apart and identical ones from
+    copying twice.
     """
     if len(paths) > MAX_REF_IMAGES:
-        raise ValueError(f"MiniMax-H3 takes at most {MAX_REF_IMAGES} --ref-image values")
+        raise ValueError(f"MiniMax-H3 takes at most {MAX_REF_IMAGES} {label} values")
     input_dir = ROOT / "vendor" / "ComfyUI" / "input"
     input_dir.mkdir(parents=True, exist_ok=True)
     import hashlib
@@ -387,17 +393,69 @@ def stage_reference_images(paths: list[str]) -> tuple[str, ...]:
     for index, raw in enumerate(paths):
         source = Path(raw).expanduser()
         if not source.is_file():
-            raise ValueError(f"--ref-image is not a file: {source}")
+            raise ValueError(f"{label} is not a file: {source}")
         suffix = source.suffix.lower()
         if suffix not in IMAGE_SUFFIXES:
-            raise ValueError(f"--ref-image must be one of {' '.join(IMAGE_SUFFIXES)}: {source}")
+            raise ValueError(f"{label} must be one of {' '.join(IMAGE_SUFFIXES)}: {source}")
         digest = hashlib.sha256(source.read_bytes()).hexdigest()[:12]
-        name = f"l2m2-h3-ref-{index + 1}-{digest}{suffix}"
+        name = f"{prefix}-{index + 1}-{digest}{suffix}"
         destination = input_dir / name
         if not destination.is_file():
             shutil.copyfile(source, destination)
         names.append(name)
     return tuple(names)
+
+
+def stage_reference_images(paths: list[str]) -> tuple[str, ...]:
+    """Stage the --ref-image values; see stage_images."""
+    return stage_images(paths)
+
+
+GUIDE_INDEX = re.compile(":(-?[0-9]+)$")
+
+
+def parse_guide_spec(raw: str) -> tuple[str, int]:
+    """Split PATH[:FRAME_IDX]. A trailing :INTEGER is always read as the frame index.
+
+    The colon goes to the index whenever the string ends in it, so a file genuinely named like
+    x:12.png has to reach a guide through --first-frame or --last-frame, which take a bare path
+    with no parsing.
+    """
+    match = GUIDE_INDEX.search(raw)
+    if match:
+        path = raw[:match.start()]
+        if not path:
+            raise ValueError(f"--guide-image needs a path before the frame index, got {raw!r}")
+        return path, int(match.group(1))
+    if not raw.strip():
+        raise ValueError("--guide-image needs a path")
+    return raw, 0
+
+
+def parse_guides(values: list[str], first_frame: str | None = None,
+                 last_frame: str | None = None, frames: int | None = None) -> tuple[tuple[str, int], ...]:
+    """Resolve the keyframe flags into (path, frame_idx) pairs, in anchor order.
+
+    Order is --first-frame, then --guide-image in the order given, then --last-frame: AddGuide
+    nodes chain, and a fixed order keeps the graph byte-stable across runs.
+    """
+    guides: list[tuple[str, int]] = []
+    if first_frame:      # frame 0
+        guides.append((first_frame, 0))
+    guides.extend(parse_guide_spec(raw) for raw in values)
+    if last_frame:       # frame -1, the clip's last frame
+        guides.append((last_frame, -1))
+    if len(guides) > MAX_GUIDES:
+        raise ValueError(f"MiniMax-H3 takes at most {MAX_GUIDES} guide frames, got {len(guides)}")
+    if frames is not None:
+        for path, index in guides:
+            resolved = index if index >= 0 else frames + index
+            if not 0 <= resolved < frames:
+                raise ValueError(
+                    f"guide frame index {index} for {path!r} lands on frame {resolved}, outside "
+                    f"the clip's {frames} frames (0..{frames - 1}, or negative to count from the end)"
+                )
+    return tuple(guides)
 
 
 def parse_loras(values: list[str]) -> tuple[tuple[str, float], ...]:
@@ -427,6 +485,7 @@ def build_workflow(
     video_vae_name: str = DEFAULT_VIDEO_VAE,
     audio_vae_name: str = DEFAULT_AUDIO_VAE,
     ref_names: tuple[str, ...] = (),
+    guide_names: tuple[tuple[str, int], ...] = (),
     ref_image_size: str = "match",
     turbo_lora: tuple[tuple[str, float], ...] = (),
     sigma_shift: tuple[float, float] | None = None,
@@ -479,7 +538,30 @@ def build_workflow(
     reference.update(ref_inputs)
     graph["136"] = {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": reference}
 
-    graph["126"] = {"class_type": "BasicGuider", "inputs": {"model": model_from, "conditioning": ("136", 0)}}
+    # Guide frames chain onto the reference conditioning: each AddGuide takes the previous guide's
+    # conditioning plus the same AV latent from the reference node and returns conditioning only,
+    # so the sampler still draws from the latent the reference node allocated. LoadImage ids for
+    # guides start at 180 because reference slots already use 137-139 and 150-155.
+    if len(guide_names) > MAX_GUIDES:
+        raise ValueError(f"MiniMax-H3 takes at most {MAX_GUIDES} guide frames, got {len(guide_names)}")
+    conditioning_from = ("136", 0)
+    for index, (name, frame_idx) in enumerate(guide_names):
+        load_id = f"18{index}"
+        graph[load_id] = {"class_type": "LoadImage", "inputs": {"image": name}}
+        node = f"16{index}"
+        graph[node] = {
+            "class_type": "MiniMaxH3AddGuide",
+            "inputs": {
+                "positive": conditioning_from,
+                "latent": ("136", 1),
+                "vae": ("119", 0),
+                "image": (load_id, 0),
+                "frame_idx": frame_idx,
+            },
+        }
+        conditioning_from = (node, 0)
+    graph["126"] = {"class_type": "BasicGuider",
+                    "inputs": {"model": model_from, "conditioning": conditioning_from}}
     graph["124"] = {
         "class_type": "BasicScheduler",
         "inputs": {"model": model_from, "scheduler": scheduler, "steps": steps, "denoise": 1.0},
@@ -533,13 +615,24 @@ def parser() -> argparse.ArgumentParser:
                              "Use one nude-view matte per character you want to stay recognizable.")
     result.add_argument("--ref-image-size", default="match", choices=REF_IMAGE_SIZES,
                         help="match scales refs to the output's pixel area; max uses the 2048px short edge and is several times slower")
+    result.add_argument("--first-frame", metavar="PATH",
+                        help="image anchored at frame 0 by MiniMaxH3AddGuide (cover-cropped to the output size). "
+                             "Keeps --ref-image conditioning, which MiniMaxH3ImageToVideo would replace")
+    result.add_argument("--last-frame", metavar="PATH",
+                        help="image anchored at the clip's final frame (AddGuide frame index -1)")
+    result.add_argument("--guide-image", action="append", default=[], metavar="PATH[:FRAME_IDX]",
+                        help=f"image anchored at an arbitrary frame, repeatable, chained in the order given; a "
+                             f"negative index counts from the end, up to {MAX_GUIDES} anchors in total. "
+                             "--first-frame and --last-frame are the frame 0 and -1 cases")
     result.add_argument("--turbo-lora", action="append", default=[], metavar="NAME[:STRENGTH]",
                         help="LoRA filename in ComfyUI loras/ applied to the DiT only; repeatable, chained in order")
     result.add_argument("--sigma-shift", metavar="VIDEO:AUDIO",
                         help="Insert MiniMaxH3SigmaShift with these shifts (the official graph does not use the node)")
     result.add_argument("--no-audio", action="store_true", help="Skip audio decoding (video-only mp4)")
     result.add_argument("--fps", type=float, default=FPS, help="Frame rate of the saved video (the DiT samples at 24 fps)")
-    result.add_argument("--url", help="ComfyUI base URL. Defaults to $L2M2_COMFY_URL, then $LLAMA_SWAP_URL/comfyui, then http://127.0.0.1:8188.")
+    result.add_argument("--url", help="ComfyUI base URL, used verbatim. Otherwise $L2M2_COMFY_URL verbatim, "
+                                      "then $LLAMA_SWAP_URL/comfyui, then the router implied by a bare "
+                                      "$LLAMA_SWAP_API_KEY, then http://127.0.0.1:8188.")
     result.add_argument("--timeout", type=float, default=3600, help="How long to wait for the clip to finish")
     result.add_argument("--warm-timeout", type=float, default=600.0,
                         help="How long --check and the submit wait for the router to boot ComfyUI")
@@ -587,6 +680,7 @@ def main() -> int:
             video_shift, _, audio_shift = args.sigma_shift.partition(":")
             shift = (float(video_shift), float(audio_shift) if audio_shift else 3.0)
         refs = list(args.ref_image)
+        guides = parse_guides(args.guide_image, args.first_frame, args.last_frame, frames)
         validate_settings(
             width, height, frames, args.steps, args.seed, args.scheduler, args.sampler,
             args.ref_image_size, len(refs), args.timeout,
@@ -597,27 +691,37 @@ def main() -> int:
         if want_audio:
             validate_asset_name("--audio-vae", args.audio_vae)
 
+        staged_guides: tuple[tuple[str, int], ...] = ()
+        if guides:
+            staged_names = stage_images([path for path, _ in guides], prefix="l2m2-h3-guide",
+                                        label="--guide frame")
+            staged_guides = tuple(zip(staged_names, (index for _, index in guides)))
+
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         graph = build_workflow(
             prompt, width, height, frames, args.steps, args.seed,
             f"h3/minimax-h3-{timestamp}", scheduler=args.scheduler, sampler=args.sampler,
             unet_name=args.model, te_name=args.te, video_vae_name=args.video_vae,
             audio_vae_name=args.audio_vae, ref_names=tuple(stage_reference_images(refs)) if refs else (),
-            ref_image_size=args.ref_image_size, turbo_lora=loras, sigma_shift=shift,
+            guide_names=staged_guides, ref_image_size=args.ref_image_size,
+            turbo_lora=loras, sigma_shift=shift,
             want_audio=want_audio, fps=args.fps,
         )
         if args.dry_run:
             print(json.dumps(graph, indent=1, sort_keys=True))
             print(f"# {width}x{height}, {frames} frames at {args.fps:g} fps "
                   f"({frames / args.fps:.2f}s), {args.steps} steps, {args.scheduler}/{args.sampler}, "
-                  f"seed {args.seed}, {len(refs)} reference(s), {width * height * frames / 1e6:.2f} megapixel-frames",
+                  f"seed {args.seed}, {len(refs)} reference(s), {len(staged_guides)} anchored frame(s) "
+                  f"{[idx for _, idx in staged_guides]}, {width * height * frames / 1e6:.2f} megapixel-frames",
                   file=sys.stderr)
             return 0
 
         check_gpu_exclusive()
         extra_nodes: list[str] = []
-        if refs:
+        if refs or staged_guides:
             extra_nodes.append("LoadImage")
+        if staged_guides:
+            extra_nodes.append("MiniMaxH3AddGuide")
         if loras:
             extra_nodes.append("LoraLoaderModelOnly")
         if shift:
@@ -632,6 +736,7 @@ def main() -> int:
             f"Generating {width}x{height} x {frames} frames ({frames / args.fps:.2f}s) with {args.model}, "
             f"{args.steps} steps, {args.scheduler}/{args.sampler}, seed {args.seed}, "
             f"TE {args.te}, refs {len(refs)} at {args.ref_image_size}, "
+            f"anchored frames {[idx for _, idx in staged_guides] or 'none'}, "
             f"audio {'on' if want_audio else 'off'}; ComfyUI job {prompt_id} at {api_url()}."
         )
         saved = wait_for_video(prompt_id, args.timeout)

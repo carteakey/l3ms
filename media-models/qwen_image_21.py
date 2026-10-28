@@ -16,6 +16,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
+from comfy_endpoint import resolve_endpoint
+
 ROOT = Path(__file__).resolve().parents[1]
 MODEL_FILES = (
     "diffusion_models/qwen_image_2.1_int8_convrot.safetensors",
@@ -219,30 +221,16 @@ def validate_settings(
 
 
 def configure_api(url: str | None = None) -> str:
-    """Resolve the ComfyUI endpoint: explicit flag, then direct URL, then llama-swap.
+    """Resolve the ComfyUI endpoint through the shared rule in comfy_endpoint.py.
 
     ComfyUI is a llama-swap engine (comfyui_auto, routed at /comfyui/), so pointing at
     the router is the normal path: the router swaps ComfyUI in and evicts whatever
     model was resident. Set LLAMA_SWAP_URL + LLAMA_SWAP_API_KEY and nothing else; a bare
-    LLAMA_SWAP_API_KEY is treated as the router too.
+    LLAMA_SWAP_API_KEY is treated as the router too. The rule, including why a bare key
+    means :8080, lives in comfy_endpoint.py so the lanes cannot drift apart again.
     """
-    base = (url or os.environ.get("L2M2_COMFY_URL") or "").strip()
-    key = ""
-    if not base:
-        router = (os.environ.get("LLAMA_SWAP_URL") or "").strip()
-        key = (os.environ.get("LLAMA_SWAP_API_KEY") or "").strip()
-        if router:
-            base = router.rstrip("/") + "/comfyui"
-        elif key:
-            # Agents in this tree get LLAMA_SWAP_API_KEY but not LLAMA_SWAP_URL. Falling back to a
-            # direct :8188 in that case made check_gpu_exclusive refuse a card llama-swap owns:
-            # measured 2026-10-27, the guard saw the resident language server holding 11558 MiB and
-            # aborted a six-row image batch with "GPU is busy" before the router could evict it. A
-            # key with no URL means the router, and the house router listens on 8080.
-            base = "http://127.0.0.1:8080/comfyui"
-    if not base:
-        base = "http://127.0.0.1:8188"
-    API["base"] = base.rstrip("/")
+    base, key = resolve_endpoint(url)
+    API["base"] = base
     API["key"] = key
     return API["base"]
 

@@ -144,6 +144,9 @@ def validate_settings(width: int, height: int, cfg: float, timeout: float) -> No
 
 
 def api_url() -> str:
+    # Direct ComfyUI only. This lane has no router fallback and no Authorization header, so
+    # reaching ComfyUI through llama-swap needs L2M2_COMFY_URL set to the routed URL. The shared
+    # rule (used by qwen_image_21.py and minimax_h3_video.py) is in comfy_endpoint.py.
     return os.environ.get("L2M2_COMFY_URL", "http://127.0.0.1:8188").rstrip("/")
 
 
