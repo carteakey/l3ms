@@ -223,15 +223,23 @@ def configure_api(url: str | None = None) -> str:
 
     ComfyUI is a llama-swap engine (comfyui_auto, routed at /comfyui/), so pointing at
     the router is the normal path: the router swaps ComfyUI in and evicts whatever
-    model was resident. Set LLAMA_SWAP_URL + LLAMA_SWAP_API_KEY and nothing else.
+    model was resident. Set LLAMA_SWAP_URL + LLAMA_SWAP_API_KEY and nothing else; a bare
+    LLAMA_SWAP_API_KEY is treated as the router too.
     """
     base = (url or os.environ.get("L2M2_COMFY_URL") or "").strip()
     key = ""
     if not base:
         router = (os.environ.get("LLAMA_SWAP_URL") or "").strip()
+        key = (os.environ.get("LLAMA_SWAP_API_KEY") or "").strip()
         if router:
             base = router.rstrip("/") + "/comfyui"
-            key = (os.environ.get("LLAMA_SWAP_API_KEY") or "").strip()
+        elif key:
+            # Agents in this tree get LLAMA_SWAP_API_KEY but not LLAMA_SWAP_URL. Falling back to a
+            # direct :8188 in that case made check_gpu_exclusive refuse a card llama-swap owns:
+            # measured 2026-10-27, the guard saw the resident language server holding 11558 MiB and
+            # aborted a six-row image batch with "GPU is busy" before the router could evict it. A
+            # key with no URL means the router, and the house router listens on 8080.
+            base = "http://127.0.0.1:8080/comfyui"
     if not base:
         base = "http://127.0.0.1:8188"
     API["base"] = base.rstrip("/")

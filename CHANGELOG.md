@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Added (media)
+
+- **`--sampler` and `--scheduler` on the Qwen Image 2.1 generator**
+  (`media-models/qwen_image_21.py`). The KSampler pair was hardcoded to ComfyUI's stock
+  `euler`/`simple`, which is what every render in the image lane has used so far. LoRA cards
+  written against this base (`thesealpacas-v2`, `genitalia-anatomy`) specify `er_sde` + `beta`
+  and warn that other samplers degrade the result, so the knobs have to be reachable from a pack
+  row. `er_sde` and `beta` both exist in the vendored ComfyUI (`comfy/samplers.py:975` and
+  `:1371`), verified before wiring. Defaults are unchanged and both values are validated by two
+  new graph tests (9 green). `runners/run-probe.sh` and `runners/run-regime-ab.sh` in the sibling
+  NSFW checkout now say the sampler is a default rather than asserting `euler/simple` for every
+  row.
+- **`configure_api` now defaults to the router when only a key is present.** Agents in this tree
+  get `LLAMA_SWAP_API_KEY` but not `LLAMA_SWAP_URL`, so the old fallback to a direct `:8188`
+  endpoint made `check_gpu_exclusive` refuse a card that llama-swap actually owns: measured
+  2026-10-27, the guard saw the resident language server holding 11,558 MiB and aborted a
+  six-row image batch with "GPU is busy" before the router could evict it. `LLAMA_SWAP_API_KEY`
+  with no URL now means `http://127.0.0.1:8080/comfyui`; `L2M2_COMFY_URL` and an explicit `--url`
+  still win. One endpoint-resolution test added (10 green).
+
 ### Added (serving)
 
 - Strata `4070-main-lite` (`carteakey/Strata`): created lean Ada-focused fork branch

@@ -1,5 +1,7 @@
+import os
 import unittest
 
+import qwen_image_21
 from qwen_image_21 import build_workflow, validate_settings
 
 
@@ -99,6 +101,32 @@ class QwenImage21WorkflowTests(unittest.TestCase):
         self.assertEqual(workflow["13"]["inputs"]["model"], ["12", 0])
         self.assertEqual(workflow["13"]["inputs"]["strength_model"], 0.5)
         self.assertEqual(workflow["6"]["inputs"]["model"], ["13", 0])
+
+    def test_endpoint_falls_back_to_the_router_when_only_the_key_is_set(self):
+        original = dict(qwen_image_21.API)
+        keys = ("L2M2_COMFY_URL", "LLAMA_SWAP_URL", "LLAMA_SWAP_API_KEY")
+        saved = {k: os.environ.get(k) for k in keys}
+        try:
+            os.environ.pop("L2M2_COMFY_URL", None)
+            os.environ.pop("LLAMA_SWAP_URL", None)
+            os.environ["LLAMA_SWAP_API_KEY"] = "secret"
+            self.assertEqual(qwen_image_21.configure_api(), "http://127.0.0.1:8080/comfyui")
+            self.assertTrue(qwen_image_21.via_router())
+            self.assertEqual(qwen_image_21.API["key"], "secret")
+
+            os.environ["LLAMA_SWAP_URL"] = "http://127.0.0.1:8080"
+            self.assertEqual(qwen_image_21.configure_api(), "http://127.0.0.1:8080/comfyui")
+
+            os.environ["L2M2_COMFY_URL"] = "http://127.0.0.1:8188"
+            self.assertEqual(qwen_image_21.configure_api(), "http://127.0.0.1:8188")
+            self.assertFalse(qwen_image_21.via_router())
+        finally:
+            for name, value in saved.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+            qwen_image_21.API.update(original)
 
     def test_sampling_knobs_reach_the_ksampler(self):
         default_graph = build_workflow("a lighthouse", "", 896, 1216, 25, 42, 2.5, "test")
