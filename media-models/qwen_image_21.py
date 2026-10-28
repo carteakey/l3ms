@@ -54,6 +54,8 @@ def build_workflow(
     ref_resolution: int = 1024,
     edit_name: str = "",
     denoise: float = 1.0,
+    sampler: str = "euler",
+    scheduler: str = "simple",
 ) -> dict[str, dict[str, object]]:
     """Return the API-format graph matching Comfy-Org's Qwen 2.1 workflow.
 
@@ -64,6 +66,7 @@ def build_workflow(
     latent output (sized to the first reference) replaces EmptyLatentImage; with an
     explicit resolution the references are downscaled to that cap (fewer spliced
     tokens, less VRAM) and EmptyLatentImage keeps the requested width/height.
+    ``sampler`` and ``scheduler`` are ComfyUI's own names, handed straight to KSampler.
     """
     graph = {
         "1": {
@@ -108,8 +111,8 @@ def build_workflow(
                 "seed": seed,
                 "steps": steps,
                 "cfg": cfg,
-                "sampler_name": "euler",
-                "scheduler": "simple",
+                "sampler_name": sampler,
+                "scheduler": scheduler,
                 "denoise": 1.0,
             },
         },
@@ -460,6 +463,19 @@ def parser() -> argparse.ArgumentParser:
     # per-row negative prompts in prompts/*.tsv would be inert. Measured on NSFW probes:
     # cfg 1.0 was the worst regime for multi-person anatomy, cfg 3.5/5.0 over-sharpen.
     result.add_argument("--cfg", type=float, default=2.5)
+    # ComfyUI's stock euler/simple is what every render in this lane has used so far. The LoRA
+    # cards for this base (thesealpacas-v2, genitalia-anatomy) instead specify er_sde + beta and
+    # warn that other samplers give poor results, so both knobs need to be reachable.
+    result.add_argument(
+        "--sampler",
+        default="euler",
+        help="KSampler sampler name as ComfyUI spells it (euler, er_sde, dpmpp_2m_sde, euler_ancestral, ...).",
+    )
+    result.add_argument(
+        "--scheduler",
+        default="simple",
+        help="KSampler scheduler name as ComfyUI spells it (simple, beta, normal, karras, sgm_uniform).",
+    )
     result.add_argument(
         "--model",
         default=DEFAULT_UNET,
@@ -589,6 +605,8 @@ def main() -> int:
             ref_resolution=args.ref_resolution,
             edit_name=edit_name,
             denoise=args.denoise,
+            sampler=args.sampler,
+            scheduler=args.scheduler,
         )
         # The router holds this open while it evicts the resident model and loads the image
         # model (measured cold: 246s before /system_stats answered), so the accept-wait is
@@ -599,7 +617,7 @@ def main() -> int:
         prompt_id = str(response["prompt_id"])
         print(
             f"Generating {args.width}x{args.height} with {args.model}, {args.steps} steps, "
-            f"seed {args.seed}; "
+            f"seed {args.seed}, sampler {args.sampler}/{args.scheduler}; "
             + (f"{len(ref_names)} reference image(s); " if ref_names else "")
             + (f"editing {args.edit_image} at denoise {args.denoise:g}; " if args.edit_image else "")
             + (f"{len(loras)} LoRA(s); " if loras else "")

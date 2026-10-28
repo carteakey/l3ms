@@ -100,6 +100,28 @@ class QwenImage21WorkflowTests(unittest.TestCase):
         self.assertEqual(workflow["13"]["inputs"]["strength_model"], 0.5)
         self.assertEqual(workflow["6"]["inputs"]["model"], ["13", 0])
 
+    def test_sampling_knobs_reach_the_ksampler(self):
+        default_graph = build_workflow("a lighthouse", "", 896, 1216, 25, 42, 2.5, "test")
+        self.assertEqual(default_graph["6"]["inputs"]["sampler_name"], "euler")
+        self.assertEqual(default_graph["6"]["inputs"]["scheduler"], "simple")
+
+        workflow = build_workflow(
+            "a lighthouse",
+            "",
+            896,
+            1216,
+            25,
+            42,
+            4.0,
+            "test",
+            sampler="er_sde",
+            scheduler="beta",
+        )
+
+        self.assertEqual(workflow["6"]["inputs"]["sampler_name"], "er_sde")
+        self.assertEqual(workflow["6"]["inputs"]["scheduler"], "beta")
+        self.assertEqual(workflow["6"]["inputs"]["cfg"], 4.0)
+
     def test_edit_path_reencodes_the_image_and_lower_denoise_survives(self):
         workflow = build_workflow(
             "keep the pose, change the face",
