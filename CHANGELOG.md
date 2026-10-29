@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added (speech)
+
+- Added a llama-swap entry for Nemotron 3.5 Transcribe using the IQ4_NL
+  speech.cpp model, with Vulkan and CPU expert offload. The installer downloads
+  and verifies the runtime, transcription model, VAD and diarization models.
+  A live 11-second sample returned speaker-labeled text through the router.
+  On this RTX 4070, speech.cpp placed 12 expert layers on the GPU and 11 on the CPU.
+
 ### Added (media)
 
 - **`--sampler` and `--scheduler` on the Qwen Image 2.1 generator**

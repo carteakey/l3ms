@@ -53,6 +53,7 @@ macros:
 
   # media engines owned by llama-swap (reserved model ids audiocpp_auto / comfyui_auto)
   "audiocpp_server":       "${env.L3MS_ROOT}/vendor/audio.cpp-955c872/build/bin/audiocpp_server"
+  "speech_cpp_server":     "${env.HOME}/.local/share/lytte-nemotron/runtime/speech"
   "comfy_root":            "${env.L3MS_ROOT}"
 
   # --- shared paths ---
@@ -100,6 +101,19 @@ models:
   # Media engines. llama-swap swaps these like any model: /audiocpp/ and
   # /comfyui/ route to the reserved ids. See docs/migration/media-through-llama-swap.md.
   # ===========================================================================
+
+  "nemotron-3.5-transcribe":
+    name: "Nemotron 3.5 Transcribe 30B-A4B (IQ4_NL)"
+    description: "Speech transcription via speech.cpp with Vulkan GPU and CPU expert offload, VAD and speaker diarization. POST /v1/audio/transcriptions."
+    useModelName: "NVIDIA-Nemotron-3.5-Transcribe-30B-A4B"
+    cmd: >-
+      ${speech_cpp_server} serve
+      ${env.HOME}/.local/share/lytte-nemotron/models/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-IQ4_NL.gguf
+      silero-vad nemotron-3-diarization --device Vulkan1 --threads 10
+      --host 127.0.0.1 --port ${PORT}
+    proxy: http://127.0.0.1:${PORT}
+    checkEndpoint: /health
+    ttl: 600
 
   "audiocpp_auto":
     name: "audio.cpp (Breeze TTS · HeartMuLa · MiniMax H3 audio)"
