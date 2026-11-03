@@ -1,0 +1,7 @@
+# Pinned lightx2v/Minimax-h3-Turbo LoRA for the MiniMax-H3 Ref2V video lane (4-step, ComfyUI build)
+# The sibling minimax_h3_ref2v_turbo_4step_v0.1_bf16.safetensors (1,383,677,768 B, sha256
+# 9e642fc8749c74f8da5e2382877ab5c7aa37b9a73b7fd0d6d457bd1b3cb1ae99) is the same weights in a
+# non-ComfyUI layout; only the _comfyui_ file below loads through ComfyUI's LoRA loader, which is
+# what media-models/minimax_h3_video.py --turbo-lora points at. Installed 2026-10-27, untested.
+# repo revision repo_file relative_path bytes sha256
+lightx2v/Minimax-h3-Turbo 30f485ed874aa44c8183348ad361c5eabad318da minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors loras/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors 1956193000 5b9ab5ade15d0775676d01a907268a69a1468dc6033b3b0d3ded5502f3ebb84c
