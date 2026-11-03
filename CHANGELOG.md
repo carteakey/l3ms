@@ -14,6 +14,9 @@
   - Includes device register arithmetic fix (`asm volatile("" : "+v"(ss));`) to guarantee bitwise mathematical equivalence with zero output drift.
 - **Strict Mathematical Routing Preserved (`STRATA_ROUTE_TAIL_SKIP=0` Default)**:
   - Defaulted `STRATA_ROUTE_TAIL_SKIP` to OFF (0) in `strata-lean` to avoid output quality shifts or teacher-forced KL drift from skipped expert misses. Opt-in via `STRATA_ROUTE_TAIL_SKIP=7`.
+- **Documentation & Upstream Separation**:
+  - Created `docs/strata-lean.md` documenting performance progression, cherry-picks, and precision trade-offs; linked from `README.md`.
+  - In `vendor/strata-lean`, separated upstream base documentation into `UPSTREAM_README.md` to keep the fork's `README.md` lean and focused.
 
 
 ### Added (bench instrument: the CPU power state)

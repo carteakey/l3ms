@@ -39,6 +39,7 @@ engine route over a new executor; see `docs/migration/runtime-policy.md`.
 ## Engineering Rules
 
 - Prefer deterministic script orchestration over hidden automation.
+- **Strata Anti-Bloat Policy**: Never blindly rebase or "re-slice" `carteakey/strata-lean` (`strata-lean`) onto upstream. Upstream commit counts (e.g. 2,252 commits to v0.2.7) are dominated by non-Ada backends (Metal, SYCL, ROCm), experimental engines, and test suites. The fork's mandate is lean, zero-bloat Ada `sm_89` on RTX 4070.Headroom hierarchy: 1. Runtime switches (e.g. `--kv-grow`); 2. Cherry-picking isolated CUDA kernel optimizations; 3. Re-slicing is rejected.
 - Serving is declared in `llama-swap.yaml`; benching is declared in
   `bench-models/*.sh`. Both are editable text, not hard-parameterized UI
   forms. When serving and benching flags drift, update them together.
@@ -90,25 +91,61 @@ Deep detail, decisions and next steps: `docs/qwen38-flash-next-internal.md` and 
 
 Seven router tiers:
 
-- plat `qwen38-flash-next-plat` (alias `strata`): Strata 4070-main-lite (`carteakey/Strata`)
-  with ISTA-DASLab GSQ-RCO IQ3_XXS quant, unquantized Q8_0 PLE table on NVMe, dynamic VRAM expert
-  caching (2,444 to 3,086 hot experts in VRAM), native MTP speculative decoding (Q2_0 draft head),
-  fused hyper-connections (down GEMV inject folding and gate/mean fusion reducing kernel launches
-  from 6 to 4), STRATA_GR_NORM_FAST=1 register-split norm, thinking wrap-up on repeat loops inside <think>,
-  K8V4 KV cache @ 128k ctx (`131072`), StrataGP 2 MB Transparent Huge Page (`MADV_HUGEPAGE`) kernel
-  acceleration, 4-slot / 3 GiB host-RAM conversation parking, and `ttl: 3600` (1-hour idle timeout).
-  **65.08 t/s steady decode on real code, 72.9 t/s peak, pp=1,887 to 1,894 t/s**, 11.7 GB VRAM, 47 GB RAM (14 GB headroom).
+- plat `qwen38-flash-next-plat` (alias `strata`): Strata strata-lean (`carteakey/strata-lean`,
+  branch `strata-lean`, cut from upstream `v0.1.45`; upstream is at `v0.2.10`, audit it with
+  `.agents/skills/strata-cherry-pick/scripts/audit_upstream.sh`, analysis in
+  `docs/strata-perf-next-steps-2026-10.md` and `docs/strata-lean.md`) with ISTA-DASLab GSQ-RCO IQ3_XXS quant,
+  unquantized Q8_0 PLE table on NVMe, dynamic VRAM expert caching (2,583 hot expert pairs in
+  4.24 GiB at the 128k config; 2,444 to 3,086 across configs) with **`--kv-grow` served since 2026-10-28
+  19:15** (elastic K/V: 16,384 of 131,072 cells mapped at load, 0.21 of 1.32 GiB; the expert cache takes
+  the room first, so 3,276 slots / 5.35 GiB at short context, measured 2,642 slots holding experts at
+  114,688 cells in a live session), native MTP speculative decoding
+  (Q2_0 draft head over 106,299 draft tokens, 178 MiB), fused hyper-connections (down GEMV
+  inject folding and gate/mean fusion reducing kernel launches from 6 to 4), fused QSA RMSNorm + RoPE
+  (`STRATA_QSA_FUSE_NR`, cuts memory traffic from 1.1 GB to 0.4 GB a layer with assembly barrier exactness),
+  strict mathematical routing (`STRATA_ROUTE_TAIL_SKIP=0` default in `strata-lean`, rejecting upstream's
+  rank >= 7 expert dropping to prevent KL 0.003-0.006 drift), thinking wrap-up
+  on repeat loops inside <think>, K8V4 KV cache @ 128k ctx (`131072`), expert arena pinned with
+  `cudaHostRegister` on **4 KB pages** (`vm.nr_hugepages=0` so `MAP_HUGETLB` fails; upstream
+  stopped requesting `MADV_HUGEPAGE` while THP is `always`, #771 and #2126 - the lever is a
+  reserved hugetlb pool, not `MADV_HUGEPAGE`), 4-slot / 3 GiB host-RAM conversation parking,
+  and `ttl: 3600` (1-hour idle timeout).
+  **69.60 t/s steady decode on real code (65.4 to 76.1 range; a same-day repeat measured
+  67.88, so run-to-run spread is about 2 t/s), pp 1,876 to 1,891 t/s @ 8k**, 11.7 GB VRAM,
+  47 GB RAM (14 GB headroom). The engine reports 410 MiB of VRAM free at request start, under
+  its own 512 MiB floor (#2065, it asks for `--vram-reserve-mib 832`), and a 58.6% decode
+  expert-cache hit rate: those two lines are where the remaining headroom is.
+  `STRATA_GR_NORM_FAST` is opt-in on CUDA (`fused_gr.cu:1179`, upstream's comment: "measured on sm_70
+  only") and the tier's run config has no `env` block, so it is NOT on; an earlier revision of this file
+  listed it as a tier feature, and measuring it on 2026-10-28 settled it: 64.85 against a 71.13 base pair
+  mean, i.e. 6.3 t/s **slower** on Ada.
+  First tuning sweep (`bench-models/bench-strata-tuning-ab.sh`, rows in `logs/results/strata-tuning-ab.jsonl`,
+  telemetry in `logs/results/strata-tuning-diag.jsonl`): paired control 70.70 and 71.55; **`STRATA_ROUTE_PRIOR=1.5`
+  measured 102.23 t/s** with hit rate 93.0% (from 57.4/57.7) and PCIe 1.3% (from 9.9%) at unchanged slots and
+  acceptance, **measured but not served** - it re-picks experts, upstream's 0.2.7 note flags agent-task
+  completion at 1.5 (4.5 of 10 at 1.5 against 5.6 off), and this agent's work is agent tasks; `--kv-grow`
+  73.53 with 3,277 slots (promoted into serving 2026-10-28 19:15); `--vram-reserve-mib 832` 68.75 for +134
+  MiB of headroom. Rejected: `--spec 5` (61.00) and `--mtp-draft-vocab data/draft_vocab_en.bin` (65.78).
+  Second sweep 17:05 to 17:36, 11 arms stacked on `--kv-grow`, run dark with
+  `bench-models/run-strata-tuning-dark.sh`: **nothing promoted**. The paired control itself read 77.07 and
+  69.43 (80.60 / 70.55 on last-two probes), so `kg_exact1` 81.70 and `kg_side` 79.80 are undecided rather
+  than fast; the only signal that survived is prefill - `STRATA_DEQUANT_WIDE=1` at 1,978 t/s @ 8k and 1,992
+  @ 32k against the controls' 1,938/1,950 and 1,932/1,933. Table and method: `docs/strata-perf-next-steps-
+  2026-10.md` §8.
   All non-Ada backends (Metal, SYCL, ROCm tuning headers) and unreleased Qwen3.5 engine code stripped.
 - plat-vision `qwen38-flash-next-plat-vision` (alias `strata-vision`): Strata v0.1.44.1
   with MTMD vision support (`strata-vision` CPU encoder with `mmproj-F16.gguf`), `--vision` position table
   allocation, and `--fit-max-tokens`. Zero VRAM overhead for vision; retains all GPU experts and K8V4 KV cache.
-  512px warmup patch slashes cold boot from 8m to 1.8s. 53–60 t/s decode @ 128k ctx.
+  512px warmup patch slashes cold boot from 8m to 1.8s. 53–60 t/s decode @ 128k ctx. Serves `--kv-grow`
+  since 2026-10-28 19:15: expert cache 2,581 slots / 4.23 GiB became 3,276 / 5.35 GiB, the whole 128k K/V
+  is only 1.32 GiB, and the cache hands slots back as a context grows (floor 128 slots,
+  `src/program/generate.cpp:7350-7372`); roughly neutral above ~110k cells.
 - plat-abliterated-vision `qwen38-flash-next-plat-abliterated-vision` (alias `abliterated-vision`):
   Strata v0.1.44.1 uncensored/unaligned SC117 weights with CPU-offloaded `strata-vision` image encoder,
   4-slot / 3 GiB host-RAM conversation cache, 128k context, and `ttl: 3600`. Primary multimodal daily driver for Pi.
 - gold `qwen38-flash-next`: plain upstream master (`vendor/llama.cpp-master`,
-  macro `qwen38_master_server`, commit `1c4729414`, tag `b11241`). 20.5–22.1 t/s steady state
-  decode, pp 180–385 t/s @ 96k ctx (`-c 98304`). Natively includes PR #29393 (RMS_NORM+SCALE CUDA fusion),
+  macro `qwen38_master_server`, commit `d1044bc82`, tag `b12073-15-gd1044bc82`). 19.95-22.1 t/s steady state
+  decode, pp 592.6 t/s @ 8k ctx. Natively includes PR #29393 (RMS_NORM+SCALE CUDA fusion),
   PR #28770 (CUDA sparse Flash Attention), and kernel fusions (#28896, #28901).
 - vision `qwen38-flash-next-vision`: master with `mmproj-F16.gguf`
   vision projector (`models/unsloth/Qwen3.8-Flash-Next-GGUF/mmproj-F16.gguf`),
@@ -151,9 +188,37 @@ Gotchas:
   fits but is quality-lateral to AD-4.27bpw (KLD 0.0836 vs 0.0842). Preflight
   big downloads by range-fetching GGUF shard headers and parsing the
   PLE/non-PLE split before committing disk.
-- Bench hygiene: tg has a warm-up transient (ngram-mod pool) — discard the
-  first 2-3 fresh-load probes and report steady state; pp probes need unique
-  prefixes to defeat KV reuse. A/B harness:
+- Bench hygiene: tg has a warm-up transient (ngram-mod pool, and draft acceptance climbs with it) — discard
+  the first 2-3 fresh-load probes and report steady state; pp probes need unique
+  prefixes to defeat KV reuse. 2026-10-28 proof of how bad this gets: with 3 warm-ups a `--kv-grow` arm read
+  70.0, 76.1, 85.1 t/s with acceptance 0.680, 0.715, 0.828 while its identical twin 30 minutes later read
+  67.2, 68.7, 72.4, a 10 t/s phantom win. Use `TG_WARMUP=6` / `TG_PROBES=4` and read `tg_steady_mean` and
+  `tg_steady_spread` (last three probes) off the row instead of `tg_mean`.
+- CPU power state is part of a bench row. Until 2026-10-29 14:35:35 this box ran
+  `scaling_governor=powersave` on all 16 logical CPUs (intel_pstate active default, `min_perf_pct=17`, EPP
+  already `performance`), power-profiles-daemon writes EPP only, and a governor choice is not persistent, so
+  the 2026-08-31 `governor=performance` reading was lost at a reboot and **every t/s row recorded here,
+  sweeps included, is a powersave row**. Route 1 is now applied: `cpupower.service` is enabled and writes
+  governor+EPP `performance` from `/etc/default/cpupower-service.conf` at every boot, and a 4-core busy loop
+  measured 4.50 GHz from the first sample with no ramp, which is the bench state even though `min_perf_pct`
+  stays 17 (that floor only sets how deep HWP may idle). `maintenance/cpu-power-state.sh check` is the gate,
+  `bench-models/run-strata-tuning-dark.sh` refuses with `rc=3` unless `FORCE_CPU=1` (not the harness's
+  `FORCE=1`), and `docs/bench-runbook.md` carries the routes (route 2 is `tuned-cachy`/`tuned-cachy-ppd` plus
+  the repo's `l3ms-bench` profile, the only one that pins the floor at 100). Re-run the paired control in the
+  new state before quoting any row taken before 14:35:35. Write access is delegated through a root-owned
+  helper (`sudo install -m 0755 -o root -g root maintenance/l3ms-cpu-power-helper.sh
+  /usr/local/bin/l3ms-cpu-power` plus `/etc/sudoers.d/l3ms-cpu-power`, four fixed verbs), never through
+  `systemctl *` or a repo path; until it is installed the script prints the sudo line and exits 4.
+- Output reproducibility: greedy output on this engine is **not reproducible**. Two boots of the same config
+  differed on 4 of 7 fixed greedy prompts, two passes inside one boot of the served tier differed on 3 of 7,
+  always at the same token count, because which of the cached expert pairs are resident changes between
+  passes and the cached and streamed paths are not bitwise the same arithmetic. `bench-models/
+  strata-identity-probe.py` (twice per arm, before the speed probes) therefore yields counts, not a verdict:
+  compare `identity_diff_n` with the control pair's own cross-boot divergence and use `intra_diff_n` as each
+  arm's noise floor. Upstream's "Exact = identity gate passed" rule cannot be met by any arm here, mine
+  included. A full-VRAM ladder can be run detached with `bench-models/run-strata-tuning-dark.sh`, which does
+  the grace delay, the unit stop, the ladder, the unit start and the engine `/health` confirmation, and
+  writes `logs/strata-dark-<stamp>.log` plus a `.status` line. A/B harness:
   `bench-models/bench-llama-qwen38-flash-next-build-ab.sh` (stop llama-swap
   first). Standardize system context: all bench scripts must capture the
   standard system frontmatter via `bench-models/bench-env.sh` (RAM MT/s,
