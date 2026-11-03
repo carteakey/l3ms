@@ -90,17 +90,28 @@ The script derives the service port, API key, Rust toolchain environment, and
 downloader Python interpreter. Arguments are passed through to the Rust binary,
 for example `./maintenance/run-l3ms-kpc.sh --list run`.
 
-## Media and decision lanes
+## Three inference lanes
 
-The media and decision lanes live in this tree (they were separate `l2m2` and
-`l3ds` repositories until 2026-10-15). Their guides:
+Language (root L3MS) · Media (L2M2) · Decisions (L3DS)
 
+Their guides:
+
+- [Language: Strata Lean (Platinum Tier)](docs/strata-lean.md)
 - [Media models](docs/media-models.md)
 - [Decision models](docs/decision-toolkit.md)
 
 Setup scripts are in `maintenance/`, runtime manifests are `media-runtimes.json`
 and `decision-runtimes.json`, and model-specific wrappers are in `media-models/`
 and `decision-models/`.
+
+### Language lane: Strata Lean (`carteakey/strata-lean`)
+
+The primary local driver for coding and reasoning is **Qwen3.8-Flash-Next** (`qwen4exp`) served on the Platinum tier (`qwen38-flash-next-plat`). It runs on **[Strata Lean (`carteakey/strata-lean`)](https://github.com/carteakey/strata-lean)**, a custom Ada Lovelace (`sm_89`) fork optimized for 12 GB RTX 4070 cards:
+
+- **Throughput**: Sustained 70-79 t/s decode on real code and reasoning, up to 1,900+ t/s 8k prefill.
+- **Architecture**: Dynamic VRAM expert caching (3,277 hot experts on GPU with `--kv-grow`), native MTP speculative decoding (`--spec 4`), and unquantized Q8_0 PLE table streamed from NVMe.
+- **Strict Mathematical Routing**: `STRATA_ROUTE_TAIL_SKIP` defaults to OFF (0) to preserve exact mathematical routing with zero expert-dropping drift.
+- **Guide & Benchmarks**: Full details, progression numbers, and trade-offs are documented in [docs/strata-lean.md](docs/strata-lean.md).
 
 List the three native manifest catalogs without starting a model or contacting
 llama-swap:
@@ -545,6 +556,7 @@ Log view: `c` clears the activity log.
 - `ARCHITECTURE.md`: source-of-truth boundaries and Rust migration status
 - `docs/llama-swap-runbook.md`: install, start/stop, curl, add-a-model
 - `docs/model-onboarding-playbook.md`: end-to-end checklist for adding new model families
+- `docs/strata-lean.md`: Strata Lean fork architecture, benchmarks, and quality-speed trade-offs
 
 ## Serving
 

@@ -2,6 +2,79 @@
 
 ## [Unreleased]
 
+### Added (Strata Lean fork rename and QSA fusion)
+
+- **Fork Renamed to `carteakey/strata-lean` with Default Branch `strata-lean`**:
+  - Renamed GitHub repository from `carteakey/Strata` to `carteakey/strata-lean`.
+  - Created and set default branch to `strata-lean` (retiring `4070-main-lite`).
+  - Updated all repo remotes, documentation (`AGENTS.md`, `README.md`), and skills (`strata-cherry-pick`, `qwen4exp-refresh`).
+- **Ported `STRATA_QSA_FUSE_NR` (QSA Single-Pass Fused RMSNorm + RoPE)**:
+  - Fuses the 3 separate passes (`split_q` + `rms_rows` + `rope`) for queries and keys into a single CUDA kernel (`rms_rope_rows`).
+  - Slashes memory traffic from ~1.1 GB to ~0.4 GB per QSA layer at 8k tokens.
+  - Includes device register arithmetic fix (`asm volatile("" : "+v"(ss));`) to guarantee bitwise mathematical equivalence with zero output drift.
+- **Strict Mathematical Routing Preserved (`STRATA_ROUTE_TAIL_SKIP=0` Default)**:
+  - Defaulted `STRATA_ROUTE_TAIL_SKIP` to OFF (0) in `strata-lean` to avoid output quality shifts or teacher-forced KL drift from skipped expert misses. Opt-in via `STRATA_ROUTE_TAIL_SKIP=7`.
+
+
+### Added (bench instrument: the CPU power state)
+
+- `maintenance/cpu-power-state.sh`: `show`, `check`, `apply-cpupower --yes`, `install-tuned`,
+  `apply-tuned --yes [--ppd]`, `revert`. Writes are dry-run unless `--yes`, every write snapshots
+  its target first (`*.bak-<stamp>`), and the apply modes print the `sudo` line when not root.
+  `maintenance/tuned/l3ms-bench/tuned.conf` copies upstream tuned's `throughput-performance`
+  CPU block (`governor=performance`, `energy_perf_bias=performance`, `min_perf_pct=100`,
+  `energy_performance_preference=performance`, `boost=1`, read from the upstream file 2026-10-29)
+  and drops `[acpi] platform_profile`, which this firmware does not expose.
+- **The measured state, because it is not what this repo's docs claimed.** Boot 2026-10-29 05:19:
+  `scaling_governor = powersave` on all 16 logical CPUs, `energy_performance_preference = performance`,
+  `intel_pstate` active with `min_perf_pct = 17`, `max_perf_pct = 100`, `no_turbo = 0`,
+  `hwp_dynamic_boost = 0`. power-profiles-daemon 0.30 is running with `Profile=performance` and does
+  not write the governor; `cpupower.service` is installed (cpupower 7.2.11-1) and disabled with the
+  packaged all-commented `/etc/default/cpupower-service.conf`; `intel-lpmd` ran at boot, found no
+  config for this CPU and exited; tuned is not installed at all. The governor is the kernel default,
+  and a governor choice does not survive a reboot, which is how the 2026-08-31 "governor=performance"
+  reading was lost. Consequence, stated plainly: every Strata row in this repo, sweep 1 and sweep 2
+  included, was measured with `powersave` / `min_perf_pct = 17` before 2026-10-29 14:35:35.
+- `bench-models/run-strata-tuning-dark.sh` now runs `cpu-power-state.sh check` before it stops the
+  router and refuses with `rc=3` unless `FORCE_CPU=1` (a separate variable from the harness's own `FORCE=1`
+  router-is-up override; verified: it exits before the grace delay, the unit
+  stays active, 11,694 MiB untouched on the card). It also pipes the run through `tee` into its own
+  `$LOG`: the sweep-2 ladder log that went missing, taking each arm's args/env line with it, was never
+  written in the first place.
+- `bench-models/bench-env.sh` records `governors_all`, `hwp_status`, `hwp_min_perf_pct`,
+  `hwp_max_perf_pct`, `hwp_no_turbo`, `hwp_dynamic_boost` in every run's frontmatter, and warns about
+  the governor plus the HWP floor with the fix command in the warning text.
+- `docs/bench-runbook.md` (snapshot `bench-runbook.md.bak-20261029-140438`) now carries the fix
+  routes, the tuned profile block, and a 2026-10-29 state block that supersedes the 2026-08-31 one.
+- **Applied by the user at 14:35:35, route 1, no new packages.** `sudo ./maintenance/cpu-power-state.sh
+  apply-cpupower --yes` wrote `GOVERNOR='performance'` and `EPP='performance'` into
+  `/etc/default/cpupower-service.conf` (snapshot `/etc/default/cpupower-service.conf.bak-20261029-143535`)
+  and enabled `cpupower.service`: `enabled`, `active (exited)`, `ExecStart=/usr/lib/systemd/scripts/cpupower`,
+  and that packaged helper reads the EnvironmentFile at boot (`cpupower frequency-set -g "$GOVERNOR"`,
+  `cpupower set -e "$EPP"`). Boot-persistence is the point, after finding out a hand-set governor does not
+  survive one. `check` returns 0.
+- **Measured after the fix, because `min_perf_pct` stayed at 17.** governor and EPP read `performance` on
+  all four cpufreq policies. A 4-core P-core busy loop held `scaling_cur_freq` at 4,499,954 to 4,500,045 kHz
+  from the first sample, no ramp, `cpuinfo_avg_freq` 4.50 GHz; idle samples on policy4 fell to 800,821 kHz,
+  matching `scaling_min_freq` 800,000 and about 17% of that core's 4,900,000 kHz max. So on intel_pstate active mode the 17 floor describes how
+  deep HWP may idle with no load, it is not a cap on a loaded core, and `cpupower frequency-set -g
+  performance` reaches the bench state without tuned writing `min_perf_pct=100`. That is why the gate
+  reports the floor as a note when the governor is right. tuned stays available for the case where a row
+  does show a ramp, since only tuned pins the floor.
+- **A passwordless route, at the user's call (`sure why not`).** `maintenance/l3ms-cpu-power-helper.sh`
+  installs as a root-owned `/usr/local/bin/l3ms-cpu-power` with four fixed verbs (`status`, `apply`,
+  `tuned`, `revert`), and `maintenance/sudoers/l3ms-cpu-power` grants NOPASSWD for exactly those four
+  command lines (`visudo -cf` on the repo copy: parsed OK). Everything the helper writes is a literal
+  inside it, including the tuned `[cpu]` block, which is embedded rather than read from the repo: a tuned
+  profile can write `[sysctl]` and `[bootloader]` state, so it must not be agent-supplied text. The
+  grant deliberately excludes `cpupower *` (wildcards let flags through), `systemctl *` (even
+  unit-restricted, `systemctl edit <unit>` writes a drop-in that systemd then runs as root, which is a
+  full escalation, not a restricted verb list), `tuned-adm *`, and any path inside `~/repos`, because a
+  grant on a repo file is a grant on root. The read side needed no grant: sysfs,
+  `systemctl is-active/is-enabled` and `cpupower frequency-info` are unprivileged, which is why `show`
+  and `check` never needed sudo. `cpu-power-state.sh` now prints the helper command and exits 4 when it
+  is not root and the helper is installed.
+
 ### Added (speech)
 
 - Added a llama-swap entry for Nemotron 3.5 Transcribe using the IQ4_NL
@@ -9,6 +82,215 @@
   and verifies the runtime, transcription model, VAD and diarization models.
   A live 11-second sample returned speaker-labeled text through the router.
   On this RTX 4070, speech.cpp placed 12 expert layers on the GPU and 11 on the CPU.
+
+### Changed (serving)
+
+- **`--kv-grow` is served on all four Strata tiers.** Added to the `args` of
+  `vendor/strata-lean/strata-iq3_xxs-ple_q8.json`, `strata-vision-ple_q8.json`,
+  `strata-sc117-iq3_xxs-ple_q8.json` and `strata-sc117-vision-ple_q8.json` (snapshots
+  `*.bak-20261028-191525`), hot-reloaded with `kill -HUP $(pgrep '[l]lama-swap')` at 19:15:37, smoke-tested
+  19:19:39 against `qwen3.8-flash-next-plat-vision`. No `llama-swap.yaml` edit: the run config carries the
+  flags and `serve/server.py:2867` forwards its `env`. The served vision tier's own log records the effect:
+  expert cache 2,581 slots / 4.23 GiB became **3,276 slots / 5.35 GiB**, `elastic K/V: 16384 of 131072
+  cells in VRAM (0.21 of 1.32 GiB)`, and during my own session `K/V grown to 114688 cells (1.17 GiB); the
+  expert cache gave 634 slots for it ... (2642 of 3276 slots hold experts)`. The whole 128k K/V is 1.32 GiB,
+  so this is a 1.11 GiB / 694-slot loan that the cache pays back as a context grows, floor 128 slots
+  (`src/program/generate.cpp:7350-7372`). IQ4 vision tiers (`strata_vision_iq4_config`) were not changed.
+
+### Measured (second Strata tuning sweep, 2026-10-28 17:05:50 to 17:36:34)
+
+- Eleven arms, all stacked on `--kv-grow`, 2 min 26 s to 2 min 32 s each, run dark through
+  `bench-models/run-strata-tuning-dark.sh`: `kv_grow kg_attn kg_rows kg_mmvq kg_side kg_wide kg_exact1
+  kg_expdec kg_adapt kg_set kv_grow`. Same slots in every arm (3,277, 5.35 GiB, 2,468 auto), `needle_4k`
+  true everywhere, `io_mb_per_token` 0.0127 to 0.0802 (no SSD thrash).
+- **Nothing is promoted from these decode rows.** The paired control read 77.07 and 69.43 t/s (all three
+  probes), 80.60 and 70.55 on the last two, a spread of 7.63 to 10.05 t/s, so the two best-looking arms
+  (`kg_exact1` 81.70, `kg_side` 79.80) are undecided rather than fast. Cause: with 3 warm-ups most arms
+  were still climbing at their last measurement probe, throughput and draft acceptance together (opening
+  control 70.0, 76.1, 85.1 t/s with acceptance 0.680, 0.715, 0.828). Not RAM pressure: `mem_available_mib`
+  12,807 to 14,306 with no trend across the ladder.
+- **Prefill signal, the one thing that survived:** `kg_wide` (`STRATA_DEQUANT_WIDE=1`, bit-exact per
+  upstream, default-on upstream only for cc 6.1, off here) measured 1,978 t/s at 8k and 1,992 at 32k
+  against the controls' 1,938/1,950 and 1,932/1,933, with the flat probe sequence of the ladder (69.5,
+  70.1, 70.7); `kg_set`, which contains it, 1,972 and 1,979. Re-test queued as `kv_grow kg_wide kg_wide
+  kv_grow`.
+- **The identity gate could not certify anything, including the control.** Two boots of the same
+  `--kv-grow` config differed on 4 of 7 greedy prompts, two passes inside one boot of the served tier
+  differed on 3 of 7, always at the same token count. With 3,277 of 24,576 expert pairs cached, residency
+  changes between passes and the cached and streamed expert paths are not bitwise the same arithmetic, so
+  upstream's Exact rule (`v0.2.7:docs/DETAILS.md:1031`) is unmeetable by any arm on this box. The gate is
+  comparative from now on: `identity_diff_n` against the ladder reference, `intra_diff_n` as each arm's own
+  noise floor, and only a divergence beyond the control pair's counts as a quality signal. Closest to
+  clean in this ladder: `kg_expdec` (2 diffs) and `kg_wide` (3), against the control pair's 4.
+
+### Added (harness)
+
+- `bench-models/strata-identity-probe.py`: seven fixed greedy prompts (code small, code fix, strict JSON,
+  short explanation, 384-token code generation, 4K and 20K document replays with a `lantern-42-kestrel`
+  marker) at `temperature 0`, `top_k 1`, `seed 42`, `cache_prompt false`. Per prompt: token counts, finish
+  reason, full sha, and hashes of the first 240 and 960 chars so a divergence reports where the two runs
+  parted. `--compare` gives `identity_sha`, `identity_diff_n`, `identity_diffs`. One pass is ~30 s.
+- `bench-models/run-strata-tuning-dark.sh`: the blackout wrapper for a ladder that measures the model it is
+  being served by. Grace delay (default 75 s), stop the user unit, wait for the card to read under 300 MiB,
+  run the ladder, start the unit, then confirm the restart by the engine's own `/health` on its freshly
+  assigned port. Writes `logs/strata-dark-<stamp>.log` and `.status`. Used for the 17:04:28 launch, back at
+  17:37:51 with `Health check passed` in the journal.
+- `bench-models/bench-strata-tuning-ab.sh`: eleven `kg_*` arms on the `--kv-grow` baseline (attn, rows,
+  mmvq, side, wide, exact1, expdec, adapt, upmix, set) for the switch pool this fork has never measured on
+  sm_89; identity gate run twice per arm before the speed probes; engine logs kept in
+  `logs/results/strata-tune-<stamp>/` instead of `/tmp` (last sweep's raw evidence was destroyed by tmp
+  cleanup); `TG_WARMUP` (default 6, was 3), `DEEP_SIZES`, and diag columns `identity_*`, `intra_diff_n`,
+  `slot_values_seen`, `kv_grown_cells`, `expert_slots_held`.
+- `bench-models/bench-qwen38-refresh-probe.py`: `--deep-sizes` deep-context decode probe (decode throughput
+  with a 98k prompt live, which is where an elastic K/V repays what it borrowed), `deep` field in the row,
+  `tg_steady_mean` and `tg_steady_spread` (last three probes), default `--warmups` 3 to 6.
+
+### Measured (first Strata tuning sweep, 2026-10-28 13:16:51 to 13:39:49)
+
+- Nine arms, 2 min 26 s to 2 min 37 s each, the production config run at both ends as the paired
+  control: **70.70 and 71.55 t/s**, pair mean 71.13, peak probes 76.7, needle_4k true in every arm.
+- **`STRATA_ROUTE_PRIOR=1.5` measured 102.23 t/s (97.4 to 109.3), +31.1 over the pair mean.** The engine
+  explains it: expert-cache hit rate **93.0%** against 57.4 and 57.7 in the two control arms, PCIe share
+  **1.3%** against 9.9%, at unchanged slots (2,583) and draft acceptance where the control sat (decode-probe
+  `draft_acc` 0.752 against 0.737 and 0.732). Accepted
+  on speed, **not served**: the kernel header and the call site both say it changes the output, and
+  upstream's own `docs/release-notes-0.2.7.md` (line 7, in the tree) flags agent-task completion at 1.5 -
+  4.5 of 10 agent tasks over 4 runs at 1.5 against 5.6 over 7 runs with it off, their off runs ranging 4
+  to 6 - after 80 tasks showed no copy or code errors. Upstream defaults 1.5 on a discrete NVIDIA card at
+  or under 13 GiB and moved off 2.0 because 2.0 "did show copy and code defects". The gate here is an
+  agent-task read on my own sessions, not a needle probe.
+- `--kv-grow` 73.53 (+2.40, inside the ~2 t/s spread): slots 2,583 to **3,277**, hit rate 62.1%, the run's
+  worst disk traffic (0.0998 MB per generated token) and a 32k prefill dip (1,928 against 1,950 and 1,948).
+  Needs `kv_grow base kv_grow` in one boot before it is served.
+- `--vram-reserve-mib 832` 68.75 (-2.38) while doing its job: 410 to 544 MiB free at request start, window
+  capture floor 276 to 410, at the cost of 77 expert slots. Insurance, not speed.
+- Rejected with numbers: `--spec 5` 61.00 (-10.13) losing twice over, decode-probe acceptance 0.652 against
+  0.735 and a wider verify window on top; `STRATA_GR_NORM_FAST=1` 64.85 (-6.28), which closes the
+  AGENTS.md tier claim as an Ada
+  loss; `--mtp-draft-vocab data/draft_vocab_en.bin` 65.78 (-5.35) with the draft head 178.4 to 68.0 MiB.
+- `--prefill auto:16384` dead neutral (70.60; 1,877 at 8k and 1,946 at 32k): `--prefill auto` is not
+  bounded by the 8,192 chunk ceiling on this card, so the flat prefill is not a chunk-size problem.
+- Rows: `logs/results/strata-tuning-ab.jsonl`; engine telemetry: `logs/results/strata-tuning-diag.jsonl`.
+
+### Added (serving)
+
+- **`bench-models/bench-strata-tuning-ab.sh`**, a Strata plat-tier tuning sweep that changes
+  only flags, `STRATA_*` env and the taskset mask. Each arm is an overlay on the production run
+  config (`vendor/strata-lean/strata-iq3_xxs-ple_q8.json`), so a winner is one config line from
+  being served instead of a cherry-pick. 19 arms in the default ladder (`base reserve832 kv_grow ctx64k
+  routeprior15 routeprior_kv draft_en grnormfast spec5 specprob no_suffix lookup prefill16k
+  prefill_alias imma hcq8 ple_mmap aux_ecores base`), two opt-in arms outside that ladder (`routeprior10` at `STRATA_ROUTE_PRIOR=1.0`, `route_resident` at `STRATA_ROUTE_RESIDENT=4`), and `--arms` and `DRY_RUN=1` print the ladder
+  without touching the card, and the script refuses to run while `llama-swap.service` is active
+  (verified: it exits 1 with the stop/start recipe, because a mid-sweep model swap invalidates
+  every row). Probe rows go to `logs/results/strata-tuning-ab.jsonl`; engine self-reporting goes
+  to `logs/results/strata-tuning-diag.jsonl` (expert slots, decode hit rate, PCIe share, VRAM
+  free at request start, the `#2065` warning, pool worker placement, the arena page-backing note,
+  draft head token count, window-capture floor, and `read_bytes` per generated token from
+  `/proc/<pid>/io`, the ground-truth spill check AGENTS.md asks for). The diag parser was tested
+  against the real boot log: it returns 2,583 slots, 4.24 GiB, 58.6% hit rate, 3.8% PCIe, 410 MiB
+  free with the warning set, 5 pool workers on `2,4,6,8,10`, 106,299 draft tokens, a capture floor
+  of 282 MiB, `HugePages_Total 0`, and the arena line naming the 20,464-page hugetlb shortfall.
+- **`docs/strata-perf-next-steps-2026-10.md`**, the audit that backlog came from: fork status
+  against upstream `v0.2.7.1` (2,252 commits since the merge base `477ac13c`, 193 in `src/core`,
+  `src/kernels/cuda` and `src/spec`; only 8 commits still ours, two of them absorbed upstream),
+  the bench history table with the same-day repeat (69.60 against 67.88, so about 2 t/s of spread),
+  a ranked P0 to P3 list with the exact flag or env for each item, and the measurement rules I
+  will hold any arm to. It was written before any arm ran (a plat-tier bench evicts the model this
+  repo's agents run on); section 7 of that doc now records the first sweep and the upstream quality
+  evidence found next to it.
+- **`.agents/skills/strata-tuning/SKILL.md`**, a new skill for the no-rebuild half of the loop
+  (flags, `STRATA_*` env, taskset masks, expert profiles, draft vocab files). It carries the three
+  patterns worth keeping: arms overlay the served config rather than rebuild it, the engine's own
+  self-report is read as a measurement next to the speed row, and a win is not believed until
+  `read_bytes` per token is inside the PLE band (about 5 KB/token here). It also records how to
+  promote a winner (snapshot, one config line, `kill -HUP`, a 64-token smoke test, and why a
+  reasoning model returning empty `content` is not a failure), how to judge a row (paired `base`,
+  the ~3 t/s threshold against 2 t/s of spread, discard the first probes, fresh pp text, never
+  compare across governors), and the shape of benching the tier you are being served by
+  (`PI_MODEL=qwen38-flash-next-plat-vision` here, 12,282 MiB card against 11.5 to 11.7 GiB
+  resident, ~44 MiB as the idle-VRAM signal, detached launch with a delay, restart and health
+  check afterwards).
+
+### Changed (scripts)
+
+- **`.agents/skills/strata-cherry-pick/scripts/bench_strata.sh`** follows the gpu-handoff rules instead of
+  `pkill -f`: it records the llama-swap, llama-server, Strata and runner pids before stopping the unit,
+  kills leftover stack processes by pid (SIGTERM, then SIGKILL for the stragglers), refuses to bench when
+  the card is not idle (over `MAX_MIB=200` in use) or when the router unit is masked, prints card state
+  before and after, and on exit reports `systemctl --user is-active`, the journal's `listening` /
+  `Health check passed` lines and the VRAM we landed on. `MODE=tune` (default `code`) runs the tuning
+  ladder through the same handoff, with `TUNE_ARMS` to name the arms.
+- `bench-models/bench-env.sh`: comment recording that `pcie_link` is sampled once and an idle card reads
+  Gen1 because of ASPM (Gen4 16x confirmed under load with `nvidia-smi -q` on this box).
+
+### Changed (documentation)
+
+- **`AGENTS.md` plat tier description corrected on two claims it had wrong.** It listed
+  `STRATA_GR_NORM_FAST=1` as a tier feature; on CUDA that switch is opt-in
+  (`vendor/strata-lean/src/kernels/cuda/fused_gr.cu:1179-1180`), the served run config has no
+  `env` block and `llama-swap.yaml` sets no `STRATA_*` for any tier, so the tier runs with it off.
+  It also described "StrataGP 2 MB Transparent Huge Page (`MADV_HUGEPAGE`) kernel acceleration",
+  which traced back to a 17-line uncommitted local patch in the stale `vendor/strata` v0.1.30
+  checkout; the live engine says `MAP_HUGETLB unavailable (needed 20464 2 MiB pages,
+  vm.nr_hugepages=0) ... MADV_HUGEPAGE not requested`, and upstream stopped asking for it under
+  THP `always` (#771, #2126). The numbers line now reports 69.60 t/s with its 65.4 to 76.1 range,
+  the 67.88 repeat, pp 1,876 to 1,891, the 410 MiB free / `#2065` warning and the 58.6% cache hit
+  rate. `llama-swap.yaml` tier text ("74.8 t/s steady, 90.2 t/s peak") is untouched pending
+  approval, since editing a tier triggers a hot reload and a model swap.
+- **`.agents/skills/strata-cherry-pick/SKILL.md`** now leads with a switch-first policy and points
+  at the new sweep, compares against the newest tag instead of the tag the fork was cut from, lists
+  what a re-slice onto `v0.2.7` unlocks, records `--mtp-q4 head` as a rejected experiment, and
+  corrects its PR table: llama.cpp #31037 is real and open, **#30790 does not exist**, #29887 is
+  merged, and our own sm_89 MMVQ table (Strata #3453) is already in `v0.2.7` even though the PR
+  still shows open.
+- **`.agents/skills/strata-cherry-pick/scripts/audit_upstream.sh`** rewritten to answer "how far
+  behind are we, what is still ours, and is the thing I want to port already upstream": newest tag
+  (`v0.2.7.1` at fetch time), commit counts by path, `git log $NEWEST..HEAD` for our own commits, a
+  symbol-level upstream check (`STRATA_SPEC_COST`, `STRATA_KVA`, `STRATA_ROUTE_PRIOR` ...), and the
+  218 new `STRATA_*` switches a re-slice would bring in. `pipefail` was dropped: `| head` closes a
+  pipe, and a closed pipe is not an error in an audit script.
+- **`.agents/skills/qwen4exp-refresh/SKILL.md`**: script paths corrected from
+  `~/.gemini/config/skills/...` (which does not exist here) to `.agents/skills/qwen4exp-refresh/scripts/`,
+  the tier table given measured numbers, the Experimental tier's PR list updated (#29887 merged), the
+  served **MTP** tier named as the tree that has actually fallen behind (`vendor/llama.cpp-exp-stack-v2`,
+  b11268 from 2026-09-28 against master's b11913), the Strata audit pointed at `vendor/strata-lean`
+  instead of the stale `vendor/strata` v0.1.30 checkout, and a warning that a 16 KB `llama-server`
+  is llama.cpp's thin launcher against `libllama-server-impl.so`, not a broken build (verified with
+  `--version` on all three trees).
+- **`.agents/skills/strata-cherry-pick/SKILL.md` Step 1c: the five merge shapes I actually use**,
+  cheapest first, with the acceptance rule for each: switch-only promote (no git history changes),
+  single-commit cherry-pick gated on `git show "$TAG:path"` first, re-slice (apply engine code,
+  then the build gate, then the backend prune so the prune runs against the new tree, then tooling
+  fixes), re-implement over upstream's rewrite when they reworked the same file (and prove the
+  6-to-4 dispatch fold survived, because a merge can silently drop it), and reject-with-evidence so
+  a lost experiment does not come back. Hard rule stated once: upstream backends never come in.
+- **Two tool commands I had published were wrong, in the skill and in the new doc.** In the lean
+  tree `--reorder`, `--base` and `--no-base` belong to `tools/make_profile.py`, not
+  `tools/make_profile_mix.py` (which takes `TRACE[:WEIGHT] ... --out/--n-expert`); and the CUDA
+  trace path is `tools/collect_profile_traces.py CONFIG.json OUTDIR --mode routing` run under
+  `vendor/strata/.venv` (the default `usage` mode is the SYCL device counter, and plain `python3`
+  fails in `tools/strata_tokenizer.py:24` with `ModuleNotFoundError: No module named 'regex'`,
+  reproduced here). Same section also fixes the assumption that trace collection is CPU-only prep:
+  it boots the engine per prompt, so 45 prompts is about 30 minutes of card time.
+- **`vendor/strata-lean/README.md` prefill caveat made explicit** about which probe it quotes: the
+  table cells are the higher of each run's two pp8192 probes, the pairs span 1,869 to 1,883 (fork
+  plus table), 1,911 to 1,926 (v0.1.45) and 1,908 to 1,914 (v0.1.44.1), so the means are 1,876 /
+  1,919 / 1,911.
+- **`docs/strata-self-tuning-local-post.md`**, a draft blog post (`draft: true`,
+  `authored_by: ai-assisted`) about tuning the inference stack that serves the agent writing it:
+  the fork-distance numbers, the bench table with its same-day repeat and flat prefill, the engine's
+  own boot log as the map, the two tier features my AGENTS.md claimed that were never switched on,
+  and the 16 KB `llama-server` I misread as a broken build. Sweep results are held in an explicit
+  `{% pending %}` block so nothing unmeasured reads as a result.
+- **`docs/strata-perf-next-steps-2026-10.md` §6: paste-ready Linear ticket text** for P0-1, P0-2,
+  P0-3, P0-8, P2-10 and the stale tier description, each with the harness that measures it and a
+  "done when" clause. This session has no Linear tool exposed, so they are text for you to paste
+  into project `L3MS` rather than issues I created.
+- **`vendor/strata-lean/README.md`**: the candidate backlog replaced with the measured list, the
+  tier's own load-time self-report added as a table, and two stale items retired (MMVQ-IL merged
+  and default-on for sm_89; the draft head is already trimmed to 106,299 tokens, so the question is
+  which subset, not whether to trim). The progression table now says prefill did not improve (1,883
+  against 1,926 on plain v0.1.45).
 
 ### Added (media)
 
@@ -111,7 +393,7 @@
 
 - `media-models/qwen_image_21.py` budgets the router's cold start instead of reading it as a
   dead engine: the health check and the `/prompt` POST now wait like a boot (measured 246 s
-  before `/system_stats` answered cold; the router holds `/prompt` open while it swaps — 5m45s
+  before `/system_stats` answered cold; the router holds `/prompt` open while it swaps - 5m45s
   observed, and a client that hangs up leaves a `499`, which is not an engine failure), and a
   slow `/history` round-trip is retried because the deadline, not one request, is the contract.
   `AGENTS.md` and `docs/migration/media-through-llama-swap.md` record the ComfyUI-through-the-
