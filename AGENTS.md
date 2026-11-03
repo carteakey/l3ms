@@ -19,7 +19,10 @@ their old guides are kept in `docs/migration/history/`.
   `docs/media-models.md`).
 - ComfyUI through the router, measured 2026-10-15/17 (details:
   `docs/migration/media-through-llama-swap.md`):
-  - Cold start is **~246 s** (`--check` and any client must budget the boot, not a request).
+  - Cold start is **~246 s** (`--check` and any client must budget the boot, not a request). The one
+    eviction measured since on the H3 video lane booted in 7.14 s (`/system_stats` polled alongside the
+    first submit, 2026-10-27, `torch_vram_total: 0`), and that row still took 117 s end to end: keep
+    budgeting 246 s, and expect generation rather than the boot to dominate a video row.
   - Requesting `/comfyui/` evicts the resident language/vision model — including the one this
     agent runs on. A batch is **one blocking call**: no LLM request until it returns, or the
     router swaps ComfyUI off the card mid-batch (`NVRM: Out of memory`).

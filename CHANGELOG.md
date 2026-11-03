@@ -338,6 +338,27 @@
   leaving the next reader to diff the branches. Table-driven tests for the rule (13 cases) plus the
   bare-key case added to the MiniMax endpoint test: 84 green across the 10 `media-models` test
   files.
+- **`models/minimax-h3-turbo-comfyui-files.txt` pins the Turbo LoRA, and the lane's first measured rows.**
+  The pin records Hugging Face repo `lightx2v/Minimax-h3-Turbo` at revision
+  `30f485ed874aa44c8183348ad361c5eabad318da` and the file
+  `minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors`: 1,956,193,000 B, sha256
+  `5b9ab5ade15d0775676d01a907268a69a1468dc6033b3b0d3ded5502f3ebb84c`, installed under that name in
+  `loras/`. Same filename and strength 1 as the official graph's `LoraLoaderModelOnly` node
+  (`workflows/minimax-h3/video_minimax_h3_r2v-official.json`, node 145). In
+  `media-models/minimax_h3_video.py` the `--turbo-lora NAME[:STRENGTH]` flag is append-mode and empty by
+  default, which reproduces the official ComfySwitchNode default - no LoRA, 20 steps - so the probe rows
+  below ran **without** it, and `MiniMaxH3SigmaShift` is opt-in too (`--sigma-shift VIDEO:AUDIO`, absent
+  from the official graph). Measured cost of that lane, 2026-10-27 23:01: a 124-frame 0.2 MP row (608x352,
+  20 steps, `simple` scheduler, `res_multistep`, audio on) ran 109.1 s and 132.4 s warm (0.88 and 1.06
+  s/frame) and 117 s for the row that carried the cold path. The 34.0 GiB checkpoint set (20,970,379,616 B
+  int8 DiT + 15,683,129,587 B NVFP4 text encoder + 266,733,757 B video VAE + 61,272,409 B audio VAE =
+  36,981,515,369 B) is why a video row is never cheap; a 243-frame 10 s row is the same weights plus 1.96x
+  the steps. Details: `l2m2-nsfw` `docs/experiments/h3-motion-and-keyframes.md`.
+- **A measured exception to the ~246 s cold start, recorded in `AGENTS.md`.** A `/system_stats` call issued
+  with the first submit of that session reported ComfyUI ready 7.14 s after the router selected it, with
+  `torch_vram_total: 0` meaning the card had just been taken back from the evicted language model. The 246 s
+  figure stays as the budget (measured 2026-10-15/17, never reproduced on this lane, and the row above still
+  took 117 s end to end), but the boot is not what dominates a video row's wall time.
 
 ### Added (serving)
 
