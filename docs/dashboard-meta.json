@@ -1,5 +1,5 @@
 {
-  "updated": "2026-10-14",
+  "updated": "2026-11-05",
   "system": {
     "gpu": "RTX 4070 12GB",
     "cpu": "i5-12600K",
@@ -9,15 +9,15 @@
   "methodology": "The ranked list contains only results from the RTX 4070 node above. Historical fields that were not captured in the same run are shown as not recorded instead of being inferred. Community hardware is kept in a separate, unranked dataset. Retired profiles keep their last measured performance in the archive tab; they are no longer reproducible on this node. Qwen3.8 serving metadata was imported from original checkout commit ed7538a; these are source-reported historical measurements, not monorepo acceptance results. Referenced new benchmark harnesses were not committed in that source snapshot and have not been imported. Historical model results may use different hardware settings.",
   "models": {
     "qwen38-flash-next-plat": {
-      "displayName": "Qwen3.8-Flash-Next Plat (Strata v0.1.45)",
-      "summary": "Platinum tier: Strata v0.1.45 with online dynamic expert VRAM caching (3,086 hot experts in VRAM), native MTP draft head (Q2_0), 128k context with dynamic KV streaming, native 2 MB Transparent Huge Page (THP) memory acceleration, and planar decode kernels. 65.8 t/s steady decode on code (probes: 65.1-66.5 t/s, 70.0 t/s peak burst), pp 947-1,885 t/s on DDR5-5800.",
-      "tps": 65.8,
+      "displayName": "Qwen3.8-Flash-Next Plat (Strata v0.1.45, UD-IQ2_XS)",
+      "summary": "Platinum tier: Strata v0.1.45 with Unsloth Dynamic V3.1 UD-IQ2_XS quant (Q5_0 down-experts) paired with unquantized Q8_0 PLE on NVMe. Dynamic VRAM expert caching (2,711 expert pairs in 4.44 GiB VRAM), native MTP draft head (Q2_0, 77-88% acceptance), 128k context with --kv-grow elastic KV allocation. 59.7 t/s steady decode on code (62.3 t/s peak), pp 1,885 t/s on DDR5-5600, 39.4 GB working set (4.4 GB RAM freed).",
+      "tps": 59.7,
       "pp": 1885,
       "testedContext": "128k",
-      "cacheState": "k8v4 KV; 3,086 hot experts in VRAM; native THP 2MB pages",
-      "draftAcceptance": "70-78% (native Q2_0 MTP, spec 4)",
-      "llamaCppCommit": "Strata v0.1.45 (native SM89 Ada + dynamic expert VRAM cache + MTP)",
-      "quant": "ISTA-DASLab GSQ-RCO IQ3_XXS",
+      "cacheState": "k8v4 KV; 2,711 hot expert pairs in VRAM; --kv-grow; native THP 2MB pages",
+      "draftAcceptance": "77-88% (native Q2_0 MTP, spec 4)",
+      "llamaCppCommit": "Strata v0.1.45 (sm_89 Ada + dynamic expert VRAM cache + MTP + UD-IQ2_XS)",
+      "quant": "Unsloth Dynamic UD-IQ2_XS + Q8_0 PLE",
       "tags": [
         "MoE",
         "Strata",
@@ -28,15 +28,15 @@
       "benchmark": "bench-models/bench-qwen38-refresh-ab.sh"
     },
     "qwen38-flash-next-plat-vision": {
-      "displayName": "Qwen3.8-Flash-Next Plat Vision (Strata)",
-      "summary": "Platinum multimodal tier: Strata engine paired with CPU-offloaded strata-vision image encoder (mmproj-F16). Retains 100% of GPU expert cache with zero VRAM loss for vision. 53-60 t/s decode, 128k context.",
+      "displayName": "Qwen3.8-Flash-Next Plat Vision (Strata v0.1.44.1, UD-IQ2_XS)",
+      "summary": "Platinum multimodal tier: Strata engine paired with CPU-offloaded strata-vision image encoder (mmproj-F16) and Unsloth Dynamic UD-IQ2_XS weights. Retains 100% of GPU expert cache with zero VRAM loss for vision. 53-60 t/s decode, 128k context.",
       "tps": 58.0,
       "pp": 1800,
       "testedContext": "128k",
-      "cacheState": "k8v4 KV; CPU vision encoder; THP 2MB pages",
-      "draftAcceptance": "70-80% (native Q2_0 MTP)",
-      "llamaCppCommit": "Strata v0.1.30 + strata-vision (mtmd)",
-      "quant": "ISTA-DASLab GSQ-RCO IQ3_XXS + mmproj-F16",
+      "cacheState": "k8v4 KV; CPU vision encoder; 2,711 hot expert pairs in VRAM; THP 2MB pages",
+      "draftAcceptance": "77-88% (native Q2_0 MTP)",
+      "llamaCppCommit": "Strata v0.1.44.1 + strata-vision (mtmd)",
+      "quant": "Unsloth Dynamic UD-IQ2_XS + mmproj-F16",
       "tags": [
         "MoE",
         "Vision",
@@ -756,6 +756,16 @@
       "quant": "ISTA IQ3_XXS / SC117",
       "vram": "11.7 GB",
       "breakthrough": "Strata v0.1.44.1 engine refresh under verified performance governor: 62.2 t/s steady decode (64.8 max, 90.2 peak), 1,992 t/s prefill @ 8k, expert cache hit rate 75-78%, and abliterated SC117 variant integration."
+    },
+    {
+      "date": "2026-11-05",
+      "milestone": "Unsloth Dynamic UD-IQ2_XS + Q8_0 PLE",
+      "engine": "Strata v0.1.45 (sm_89 Ada)",
+      "decode": 59.7,
+      "prefill": 1885.0,
+      "quant": "UD-IQ2_XS + Q8_0 PLE",
+      "vram": "11.6 GB",
+      "breakthrough": "Unsloth Dynamic V3.1 (Q5_0 down-experts) paired with unquantized Q8_0 PLE on NVMe: freed 4.4 GB RAM, 77-88% draft acceptance, 59.7 t/s steady decode with 2,711 expert pairs in VRAM."
     }
   ],
   "archived": [

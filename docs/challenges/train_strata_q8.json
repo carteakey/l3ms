@@ -1,0 +1,38 @@
+{
+  "label": "strata_q8_ple_after",
+  "wall_sec": 265.91,
+  "timings": {
+    "cache_n": 0,
+    "prompt_n": 107,
+    "prompt_ms": 859.2,
+    "prompt_per_token_ms": 8.03,
+    "prompt_per_second": 124.5,
+    "predicted_n": 14722,
+    "predicted_ms": 196701.0,
+    "predicted_per_token_ms": 13.361,
+    "predicted_per_second": 74.8,
+    "draft_n": 12623,
+    "draft_n_accepted": 9880
+  },
+  "usage": {
+    "prompt_tokens": 107,
+    "completion_tokens": 14722,
+    "total_tokens": 14829,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    }
+  },
+  "predicted_per_second": 74.8,
+  "analysis": {
+    "bytes": 36222,
+    "has_threejs": true,
+    "has_camera_controls": true,
+    "has_weather_controls": true,
+    "has_train": true,
+    "has_lighting": true,
+    "line_count": 1023,
+    "is_complete": true
+  },
+  "reasoning_len": 6050,
+  "content_len": 37991
+}

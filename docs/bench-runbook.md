@@ -128,19 +128,88 @@ You can also run preflight checks and view frontmatter manually before any test 
 If governor or EPP is not `performance`, fix before running:
 
 ```sh
-sudo cpupower frequency-set -g performance
-# or via tuned-ppd (CachyOS recommended over power-profiles-daemon):
-sudo tuned-adm profile throughput-performance
+# Route 1, no new packages. Writes GOVERNOR/EPP into
+# /etc/default/cpupower-service.conf and enables the packaged cpupower.service,
+# whose helper applies them at boot (cpupower frequency-set -g, cpupower set -e).
+sudo ./maintenance/cpu-power-state.sh apply-cpupower --yes
+
+# Route 2, tuned. CachyOS ships its own tuned in the cachyos repo (checked 2026-10-29):
+# cachyos/tuned-cachy 2.27.0-3 and cachyos/tuned-cachy-ppd 2.27.0-3, the second one keeping
+# KDE's power slider working on top of tuned. Upstream extra/tuned + extra/tuned-ppd are at
+# 2.28.0-1. Pick one pair, not both.
+sudo pacman -S --noconfirm tuned-cachy tuned-cachy-ppd
+sudo ./maintenance/cpu-power-state.sh apply-tuned --yes --ppd   # installs the repo profile as "l3ms-bench"
+
+./maintenance/cpu-power-state.sh show      # the whole layering, services included
+./maintenance/cpu-power-state.sh check     # the bench gate: exit 1 with the reasons listed
 ```
 
-**Why this happens on CachyOS:** `intel_pstate` defaults to `schedutil` or
-`powersave` EPP, optimised for responsiveness. CachyOS recommends `tuned-ppd`
-for persistent power profile management. See:
-https://wiki.cachyos.org/configuration/general_system_tweaks/
+`bench-models/run-strata-tuning-dark.sh` runs that check before it stops the router and
+refuses with `rc=3` (`cpu-gate=failed` in the status line) unless `FORCE_CPU=1`, so a 20-minute dark
+ladder cannot quietly measure a
+state no other row was taken in. `bench-models/bench-env.sh` now writes `hwp_status`,
+`hwp_min_perf_pct`, `hwp_max_perf_pct`, `hwp_no_turbo`, `hwp_dynamic_boost` and
+`governors_all` into every run's frontmatter.
 
-**Intel Alder Lake specific:** even with governor=performance, EPP matters.
-`balance_performance` EPP caps boost duration on the P-cores under sustained
-load. Always verify EPP reads `performance`, not just the governor.
+**What actually held the governor before the fix (measured 2026-10-29 14:04, boot 05:19).** All 16 logical
+CPUs read `scaling_governor = powersave` with `energy_performance_preference = performance`,
+`intel_pstate` active, `min_perf_pct = 17`, `max_perf_pct = 100`, `no_turbo = 0`,
+`hwp_dynamic_boost = 0`. power-profiles-daemon 0.30 is running with
+`Profile=performance` (`/var/lib/power-profiles-daemon/state.ini`,
+`CpuDriver=intel_pstate`, `Actions: trickle_charge=true`) and the governor still reads
+powersave, so the daemon's intel_pstate path is an EPP writer, not a governor writer.
+`cpupower.service` is installed (cpupower 7.2.11-1) and **disabled**, and
+`/etc/default/cpupower-service.conf` is the packaged all-commented default. `intel-lpmd`
+0.1.1-2 ran at boot, found no config for this CPU (`intel_lpmd_config_F6_M151*.xml`) and
+exited. tuned is **not installed** (`pacman -Q tuned` -> not found, no `/etc/tuned`, no
+`tuned-adm`), so tuned is not the thing holding powersave on this box; the kernel default is.
+
+The regression mechanism is boring and worth writing down: **a governor choice does not
+survive a reboot.** Something wrote `performance` before the 2026-08-31 verification below,
+nothing writes it now, and each boot returns it to intel_pstate's default. PPD re-applies EPP
+on profile change, which is exactly why the EPP check keeps passing while the governor check
+fails. Every row recorded in this repo since then - the 69.60 t/s Strata steady decode,
+sweep 1, sweep 2, the deep-context ladder - was measured in the
+`powersave` / `min_perf_pct = 17` state, so those rows are comparable with each other and
+should not be compared with anything verified on 2026-08-31 until the paired control is re-run
+in the fixed state.
+
+**Applied 2026-10-29 14:35:35 (route 1, no new packages).** `GOVERNOR='performance'` and
+`EPP='performance'` written into `/etc/default/cpupower-service.conf` (snapshot
+`/etc/default/cpupower-service.conf.bak-20261029-143535`), `cpupower.service` enabled and `active
+(exited)`; the packaged `/usr/lib/systemd/scripts/cpupower` reads that EnvironmentFile at boot, so this
+state survives the reboot that lost the previous one. `./maintenance/cpu-power-state.sh check` returns 0.
+What the fix did not change is `min_perf_pct`, still 17, and a load test says that is fine here: a 4-core
+P-core busy loop held `scaling_cur_freq` at 4,499,954 to 4,500,045 kHz from the first sample, no ramp,
+`cpuinfo_avg_freq` 4.50 GHz, while idle samples on policy4 fell to 800,821 kHz, matching
+`scaling_min_freq` 800,000 and about 17% of that core's 4,900,000 kHz max. On intel_pstate active mode the
+floor line describes how deep HWP may idle when nothing is running; it is not a cap on a loaded core, which
+is why `check` reports it as a note once the governor is right, and why tuned remains the route for the case
+where a row actually shows a ramp (only tuned writes `min_perf_pct=100`). PPD still owns EPP
+(`Profile=performance`), so re-run `show` after any desktop profile change instead of assuming the conf file
+is the last writer.
+
+**Who can apply it without waking anyone (the sudoers grant, added 2026-10-29).** The read side was
+never privileged: sysfs, `systemctl is-active/is-enabled` and `cpupower frequency-info` work as the
+user, which is why `show` and `check` never needed sudo. The write side goes through a root-owned
+helper so the grant can stay narrow:
+
+```sh
+sudo install -m 0755 -o root -g root maintenance/l3ms-cpu-power-helper.sh /usr/local/bin/l3ms-cpu-power
+sudo install -m 0440 -o root -g root maintenance/sudoers/l3ms-cpu-power /etc/sudoers.d/l3ms-cpu-power
+sudo visudo -cf /etc/sudoers.d/l3ms-cpu-power        # must parse before you keep it
+# then, no password:
+sudo /usr/local/bin/l3ms-cpu-power apply
+sudo /usr/local/bin/l3ms-cpu-power status
+```
+
+The grant is four fixed verbs (`status`, `apply`, `tuned`, `revert`) on one absolute path. It is not
+`cpupower *` (flags would get through), not `tuned-adm *` (a tuned profile can write `[sysctl]` and
+`[bootloader]` state, so the profile is embedded in the helper rather than read from the repo), and
+above all not `systemctl *`: even restricted to named units, `systemctl edit <unit>` writes a drop-in
+that systemd then executes as root, which is a full escalation dressed up as a restricted verb list.
+And no grant may name a file inside `~/repos`, because the agent can edit that file and then sudo-run
+it. That is the entire reason the helper is installed root-owned instead of being called in place.
 
 ### CPU power layering — governor vs EPP vs profile managers (concepts)
 
@@ -159,28 +228,49 @@ Key implications:
   governor + EPP=`performance` is a fully valid high-performance setup (the
   "powersave" governor just delegates to HWP, and the EPP hint makes HWP
   aggressive). Only the legacy `acpi-cpufreq` driver makes `powersave`
-  actually mean slow. **EPP is the knob that matters** — it is also the one
+  actually mean slow. **EPP is the knob that matters** - it is also the one
   profile daemons silently flip (see `docs/bench-troubleshooting.md`).
+  For a *bench* row there is a second question the label does not answer:
+  whether the cores sit at the ceiling or ramp to it. That is the
+  `min_perf_pct` floor plus the ramp you can see in the first probes of a run,
+  which is why `maintenance/cpu-power-state.sh check` reports all four HWP lines
+  instead of just the governor.
 - **Tuned vs PPD vs tuned-ppd:** CachyOS ships power-profiles-daemon by
   default (KDE integration), not Tuned (Fedora/RHEL default). `tuned-ppd` is
-  the shim package that provides the PPD API on top of the Tuned daemon —
+  the shim package that provides the PPD API on top of the Tuned daemon -
   hence the historical swap documented in `bench-troubleshooting.md`. All three are interchangeable owners of
   the same knobs; only one should be active. Tuned's
   `throughput-performance` profile ≡ governor=performance + EPP=performance
-  plus a few sysctls — functionally equivalent to the manual setup.
+  plus a few sysctls - functionally equivalent to the manual setup. Its CPU
+  block, read from upstream on 2026-10-29, is exactly what a bench state needs:
+
+  ```
+  [cpu]
+  governor=performance
+  energy_perf_bias=performance
+  min_perf_pct=100
+  energy_performance_preference=performance
+  boost=1
+  ```
+
+  `maintenance/tuned/l3ms-bench/tuned.conf` copies that block and drops upstream's
+  `[acpi] platform_profile=performance`, because this firmware does not expose
+  `/sys/firmware/acpi/platform_profile` (only `pm_profile`).
 - **I/O scheduler is a separate, unrelated layer** (block-device request
   ordering: `none` NVMe / `mq-deadline` SATA / `bfq` HDD — checked by
   `preflight-check.sh`). It does not interact with CPU frequency scaling.
 
-**Current box state (verified 2026-08-31):** PPD 0.30 installed and active
+**Current box state (verified 2026-08-31, superseded by the 2026-10-29 reading above):** PPD 0.30 installed and active
 with `Profile=performance` (`/var/lib/power-profiles-daemon/state.ini`),
 governor=performance, EPP=performance, `hwp_dynamic_boost=0`. Tuned /
-tuned-ppd are *not* installed — the tuned-ppd swap (see
+tuned-ppd are *not* installed - the tuned-ppd swap (see
 `docs/bench-troubleshooting.md`) was later reverted;
 the historical 40.60 t/s figure proves the EPP/perf-profile mechanism was the
 root cause, not tuned-ppd itself. PPD at `performance` profile reproduces the
 same sysfs state. Note this means PPD owns the knobs again: after any login /
-profile change, re-verify sysfs rather than trusting the daemon.
+profile change, re-verify sysfs rather than trusting the daemon. The 2026-10-29
+reading shows exactly that warning paying off: same daemon, same
+`Profile=performance`, governor back to the kernel default.
 
 ### Tg variability forensics — moved
 

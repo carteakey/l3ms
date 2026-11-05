@@ -1,0 +1,38 @@
+{
+  "label": "iq4_nl_scorched_earth",
+  "wall_sec": 250.67,
+  "timings": {
+    "cache_n": 0,
+    "prompt_n": 107,
+    "prompt_ms": 961.8,
+    "prompt_per_token_ms": 8.989,
+    "prompt_per_second": 111.2,
+    "predicted_n": 14179,
+    "predicted_ms": 249694.4,
+    "predicted_per_token_ms": 17.61,
+    "predicted_per_second": 56.8,
+    "draft_n": 12464,
+    "draft_n_accepted": 9420
+  },
+  "usage": {
+    "prompt_tokens": 107,
+    "completion_tokens": 14179,
+    "total_tokens": 14286,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    }
+  },
+  "predicted_per_second": 56.8,
+  "analysis": {
+    "bytes": 38447,
+    "has_threejs": true,
+    "has_camera_controls": true,
+    "has_weather_controls": true,
+    "has_train": true,
+    "has_lighting": true,
+    "line_count": 737,
+    "is_complete": true
+  },
+  "reasoning_len": 2796,
+  "content_len": 39701
+}

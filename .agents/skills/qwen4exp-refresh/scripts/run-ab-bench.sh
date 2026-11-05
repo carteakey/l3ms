@@ -13,6 +13,8 @@ ok()  { printf '\033[1;32m✓\033[0m %s\n' "$*"; }
 
 log "Pausing llama-swap router service for full-VRAM benchmark..."
 systemctl --user stop llama-swap.service || true
+pkill -f "strata.*--pack" 2>/dev/null || true
+pkill -f "llama-server" 2>/dev/null || true
 sleep 3
 
 cleanup() {

@@ -1,0 +1,36 @@
+{
+  "label": "llamacpp_q8_ple_after",
+  "wall_sec": 660.02,
+  "timings": {
+    "cache_n": 30,
+    "prompt_n": 77,
+    "prompt_ms": 1619.466,
+    "prompt_per_token_ms": 21.032025974025974,
+    "prompt_per_second": 47.546536944894186,
+    "predicted_n": 13523,
+    "predicted_ms": 658390.858,
+    "predicted_per_token_ms": 48.69034595474042,
+    "predicted_per_second": 20.537952244774335
+  },
+  "usage": {
+    "completion_tokens": 13523,
+    "prompt_tokens": 107,
+    "total_tokens": 13630,
+    "prompt_tokens_details": {
+      "cached_tokens": 30
+    }
+  },
+  "predicted_per_second": 20.537952244774335,
+  "analysis": {
+    "bytes": 40124,
+    "has_threejs": true,
+    "has_camera_controls": true,
+    "has_weather_controls": true,
+    "has_train": true,
+    "has_lighting": true,
+    "line_count": 1009,
+    "is_complete": true
+  },
+  "reasoning_len": 1658,
+  "content_len": 41448
+}

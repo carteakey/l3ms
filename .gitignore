@@ -21,6 +21,10 @@
 
 # Ignore log files
 /*.log
+logs/*.log
+logs/*.status
+logs/results/strata-tune-*/
+.zcode/
 
 # Bench raw logs — gitignored (large, redundant; structured results are tracked)
 bench-models/logs/*

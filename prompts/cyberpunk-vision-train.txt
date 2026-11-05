@@ -1,0 +1,10 @@
+You are an expert Three.js creative developer. Examine this visual reference screenshot of a cyberpunk 3D scene featuring a futuristic train/monorail traveling through a neon-lit metropolis in the rain.
+Your task is to write complete, production-grade, self-contained HTML/JavaScript code implementing an interactive 3D scene in Three.js that recreates the visual elements, mood, and architecture of this image as faithfully as possible.
+
+Requirements:
+1. Monorail / Train: Build a detailed futuristic train (body geometry, glowing neon cockpit/windows, pantograph/rail attachment, engine thrusters) perched on an elevated track beam.
+2. Architecture & City: Generate towering futuristic skyscrapers flanking the track, illuminated with volumetric window grids, holographic billboard advertisements, neon trim, and rooftop antennae.
+3. Lighting & Atmosphere: Cinematic cyberpunk palette (magenta, deep cyan, electric blue, amber). Volumetric dark atmospheric fog, directional spotlighting, and reflective wet ground/track surfaces.
+4. Weather: Dynamic falling rain particle system with splash rings and subtle screen streaks.
+5. Camera & Interactivity: OrbitControls with auto-rotation or cinematic camera dolly matching the perspective in the image.
+6. Execution: Deliver a single, complete, valid HTML file containing all CSS, HTML, and JS (CDN Three.js r128). Uncap output — provide the full unminified code without placeholders or omissions.

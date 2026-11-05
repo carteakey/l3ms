@@ -1,0 +1,33 @@
+# /etc/sudoers.d/l3ms-cpu-power
+#
+# Narrow grant: let an agent put this box in the bench CPU power state without a password.
+# Install with:
+#   sudo install -m 0440 -o root -g root maintenance/sudoers/l3ms-cpu-power /etc/sudoers.d/l3ms-cpu-power
+#   sudo visudo -cf /etc/sudoers.d/l3ms-cpu-power      # must parse before you keep it
+#   sudo rm -f /etc/sudoers.d/l3ms-cpu-power           # to take it back
+#
+# What is deliberately NOT granted, and why:
+#   sudo cpupower *            - a wildcard lets flags through (frequency-set -p/-f, set -b),
+#                                which is a knob an agent should not be free to move.
+#   sudo systemctl *           - even unit-restricted, systemctl has edit/link/set-property/revert,
+#                                and `systemctl edit <unit>` writes a drop-in that systemd then runs
+#                                as root. That is a full escalation, not a restricted verb list.
+#   sudo tuned-adm *           - a tuned profile can write [sysctl] and [bootloader] state. The
+#                                profile has to be root-owned text, so the grant goes through the
+#                                helper (which has the [cpu] block embedded) and not through tuned-adm.
+#   sudo <anything in ~/repos> - a grant naming a repo file is a grant on root, because the agent can
+#                                edit that file and then sudo-run it. Hence the installed root-owned
+#                                copy at /usr/local/bin/l3ms-cpu-power.
+#
+# What needs no grant at all: the read side. scaling_governor, energy_performance_preference,
+# the intel_pstate files, `systemctl is-active/is-enabled` and `cpupower frequency-info` are all
+# readable unprivileged, which is why maintenance/cpu-power-state.sh show and check run without
+# sudo and never needed one.
+
+# Four fixed verbs, fixed absolute path, no wildcards anywhere. apply/tuned/revert write
+# /etc/default/cpupower-service.conf and the cpupower unit; every value they write is a literal
+# inside the helper.
+kchauhan ALL=(root) NOPASSWD: /usr/local/bin/l3ms-cpu-power status, /usr/local/bin/l3ms-cpu-power apply, /usr/local/bin/l3ms-cpu-power tuned, /usr/local/bin/l3ms-cpu-power revert
+
+# If you would rather an agent can only apply and never undo, keep only these two verbs:
+# kchauhan ALL=(root) NOPASSWD: /usr/local/bin/l3ms-cpu-power status, /usr/local/bin/l3ms-cpu-power apply

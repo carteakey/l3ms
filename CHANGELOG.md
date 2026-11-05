@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Added (Unsloth Dynamic V3.1 audit & Strata v0.2.11 intake analysis)
+
+- **Audited Unsloth Dynamic V3.1 Qwen3.8-Flash-Next Quants**:
+  - Analyzed the 2026-11-04 Dynamic V3.1 release across agentic benchmarks (Terminal Bench 2.1, DeepSWE v1.1, LiveCodeBench v6).
+  - Clarified iso-size alignment: Unsloth compares against GSQ-RCO by total file size rather than nominal bit name. At 75.8 GB total file size, `UD-IQ2_XS` matches the exact 43.8 GB non-PLE fast RAM footprint of GSQ-RCO `IQ3_XXS` while scoring +11.5 points higher on DeepSWE (58.4 vs 46.9).
+  - Identified that `UD-IQ3_XXS` (83.7 GB total, ~54.9 GB non-PLE RAM) is an iso-size peer to `IQ3_S`, which pushes 64 GB host RAM into swap and SSD expert re-fault thrashing.
+  - Documented findings in `docs/strata-evaluation-internal.md` (§18) and updated `docs/qwen38-flash-next-variant-ranking.md`.
+- **Integrated and Verified Unsloth `UD-IQ2_XS` Serving on Strata Platinum Tier**:
+  - Downloaded `UD-IQ2_XS` Shards 1 and 2 to `/mnt/dev/models/unsloth/UD-IQ2_XS/` and paired with existing full-fidelity `Q8_0` PLE table (54.4 GB on NVMe).
+  - Resolved split validation across `tools/iq_pack.py`, `gguf_reader.hpp`, and `native_dense.cpp` for external PLE shards, allowing seamless 3-shard Unsloth weights to pair with 2-shard unquantized PLE tables.
+  - Generated Strata pack at `vendor/Strata-data/packs/ud-iq2_xs` (1.5 GB `dense.bin`, 92 KB index).
+  - Wired into `llama-swap.yaml` as primary Platinum tier `qwen38-flash-next-plat` (and alias `qwen38-flash-next-plat-ud-iq2`).
+  - Empirical verification: 39.38 GiB fast RAM, 2,711 expert slots in 4.33 GiB VRAM, 73.4% to 78.6% MTP draft acceptance, ~55 to 68 t/s decode, and zero SSD expert refaulting (~3.4 KB/token pure PLE traffic).
+
+  - Ported commit `aa678f10` (`Q5_0` expert dot activation offset fix: `d5 * d8 * (sumi - 16 * sumu)`) into `carteakey/strata-lean` (branch `strata-lean`), resolving expert error on `Q5_0` down layers.
+  - Updated `tools/iq_pack.py` with upstream v4 shard handling to parse the modular engram layout without full de-sharding.
+  - Successfully recompiled lean Ada `sm_89` binary (`vendor/strata-lean/build/strata`, 73 MB).
+  - Updated skills (`strata-cherry-pick`, `qwen4exp-refresh`) and documented benchmark protocols for `UD-IQ2_XS` evaluation.
+
 ### Added (Strata Lean fork rename and QSA fusion)
 
 - **Fork Renamed to `carteakey/strata-lean` with Default Branch `strata-lean`**:
@@ -350,7 +369,7 @@
   below ran **without** it, and `MiniMaxH3SigmaShift` is opt-in too (`--sigma-shift VIDEO:AUDIO`, absent
   from the official graph). Measured cost of that lane, 2026-10-27 23:01: a 124-frame 0.2 MP row (608x352,
   20 steps, `simple` scheduler, `res_multistep`, audio on) ran 109.1 s and 132.4 s warm (0.88 and 1.06
-  s/frame) and 117 s for the row that carried the cold path. The 34.0 GiB checkpoint set (20,970,379,616 B
+  s/frame) and 117 s for the 73-frame row that carried the cold path, 1.60 s/frame. The 34.0 GiB checkpoint set (20,970,379,616 B
   int8 DiT + 15,683,129,587 B NVFP4 text encoder + 266,733,757 B video VAE + 61,272,409 B audio VAE =
   36,981,515,369 B) is why a video row is never cheap; a 243-frame 10 s row is the same weights plus 1.96x
   the steps. Details: `l2m2-nsfw` `docs/experiments/h3-motion-and-keyframes.md`.

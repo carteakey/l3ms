@@ -1,0 +1,868 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>NEON TRANSIT // Cyberpunk Monorail Metropolis</title>
+<style>
+  :root{
+    --magenta:#ff2bd6;
+    --cyan:#19f0ff;
+    --electric:#3aa0ff;
+    --amber:#ff9b2e;
+    --void:#02030a;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:var(--void);}
+  #scene{position:fixed;inset:0;display:block;width:100%;height:100%;}
+  /* ---- cinematic overlays ---- */
+  #vignette{
+    position:fixed;inset:0;pointer-events:none;z-index:5;
+    background:
+      radial-gradient(ellipse 60% 50% at 50% 45%, rgba(0,0,0,0) 35%, rgba(0,0,0,0.55) 100%);
+    mix-blend-mode:multiply;
+  }
+  #scanlines{
+    position:fixed;inset:0;pointer-events:none;z-index:6;opacity:.10;
+    background:repeating-linear-gradient(0deg, rgba(255,255,255,.10) 0 1px, rgba(0,0,0,0) 1px 3px);
+  }
+  #grain{
+    position:fixed;inset:0;pointer-events:none;z-index:6;opacity:.05;
+    background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+  }
+  /* subtle screen rain-streaks */
+  #streaks{
+    position:fixed;inset:0;pointer-events:none;z-index:5;opacity:.12;mix-blend-mode:screen;
+    background-image:
+      repeating-linear-gradient(74deg, rgba(25,240,255,.0) 0 18px, rgba(25,240,255,.18) 18px 19px, rgba(255,43,214,.10) 19px 20px),
+      repeating-linear-gradient(98deg, rgba(255,255,255,.0) 0 26px, rgba(255,155,46,.10) 26px 27px);
+    animation:streak 0.9s linear infinite;
+  }
+  @keyframes streak{from{background-position:0 0,0 0;}to{background-position:40px 120px,-30px 120px;}}
+  /* HUD */
+  #hud{
+    position:fixed;z-index:7;top:18px;left:20px;color:#cfe9ff;
+    font-family:"Segoe UI",Helvetica,Arial,sans-serif;letter-spacing:.18em;
+    text-transform:uppercase;font-size:11px;pointer-events:none;
+    text-shadow:0 0 10px rgba(25,240,255,.6);
+  }
+  #hud b{color:var(--cyan);}
+  #hud .mag{color:var(--magenta);}
+  #hud small{display:block;opacity:.55;margin-top:6px;letter-spacing:.3em;font-size:9px;}
+  #loader{
+    position:fixed;inset:0;z-index:20;display:flex;align-items:center;justify-content:center;
+    background:var(--void);color:var(--cyan);font-family:monospace;letter-spacing:.4em;font-size:12px;
+    text-transform:uppercase;transition:opacity .8s ease;
+  }
+  #loader.hidden{opacity:0;pointer-events:none;}
+  .bar{position:fixed;z-index:7;bottom:14px;left:20px;color:#7fb0c8;font-family:monospace;font-size:10px;letter-spacing:.25em;opacity:.6;}
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+<div id="vignette"></div>
+<div id="streaks"></div>
+<div id="scanlines"></div>
+<div id="grain"></div>
+<div id="hud">
+  <b>NEON&nbsp;TRANSIT</b> // LINE&nbsp;<span class="mag">7</span> — DOWNTOWN&nbsp;SPIRE&nbsp;CORRIDOR
+  <small>monorail&nbsp;mk-ix &nbsp;·&nbsp; weather:&nbsp;acid-rain &nbsp;·&nbsp; visibility:&nbsp;low</small>
+</div>
+<div class="bar">// drag to orbit · scroll to dolly · auto-dolly engaged</div>
+<div id="loader">initialising&nbsp;grid&nbsp;…</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+/* =======================================================================
+   NEON TRANSIT — cyberpunk monorail metropolis
+   Single-file Three.js r128 scene. Procedural textures, emissive neon
+   aesthetic on a black void, dynamic rain + splashes, holographic signage.
+   ======================================================================= */
+
+(function(){
+"use strict";
+
+/* ---------- palette ---------- */
+const COL = {
+  magenta:0xff2bd6,
+  cyan:0x19f0ff,
+  electric:0x3aa0ff,
+  amber:0xff9b2e,
+  violet:0x9b3bff,
+  void:0x02030a,
+  deep:0x070a14
+};
+
+/* ---------- renderer ---------- */
+const canvas = document.getElementById("scene");
+const renderer = new THREE.WebGLRenderer({canvas, antialias:true, powerPreference:"high-performance"});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setClearColor(COL.void, 1);
+renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.physicallyCorrectLights = false;
+
+/* ---------- scene + fog ---------- */
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x04060f, 0.0125);
+
+/* ---------- camera ---------- */
+const camera = new THREE.PerspectiveCamera(58, window.innerWidth/window.innerHeight, 0.1, 600);
+camera.position.set(26, 4.5, 34);
+
+/* ---------- controls ---------- */
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.target.set(-1, 2.0, -4);
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.35;
+controls.minDistance = 8;
+controls.maxDistance = 90;
+controls.maxPolarAngle = Math.PI * 0.52;
+controls.minPolarAngle = Math.PI * 0.18;
+
+/* ---------- clock ---------- */
+const clock = new THREE.Clock();
+
+/* =======================================================================
+   PROCEDURAL TEXTURE HELPERS (CanvasTexture)
+   ======================================================================= */
+
+function windowGridTexture(){
+  const w=64,h=128;
+  const c=document.createElement("canvas");c.width=w;c.height=h;
+  const g=c.getContext("2d");
+  g.fillStyle="#000";g.fillRect(0,0,w,h);
+  const cols=["#19f0ff","#ff2bd6","#ff9b2e","#3aa0ff","#9b3bff","#ffffff"];
+  const cellW=8, cellH=8;
+  for(let y=0;y<h;y+=cellH){
+    for(let x=0;x<w;x+=cellW){
+      if(Math.random()<0.42){
+        const col=cols[(Math.random()*cols.length)|0];
+        g.fillStyle=col;
+        const a=0.35+Math.random()*0.65;
+        g.globalAlpha=a;
+        g.fillRect(x+1,y+1,cellW-2,cellH-2);
+        // glow halo
+        g.globalAlpha=a*0.25;
+        g.fillRect(x,y,cellW,cellH);
+        g.globalAlpha=1;
+      }
+    }
+  }
+  const t=new THREE.CanvasTexture(c);
+  t.wrapS=t.wrapT=THREE.RepeatWrapping;
+  t.magFilter=THREE.NearestFilter;
+  t.minFilter=THREE.LinearFilter;
+  return t;
+}
+
+function billboardTexture(text, color){
+  const w=256,h=128;
+  const c=document.createElement("canvas");c.width=w;c.height=h;
+  const g=c.getContext("2d");
+  g.fillStyle="#000";g.fillRect(0,0,w,h);
+  // frame
+  g.strokeStyle=color;g.lineWidth=3;g.globalAlpha=.9;
+  g.strokeRect(6,6,w-12,h-12);
+  // glitch bars
+  for(let i=0;i<10;i++){
+    g.globalAlpha=.12+Math.random()*.25;
+    g.fillStyle=color;
+    const bh=4+Math.random()*10;
+    g.fillRect(6, 6+Math.random()*(h-12), w-12, bh);
+  }
+  g.globalAlpha=1;
+  // text
+  g.fillStyle=color;
+  g.font="bold 40px monospace";
+  g.textAlign="center";g.textBaseline="middle";
+  g.shadowColor=color;g.shadowBlur=18;
+  g.fillText(text, w/2, h/2);
+  g.shadowBlur=0;
+  // small subline
+  g.font="12px monospace";g.globalAlpha=.7;
+  g.fillText("◢ 77 88 11 ◣  NET//DOWNTOWN", w/2, h-18);
+  const t=new THREE.CanvasTexture(c);
+  return t;
+}
+
+function radialGlowTexture(color){
+  const s=128;
+  const c=document.createElement("canvas");c.width=s;c.height=s;
+  const g=c.getContext("2d");
+  const grd=g.createRadialGradient(s/2,s/2,0,s/2,s/2,s/2);
+  grd.addColorStop(0, color+"ff");
+  grd.addColorStop(0.25, color+"aa");
+  grd.addColorStop(0.6, color+"33");
+  grd.addColorStop(1, color+"00");
+  g.fillStyle=grd;g.fillRect(0,0,s,s);
+  return new THREE.CanvasTexture(c);
+}
+
+function ringTexture(color){
+  const s=128;
+  const c=document.createElement("canvas");c.width=s;c.height=s;
+  const g=c.getContext("2d");
+  g.clearRect(0,0,s,s);
+  g.strokeStyle=color;g.lineWidth=4;g.globalAlpha=.9;
+  g.beginPath();g.arc(s/2,s/2,s/2-8,0,Math.PI*2);g.stroke();
+  g.globalAlpha=.3;g.lineWidth=10;
+  g.beginPath();g.arc(s/2,s/2,s/2-8,0,Math.PI*2);g.stroke();
+  return new THREE.CanvasTexture(c);
+}
+
+function streakTexture(){
+  const w=8,h=32;
+  const c=document.createElement("canvas");c.width=w;c.height=h;
+  const g=c.getContext("2d");
+  const grd=g.createLinearGradient(0,0,0,h);
+  grd.addColorStop(0,"rgba(180,240,255,0)");
+  grd.addColorStop(0.45,"rgba(200,245,255,0.85)");
+  grd.addColorStop(0.55,"rgba(255,255,255,0.95)");
+  grd.addColorStop(1,"rgba(120,220,255,0)");
+  g.fillStyle=grd;
+  g.fillRect(w/2-1,0,2,h);
+  return new THREE.CanvasTexture(c);
+}
+
+const TEX = {
+  windows: windowGridTexture(),
+  glowCyan: radialGlowTexture("#19f0ff"),
+  glowMag: radialGlowTexture("#ff2bd6"),
+  glowAmber: radialGlowTexture("#ff9b2e"),
+  ringCyan: ringTexture("#19f0ff"),
+  ringMag: ringTexture("#ff2bd6"),
+  ringAmber: ringTexture("#ff9b2e"),
+  streak: streakTexture()
+};
+
+/* =======================================================================
+   LIGHTING  (cinematic, sparse, neon-keyed)
+   ======================================================================= */
+scene.add(new THREE.AmbientLight(0x101828, 0.9));
+
+const hemi = new THREE.HemisphereLight(0x14243a, 0x02030a, 0.5);
+scene.add(hemi);
+
+const keySpot = new THREE.SpotLight(COL.cyan, 1.4, 90, Math.PI*0.35, 0.6, 1.2);
+keySpot.position.set(6, 22, 6);
+keySpot.target.position.set(0,0,-6);
+scene.add(keySpot, keySpot.target);
+
+const magPoint = new THREE.PointLight(COL.magenta, 2.0, 60, 2);
+magPoint.position.set(-10, 9, -6);
+scene.add(magPoint);
+
+const amberPoint = new THREE.PointLight(COL.amber, 1.6, 55, 2);
+amberPoint.position.set(18, 7, 10);
+scene.add(amberPoint);
+
+const trackGlowLight = new THREE.PointLight(COL.cyan, 1.4, 70, 2);
+trackGlowLight.position.set(0, 3, 2);
+scene.add(trackGlowLight);
+
+/* =======================================================================
+   WET GROUND + PUDGLE REFLECTION POOLS
+   ======================================================================= */
+const groundGeo = new THREE.PlaneGeometry(600,600,1,1);
+const groundMat = new THREE.MeshStandardMaterial({
+  color:0x04060c, roughness:0.35, metalness:0.85, envMapIntensity:0.2
+});
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI/2;
+ground.position.y = -0.02;
+scene.add(ground);
+
+// faint radial puddle glows to imply reflection on wet surface
+const puddleColors = [TEX.glowCyan, TEX.glowMag, TEX.glowAmber];
+const puddles = [];
+for(let i=0;i<22;i++){
+  const tex = puddleColors[i%puddleColors.length];
+  const m = new THREE.Mesh(
+    new THREE.PlaneGeometry(6+Math.random()*10, 6+Math.random()*10),
+    new THREE.MeshBasicMaterial({map:tex, transparent:true, blending:THREE.AdditiveBlending, depthWrite:false, opacity:0.35+Math.random()*0.3})
+  );
+  m.rotation.x=-Math.PI/2;
+  m.position.set((Math.random()-0.5)*120, 0.02, -Math.random()*90+20);
+  m.userData.baseOpacity = m.material.opacity;
+  scene.add(m); puddles.push(m);
+}
+
+/* =======================================================================
+   MONORAIL GUIDEWAY CURVE  (the glowing double-rail in the reference)
+   ======================================================================= */
+const curvePoints = [
+  new THREE.Vector3(  46, -1.5,  50),
+  new THREE.Vector3(  30,  0.0,  30),
+  new THREE.Vector3(  15,  1.0,  16),
+  new THREE.Vector3(   5,  1.6,   6),
+  new THREE.Vector3(  -2,  1.9,  -4),
+  new THREE.Vector3( -10,  2.4, -16),
+  new THREE.Vector3( -18,  2.9, -30),
+  new THREE.Vector3( -26,  3.4, -46)
+];
+const guideway = new THREE.CatmullRomCurve3(curvePoints, false, "catmullrom", 0.5);
+const FRAMES = guideway.computeFrenetFrames(240, false);
+const SAMPLES = 240;
+const samplePts = guideway.getPoints(SAMPLES);
+
+function offsetPoint(i, dist){
+  const p = samplePts[i];
+  const n = FRAMES.normals[i];
+  return new THREE.Vector3(p.x + n.x*dist, p.y + n.y*dist, p.z + n.z*dist);
+}
+
+/* main guideway beam (elevated dark structure) */
+const beamTube = new THREE.Mesh(
+  new THREE.TubeGeometry(guideway, 240, 0.55, 8, false),
+  new THREE.MeshStandardMaterial({color:0x0a0e18, emissive:0x0a1322, emissiveIntensity:0.6, roughness:0.6, metalness:0.7})
+);
+scene.add(beamTube);
+
+/* two neon rails (parallel glowing lines like the screenshot) */
+function neonRail(dist, color){
+  const pts=[];
+  for(let i=0;i<=SAMPLES;i++) pts.push(offsetPoint(i,dist));
+  const crv=new THREE.CatmullRomCurve3(pts);
+  const tube=new THREE.Mesh(
+    new THREE.TubeGeometry(crv, 240, 0.07, 6, false),
+    new THREE.MeshBasicMaterial({color:color})
+  );
+  // additive halo
+  const halo=new THREE.Mesh(
+    new THREE.TubeGeometry(crv, 240, 0.22, 6, false),
+    new THREE.MeshBasicMaterial({color:color, transparent:true, blending:THREE.AdditiveBlending, depthWrite:false, opacity:0.35})
+  );
+  scene.add(tube, halo);
+  return {tube, halo};
+}
+neonRail( 0.42, COL.cyan);
+neonRail(-0.42, COL.cyan);
+neonRail( 0.0,  COL.electric); // faint centre guide line
+
+/* cross ties glowing along the guideway */
+const tieGroup = new THREE.Group();
+for(let i=4;i<SAMPLES;i+=6){
+  const a=offsetPoint(i, 0.42), b=offsetPoint(i,-0.42);
+  const geo=new THREE.BufferGeometry().setFromPoints([a,b]);
+  const line=new THREE.Line(geo, new THREE.LineBasicMaterial({color:COL.cyan, transparent:true, opacity:0.5, blending:THREE.AdditiveBlending}));
+  tieGroup.add(line);
+}
+scene.add(tieGroup);
+
+/* support pylons dropping to ground every few segments */
+for(let i=10;i<SAMPLES;i+=24){
+  const p=samplePts[i];
+  const h=p.y+1.5;
+  const pylon=new THREE.Mesh(
+    new THREE.BoxGeometry(0.5,h,0.5),
+    new THREE.MeshStandardMaterial({color:0x0b1018, emissive:0x101a2a, emissiveIntensity:0.5, metalness:0.8, roughness:0.4})
+  );
+  pylon.position.set(p.x, -h/2, p.z);
+  scene.add(pylon);
+  // pylon light strip
+  const strip=new THREE.Mesh(
+    new THREE.BoxGeometry(0.12,h,0.12),
+    new THREE.MeshBasicMaterial({color:COL.magenta})
+  );
+  strip.position.set(p.x+0.3, -h/2, p.z+0.3);
+  scene.add(strip);
+}
+
+/* =======================================================================
+   THE MONORAIL TRAIN
+   ======================================================================= */
+const train = new THREE.Group();
+
+// body shell
+const bodyMat = new THREE.MeshStandardMaterial({color:0x0c1220, emissive:0x0a1626, emissiveIntensity:0.5, metalness:0.9, roughness:0.25});
+const body = new THREE.Mesh(new THREE.BoxGeometry(2.1, 1.15, 5.2), bodyMat);
+body.position.y = 1.0;
+train.add(body);
+
+// rounded nose front + rear using boxes scaled
+const nose = new THREE.Mesh(new THREE.ConeGeometry(1.05, 1.6, 6), bodyMat.clone());
+nose.rotation.x = -Math.PI/2;
+nose.position.set(0,1.0, 2.6);
+train.add(nose);
+const tail = new THREE.Mesh(new THREE.ConeGeometry(1.05, 1.3, 6), bodyMat.clone());
+tail.rotation.x = Math.PI/2;
+tail.position.set(0,1.0,-2.7);
+train.add(tail);
+
+// cockpit window (neon front face)
+const cockpit = new THREE.Mesh(
+  new THREE.PlaneGeometry(1.7,0.7),
+  new THREE.MeshBasicMaterial({color:COL.cyan, transparent:true, blending:THREE.AdditiveBlending, opacity:0.95})
+);
+cockpit.position.set(0,1.25,2.05);
+train.add(cockpit);
+const cockpitCore = new THREE.Mesh(
+  new THREE.PlaneGeometry(1.0,0.35),
+  new THREE.MeshBasicMaterial({color:0xffffff, transparent:true, blending:THREE.AdditiveBlending, opacity:0.7})
+);
+cockpitCore.position.set(0,1.25,2.07);
+train.add(cockpitCore);
+
+// side window strips (long neon bands)
+for(const side of [-1,1]){
+  const strip=new THREE.Mesh(
+    new THREE.PlaneGeometry(4.4,0.42),
+    new THREE.MeshBasicMaterial({color:COL.cyan, transparent:true, blending:THREE.AdditiveBlending, opacity:0.85, side:THREE.DoubleSide})
+  );
+  strip.position.set(side*1.06, 1.15, 0);
+  strip.rotation.y = side*Math.PI/2;
+  train.add(strip);
+}
+
+// neon underbody trim + top accent
+const underTrim = new THREE.Mesh(
+  new THREE.BoxGeometry(2.2,0.1,5.3),
+  new THREE.MeshBasicMaterial({color:COL.magenta})
+);
+underTrim.position.set(0,0.45,0);
+train.add(underTrim);
+const topTrim = new THREE.Mesh(
+  new THREE.BoxGeometry(0.9,0.08,5.3),
+  new THREE.MeshBasicMaterial({color:COL.amber})
+);
+topTrim.position.set(0,1.62,0);
+train.add(topTrim);
+
+// pantograph / rail-attachment diamond on top
+const panto = new THREE.Group();
+const pMat = new THREE.LineBasicMaterial({color:COL.amber});
+const armPtsA=[new THREE.Vector3(0,1.66,0), new THREE.Vector3(0,2.25,0.7), new THREE.Vector3(0,2.9,0)];
+const armPtsB=[new THREE.Vector3(0,1.66,0), new THREE.Vector3(0,2.25,-0.7), new THREE.Vector3(0,2.9,0)];
+panto.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(armPtsA),pMat));
+panto.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(armPtsB),pMat));
+const collector=new THREE.Mesh(new THREE.BoxGeometry(1.4,0.06,0.18), new THREE.MeshBasicMaterial({color:COL.amber}));
+collector.position.set(0,2.92,0);
+panto.add(collector);
+train.add(panto);
+
+// engine thruster rings at rear (torus, glowing) — echoes the rings in ref
+const thrusters=[];
+for(let i=0;i<3;i++){
+  const col = i%2===0?COL.cyan:COL.amber;
+  const t=new THREE.Mesh(
+    new THREE.TorusGeometry(0.55,0.12,10,24),
+    new THREE.MeshBasicMaterial({color:col, transparent:true, blending:THREE.AdditiveBlending, opacity:0.9})
+  );
+  t.rotation.y=Math.PI/2; // ring faces along track
+  t.position.set(0,1.0,-2.2-i*0.18);
+  train.add(t); thrusters.push(t);
+  // exhaust glow sprite
+  const spr=new THREE.Sprite(new THREE.SpriteMaterial({map: i%2===0?TEX.glowCyan:TEX.glowAmber, blending:THREE.AdditiveBlending, depthWrite:false, opacity:0.5}));
+  spr.scale.set(1.4,1.4,1.4); spr.position.set(0,1.0,-2.6-i*0.18);
+  train.add(spr);
+}
+
+// headlight glow sprite at front
+const headGlow=new THREE.Sprite(new THREE.SpriteMaterial({map:TEX.glowCyan, blending:THREE.AdditiveBlending, depthWrite:false, opacity:0.55}));
+headGlow.scale.set(3,3,3); headGlow.position.set(0,1.2,3.0);
+train.add(headGlow);
+
+train.position.y = -3; // start off-track until placed
+scene.add(train);
+
+/* =======================================================================
+   CITY — TOWERS FLANKING THE TRACK
+   ======================================================================= */
+const cityGroup = new THREE.Group();
+scene.add(cityGroup);
+
+const windowTexA = TEX.windows;
+const windowTexB = TEX.windows.clone(); windowTexB.needsUpdate=true; windowTexB.offset.set(0.3,0.12);
+const windowTexC = TEX.windows.clone(); windowTexC.needsUpdate=true; windowTexC.offset.set(0.55,0.4);
+const windowTexD = TEX.windows.clone(); windowTexD.needsUpdate=true; windowTexD.offset.set(0.2,0.7);
+const winTextures=[windowTexA,windowTexB,windowTexC,windowTexD];
+
+function makeTower(x,z,h,w,d){
+  const tex = winTextures[(Math.random()*winTextures.length)|0].clone();
+  tex.repeat.set(Math.max(1,(w/3)|0), Math.max(2,(h/3)|0));
+  tex.needsUpdate=true;
+  const mat = new THREE.MeshStandardMaterial({
+    color:0x05070d, emissive:0xffffff, emissiveMap:tex, emissiveIntensity:0.85,
+    metalness:0.85, roughness:0.3
+  });
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w,h,d), mat);
+  m.position.set(x, h/2-0.02, z);
+  cityGroup.add(m);
+  // neon edge trim
+  const edges=new THREE.LineSegments(new THREE.EdgesGeometry(m.geometry),
+     new THREE.LineBasicMaterial({color:COL.cyan, transparent:true, opacity:0.45, blending:THREE.AdditiveBlending}));
+  edges.position.copy(m.position);
+  cityGroup.add(edges);
+  // rooftop antenna + blinking tip
+  const ant=new THREE.Mesh(new THREE.CylinderGeometry(0.05,0.05,h*0.25,4),
+     new THREE.MeshBasicMaterial({color:COL.electric}));
+  ant.position.set(x, h + h*0.125, z);
+  cityGroup.add(ant);
+  const tip=new THREE.Sprite(new THREE.SpriteMaterial({map:TEX.glowMag, blending:THREE.AdditiveBlending, depthWrite:false}));
+  tip.scale.set(0.9,0.9,0.9); tip.position.set(x, h + h*0.25, z);
+  tip.userData.blinkPhase=Math.random()*Math.PI*2;
+  cityGroup.add(tip); antennaTips.push(tip);
+  // magenta crown plate
+  const crown=new THREE.Mesh(new THREE.BoxGeometry(w*0.7,0.25,d*0.7),
+     new THREE.MeshBasicMaterial({color:COL.magenta, transparent:true, blending:THREE.AdditiveBlending, opacity:0.7}));
+  crown.position.set(x,h+0.2,z);
+  cityGroup.add(crown);
+  return m;
+}
+
+const antennaTips=[];
+
+// towers on the LEFT side of the guideway
+const towerDefs=[
+  [-22,-12, 46, 9, 9], [-34,-24, 60, 11,11], [-16,4, 38, 8,8],
+  [-44,-4, 72, 13,13], [-12,-28, 52,10,10], [-30,10, 44,9,9],
+  [-52,-34, 80,14,14], [-20,18, 30,7,7], [-38,24, 40,8,8]
+];
+// towers on the RIGHT side
+const rightDefs=[
+  [26,-2, 42, 9,9], [40,-14, 56,11,11], [18,-22, 36,8,8],
+  [50,-30, 68,12,12], [34,8, 32,7,7], [56,4, 50,10,10],
+  [22,16, 26,6,6], [46,22, 44,9,9], [62,-8, 76,13,13]
+];
+towerDefs.concat(rightDefs).forEach(t=>makeTower(t[0],t[1],t[2],t[3],t[4]));
+
+/* holographic billboard advertisements (magenta/amber planes floating) */
+const billboards=[];
+const bbTexts=[
+  {t:"NET//RUN",c:"#19f0ff"},
+  {t:"SYNTH88",c:"#ff2bd6"},
+  {t:"OMNI·CO",c:"#ff9b2e"},
+  {t:"DRIFT",c:"#9b3bff"},
+  {t:"9-LINE",c:"#19f0ff"},
+  {t:"HOLO",c:"#ff2bd6"},
+  {t:"VOLT",c:"#ff9b2e"},
+  {t:"AXIOM",c:"#3aa0ff"}
+];
+const bbSpots=[
+  [-30,18,-6], [-16,22,4], [28,16,-8], [42,20,2], [-44,26,-18], [20,24,-20], [-22,30,14], [46,28,-30]
+];
+for(let i=0;i<bbTexts.length;i++){
+  const s=bbSpots[i];
+  const tex=billboardTexture(bbTexts[i].t, bbTexts[i].c);
+  const m=new THREE.Mesh(
+    new THREE.PlaneGeometry(7,3.5),
+    new THREE.MeshBasicMaterial({map:tex, transparent:true, blending:THREE.AdditiveBlending, side:THREE.DoubleSide, depthWrite:false})
+  );
+  m.position.set(s[0],s[1],s[2]);
+  m.lookAt(camera.position.x, s[1], camera.position.z); // billboard-ish toward viewer
+  m.userData.baseOpacity=0.92;
+  m.userData.flicker=Math.random()<0.5;
+  m.userData.phase=Math.random()*10;
+  scene.add(m); billboards.push(m);
+}
+
+/* the big wireframe holographic orb + orbit ring (top centre of reference) */
+const holoOrb = new THREE.Group();
+const orbWire = new THREE.Mesh(
+  new THREE.SphereGeometry(3.0, 18, 12),
+  new THREE.MeshBasicMaterial({color:COL.magenta, wireframe:true, transparent:true, blending:THREE.AdditiveBlending, opacity:0.85})
+);
+holoOrb.add(orbWire);
+const orbCore = new THREE.Mesh(
+  new THREE.SphereGeometry(1.4, 16, 12),
+  new THREE.MeshBasicMaterial({color:COL.cyan, wireframe:true, transparent:true, blending:THREE.AdditiveBlending, opacity:0.6})
+);
+holoOrb.add(orbCore);
+const orbRing = new THREE.Mesh(
+  new THREE.TorusGeometry(3.6,0.10,10,48),
+  new THREE.MeshBasicMaterial({color:COL.magenta, transparent:true, blending:THREE.AdditiveBlending, opacity:0.9})
+);
+orbRing.rotation.x=Math.PI/2.4;
+holoOrb.add(orbRing);
+const orbRing2 = new THREE.Mesh(
+  new THREE.TorusGeometry(4.1,0.05,8,48),
+  new THREE.MeshBasicMaterial({color:COL.cyan, transparent:true, blending:THREE.AdditiveBlending, opacity:0.5})
+);
+orbRing2.rotation.x=Math.PI/2; orbRing2.rotation.z=0.5;
+holoOrb.add(orbRing2);
+const orbGlow=new THREE.Sprite(new THREE.SpriteMaterial({map:TEX.glowMag, blending:THREE.AdditiveBlending, depthWrite:false, opacity:0.35}));
+orbGlow.scale.set(11,11,11); holoOrb.add(orbGlow);
+// connector beams dropping from orb to a tower
+for(let k=0;k<3;k++){
+  const beam=new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,-3,0), new THREE.Vector3((k-1)*2,-12,0)]),
+    new THREE.LineBasicMaterial({color:COL.magenta, transparent:true, opacity:0.4, blending:THREE.AdditiveBlending})
+  );
+  holoOrb.add(beam);
+}
+holoOrb.position.set(-6, 26, -22);
+scene.add(holoOrb);
+
+/* scattered small neon signage rectangles (magenta squares like ref) */
+const signage=[];
+for(let i=0;i<26;i++){
+  const col=[COL.magenta,COL.cyan,COL.amber,COL.electric,COL.violet][i%5];
+  const w=1.2+Math.random()*2.4, h=0.6+Math.random()*1.4;
+  const m=new THREE.Mesh(new THREE.PlaneGeometry(w,h),
+    new THREE.MeshBasicMaterial({color:col, transparent:true, blending:THREE.AdditiveBlending, side:THREE.DoubleSide, depthWrite:false, opacity:0.85}));
+  const ang=Math.random()*Math.PI*2, r=14+Math.random()*46;
+  m.position.set(Math.cos(ang)*r, 2+Math.random()*18, -Math.random()*70+18);
+  m.rotation.y=Math.random()*Math.PI; m.rotation.z=(Math.random()-0.5)*0.4;
+  m.userData.phase=Math.random()*10;
+  scene.add(m); signage.push(m);
+}
+
+/* thin vertical neon light-beams (like the vertical lines in ref) */
+for(let i=0;i<14;i++){
+  const hgt=20+Math.random()*40;
+  const col=[COL.cyan,COL.magenta,COL.electric][i%3];
+  const beam=new THREE.Mesh(new THREE.BoxGeometry(0.06,hgt,0.06),
+    new THREE.MeshBasicMaterial({color:col, transparent:true, blending:THREE.AdditiveBlending, opacity:0.6}));
+  const ang=Math.random()*Math.PI*2, r=20+Math.random()*40;
+  beam.position.set(Math.cos(ang)*r, hgt/2, -Math.random()*60+15);
+  scene.add(beam);
+}
+
+/* floating holographic ring clusters on the ground/foreground (ref bottom) */
+const ringClusters=[];
+function ringCluster(x,z){
+  const g=new THREE.Group();
+  const specs=[[0.8,COL.cyan],[1.1,COL.magenta],[1.5,COL.amber]];
+  specs.forEach((s,i)=>{
+    const t=new THREE.Mesh(new THREE.TorusGeometry(s[0],0.07,8,32),
+      new THREE.MeshBasicMaterial({color:s[1], transparent:true, blending:THREE.AdditiveBlending, opacity:0.85}));
+    t.rotation.x=Math.PI/2; t.position.y=0.6+i*0.55; g.add(t);
+  });
+  const glow=new THREE.Sprite(new THREE.SpriteMaterial({map:TEX.glowMag,blending:THREE.AdditiveBlending,depthWrite:false,opacity:0.25}));
+  glow.scale.set(4,4,4); glow.position.y=1.4; g.add(glow);
+  g.position.set(x,0,z);
+  scene.add(g); ringClusters.push(g);
+}
+ringCluster(2,6); ringCluster(-6,-10); ringCluster(14,-4); ringCluster(-14,8);
+
+/* =======================================================================
+   STARFIELD / AMBIENT DUST DOTS
+   ======================================================================= */
+(function stars(){
+  const N=700;
+  const pos=new Float32Array(N*3);
+  for(let i=0;i<N;i++){
+    const r=80+Math.random()*160, th=Math.random()*Math.PI*2, ph=Math.acos(2*Math.random()-1);
+    pos[i*3]=r*Math.sin(ph)*Math.cos(th);
+    pos[i*3+1]=Math.random()*70;
+    pos[i*3+2]=r*Math.sin(ph)*Math.sin(th)-20;
+  }
+  const g=new THREE.BufferGeometry();
+  g.setAttribute("position",new THREE.BufferAttribute(pos,3));
+  const cols=new Float32Array(N*3);
+  for(let i=0;i<N;i++){
+    const c=new THREE.Color([0x19f0ff,0xff2bd6,0xff9b2e,0xffffff][(Math.random()*4)|0]);
+    cols[i*3]=c.r;cols[i*3+1]=c.g;cols[i*3+2]=c.b;
+  }
+  g.setAttribute("color",new THREE.BufferAttribute(cols,3));
+  const m=new THREE.PointsMaterial({size:0.6, vertexColors:true, transparent:true, blending:THREE.AdditiveBlending, depthWrite:false, opacity:0.7, sizeAttenuation:true});
+  scene.add(new THREE.Points(g,m));
+})();
+
+/* =======================================================================
+   RAIN  (vertical streak particles) + SPLASH RINGS
+   ======================================================================= */
+const RAIN_COUNT=1400;
+const rainPos=new Float32Array(RAIN_COUNT*3);
+const rainVel=new Float32Array(RAIN_COUNT);
+const RAIN_AREA=140, RAIN_TOP=60;
+for(let i=0;i<RAIN_COUNT;i++){
+  rainPos[i*3]=(Math.random()-0.5)*RAIN_AREA;
+  rainPos[i*3+1]=Math.random()*RAIN_TOP;
+  rainPos[i*3+2]=(Math.random()-0.5)*RAIN_AREA-10;
+  rainVel[i]=30+Math.random()*30;
+}
+const rainGeo=new THREE.BufferGeometry();
+rainGeo.setAttribute("position",new THREE.BufferAttribute(rainPos,3));
+// use LineSegments to draw vertical streaks of fixed length per drop
+const rainSegPos=new Float32Array(RAIN_COUNT*6); // 2 verts per drop
+rainGeo.setAttribute("position",new THREE.BufferAttribute(rainSegPos,3));
+function buildRainSegs(){
+  const L=1.2; // streak length
+  for(let i=0;i<RAIN_COUNT;i++){
+    const x=rainPos[i*3], y=rainPos[i*3+1], z=rainPos[i*3+2];
+    rainSegPos[i*6]=x;   rainSegPos[i*6+1]=y;     rainSegPos[i*6+2]=z;
+    rainSegPos[i*6+3]=x; rainSegPos[i*6+4]=y-L;   rainSegPos[i*6+5]=z;
+  }
+  rainGeo.attributes.position.needsUpdate=true;
+}
+buildRainSegs();
+const rainMat=new THREE.LineBasicMaterial({color:0xa8e6ff, transparent:true, blending:THREE.AdditiveBlending, depthWrite:false, opacity:0.45});
+const rainLines=new THREE.LineSegments(rainGeo, rainMat);
+scene.add(rainLines);
+
+// splash ring pool
+const SPLASH_MAX=40;
+const splashes=[];
+for(let i=0;i<SPLASH_MAX;i++){
+  const tex=[TEX.ringCyan,TEX.ringMag,TEX.ringAmber][i%3];
+  const m=new THREE.Mesh(new THREE.PlaneGeometry(1,1),
+    new THREE.MeshBasicMaterial({map:tex, transparent:true, blending:THREE.AdditiveBlending, depthWrite:false, opacity:0}));
+  m.rotation.x=-Math.PI/2;
+  m.position.y=0.05;
+  m.userData.active=false; m.userData.life=0;
+  scene.add(m); splashes.push(m);
+}
+function spawnSplash(x,z){
+  for(let i=0;i<SPLASH_MAX;i++){
+    if(!splashes[i].userData.active){
+      const s=splashes[i];
+      s.userData.active=true; s.userData.life=1.0;
+      s.position.set(x,0.05,z);
+      s.scale.set(0.4,0.4,1);
+      s.material.opacity=0.7;
+      return;
+    }
+  }
+}
+
+/* =======================================================================
+   TRAIN ANIMATION ON CURVE
+   ======================================================================= */
+let trainT=0.06;
+const trainSpeed=0.045; // curve param per second
+const up=new THREE.Vector3(0,1,0);
+function placeTrain(){
+  const t=(trainT%1+1)%1;
+  const idx=Math.floor(t*SAMPLES);
+  const clamped=Math.max(0,Math.min(SAMPLES, idx));
+  const p=guideway.getPointAt(t);
+  // orientation: tangent
+  const tangent=guideway.getTangentAt(t).normalize();
+  const look=new THREE.Vector3(p.x+tangent.x, p.y+tangent.y, p.z+tangent.z);
+  train.position.set(p.x, p.y+0.18, p.z);
+  train.lookAt(look);
+  // keep upright using up vector roll correction
+  const q=train.quaternion.clone();
+  const fwd=new THREE.Vector3(0,0,1).applyQuaternion(q);
+  const desiredUp=new THREE.Vector3(0,1,0);
+  const right=new THREE.Vector3().crossVectors(desiredUp,fwd).normalize();
+  const newUp=new THREE.Vector3().crossVectors(fwd,right);
+  const m=new THREE.Matrix4().makeBasis(right,newUp,fwd);
+  train.quaternion.setFromRotationMatrix(m);
+}
+
+/* =======================================================================
+   ANIMATION LOOP
+   ======================================================================= */
+let splashTimer=0;
+let camDollyT=0;
+
+function animate(){
+  requestAnimationFrame(animate);
+  const dt=Math.min(clock.getDelta(),0.05);
+  const t=clock.elapsedTime;
+
+  /* train along track */
+  trainT += trainSpeed*dt;
+  if(trainT>1) trainT-=1;
+  placeTrain();
+  // thruster pulse
+  for(let i=0;i<thrusters.length;i++){
+    thrusters[i].material.opacity=0.7+0.3*Math.sin(t*6+i);
+    thrusters[i].scale.setScalar(1+0.08*Math.sin(t*9+i));
+  }
+  headGlow.material.opacity=0.45+0.18*Math.sin(t*4);
+
+  /* holographic orb spin */
+  holoOrb.rotation.y += dt*0.5;
+  orbRing.rotation.z += dt*0.8;
+  orbRing2.rotation.y += dt*0.6;
+  orbWire.rotation.y += dt*0.25;
+
+  /* billboard flicker + slight billboard facing */
+  for(const b of billboards){
+    if(b.userData.flicker){
+      b.material.opacity = b.userData.baseOpacity * (Math.sin(t*18+b.userData.phase)>-0.55 ? 1 : 0.35);
+    } else {
+      b.material.opacity = b.userData.baseOpacity*(0.85+0.15*Math.sin(t*2+b.userData.phase));
+    }
+  }
+  for(const s of signage){
+    s.material.opacity=0.55+0.35*Math.sin(t*3+s.userData.phase);
+  }
+
+  /* antenna tip blink */
+  for(const tip of antennaTips){
+    tip.material.opacity = (Math.sin(t*4+tip.userData.blinkPhase)>0.2)?0.9:0.15;
+  }
+
+  /* puddle shimmer */
+  for(const p of puddles){
+    p.material.opacity = p.userData.baseOpacity*(0.7+0.3*Math.sin(t*1.5+p.position.x));
+  }
+
+  /* ring clusters gentle rotation */
+  for(let i=0;i<ringClusters.length;i++){
+    ringClusters[i].children.forEach((c,ci)=>{ if(c.geometry && c.geometry.type==="TorusGeometry") c.rotation.z += dt*(0.2+ci*0.1); });
+  }
+
+  /* rain update */
+  for(let i=0;i<RAIN_COUNT;i++){
+    rainPos[i*3+1]-=rainVel[i]*dt;
+    if(rainPos[i*3+1]<0){
+      // maybe splash before reset
+      if(Math.random()<0.18) spawnSplash(rainPos[i*3], rainPos[i*3+2]);
+      rainPos[i*3+1]=RAIN_TOP;
+      rainPos[i*3]=(Math.random()-0.5)*RAIN_AREA;
+      rainPos[i*3+2]=(Math.random()-0.5)*RAIN_AREA-10;
+    }
+  }
+  buildRainSegs();
+  rainMat.opacity=0.38+0.10*Math.sin(t*0.7);
+
+  /* splash rings expand+fade */
+  for(const s of splashes){
+    if(s.userData.active){
+      s.userData.life-=dt*1.6;
+      const k=1-s.userData.life;
+      s.scale.set(0.4+k*2.2, 0.4+k*2.2, 1);
+      s.material.opacity=Math.max(0,s.userData.life*0.7);
+      if(s.userData.life<=0){ s.userData.active=false; s.material.opacity=0; }
+    }
+  }
+  splashTimer+=dt; if(splashTimer>0.12){ splashTimer=0; spawnSplash((Math.random()-0.5)*30, -Math.random()*30+5); }
+
+  /* light flicker on mag point for atmosphere */
+  magPoint.intensity=1.7+0.5*Math.sin(t*3.1)+ (Math.sin(t*17)>0.8? -0.8:0);
+
+  /* gentle cinematic camera dolly toward the horizon centre of the ref */
+  camDollyT+=dt;
+  const dolly=Math.sin(camDollyT*0.18)*0.5+0.5; // 0..1
+  controls.target.z = -4 - dolly*10;
+  controls.target.y = 2.0 + dolly*0.6;
+
+  controls.update();
+  renderer.render(scene,camera);
+}
+
+/* =======================================================================
+   RESIZE + INIT
+   ======================================================================= */
+function onResize(){
+  camera.aspect=window.innerWidth/window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth,window.innerHeight);
+}
+window.addEventListener("resize",onResize);
+
+// warm up textures
+winTextures.forEach(t=>t.needsUpdate=true);
+
+// initial train placement
+placeTrain();
+
+// hide loader after first frame
+requestAnimationFrame(()=>{
+  animate();
+  setTimeout(()=>{const l=document.getElementById("loader"); if(l) l.classList.add("hidden");},350);
+});
+
+})();
+</script>
+</body>
+</html>

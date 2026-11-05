@@ -19,7 +19,7 @@
 bench_collect_python() {
   local action="${1:-all}"
   python3 - "$action" <<'PYEOF'
-import os, sys, json, subprocess, re
+import os, sys, json, subprocess, re, glob
 
 def collect_sysinfo():
     info = {}
@@ -65,6 +65,31 @@ def collect_sysinfo():
 
     info["cpu_governor"] = read_sysfs("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor") or "unknown"
     info["cpu_epp"] = read_sysfs("/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference") or "unknown"
+    # intel_pstate/HWP layer.  On Intel's active-mode driver the governor name is a label
+    # (powersave == the HWP governor intel_cpufreq), so scaling_governor + EPP alone do not say
+    # whether the cores hold max or ramp to it.  min_perf_pct is the floor HWP may not go under,
+    # and 17 is the kernel default: a bench load ramps instead of starting at the ceiling.
+    # Measured on yeti-cachy 2026-10-29: governor powersave, EPP performance, min_perf_pct 17.
+    info["hwp_status"] = read_sysfs("/sys/devices/system/cpu/intel_pstate/status") or "unknown"
+    info["hwp_min_perf_pct"] = read_sysfs("/sys/devices/system/cpu/intel_pstate/min_perf_pct")
+    info["hwp_max_perf_pct"] = read_sysfs("/sys/devices/system/cpu/intel_pstate/max_perf_pct")
+    info["hwp_no_turbo"] = read_sysfs("/sys/devices/system/cpu/intel_pstate/no_turbo")
+    info["hwp_dynamic_boost"] = read_sysfs("/sys/devices/system/cpu/intel_pstate/hwp_dynamic_boost")
+    gov_all = set()
+    try:
+        for p in glob.glob("/sys/devices/system/cpu/cpufreq/policy*"):
+            g = read_sysfs(os.path.join(p, "scaling_governor"))
+            if g:
+                gov_all.add(g)
+    except Exception:
+        pass
+    for key in ("hwp_min_perf_pct", "hwp_max_perf_pct", "hwp_no_turbo", "hwp_dynamic_boost"):
+        try:
+            info[key] = int(info[key])
+        except (TypeError, ValueError):
+            pass
+
+    info["cpu_governors"] = ",".join(sorted(gov_all)) if gov_all else "unknown"
 
     # Power Profile (power-profiles-daemon via D-Bus / busctl)
     ppd = "unknown"
@@ -162,7 +187,13 @@ def to_frontmatter(info):
         "cpu:",
         f"  model: {json.dumps(info.get('cpu_model'))}",
         f"  governor: {json.dumps(info.get('cpu_governor'))}",
+        f"  governors_all: {json.dumps(info.get('cpu_governors'))}",
         f"  epp: {json.dumps(info.get('cpu_epp'))}",
+        f"  hwp_status: {json.dumps(info.get('hwp_status'))}",
+        f"  hwp_min_perf_pct: {json.dumps(info.get('hwp_min_perf_pct'))}",
+        f"  hwp_max_perf_pct: {json.dumps(info.get('hwp_max_perf_pct'))}",
+        f"  hwp_no_turbo: {json.dumps(info.get('hwp_no_turbo'))}",
+        f"  hwp_dynamic_boost: {json.dumps(info.get('hwp_dynamic_boost'))}",
         f"  power_profile: {json.dumps(info.get('power_profile'))}",
         f"  temp_c: {info.get('cpu_temp_c')}",
         "memory:",
@@ -182,6 +213,10 @@ def to_frontmatter(info):
         f"  vram_used_baseline_mib: {info.get('vram_used_baseline_mib')}",
         f"  temp_c: {info.get('gpu_temp_c')}",
         f"  pcie_link: {json.dumps(info.get('pcie_link'))}",
+        "  # pcie_link is sampled once, at harness start. An idle card reports Gen1 through ASPM",
+        "  # downclocking (measured 2026-10-28: Gen1 sampled after the handoff, Gen4 16x with the model",
+        "  # loaded), so re-check with `nvidia-smi -q | grep -A6 \"GPU Link Info\"` while a model is on the",
+        "  # card before reading a low link gen as the reason an expert-streaming arm lost.",
         "---",
     ]
     return "\n".join(lines)
@@ -190,8 +225,11 @@ def run_preflight_checks(info):
     warnings = []
     if info.get("cpu_governor") != "performance":
         warnings.append(f"CPU governor is '{info.get('cpu_governor')}' (expected 'performance'). Decode t/s may be degraded by ~15-25%.")
+        warnings.append("On intel_pstate active mode the governor is whatever the kernel left there; nothing on this box writes it. Set it with 'sudo ./maintenance/cpu-power-state.sh apply-cpupower --yes' (or the tuned route in docs/bench-runbook.md), then re-run the paired control before quoting any older row.")
     if info.get("cpu_epp") not in ("performance", "unknown"):
         warnings.append(f"CPU EPP is '{info.get('cpu_epp')}' (expected 'performance'). Speculative verification round latency may increase.")
+    if info.get("hwp_status") == "active" and info.get("hwp_min_perf_pct") not in (None, 100) and info.get("cpu_governor") != "performance":
+        warnings.append(f"intel_pstate min_perf_pct is {info.get('hwp_min_perf_pct')} while the governor is not performance: the cores ramp to max under load instead of holding it, so short probes read low.")
     if info.get("power_profile") not in ("performance", "unknown"):
         warnings.append(f"Power profile daemon profile is '{info.get('power_profile')}' (expected 'performance').")
     if info.get("llama_swap_active"):

@@ -1,0 +1,63 @@
+{
+ "label": "served-no-kvgrow",
+ "ts": "2026-10-28 17:03:00",
+ "identity_sha": "d31e9824fe18228b",
+ "prompts": [
+  {
+   "name": "code_small",
+   "prompt_tokens": 87,
+   "completion_tokens": 128,
+   "finish": "length",
+   "sha": "75988dfe1e03b75a",
+   "wall": 3.05
+  },
+  {
+   "name": "code_fix",
+   "prompt_tokens": 122,
+   "completion_tokens": 181,
+   "finish": "stop",
+   "sha": "9dba9f3344559409",
+   "wall": 2.67
+  },
+  {
+   "name": "json_strict",
+   "prompt_tokens": 95,
+   "completion_tokens": 84,
+   "finish": "stop",
+   "sha": "2e811dc0f4e7d84e",
+   "wall": 1.81
+  },
+  {
+   "name": "explain_short",
+   "prompt_tokens": 86,
+   "completion_tokens": 96,
+   "finish": "length",
+   "sha": "29025b8baf0b6c87",
+   "wall": 1.81
+  },
+  {
+   "name": "code_long",
+   "prompt_tokens": 88,
+   "completion_tokens": 384,
+   "finish": "length",
+   "sha": "6db9940a000605e9",
+   "wall": 5.47
+  },
+  {
+   "name": "pp4k",
+   "prompt_tokens": 4176,
+   "completion_tokens": 48,
+   "finish": "length",
+   "sha": "88de00d70fb3ad48",
+   "wall": 4.11
+  },
+  {
+   "name": "pp20k",
+   "prompt_tokens": 20551,
+   "completion_tokens": 48,
+   "finish": "length",
+   "sha": "f1ef068f463a5c1d",
+   "wall": 11.28
+  }
+ ]
+}

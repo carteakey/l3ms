@@ -25,8 +25,8 @@ V="$REPO/vendor"
 MOE_CACHE_MIB="${MOE_CACHE_MIB:-2048}"
 
 declare -A BIN=(
-  [gold_old]="$V/llama.cpp-master/build/bin/llama-server-b11619-18-g683bbc0dc"
-  [gold_new]="$V/llama.cpp-master/build/bin/llama-server-b11913"
+  [gold_old]="$V/llama.cpp-master/build/bin/llama-server-b11913"
+  [gold_new]="$V/llama.cpp-master/build/bin/llama-server-b12073-15-gd1044bc82"
   [exp_old]="$V/llama.cpp-exp-stack-v2/build/bin/llama-server"
   [exp_new]="$V/llama.cpp-exp-latest/build/bin/llama-server"
   [exp_cache]="$V/llama.cpp-exp-latest/build/bin/llama-server"
@@ -88,7 +88,7 @@ run_arm() {
     strata_old)        strata_arm "$label" "$V/strata-v0.1.44.1" ;;
     strata_new|strata_v145) strata_arm "$label" "$V/strata-latest" ;;
     strata_v026)       strata_arm "$label" "$V/strata-v0.2.6" ;;
-    strata_ple_q8)     strata_arm_cfg "$label" "$V/strata-latest" "$V/strata-latest/strata-iq3_xxs-ple_q8.json" ;;
+    strata_master|strata_ple_q8) strata_arm_cfg "$label" "$V/strata-latest" "$V/strata-latest/strata-iq3_xxs-ple_q8.json" ;;
     strata_lean)       strata_arm_cfg "$label" "$V/strata-lean" "$V/strata-lean/strata-iq3_xxs-ple_q8.json" ;;
     *) echo "unknown arm $label"; return 1 ;;
   esac
@@ -105,6 +105,7 @@ run_arm() {
   echo "   VRAM: $(nvidia-smi --query-gpu=memory.used --format=csv,noheader)  RAM avail: $(free -g | awk '/^Mem:/{print $7}') GiB"
   kill $SRV 2>/dev/null; wait $SRV 2>/dev/null
   pkill -f "strata.*--pack" 2>/dev/null
+  fuser -k ${PORT}/tcp 2>/dev/null || true
   sleep 5
 }
 

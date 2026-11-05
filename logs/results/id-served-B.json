@@ -1,0 +1,86 @@
+{
+ "label": "served-B",
+ "ts": "2026-10-28 19:12:49",
+ "identity_sha": "929b3e89d484b158",
+ "prompts": [
+  {
+   "name": "code_small",
+   "prompt_tokens": 87,
+   "completion_tokens": 128,
+   "finish": "length",
+   "sha": "f4dce37a0053b4b3",
+   "head64": "555555bbc9de",
+   "head256": "f4dce37a0053",
+   "wall": 2.62
+  },
+  {
+   "name": "code_fix",
+   "prompt_tokens": 122,
+   "completion_tokens": 181,
+   "finish": "stop",
+   "sha": "9dba9f3344559409",
+   "head64": "16faff3e7faf",
+   "head256": "9dba9f334455",
+   "wall": 2.58
+  },
+  {
+   "name": "json_strict",
+   "prompt_tokens": 95,
+   "completion_tokens": 84,
+   "finish": "stop",
+   "sha": "2e811dc0f4e7d84e",
+   "head64": "6766d3f41d2a",
+   "head256": "2e811dc0f4e7",
+   "wall": 1.79
+  },
+  {
+   "name": "explain_short",
+   "prompt_tokens": 86,
+   "completion_tokens": 96,
+   "finish": "length",
+   "sha": "29025b8baf0b6c87",
+   "head64": "28f56a30ba71",
+   "head256": "29025b8baf0b",
+   "wall": 1.85
+  },
+  {
+   "name": "code_long",
+   "prompt_tokens": 88,
+   "completion_tokens": 384,
+   "finish": "length",
+   "sha": "807833653d1d460b",
+   "head64": "c357eb1cb014",
+   "head256": "c15a23d9bb12",
+   "wall": 5.55
+  },
+  {
+   "name": "pp4k",
+   "prompt_tokens": 4176,
+   "completion_tokens": 48,
+   "finish": "length",
+   "sha": "8a49aae69d8add6d",
+   "head64": "8a49aae69d8a",
+   "head256": "8a49aae69d8a",
+   "wall": 0.82
+  },
+  {
+   "name": "pp20k",
+   "prompt_tokens": 20551,
+   "completion_tokens": 48,
+   "finish": "length",
+   "sha": "f65814c8ea43a230",
+   "head64": "f65814c8ea43",
+   "head256": "f65814c8ea43",
+   "wall": 1.17
+  }
+ ],
+ "identity_prompts": 7,
+ "identity_diff_n": 3,
+ "identity_vs": "served-A",
+ "identity_pass": false,
+ "identity_diffs": [
+  "code_small: sha 0e22b96d7333a471 -> f4dce37a0053b4b3, tokens 128 -> 128, parted after 960 chars",
+  "code_long: sha 9ba126eeaa0bf486 -> 807833653d1d460b, tokens 384 -> 384, parted after 960 chars",
+  "pp20k: sha 5d5237a2e7a52622 -> f65814c8ea43a230, tokens 48 -> 48, parted after 960 chars"
+ ]
+}

@@ -41,13 +41,14 @@ macros:
   # strata tier: 4070-main-lite (carteakey/Strata) dynamic expert cache + native MTP + fused hyper-connections + Q8_0 PLE table
   "strata_python":         "${env.L3MS_ROOT}/vendor/strata/.venv/bin/python"
   "strata_server":         "${env.L3MS_ROOT}/vendor/strata-lean/serve/server.py"
-  "strata_iq3_config":     "${env.L3MS_ROOT}/vendor/strata-lean/strata-iq3_xxs-ple_q8.json"
+  "strata_ud_iq2_config":  "${env.L3MS_ROOT}/vendor/strata-lean/strata-ud-iq2_xs-ple_q8.json"
+  "strata_iq3_config":     "${env.L3MS_ROOT}/vendor/strata-lean/strata-ud-iq2_xs-ple_q8.json"
   "strata_abliterated_config": "${env.L3MS_ROOT}/vendor/strata-lean/strata-sc117-iq3_xxs-ple_q8.json"
   "strata_vision_config":  "${env.L3MS_ROOT}/vendor/strata-lean/strata-vision-ple_q8.json"
   "strata_vision_iq4_config": "${env.L3MS_ROOT}/vendor/strata-lean/strata-vision.json"
   "strata_abliterated_vision_config": "${env.L3MS_ROOT}/vendor/strata-lean/strata-sc117-vision-ple_q8.json"
   "strata_iq3s_config":    "${env.L3MS_ROOT}/vendor/strata/strata-iq3_s.json"
-  "strata_ple_q8_config":  "${env.L3MS_ROOT}/vendor/strata-lean/strata-iq3_xxs-ple_q8.json"
+  "strata_ple_q8_config":  "${env.L3MS_ROOT}/vendor/strata-lean/strata-ud-iq2_xs-ple_q8.json"
   # humanizer: master binary with full Gemma 4 support & jinja chat template
   "humanizer_server":      "${env.L3MS_ROOT}/vendor/llama.cpp-master/build/bin/llama-server"
 
@@ -106,6 +107,7 @@ models:
     name: "Nemotron 3.5 Transcribe 30B-A4B (IQ4_NL)"
     description: "Speech transcription via speech.cpp with Vulkan GPU and CPU expert offload, VAD and speaker diarization. POST /v1/audio/transcriptions."
     useModelName: "NVIDIA-Nemotron-3.5-Transcribe-30B-A4B"
+    unlisted: true
     cmd: >-
       ${speech_cpp_server} serve
       ${env.HOME}/.local/share/lytte-nemotron/models/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-IQ4_NL.gguf
@@ -344,19 +346,32 @@ models:
   ## ===========================================================================
 
   "qwen38-flash-next-plat":
-    name: "Qwen3.8-Flash-Next Plat (Strata v0.1.45, Q8_0 PLE Table, 128k ctx, 75-90 t/s)"
-    description: "Platinum: Strata v0.1.45 with dynamic expert VRAM caching (3,086 hot experts in VRAM) + unquantized Q8_0 PLE n-gram table (54.4 GB on NVMe, 0 MiB VRAM overhead) + native MTP speculative decoding (Q2_0 draft head) + K8V4 KV cache + 128k context + 4-slot conversation cache. 74.8 t/s steady decode on real code, 90.2 t/s peak, pp=1,138-2,013 t/s @ 8k. See docs/qwen3-8-flash-next-ple-precision.md."
+    name: "Qwen3.8-Flash-Next Plat (Strata v0.1.45, Unsloth UD-IQ2_XS, Q8_0 PLE Table, 128k ctx, 75-90 t/s)"
+    description: "Platinum: Strata v0.1.45 with Unsloth Dynamic UD-IQ2_XS (75.8 GB iso-peer to IQ3_XXS, 43.8 GB fast RAM) + dynamic expert VRAM caching + unquantized Q8_0 PLE n-gram table (54.4 GB on NVMe, 0 MiB VRAM overhead) + native MTP speculative decoding (Q2_0 draft head) + K8V4 KV cache + 128k context + 4-slot conversation cache."
     ttl: 3600
     cmd: |
       taskset -c ${cpu_range} ${strata_python}
       ${strata_server}
       --engine strata
-      --config ${strata_iq3_config}
+      --config ${strata_ud_iq2_config}
+      --fit-max-tokens
+      --port ${PORT}
+
+  "qwen38-flash-next-plat-ud-iq2":
+    name: "Qwen3.8-Flash-Next Plat UD-IQ2_XS (Strata v0.1.45, Unsloth UD-IQ2_XS, Q8_0 PLE Table, 128k ctx)"
+    description: "Alias for qwen38-flash-next-plat running Unsloth UD-IQ2_XS."
+    unlisted: true
+    ttl: 3600
+    cmd: |
+      taskset -c ${cpu_range} ${strata_python}
+      ${strata_server}
+      --engine strata
+      --config ${strata_ud_iq2_config}
       --fit-max-tokens
       --port ${PORT}
 
   "strata":
-    name: "Strata (Qwen3.8-Flash-Next Plat, ISTA-DASLab IQ3_XXS, 128k ctx, 60-90 t/s)"
+    name: "Strata (Qwen3.8-Flash-Next Plat, Unsloth UD-IQ2_XS, 128k ctx, 60-90 t/s)"
     description: "Alias for qwen38-flash-next-plat. High-throughput 60+ t/s coding and reasoning tier."
     unlisted: true
     ttl: 3600
@@ -364,7 +379,7 @@ models:
       taskset -c ${cpu_range} ${strata_python}
       ${strata_server}
       --engine strata
-      --config ${strata_iq3_config}
+      --config ${strata_ud_iq2_config}
       --fit-max-tokens
       --port ${PORT}
 
@@ -377,7 +392,7 @@ models:
       taskset -c ${cpu_range} ${strata_python}
       ${strata_server}
       --engine strata
-      --config ${strata_iq3_config}
+      --config ${strata_ud_iq2_config}
       --fit-max-tokens
       --port ${PORT}
 
@@ -407,8 +422,8 @@ models:
       --port ${PORT}
 
   "qwen38-flash-next-plat-vision":
-    name: "Qwen3.8-Flash-Next Plat Vision (Strata v0.1.45 + strata-vision, Q8_0 PLE, mmproj-F16, 128k ctx)"
-    description: "Platinum Vision: Strata v0.1.45 with native CPU-offloaded strata-vision image encoder (mmproj-F16) + full Q8_0 PLE table preserving 100% VRAM expert cache. 65-72 t/s decode, multimodal image understanding via OpenAI / Anthropic API."
+    name: "Qwen3.8-Flash-Next Plat Vision (Strata v0.1.45 + strata-vision, Unsloth UD-IQ2_XS, Q8_0 PLE, mmproj-F16, 128k ctx)"
+    description: "Platinum Vision: Strata v0.1.45 with Unsloth UD-IQ2_XS + native CPU-offloaded strata-vision image encoder (mmproj-F16) + full Q8_0 PLE table preserving 100% VRAM expert cache. Multimodal image understanding via OpenAI / Anthropic API."
     ttl: 3600
     cmd: |
       taskset -c ${cpu_range} ${strata_python}
@@ -419,7 +434,7 @@ models:
       --port ${PORT}
 
   "strata-vision":
-    name: "Strata Vision (Qwen3.8-Flash-Next Plat + strata-vision, mmproj-F16)"
+    name: "Strata Vision (Qwen3.8-Flash-Next Plat Vision, Unsloth UD-IQ2_XS, mmproj-F16)"
     description: "Alias for qwen38-flash-next-plat-vision. High-throughput multimodal tier."
     unlisted: true
     ttl: 3600
@@ -540,8 +555,8 @@ models:
 # [retired 2026-08-31 — model files deleted from disk, see docs/bench-results.md archive]
 
   "qwen38-flash-next":
-    name: "Qwen3.8-Flash-Next (master b11913 7aca0d2ea, ISTA-DASLab IQ3_XXS, 96k ctx)"
-    description: "Gold: plain upstream master b11913 (7aca0d2ea). 20.6-24.8 t/s steady decode, pp=449-596 t/s @ 8k, 96k ctx, q8 KV, ngram-mod spec. Natively includes PR #29761, #29824, #29825, #30480, #29181, #30239, #29887, #30602, #30927. Reasoning: effort=xhigh, budget=4000. See docs/qwen38-flash-next-internal.md."
+    name: "Qwen3.8-Flash-Next (master b12073 d1044bc82, ISTA-DASLab IQ3_XXS, 96k ctx)"
+    description: "Gold: plain upstream master b12073 (d1044bc82). 96k ctx, q8 KV, ngram-mod spec. Natively includes PR #29761, #29824, #29825, #30480, #29181, #30239, #29887, #30602, #30927, #31188, #31243, #31443. Reasoning: effort=xhigh, budget=4000. See docs/qwen38-flash-next-internal.md."
     env:
       - "GGML_CUDA_GRAPH_OPT=1"
     cmd: |
@@ -611,8 +626,8 @@ models:
       --host 0.0.0.0 --port ${PORT}
 
   "qwen38-flash-next-exp":
-    name: "Qwen3.8-Flash-Next EXP (b11923 + MoE Cache #30966 + MTP Fix #30592, ISTA-DASLab IQ3_XXS)"
-    description: "Experimental tier: llama.cpp b11923 with dynamic GPU MoE expert LRU caching (--moe-cache-mib 2048) + CPU-shared misses (#30966). 24.53 t/s steady decode (26.99 t/s peak), pp=452 t/s @ 8k, 65k ctx. See docs/qwen38-flash-next-internal.md."
+    name: "Qwen3.8-Flash-Next EXP (b12100 + MoE Cache #30966 + MTP Fix #30592, ISTA-DASLab IQ3_XXS)"
+    description: "Experimental tier: llama.cpp b12100 with dynamic GPU MoE expert LRU caching (--moe-cache-mib 2048) + CPU-shared misses (#30966) + fused MoE MMQ. 65k ctx. See docs/qwen38-flash-next-internal.md."
     env:
       - "GGML_CUDA_GRAPH_OPT=1"
     cmd: |

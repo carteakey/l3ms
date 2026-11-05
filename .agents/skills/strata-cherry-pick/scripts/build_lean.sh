@@ -5,9 +5,14 @@ set -euo pipefail
 REPO_ROOT="$(cd -- "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 STRATA_DIR="$REPO_ROOT/vendor/strata-lean"
 
-export PATH="$STRATA_DIR/.venv/bin:/opt/cuda/bin:$PATH"
+# There is no vendor/strata-lean/.venv on this host; the Strata python environment lives in the
+# upstream checkout. Prefer a lean venv if one is ever made, otherwise use the one that exists.
+VENV="$STRATA_DIR/.venv"
+[[ -d "$VENV" ]] || VENV="$REPO_ROOT/vendor/strata/.venv"
+export PATH="$VENV/bin:/opt/cuda/bin:$PATH"
 
 echo "=== Building Strata 4070-main-lite (sm_89) ==="
+echo "venv: $VENV"
 cd "$STRATA_DIR"
 
 cmake -B build -G Ninja \

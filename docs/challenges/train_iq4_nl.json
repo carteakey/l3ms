@@ -1,0 +1,38 @@
+{
+  "label": "iq4_nl_baseline_8k",
+  "wall_sec": 129.42,
+  "timings": {
+    "cache_n": 114,
+    "prompt_n": 5,
+    "prompt_ms": 727.7,
+    "prompt_per_token_ms": 145.54,
+    "prompt_per_second": 6.9,
+    "predicted_n": 8192,
+    "predicted_ms": 128682.9,
+    "predicted_per_token_ms": 15.741,
+    "predicted_per_second": 63.5,
+    "draft_n": 7366,
+    "draft_n_accepted": 5053
+  },
+  "usage": {
+    "prompt_tokens": 119,
+    "completion_tokens": 8192,
+    "total_tokens": 8311,
+    "prompt_tokens_details": {
+      "cached_tokens": 114
+    }
+  },
+  "predicted_per_second": 63.5,
+  "analysis": {
+    "bytes": 16325,
+    "has_threejs": true,
+    "has_camera_controls": false,
+    "has_weather_controls": true,
+    "has_train": false,
+    "has_lighting": false,
+    "line_count": 280,
+    "is_complete": false
+  },
+  "reasoning_len": 8901,
+  "content_len": 16325
+}

@@ -541,9 +541,110 @@ Benchmarked with identical system context (RTX 4070 12 GB, 64 GB DDR5-5200, Q8_0
 - Needle @ 4096: Pass (`true`)
 - VRAM: 11,698 MiB
 
-`4070-main-lite` on `carteakey/Strata` is now the canonical serving binary for
-the Platinum tier under `llama-swap.yaml`. Future upstream releases will be audited
-and cherry-picked selectively into this rolling branch.
+`4070-main-lite` (now `carteakey/strata-lean` on branch `strata-lean`) is the
+canonical serving repository for the Platinum tier under `llama-swap.yaml`. Future upstream
+releases are audited and cherry-picked selectively into this rolling branch.
+
+---
+
+## 18. Unsloth Dynamic V3.1 Audit & Strata v0.2.11 Upstream Intake (2026-11-05)
+
+On 2026-11-04, Unsloth published their Dynamic V3.1 preview quants for Qwen3.8-Flash-Next,
+introducing mixed-precision dynamic quantization across MoE layers alongside modular
+"Mix N Match" engram (PLE) table shards swappable via `set_split.py`.
+
+Upstream Strata (`Niko1221/Strata`) cut release `v0.2.11` on 2026-11-05 (commits `9ed3c778`,
+`c3b3f503`, `3e021066`, `aa678f10`), integrating native catalog and engine support for
+these quants.
+
+### 18.1 Iso-Size Comparison: GSQ-RCO vs Unsloth Dynamic V3.1
+
+Unsloth's published benchmark comparisons against GSQ-RCO align by total file size
+rather than nominal quant name:
+
+| Total Size | GSQ-RCO (Baseline) | Unsloth V3.1 | Non-PLE Fast RAM | DeepSWE v1.1 | Terminal Bench 2.1 | LiveCodeBench v6 | 12-Bench Avg Recovery |
+| :---: | :--- | :--- | :---: | :---: | :---: | :---: | :---: |
+| **~68.0 GB** | `IQ2_XS` | `UD-IQ1_M` | ~45.7 GB | **49.6** vs 39.8 (+9.8) | **69.5** vs 57.3 (+12.2) | **89.5** vs 82.6 (+6.9) | **97.4%** vs 89.5% |
+| **~75.8 GB** | `IQ3_XXS` *(serving default)* | **`UD-IQ2_XS`** | **43.8 GB** | **58.4** vs 46.9 (+11.5) | **66.9** vs 65.9 (+1.0) | **90.2** vs 88.9 (+1.3) | **99.4%** vs 96.8% |
+| **~83.7 GB** | `IQ3_S` | `UD-IQ3_XXS` | ~54.9 GB | **55.1** vs 54.9 (+0.2) | **70.8** vs 67.1 (+3.7) | **90.5** vs 90.0 (+0.5) | **99.9%** vs 99.0% |
+
+### 18.2 Architectural Assessment for 64 GB Host RAM + 12 GB RTX 4070
+
+1. **`UD-IQ2_XS` is the true drop-in peer to GSQ-RCO `IQ3_XXS`**:
+   - Total file size is 75.8 GB with an identical 43.8 GB non-PLE weight footprint.
+   - Fits cleanly in our 64 GB host RAM with ~18 to 20 GB of free headroom, avoiding the
+     disastrous SSD thrashing and swap pressure that quants above ~52 GB produce.
+   - Yields a ground-truth +11.5 point jump on DeepSWE v1.1 (58.4 vs 46.9) by allocating
+     higher precision to critical attention and router layers while quantizing less sensitive
+     experts to 2-bit.
+2. **`UD-IQ3_XXS` is an `IQ3_S` peer, not an `IQ3_XXS` peer**:
+   - Total file size is 83.7 GB, requiring ~54.9 GB of host RAM for non-PLE weights.
+   - Pushes our 64 GB host into compressed zram paging and NVMe expert re-faults, which
+     collapses generation throughput from 70 t/s down to 5 to 7 t/s.
+   - On DeepSWE, `UD-IQ3_XXS` (55.1) is virtually identical to GSQ-RCO `IQ3_S` (54.9).
+
+### 18.3 Strata Upstream Engine & Tooling Changes
+
+Upstream Strata `v0.2.11` resolved the prerequisites for running Unsloth V3.1:
+1. **`Q5_0` Down-Expert Offset Fix (`aa678f10`)**: Fixed the `-16` quantized activation sum
+   offset in CUDA/HIP/SYCL expert dots, allowing `UD-IQ2_XS`, `UD-Q2_K_XL`, and `UD-Q3_K_XL`
+   layers with `Q5_0` down projections to execute natively.
+2. **Packer Shard Handling (`tools/iq_pack.py`)**: Generates `native_experts.txt v4` to handle
+   the split layout where the 28.8 GB IQ4_NL PLE table is the final shard.
+3. **In-Place Streaming**: Retains in-place GGUF expert streaming (`--compat-bf16`), writing
+   only `dense.bin` (~1.4 GB) and avoiding redundant 70+ GB `experts.bin` duplications.
+4. **Intake for `strata-lean`**: Cherry-picked commit `aa678f10` (CUDA `Q5_0` fix) and the
+   `iq_pack.py` v4 shard updates into `carteakey/strata-lean`.
+
+### 18.4 Deployment, Split Validation Fixes, and Serving Verification (2026-11-05)
+
+1. **Intake and Build**:
+   - Cherry-picked upstream commit `aa678f10` (`Q5_0` down-expert dot activation sum offset fix) into `carteakey/strata-lean` (branch `strata-lean`).
+   - Relaxed split validation in `tools/iq_pack.py`, `include/strata/artifact/gguf_reader.hpp`, and `src/core/native_dense.cpp` so that shards containing only `per_layer_token_embd.weight` (our external `Q8_0` PLE table, shard 2 of 2) do not trigger spurious split count / index errors when paired with 3-shard Unsloth weights (`UD-IQ2_XS-00001` and `-00002`).
+   - Recompiled minimal-bloat Ada `sm_89` binary: `vendor/strata-lean/build/strata` (73 MB).
+
+2. **Artifact Generation & Pairing**:
+   - Downloaded `Qwen3.8-Flash-Next-UD-IQ2_XS` Shards 1 and 2 (44 GB on NVMe).
+   - Paired with existing unquantized `Q8_0` PLE table (`/mnt/dev/models/PLE-Q8/Qwen3.8-Flash-Next-GSQ-RCO-Q8_0-PLE-00002-of-00002.gguf`, 54.4 GB).
+   - Generated pack via `tools/iq_pack.py --compat-bf16` at `vendor/Strata-data/packs/ud-iq2_xs`: `dense.bin` (1.5 GB), `index.txt` (92 KB, 1,079 tensors), `tokenizer/` (vocab 248,320).
+
+3. **Serving Integration (`llama-swap.yaml`)**:
+   - Configured `vendor/strata-lean/strata-ud-iq2_xs-ple_q8.json` with `--kv-grow`, `k8v4` KV cache @ 128k context, and native MTP speculative decoding (`--spec 4 --spec-min-p 0.5`).
+   - Wired into `llama-swap.yaml` under macro `"strata_ud_iq2_config"` and active serving tier `qwen38-flash-next-plat` (with alias `qwen38-flash-next-plat-ud-iq2`).
+   - SIGHUP hot-reload executed cleanly.
+
+4. **Empirical Serving Metrics**:
+   - Host RAM footprint: 39.38 GiB expert arena locked via `cudaHostRegister` (plenty of room in 64 GB host, ~18 GB free memory).
+   - VRAM allocation: 2,711 expert slots in 4.33 GiB VRAM; total VRAM 11,562 MiB at execution time.
+   - Speculative decode acceptance: 75.2% to 78.8% draft acceptance (peaking at 88.3% on complex algorithms).
+   - Steady decode throughput: 59.7 tok/s steady state in `performance` governor (vs 54.6 tok/s in `powersave`).
+   - SSD I/O delta: ~3.4 KB/token during generation, confirming pure PLE design traffic with zero expert SSD refaulting.
+
+### 18.5 RTX 4070 VRAM Budget & Expert Cache Sizing Math
+
+On an RTX 4070 (12,282 MiB usable VRAM), Strata's `auto` allocator pushes the expert cache to the physical ceiling of the card:
+
+```text
+Component                     VRAM Usage   Details
+----------------------------------------------------------------------------------
+Native dense projections       2,680 MiB   Attention/gate projections (higher-bit)
+Pack dense weights             1,466 MiB   Dense backbone weights from pack
+MTP draft layer (rt)             818 MiB   Speculative drafting layer
+Q5_K output head                 521 MiB   Native unquantized/Q5_K head projection
+Expert cache (2,711 pairs)     4,435 MiB   ~1.636 MB per expert pair (Q5_0 down)
+K8V4 KV cache + CUDA graphs    1,642 MiB   Elastic 128k KV state + verify windows
+----------------------------------------------------------------------------------
+Total Active VRAM             11,562 MiB   94.1% of physical 12,282 MiB capacity
+Runtime Free Headroom            588 MiB   Drops to ~278-412 MiB during window verify
+```
+
+#### Why 2,711 Pairs is the Hardware Limit
+1. **Per-Pair Byte Footprint**: In GSQ-RCO `IQ3_XXS`, down-experts were 3-bit (`1.374 MB` per pair), fitting 3,086 pairs in 4.24 GiB. In `UD-IQ2_XS`, down-experts use `Q5_0` (5-bit), increasing pair size to `1.636 MB` (+19.1%).
+2. **Dense Weight Growth**: Native dense projections expanded from ~2,400 MiB to 2,680 MiB (+280 MiB) to maintain high-bit precision on attention projections.
+3. **Over-Subscription Barrier**: Sizing the cache to 3,400 pairs would demand `(3,400 - 2,711) * 1.636 MB = +1,127 MiB`, pushing total VRAM to **12,689 MiB**. The driver would immediately spill over PCIe into host RAM, collapsing decode from 60 tok/s to 3-5 tok/s.
+4. **Conclusion**: 2,711 slots represents the exact empirical ceiling on a 12 GB Ada card. The ~10 tok/s gap to GSQ is the physical trade-off for Q5_0 down-expert math and +11.5 points on DeepSWE.
+
+
 
 
 

@@ -1,0 +1,1 @@
+Build a beautiful 3D scene of a train driving through a futuristic cyberpunk city in HTML. dystopian vibes, detailed models, try not to use too many boxes in the models. Be creative and add some user interactivity like camera and weather controls. Ensure the HTML file is completely self-contained, executable, and fully closed.
