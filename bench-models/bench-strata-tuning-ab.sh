@@ -127,6 +127,14 @@ arm_spec() { # label -> fills ARGS/ENV/MASK for one arm
     # picked up from the dir, so this is a head swap, not a vocab swap. Last --mtp wins
     # (generate.cpp:2478), so the overlay replaces the config's head.
     mtp_lamina)    ARGS="--mtp $V/Strata-data/mtp/rt-lamina" ;;
+    # Same head, but the ~132 MiB the smaller draft head frees is handed back as VRAM headroom
+    # instead of expert slots: the engine's own ask is 832 MiB (#2065), so 960 buys ~128 MiB more.
+    # Compares against base at the same slot count, and against mtp_lamina for the slot cost.
+    mtp_lamina_r960) ARGS="--mtp $V/Strata-data/mtp/rt-lamina --vram-reserve-mib 960" ;;
+    # The control for the headroom question: the stock head at the same reserve. #2065 is diagnostic
+    # only (generate.cpp:11335, "said, never changed"), so this buys margin, not throughput. If this
+    # clears the floor at the same slot count, the Lamina head is not needed for the headroom either.
+    base_r960)     ARGS="--vram-reserve-mib 960" ;;
     spec5)         ARGS="--spec 5" ;;
     specprob)      ARGS="--spec 5"; ENV="STRATA_SPEC_PROB=1" ;;
     no_suffix)     ARGS="--suffix-draft 0" ;;
@@ -177,6 +185,8 @@ routeprior10  STRATA_ROUTE_PRIOR=1.0 (opt-in, not in the default ladder)
 route_resident STRATA_ROUTE_RESIDENT=4 (opt-in, not in the default ladder)
 draft_en      --mtp-draft-vocab data/draft_vocab_en.bin
 mtp_lamina    --mtp vendor/Strata-data/mtp/rt-lamina (Lamina draft head, 40,525-token vocab)
+mtp_lamina_r960  mtp_lamina + --vram-reserve-mib 960 (the freed head VRAM as headroom, not slots)
+base_r960     --vram-reserve-mib 960 on the stock head (headroom control)
 spec5         --spec 5
 specprob      --spec 5 + STRATA_SPEC_PROB=1
 no_suffix     --suffix-draft 0
@@ -193,8 +203,8 @@ TXT
 
 if [ "${1:-}" = "--arms" ]; then list_arms; exit 0; fi
 
-build_cfg() { # label -> writes $TMP/<label>.json from the production config plus this arm's args/env
-  python3 - "$SRC_CFG" "$LEAN" "$TMP/$1.json" "$TMP/$1.engine.log" "$PORT" "$ARGS" "$ENV" <<'PY'
+build_cfg() { # label cfg_path engine_log -> writes cfg_path from the production config plus this arm's args/env
+  python3 - "$SRC_CFG" "$LEAN" "$2" "$3" "$PORT" "$ARGS" "$ENV" <<'PY'
 import json, os, shlex, sys
 src, lean, out, log, port, extra, envi = sys.argv[1:8]
 c = json.load(open(src))
@@ -358,10 +368,14 @@ PY
 }
 
 run_arm() { # label
-  local label="$1" cfg="$TMP/$1.json" log="$TMP/$1.log" elog="$TMP/$1.engine.log"
+  # A label may repeat (the ladder convention runs the control first and last), so the log paths
+  # carry a sequence number: without it the second "base" appends to the first one's engine log and
+  # every cumulative counter read out of it (drafts accepted/offered above all) is double-counted.
+  ARM_SEQ=$(( ${ARM_SEQ:-0} + 1 ))
+  local label="$1" cfg="$TMP/$ARM_SEQ-$1.json" log="$TMP/$ARM_SEQ-$1.log" elog="$TMP/$ARM_SEQ-$1.engine.log"
   arm_spec "$label" || { echo "== $label: unknown arm (see --arms)"; return 1; }
   echo "== arm: $label  args: ${ARGS:-none}  env: ${ENV:-none}  taskset: $MASK"
-  build_cfg "$label" || return 1
+  build_cfg "$label" "$cfg" "$elog" || return 1
 
   local srv="" pid="" io0=0 io1=0 tok=0
   # env goes in twice on purpose: the run config carries it (that is how a winner gets
@@ -453,10 +467,20 @@ bench_preflight_warn
 bench_emit_frontmatter | tee "$TMP/frontmatter.yaml"
 
 ARMS="${ARMS:-$DEFAULT_ARMS}"
+failed=0; total=0
 for arm in $ARMS; do
-  run_arm "$arm" || true
+  total=$((total + 1))
+  run_arm "$arm" || failed=$((failed + 1))
 done
 echo "done. rows in $OUT and $DIAG"
+# An arm that never loaded used to be swallowed by `|| true`, so a ladder where every arm died
+# still exited 0 and the dark runner wrote rc=0. 2026-11-05: all four arms failed on a bad
+# --config path and the status line said success. A total failure is now an error.
+if [ "$failed" -ne 0 ]; then
+  echo "WARNING: $failed of $total arms failed to run"
+  [ "$failed" -eq "$total" ] && return 1
+fi
+return 0
 }
 
 # Sourced (by a test or another script) this gives the arm table and the helpers without

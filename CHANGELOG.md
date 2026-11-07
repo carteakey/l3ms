@@ -2,6 +2,63 @@
 
 ## [Unreleased]
 
+### Changed (tracker and shared context)
+
+- **GitHub Issues is now the tracker.** Linear was retired on 2026-11-07. The eight
+  `migrated-from-linear` issues (#5 to #12) are the only surviving tickets from it;
+  `CAR-*` identifiers in older notes are historical references, not live tickets.
+- **Filed the open backlog as issues #13 to #30**, with a `p0` to `p3` priority
+  scale, `lane:*` labels and the `Operations backlog completion` milestone: nine
+  Strata tuning items (the blocking `kv_grow` ladder first), both blocked acceptance
+  gates, Blender acceptance, the abliterated-vision measurement, source
+  consolidation, the publication and accessibility audits, `_retired` cleanup, and
+  the crate-version/changelog reconciliation.
+- **Notion is the shared context layer**, not the tracker. The `Forge` workspace
+  holds the Agent Operating Guide, the L3MS project row and the cross-repo
+  `Open Work — GitHub` view. `AGENTS.md` now points agents at it and forbids
+  mirroring the repository or its backlog into Notion.
+- `TODO.md` is the in-repo index that mirrors the open issues; every open item
+  links its issue number.
+
+### Changed (Strata plat prefill, upstream v0.2.12 intake)
+
+- **Raised the plat tier's CPU prefill share limit to 3,072 tokens.** `strata-ud-iq2_xs-ple_q8.json`
+  now carries `STRATA_PREFILL_CPU_SHARE_MAX=3072` in its `env` block. Measured on 2026-11-07:
+  prefill at 2,048 tokens went from 939 to 1,116 t/s (+19%) with no change at 8,192 tokens and no
+  change in decode. The old limit was 1,024 (`kStreamAllMinDefault`); upstream raised it to 3,072
+  (`share_rules::kShareLimitNew`). Quality note: first-token KL about 0.011 after a 1.1 to 2.8K
+  prompt against 0.004 at the old limit, with top-1 unchanged.
+- **Audited and rejected a wholesale re-slice onto upstream v0.2.12.** Branch
+  `4070-main-lite-0.2.12` at `vendor/strata-v0.2.12` (engine 0.1.58) loads the UD-IQ2_XS pack and
+  is kept as a reference arm, not served: decode was equal (62.59 against 62.60 t/s paired) and
+  8,192-token prefill was 12% worse, because upstream reserves 256 MiB more and holds 184 fewer
+  expert slots (2,527 against 2,711). Most of the fork's own commits were already upstream: the
+  `sm_89` MMVQ tables, `STRATA_QSA_FUSE_NR`, `STRATA_GR_NORM_FAST`, the hyper-connection fold, the
+  Q5_0 offset fix and `iq_pack.py` v4. Only the external PLE shard and the serve thinking wrap
+  needed picking. Measurements: `docs/strata-perf-next-steps-2026-10.md` §10.
+- `bench-models/bench-qwen38-refresh-ab.sh` gained an optional env JSON on `strata_arm_cfg`, plus
+  the arms `strata_lean_ud`, `strata_v0212`, `strata_v0212_pf0` and `strata_lean_share3072`.
+
+### Added (Strata plat decode: `STRATA_ADAPT_FETCH` ported)
+
+- **Ported upstream `24c6c2f6` into the lean fork as `20c19b89`** (252 insertions, 7 files): the
+  PCIe share's fetched misses, which already cross into VRAM, are copied into the slot of a
+  resident expert the window does not route instead of being dropped. `RouterLookahead::submit`
+  now copies the residency rows into `res_` so an admission can write the table the lookahead
+  reads. Conflicts kept the fork's simpler lookahead and its verify call; the Metal stub is not
+  in the tree. `=1` and `=2` are both wired.
+- **Served as `STRATA_ADAPT_FETCH=1`** in `strata-ud-iq2_xs-ple_q8.json`'s `env`. Measured on the
+  ported fork: switch off 55.63 t/s, `=1` **70.43**, `=2` 70.80, with the decode hit rate moving
+  from 46.6% to 67.2% in the same window and a live session's second window at 81.5%. Prefill is
+  unchanged (8k 1,884 against 1,880 with the switch off), so the fork keeps its advantage over the
+  0.2.12 tree. Isolated on the reference tree first: +9.42 t/s, +16.0%, pair deltas 1.87 and 0.17.
+  `=1` is served as the conservative choice, not as a proven cleaner one: upstream's only quality
+  evidence is a token-forcing divergence test at 2.73% against 2.53% for two unset arms (+0.19 pt,
+  90% CI -0.02 to +0.42, PASS), the row does not name which switch value that arm used, and it was
+  measured on IQ3_S rather than UD-IQ2_XS. The quality gate on this box is open. Measurements: `docs/strata-perf-next-steps-2026-10.md` §10.
+- New arms `strata_lean_af0`, `strata_lean_af1`, `strata_lean_af2` (the ported worktree at
+  `vendor/strata-adapt-fetch`, switch off and on) and `PP_SIZES` on the refresh harness.
+
 ### Added (Unsloth Dynamic V3.1 audit & Strata v0.2.11 intake analysis)
 
 - **Audited Unsloth Dynamic V3.1 Qwen3.8-Flash-Next Quants**:

@@ -96,6 +96,7 @@ def main():
     ap.add_argument("--tg-tokens", type=int, default=256)
     ap.add_argument("--pp-sizes", default="2048,8192")
     ap.add_argument("--deep-sizes", default="", help="deep-context decode probes, e.g. 98304 (off by default)")
+    ap.add_argument("--meta", default="", help="JSON object merged into the row as config (engine, args, env, commit)")
     a = ap.parse_args()
 
     for i in range(a.warmups):
@@ -114,7 +115,7 @@ def main():
     # with it: 0.680, 0.715, 0.828) out-read an identical arm 30 minutes later (67.2, 68.7, 72.4),
     # so tg_mean on a short probe run measures how far along the warm-up each arm happened to be.
     steady = tgs[-3:] if len(tgs) >= 3 else tgs
-    res = {"label": a.label, "ts": time.strftime("%F %T"), "tg_probes": tg,
+    res = {"label": a.label, "ts": time.strftime("%F %T"), "config": json.loads(a.meta) if a.meta else {}, "tg_probes": tg,
            "tg_mean": sum(tgs) / len(tgs) if tgs else None,
            "tg_steady_mean": sum(steady) / len(steady) if steady else None,
            "tg_steady_spread": (max(steady) - min(steady)) if steady else None,

@@ -1,0 +1,112 @@
+[strata] sampling defaults from the config: temperature=1.0, top_p=0.95, top_k=20, min_p=0.05, presence_penalty=0.0, repetition_penalty=1.0
+loading the model (the first start takes a minute or two) ...
+[strata] starting the engine: reading the model's weights ...
+[strata] loading the experts into RAM (tens of GB) and locking part of them for the GPU.
+         YOUR PC CAN BE SLOW OR STOP RESPONDING FOR 1-3 MINUTES NOW - this is normal.
+         Please wait and don't close this window; the browser opens when it is ready.
+[strata] still starting (25 s) - please wait ...
+[strata] still starting (45 s) - please wait ...
+[strata] still starting (65 s) - please wait ...
+[strata] experts loaded: 39.38 GiB at 0.69 GiB/s (67 s so far)
+[strata] filling the GPU's expert cache (2711 experts, 4.33 GiB of VRAM) ...
+[strata] almost ready ...
+[strata] thinking budget: 8192 tokens (reasoning_budget_tokens; a request can set its own)
+ready: http://127.0.0.1:8023/v1  (OpenAI: /v1/chat/completions, Anthropic: /v1/messages, context 131072 tokens)
+       open http://127.0.0.1:8023/ in a browser to chat; close this window to stop the model
+[strata] thinking capped at 128 of max_tokens 256 to leave room for the answer (budget 8192)
+[strata] thinking: 12 of budget 128 (max 256) tokens, 45.4 tok/s, 1 s
+[strata] thinking: 63 of budget 128 (max 256) tokens, 48.8 tok/s, 2 s
+[strata] thinking: 110 of budget 128 (max 256) tokens, 47.9 tok/s, 3 s
+[strata] thinking budget reached (128 tokens): wrapping up the thinking
+[strata] answering: 159 of max 256 tokens, 47.8 tok/s, 4 s
+[strata] answering: 210 of max 256 tokens, 48.3 tok/s, 5 s
+[strata] done: 256 tokens in 6 s (50.9 tok/s) (length, cancel=False), expert cache 50.5% hit (+4.3% of the routed experts over PCIe)
+[strata] thinking capped at 128 of max_tokens 256 to leave room for the answer (budget 8192)
+[strata] thinking: 26 of budget 128 (max 256) tokens, 58.2 tok/s, 1 s
+[strata] thinking: 75 of budget 128 (max 256) tokens, 51.8 tok/s, 2 s
+[strata] thinking: 126 of budget 128 (max 256) tokens, 51.4 tok/s, 3 s
+[strata] thinking budget reached (128 tokens): wrapping up the thinking
+[strata] answering: 195 of max 256 tokens, 55.7 tok/s, 4 s
+[strata] answering: 253 of max 256 tokens, 55.8 tok/s, 5 s
+[strata] done: 256 tokens in 5 s (56.4 tok/s) (length, cancel=False), expert cache 59.0% hit (+2.1% of the routed experts over PCIe)
+[strata] thinking capped at 128 of max_tokens 256 to leave room for the answer (budget 8192)
+[strata] thinking: 29 of budget 128 (max 256) tokens, 63.1 tok/s, 1 s
+[strata] thinking: 85 of budget 128 (max 256) tokens, 56.4 tok/s, 2 s
+[strata] thinking budget reached (128 tokens): wrapping up the thinking
+[strata] thinking: 146 of max 256 tokens, 52.2 tok/s, 3 s
+[strata] answering: 215 of max 256 tokens, 56.1 tok/s, 4 s
+[strata] done: 256 tokens in 5 s (57.2 tok/s) (length, cancel=False), expert cache 63.7% hit (+1.7% of the routed experts over PCIe)
+[strata] thinking capped at 128 of max_tokens 256 to leave room for the answer (budget 8192)
+[strata] thinking: 19 of budget 128 (max 256) tokens, 45.6 tok/s, 1 s
+[strata] thinking: 66 of budget 128 (max 256) tokens, 46.5 tok/s, 2 s
+[strata] thinking: 113 of budget 128 (max 256) tokens, 46.1 tok/s, 3 s
+[strata] thinking budget reached (128 tokens): wrapping up the thinking
+[strata] answering: 165 of max 256 tokens, 47.2 tok/s, 4 s
+[strata] answering: 229 of max 256 tokens, 50.5 tok/s, 5 s
+[strata] done: 256 tokens in 6 s (51.9 tok/s) (length, cancel=False), expert cache 54.9% hit (+2.2% of the routed experts over PCIe)
+[strata] thinking capped at 128 of max_tokens 256 to leave room for the answer (budget 8192)
+[strata] thinking: 28 of budget 128 (max 256) tokens, 55.4 tok/s, 1 s
+[strata] thinking: 82 of budget 128 (max 256) tokens, 52.6 tok/s, 2 s
+[strata] thinking budget reached (128 tokens): wrapping up the thinking
+[strata] thinking: 146 of max 256 tokens, 52.4 tok/s, 3 s
+[strata] answering: 196 of max 256 tokens, 51.5 tok/s, 4 s
+[strata] done: 256 tokens in 5 s (54.4 tok/s) (length, cancel=False), expert cache 52.7% hit (+2.5% of the routed experts over PCIe)
+[strata] thinking capped at 128 of max_tokens 256 to leave room for the answer (budget 8192)
+[strata] thinking: 26 of budget 128 (max 256) tokens, 54.9 tok/s, 1 s
+[strata] thinking: 79 of budget 128 (max 256) tokens, 53.4 tok/s, 2 s
+[strata] thinking budget reached (128 tokens): wrapping up the thinking
+[strata] thinking: 146 of max 256 tokens, 54.9 tok/s, 3 s
+[strata] answering: 206 of max 256 tokens, 55.7 tok/s, 4 s
+[strata] done: 256 tokens in 5 s (56.6 tok/s) (length, cancel=False), expert cache 56.4% hit (+2.3% of the routed experts over PCIe)
+[strata] thinking capped at 128 of max_tokens 256 to leave room for the answer (budget 8192)
+[strata] thinking: 32 of budget 128 (max 256) tokens, 62.8 tok/s, 1 s
+[strata] thinking: 87 of budget 128 (max 256) tokens, 57.1 tok/s, 2 s
+[strata] thinking budget reached (128 tokens): wrapping up the thinking
+[strata] thinking: 146 of max 256 tokens, 57.1 tok/s, 3 s
+[strata] answering: 200 of max 256 tokens, 55.6 tok/s, 4 s
+[strata] done: 256 tokens in 5 s (56.4 tok/s) (length, cancel=False), expert cache 62.1% hit (+1.8% of the routed experts over PCIe)
+[strata] thinking capped at 128 of max_tokens 256 to leave room for the answer (budget 8192)
+[strata] thinking: 28 of budget 128 (max 256) tokens, 55.9 tok/s, 1 s
+[strata] thinking: 82 of budget 128 (max 256) tokens, 54.2 tok/s, 2 s
+[strata] thinking budget reached (128 tokens): wrapping up the thinking
+[strata] thinking: 146 of max 256 tokens, 54.7 tok/s, 3 s
+[strata] answering: 206 of max 256 tokens, 55.7 tok/s, 4 s
+[strata] done: 256 tokens in 5 s (56.9 tok/s) (length, cancel=False), expert cache 57.0% hit (+2.1% of the routed experts over PCIe)
+[strata] thinking capped at 128 of max_tokens 256 to leave room for the answer (budget 8192)
+[strata] thinking: 32 of budget 128 (max 256) tokens, 60.8 tok/s, 1 s
+[strata] thinking: 84 of budget 128 (max 256) tokens, 54.6 tok/s, 2 s
+[strata] thinking budget reached (128 tokens): wrapping up the thinking
+[strata] thinking: 146 of max 256 tokens, 55.1 tok/s, 3 s
+[strata] answering: 213 of max 256 tokens, 58.2 tok/s, 4 s
+[strata] done: 256 tokens in 5 s (59.8 tok/s) (length, cancel=False), expert cache 61.2% hit (+1.9% of the routed experts over PCIe)
+[strata] thinking capped at 128 of max_tokens 256 to leave room for the answer (budget 8192)
+[strata] thinking: 27 of budget 128 (max 256) tokens, 52.9 tok/s, 1 s
+[strata] thinking: 78 of budget 128 (max 256) tokens, 51.0 tok/s, 2 s
+[strata] thinking: 124 of budget 128 (max 256) tokens, 48.9 tok/s, 3 s
+[strata] thinking budget reached (128 tokens): wrapping up the thinking
+[strata] answering: 190 of max 256 tokens, 53.2 tok/s, 4 s
+[strata] answering: 247 of max 256 tokens, 53.7 tok/s, 5 s
+[strata] done: 256 tokens in 5 s (54.3 tok/s) (length, cancel=False), expert cache 54.4% hit (+2.4% of the routed experts over PCIe)
+[strata] thinking capped at 2 of max_tokens 4 to leave room for the answer (budget 8192)
+[strata] reading the prompt: 1,754 of 1,759 tokens, 1 s so far
+[strata] done: 2 tokens in 2 s (37.2 tok/s) (length, cancel=False), expert cache 52.5% hit (+1.8% of the routed experts over PCIe)
+[strata] the reply reached max tokens while still thinking, so it has no answer: a thinking budget (reasoning_budget_tokens, in the request or in strata-<model>.json for every request) leaves room to answer
+[strata] thinking capped at 2 of max_tokens 4 to leave room for the answer (budget 8192)
+[strata] reading the prompt: 1,754 of 1,759 tokens, 2 s so far
+[strata] done: 2 tokens in 2 s (36.3 tok/s) (length, cancel=False), expert cache 60.1% hit (+1.3% of the routed experts over PCIe)
+[strata] the reply reached max tokens while still thinking, so it has no answer: a thinking budget (reasoning_budget_tokens, in the request or in strata-<model>.json for every request) leaves room to answer
+[strata] thinking capped at 2 of max_tokens 4 to leave room for the answer (budget 8192)
+[strata] reading the prompt: 6,791 of 6,796 tokens, 3 s so far
+[strata] done: 2 tokens in 4 s (56.2 tok/s) (length, cancel=False), expert cache 65.0% hit (+0.8% of the routed experts over PCIe)
+[strata] the reply reached max tokens while still thinking, so it has no answer: a thinking budget (reasoning_budget_tokens, in the request or in strata-<model>.json for every request) leaves room to answer
+[strata] thinking capped at 2 of max_tokens 4 to leave room for the answer (budget 8192)
+[strata] reading the prompt: 6,791 of 6,796 tokens, 3 s so far
+[strata] done: 2 tokens in 4 s (38.1 tok/s) (length, cancel=False), expert cache 66.9% hit (+1.0% of the routed experts over PCIe)
+[strata] the reply reached max tokens while still thinking, so it has no answer: a thinking budget (reasoning_budget_tokens, in the request or in strata-<model>.json for every request) leaves room to answer
+[strata] thinking capped at 128 of max_tokens 256 to leave room for the answer (budget 8192)
+[strata] reading the prompt: 3,433 of 3,438 tokens, 2 s so far
+[strata] thinking: 40 of budget 128 (max 256) tokens, 48.1 tok/s, 3 s
+[strata] done: 87 tokens in 4 s (51.2 tok/s) (stop, cancel=False), expert cache 46.6% hit (+3.0% of the routed experts over PCIe)
+
+[strata] stopping (Ctrl+C again to end the engine at once) ...
+[strata] stopped

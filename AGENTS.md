@@ -61,6 +61,7 @@ engine route over a new executor; see `docs/migration/runtime-policy.md`.
   - No synthetic framing, dramatic one-line closers, or AI marketing hype (`"Not X but Y"`, `"The physics of X"`, `"game-changer"`, `"blazing"`).
   - Natural contractions (`it's`, `didn't`, `doesn't`).
   - Report ground-truth empirical numbers with system context; never publish single-burst anomalies (e.g. the 90.2 t/s burst) as sustained throughput.
+  - **Charts and diagrams have their own skills in the blog repo, and posts should use them rather than a pasted image or a raw table.** `~/repos/carteakey.dev/.agents/skills/dataviz/SKILL.md` owns the build-time SVG chart system (`{% chart %}`, `{% progression_chart %}`, `chartSvg()`, eight chart types, the "ink and dots" grammar, `/lab/charts/`). `~/repos/carteakey.dev/.agents/skills/sketches/SKILL.md` owns hand-drawn diagrams and post thumbnails. The utilities behind them are `utils/charts.mjs`, `utils/chart-to-excalidraw.mjs` with `diagrams/*.spec.json`, and `utils/prepare-diagram.mjs`. Run `npm run check:content` and `npm run check:design` in the blog repo before pushing; the design gate also fails a stale `updated` field.
 
 ## llama-swap Operations
 
@@ -107,7 +108,11 @@ Seven router tiers:
   inject folding and gate/mean fusion reducing kernel launches from 6 to 4), fused QSA RMSNorm + RoPE
   (`STRATA_QSA_FUSE_NR`, cuts memory traffic from 1.1 GB to 0.4 GB a layer with assembly barrier exactness),
   strict mathematical routing (`STRATA_ROUTE_TAIL_SKIP=0` default in `strata-lean`, rejecting upstream's
-  rank >= 7 expert dropping to prevent KL 0.003-0.006 drift), thinking wrap-up
+  rank >= 7 expert dropping to prevent KL 0.003-0.006 drift), the CPU prefill share armed up to **3,072
+  tokens** (`STRATA_PREFILL_CPU_SHARE_MAX=3072` in the run config's `env` since 2026-11-07: 2k prefill
+  939 -> 1,116 t/s, no 8k or decode cost, first-token KL about 0.011 at 1-3K), the PCIe share's fetched
+  misses admitted into the cache (`STRATA_ADAPT_FETCH=1`, ported as `20c19b89` since 2026-11-07: decode
+  55.6 -> 70.4 t/s, hit rate 46.6% -> 67.2%, prefill unchanged), thinking wrap-up
   on repeat loops inside <think>, K8V4 KV cache @ 128k ctx (`131072`), expert arena pinned with
   `cudaHostRegister` on **4 KB pages** (`vm.nr_hugepages=0` so `MAP_HUGETLB` fails; upstream
   stopped requesting `MADV_HUGEPAGE` while THP is `always`, #771 and #2126 - the lever is a
@@ -326,10 +331,19 @@ compatibility boundary has explicit parity coverage.
 
 ## Planning Authority
 
-Linear is authoritative for committed L3MS work. The repository and Markdown
-remain authoritative for code and canonical documentation. The single Linear
-project is `L3MS` with milestone `Operations backlog completion — 2026-08-10`.
-The reconciled TODO groups are tracked by `CAR-140` through `CAR-146`, while
-`CAR-97` remains the parent Rust-port history and is attached to the same
-project/milestone. `TODO.md` is reserved for speculative or research notes
-that have not been intentionally committed.
+GitHub Issues on `carteakey/l3ms` is authoritative for committed L3MS work.
+`TODO.md` is the in-repo forward index that mirrors the open issues, `docs/`
+carries the evidence, and `CHANGELOG.md` records what shipped. Linear was the
+tracker until 2026-11-07 and is now historical only: the `CAR-*` identifiers in
+older notes are references to that history, and the eight
+`migrated-from-linear` issues are the only surviving tickets from it.
+Notion is the shared context layer (notes, research, cross-repo context), not the
+tracker; nothing is blocked on a Notion page. `TODO.md` holds committed work
+first and speculative or research notes last, labelled as such.
+
+Shared context lives in the Notion `Forge` workspace: the `Agent Operating Guide`
+skill, the `Projects` row for L3MS, and the `Open Work — GitHub` cross-repo view.
+Read the guide before project work and update the project row's next action when
+the state changes. Do not mirror this repository or its issue backlog into Notion,
+and do not copy Notion-only material into a public issue or commit without
+explicit authorization.

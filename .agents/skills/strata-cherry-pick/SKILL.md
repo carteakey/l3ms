@@ -41,14 +41,20 @@ All evaluations are conducted against this fixed homelab target:
   Strata arm since 2026-10-07 while decode moved 52 to 69.6: the prompt lane is the part
   of the fork that has not kept pace, and the 4070 is behind an unpruned v0.1.44.1 there.
 
-- **Fork size and upstream distance**: upstream went from `v0.1.45` to `v0.2.11`.
-  `git log v0.2.11..HEAD` retains our core lean commits: the hyper-connection
-  inject/gate-mean fold (`8645328d`), build gates (`2b829e1e`), non-Ada backend pruning
-  (`3c3312d4`), serve repeat-wrap fix (`9aafcbf0`), QSA fused RMSNorm + RoPE (`STRATA_QSA_FUSE_NR`),
-  strict mathematical routing default (`STRATA_ROUTE_TAIL_SKIP=0`), and now the **Unsloth Dynamic V3.1
-  intake**: cherry-picked `Q5_0` down-expert activation offset fix (`aa678f10`) and `tools/iq_pack.py`
-  v4 split-shard layout handling. This enables native execution of `UD-IQ2_XS` (75.8 GB iso-size
-  contender) with zero non-Ada bloat.
+- **Fork size and upstream distance**: upstream went from `v0.1.45` to `v0.2.12`
+  (3,502 commits from the fork's base `477ac13c`, 2026-10-16). Most of what the fork
+  carried is now upstream, so the 2026-11-07 audit found only two picks still needed:
+  the external PLE shard (`9842df41`) and the serve thinking wrap (`9aafcbf0`). Already
+  upstream and not re-applied: the Ada `sm_89` MMVQ tables (`kIlRows_89`, default on),
+  `STRATA_QSA_FUSE_NR` (default on), `STRATA_GR_NORM_FAST`, the hyper-connection
+  inject/gate-mean fold (`gr.cu` is byte-identical to ours), the Q5_0 expert-dot offset
+  fix (`aa678f10`) and `tools/iq_pack.py` v4, which is what the Unsloth Dynamic V3.1
+  intake needed to run `UD-IQ2_XS` natively (75.8 GB iso-size contender, zero non-Ada
+  bloat). Still ours and not upstream: the build
+  gate (`2b829e1e`), the backend prune (`3c3312d4`), `STRATA_ROUTE_TAIL_SKIP=0`
+  (`3733343d`) and the PLE shard. The re-slice measured equal decode and 12% worse 8k
+  prefill, so it is a reference arm, not served; the one promotable change it exposed was
+  a default, not a commit (Step 1d).
 
 ---
 
@@ -80,13 +86,67 @@ active; through `bench_strata.sh` it passes `FORCE=1` because the handoff alread
 
 ### Step 1: Upstream Strata Audit & Filtering
 
+**Read the release notes first.** They are the fastest filter there is: a release note names the
+card class, the quant, the switch and the measured delta, which is exactly the tuple needed to
+decide whether a change can touch this box. The commit log cannot be read that way, and 3,502
+commits is a lot of noise for four candidates. Use the notes to build a shortlist, then use the
+tag to prove each item's state.
+
+The filter is: **RTX 4070, 12 GB, `sm_89`, Linux, single GPU, UD-IQ2_XS, Q8_0 PLE on NVMe, MTP
+draft head, 128k context.** Anything naming Mac, Metal, Strix Halo, gfx12/gfx1201, DGX Spark,
+Intel Arc, a peer/second GPU, a layer split, or a `UD-Q4`/`UD-IQ4`/`IQ3_S` quant is not ours.
+For the 0.2.12 notes that leaves:
+
+| note item | applies? | why |
+| --- | --- | --- |
+| 12 GB cards: file-tier re-check no longer counts the engine's own memory | **check, probably no action** | the fallback line `expert reads now go through the file cache (X GiB of RAM free for them, Y GiB limit)` never appears in our log; the `expert arena read through the file cache` line is the normal arena load, not the fallback |
+| `STRATA_ADAPT_FETCH=1\|2`, fetched misses into the card's cache, decode +10.2% | **taken** | our decode ran 10-12% PCIe misses, exactly the regime; ported as `20c19b89` and served as `=1`. Isolated +9.42 t/s on the reference tree, 55.6 -> 70.4 on the fork, hit rate 46.6% -> 67.2% |
+| `STRATA_SELECT_TWO_PASS=1`, 128K +1.65% | yes, small | we serve 128k; prefill-only, low value |
+| tool-call fixes (#5312, #5409, #5276, #5281, #4828, #4832, #4622) | yes, quality not speed | they live in `serve/server.py`; worth reading before any agent-facing change |
+| row-table over-read that faults long CUDA prompts (#5108) | yes, correctness | 128k context is the exposure |
+| tuned DFlash2 drafter | no | 12 GB gains are prompt-side on UD-IQ4_XS-v31; we run IQ2_XS and MTP |
+| `STRATA_IQ4_W4A8` | no | IQ4_XS / IQ4_NL experts only |
+| `STRATA_PF_FUSED_Q50` | no | Radeon gfx12 and Q5_0 layers |
+| `STRATA_VNNI_TIER` | no | CPUs with AVX-512 but no VNNI; Alder Lake has neither |
+| Mac, Strix Halo, Radeon, DGX Spark, peer/layer split, #3559, #5158 | no | wrong backend or multi-GPU |
+
+A release note's headline can also be a bug fix rather than a kernel. The 3060's "2K 87 to 264
+tokens per second" is mostly the file-tier fix, not a faster prompt path. On this box the fix
+does not fire, so the applicable slice of that headline was the CPU share limit (+19% at 2k),
+which is what the measurement found. Read the note, then check which half of it your box is in.
+
+**The fork is cut from 0.1.45, so every release since then is unclaimed, not just the newest.**
+Read the notes from the fork's base forward. What 0.2.7 to 0.2.11 still hold for this box, and
+whether it has already been tried:
+
+| item | release | status here |
+| --- | --- | --- |
+| `STRATA_ROUTE_PRIOR=1.5`, residency-biased routing on 12 GB NVIDIA | 0.2.7 | **measured +43.7% (102.23 t/s) on 2026-10-28 and deliberately not served**: it re-picks experts, and upstream's own agent-task check read 4.5 of 10 against 5.6. Upstream reverted it as a default in 0.2.8 for the same reason. Do not re-litigate without an agent-quality gate. |
+| `STRATA_MMVQ_IL_89` RTX 40 tables | 0.2.7 | taken (`0cef00fa`), now upstream and on by default |
+| `--slots 2`, +10-12% aggregate | 0.2.7 | not applicable to a single-user Pi; it pays only for concurrent requests |
+| `--ple-io ram`, prompts +16-30% | 0.2.7 | impossible here: the Q8_0 PLE table is 54.4 GB and the non-PLE weights are 43.8 GB against 64 GB RAM |
+| `--mtp-draft-vocab draft_vocab_en.bin`, +2.7-3.1% for English | 0.2.7 | **measured slower here** (65.78 against ~71 t/s); rejected |
+| `--kv q4_0` on a 12 GB card | 0.2.7 | upstream could not reproduce a gain; we serve K8V4 |
+| `STRATA_KVA=1`, long prompts +11-18% | 0.2.7 | opt-in and approximate (last 12 layers); it can drop details from long lists, so it needs a task-suite gate before it is worth a look |
+| DFlash2 drafter, one card +5.8% to +12% | 0.2.10 | sm_89 is a supported architecture, but no 12 GB Ada number exists; it is a new drafter plus a large intake, and MTP already accepts 77-88% here |
+| CPU/PCIe miss share follows the CPU, ceiling 0.95 | 0.2.11 | the `strata_v0212` arm already ran it and decode was equal (62.59 against 62.60), so the resident fraction here is not the regime upstream's +40% single-12-GB rows were measured in |
+| `STRATA_ADAPT_FETCH=1\|2`, decode +10.2% | 0.2.12 | **ported (`20c19b89`) and served as `=1`**: +9.42 t/s isolated on the reference tree, 55.6 -> 70.4 on the fork, hit rate 46.6% -> 67.2%. `docs/strata-perf-next-steps-2026-10.md` §10 |
+| tool-call and server fixes (#5312, #5409, #5276, #5281, #4828, #4832, #4622, #5040, #4701, #2518, #2892) | 0.2.11 | **absent from the fork**: its `serve/server.py` is 7,164 lines against 10,540 in 0.2.12. These are agent-quality and correctness gaps, not tps, and they are the largest unclaimed block for daily Pi use |
+
+The filter that does the work: a note is only a candidate if it names **this** card class, **this**
+quant and **one** card. Everything naming a second card, a layer split, a peer device, Mac,
+Metal, Strix Halo, gfx12/gfx1201, DGX Spark, Intel Arc, `UD-Q4`/`UD-IQ4`/`IQ3_S`, or a K-quant
+expert is not ours. `STRATA_MMQ_KQ` is K-quant only; `STRATA_IQ4_W4A8` is IQ4 only;
+`STRATA_PF_FUSED_Q50` is Radeon gfx12 and Q5_0; `STRATA_VNNI_TIER` needs AVX-512 without VNNI,
+which Alder Lake does not have.
+
 Inspect what upstream has changed since the base tag (`v0.1.45`) or between releases.
 Compare against the newest tag, not against the tag the fork was cut from:
 
 ```bash
 cd vendor/strata-lean
 git fetch origin --tags -q
-NEWEST=$(git tag --sort=-v:refname | head -n1)     # v0.2.7 on 2026-10-28
+NEWEST=$(git tag --sort=-v:refname | head -n1)     # v0.2.12 on 2026-11-07
 
 # Core inference / CUDA / speculative commits between the fork's merge base and the newest tag
 git log "$(git merge-base HEAD "$NEWEST")..$NEWEST" --oneline -- src/core src/kernels/cuda src/spec
@@ -118,17 +178,36 @@ default for NVIDIA cards at or under 13 GiB), int8 prompt attention
 
 ```bash
 cd vendor/strata-lean
-git worktree add -b 4070-main-lite-027 ../strata-v0.2.7 v0.2.7
-cd ../strata-v0.2.7
-git cherry-pick -x 8645328d 2b829e1e 3c3312d4 9aafcbf0    # ours; skip what is already upstream
-../.venv/... build_lean.sh   # the fork's build gate, then the standard A/B
+git worktree add -b 4070-main-lite-0.2.12 ../strata-v0.2.12 v0.2.12
+cd ../strata-v0.2.12
+
+# 1. Prove which of our commits are already upstream BEFORE picking anything.
+#    An empty diff means upstream already has it; do not re-apply.
+git diff --stat v0.2.12 HEAD -- src/kernels/cuda/gr.cu src/kernels/cuda/native_mmvq.cu
+
+# 2. Pick only the still-ours commits, smallest first.
+git cherry-pick -x 9842df41 9aafcbf0
+
+# 3. Build with the lean flags. The gate and prune are optional for a reference arm.
+cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_CUDA=ON \
+  -DSTRATA_BUILD_TESTS=OFF -DCMAKE_CUDA_ARCHITECTURES=89 -DCMAKE_CUDA_COMPILER=/opt/cuda/bin/nvcc
+cmake --build build --target strata -j6
 ```
 
-Expect the conflict to land in `src/core/gr.cpp` / `src/kernels/cuda/fused_gr.cu`, because
-0.2.x reworked the hyper-connection path that `8645328d` folds. Two of our seven commits
-(`0cef00fa` the sm_89 table, `7ce60ad3` `GR_NORM_FAST`) do not need re-applying at all.
-Keep the old branch until the re-sliced one benches at or above it; the comparison is
-`ARMS="strata_lean strata_v027"` once the arm exists in `bench-qwen38-refresh-ab.sh`.
+`-j6` is not a preference. `-j14` crashed `nvcc` on `mmq-instance-tqk6.cu` (rc 139) while
+the served model held 14 GB; the retry at `-j6` finished clean. A worktree build is 1.0 to
+1.5 GB, so it fits in the 28 GB free on `/home`.
+
+Expect a conflict in `CMakeLists.txt` if the build gate is picked. For a reference arm, skip
+the gate and the prune: neither changes performance, and the prune conflicts with upstream's
+new backend directories. Keep the old branch until the re-sliced one benches at or above it;
+the comparison is `ARMS="strata_lean_ud strata_v0212"` once the arms exist in
+`bench-qwen38-refresh-ab.sh`.
+
+The 2026-11-07 run is the worked example: two picks, a clean build, and a result that was
+equal on decode and worse on 8k prefill. That is a valid outcome, not a failure. Write it down
+and move to Step 1d, because the tree being worse does not mean the upstream work has nothing
+in it.
 
 ---
 
@@ -136,19 +215,28 @@ Keep the old branch until the re-sliced one benches at or above it; the comparis
 
 1. **Switch-only promote (no merge at all).** The change is a flag, a `STRATA_*` env var, a
    taskset mask, or a data file (`--expert-profile`, `--mtp-draft-vocab`). It is measured by
-   `strata-tuning`, and a winner lands as one line in `strata-iq3_xxs-ple_q8.json` plus a
+   `strata-tuning`, and a winner lands as one line in the run config's `args` or `env` block plus a
    `name`/`description` refresh in `llama-swap.yaml`. No git history changes. This is the most
-   common shape and it should be tried before any merge.
+   common shape and it should be tried before any merge. It is also how an upstream *default*
+   change gets taken when the tree itself is not worth carrying (Step 1d: the CPU share limit).
 2. **Single-commit cherry-pick.** Only when the commit is one kernel or one policy file that my
    fork has not touched, and only after `git show "$TAG:path/to/file"` proves the same file exists
    in the new base with the same shape. `git cherry-pick -x <sha>` keeps the upstream SHA in the
-   message so the next audit can see it is not ours to maintain.
-3. **Re-slice.** When upstream distance is the problem (2,252 commits, 8 of them ours), retarget
-   the branch instead of stacking picks: new branch off the tag, re-apply the substantive commits,
-   keep the old branch until the new one benches at or above it. Apply them in this order:
-   engine code first (`8645328d`), then the build gate (`2b829e1e`), then the backend prune
-   (`3c3312d4`) so the prune runs against the new tree and never conflicts with a file that no
-   longer exists, then tooling or serve fixes (`9aafcbf0`).
+   message so the next audit can see it is not ours to maintain. Worked example (2026-11-07):
+   `24c6c2f6` (`STRATA_ADAPT_FETCH`) applied cleanly to the headers, `verify.cpp` and
+   `verify_kernels.cu`, and conflicted in three places. Resolve by intent, not by taking a side:
+   the pruned `metal/` stub is dropped, `expert_source.cpp` keeps the fork's simpler lookahead
+   (the upstream hunk there was an unrelated confidence-scoring refactor), and `generate.cpp`
+   keeps the fork's verify call and gains only the new diagnostic block. Then prove the port is
+   inert with the switch off before measuring it on: the ported binary read 55.63 t/s against a
+   closing control of 56.47, and only then 70.43 with the switch on.
+3. **Re-slice.** When upstream distance is the problem (3,502 commits from the 2026-10-16 base,
+   16 of them ours and only 2 still needed on 2026-11-07), retarget the branch instead of stacking
+   picks: new branch off the tag, re-apply the substantive commits, keep the old branch until the
+   new one benches at or above it. Apply them in this order: engine code first (`8645328d`), then
+   the build gate (`2b829e1e`), then the backend prune (`3c3312d4`) so the prune runs against the
+   new tree and never conflicts with a file that no longer exists, then tooling or serve fixes
+   (`9aafcbf0`).
 4. **Re-implement on top of upstream's rewrite.** When upstream reworked the same file my commit
    edits (the hyper-connection path in `src/core/gr.cpp` and `src/kernels/cuda/fused_gr.cu` is the
    live example), do not merge through the conflict. Read upstream's version, re-apply the intent
@@ -157,11 +245,63 @@ Keep the old branch until the re-sliced one benches at or above it; the comparis
    silently dropped the optimization.
 5. **Reject with evidence.** A rejected experiment gets a written row (what changed, the measured
    before and after, the reason) so nobody re-runs it: `--mtp-q4 head` went 69.60 to 67.88 t/s and
-   was reverted because on-the-fly dequant cost more than the bandwidth it saved.
+   was reverted because on-the-fly dequant cost more than the bandwidth it saved. The Lamina draft head
+   (2026-11-05) stayed out for the same reason at the other end of the scale: its acceptance gain did not
+   reproduce (pooled +0.6 points at SE 0.56 over three ladders) and its decode effect flipped sign between
+   runs, even though it does free a reproducible 132 MiB. Row: `docs/strata-perf-next-steps-2026-10.md` §9.
+   The v0.2.12 re-slice (2026-11-07) is the same shape at tree scale: equal decode, 12% worse 8k
+   prefill, kept as a reference arm at `vendor/strata-v0.2.12` rather than served. Row: §10.
 
 Hard rule across all five: upstream backends never come in. Metal, SYCL, ROCm tuning headers,
 `src/qwen35/`, `web/` and installer code are pruned in every re-slice, and `CMAKE_CUDA_ARCHITECTURES=89`
 stays pinned in the build gate.
+
+---
+
+### Step 1d: Audit the defaults, not only the commits
+
+A re-slice can be a wash and still contain the win, because upstream often changes a *default*
+the fork pinned. On 2026-11-07 the tree move measured equal decode (62.59 against 62.60 paired)
+and 12% worse 8k prefill, yet the same afternoon produced a +19% 2k prefill win with no 8k or
+decode cost: upstream had raised the CPU prefill share limit from 1,024 to 3,072 tokens.
+
+Do this after the tree A/B, before writing the tree off:
+
+```bash
+# 1. Diff the default constants the fork pins against the tag.
+git diff v0.2.12 HEAD -- src/prefill/prefill.cpp include/strata/prefill/share_rules.hpp
+
+# 2. Read the new constant's comment. It usually names the measurement and the card class.
+git show v0.2.12:include/strata/prefill/share_rules.hpp | head -30
+
+# 3. Test it as an env arm on the CURRENT binary. No rebuild.
+ARMS="strata_lean_ud strata_lean_share3072 strata_lean_ud" \
+  bash bench-models/bench-qwen38-refresh-ab.sh
+```
+
+The fork's `cpu_share_max()` returns `kStreamAllMinDefault` (1,024) when the default is armed.
+Setting `STRATA_PREFILL_CPU_SHARE_MAX=3072` explicitly bypasses that guard, so the switch is
+measurable without a build. The winner lands as one `env` line in the run config, not a commit:
+
+```json
+"env": { "STRATA_PREFILL_CPU_SHARE_MAX": "3072" }
+```
+
+The same shape applies to every default the fork overrides: `STRATA_ROUTE_TAIL_SKIP`,
+`STRATA_PCIE_AUTO_SPLIT`, `STRATA_MMQ_KQ`, the bare `--prefill auto` chunk ceiling. Diff the
+constant, read its comment, measure it as a switch, and only then decide whether the tree is
+worth carrying.
+
+Two traps in this step:
+
+- **A hardcoded log line is not the value.** The fork prints "the CPU share is ON by default for
+  prompt chunks below 1024 tokens" from a string literal in `0.1.45`, even with the env set to
+  3072. Confirm the switch reached the engine from `/proc/<pid>/environ`, not from the log.
+- **The tree's own reservation can be the regression.** v0.2.12 reserves an extra 256 MiB "for
+  what is allocated after the cache", which costs 184 expert slots (2,527 against 2,711) and
+  shrinks the prompt chunk from 6,912 to 6,144. That, not the prompt path, is the 8k loss:
+  `STRATA_PF_SMALL=0` recovered only 4 of the 13 points. When a re-slice loses prefill, read
+  the slot count and chunk size in the engine log before blaming a kernel.
 
 ---
 
@@ -227,7 +367,32 @@ draft vocab: 40,525 tokens against the served 106,299.
   acceptance does not transfer across quants.
 - The 40,525-token vocab is the same size as the rejected `draft_en` arm, which cost about 7%
   (65.78 against ~71 t/s). The retrained dense part has to earn that back.
-- Verdict: pending (paired A/B `base mtp_lamina base` launched 2026-11-05 on UD-IQ2_XS).
+- Verdict, measured 2026-11-05 on UD-IQ2_XS (two paired ladders, `base` bookending):
+  **acceptance does not reproduce.** Run 1 read 79.9% to 82.1% (+1.4 points); run 2 read 80.1/81.5%
+  to 80.8% (-0.1). Pooled over both, 80.8% (11,837 of 14,647) to 81.4% (5,906 of 7,254), which is
+  +0.6 points at a standard error of 0.56 - not significant. Decode contradicts itself the same way:
+  +3.9 t/s in run 1, -2.9 in run 2. The README's +3.6% is against basalt's dense part on IQ3_S, not
+  against the stock head on the quant we serve.
+- What *is* reproducible is the VRAM. The head is Q6_K over the vocabulary, so 106,299 tokens is
+  212.9 MiB and 40,525 is 81.2 MiB: **131.7 MiB freed**, confirmed in both runs. With
+  `--expert-cache auto` the engine spends it on expert slots immediately, 2,711 to 2,790 (+79, +2.9%),
+  at unchanged headroom (412 to 414 MiB free with everything loaded). It never shows up as free VRAM.
+- The headroom option, measured 2026-11-05 in a third ladder (`base base_r960 mtp_lamina_r960 base`,
+  no spill, io/tok 0.023-0.032): `--vram-reserve-mib 960` clears `#2065` in both variants (674 MiB free
+  with everything loaded, 538-540 MiB at the worst prompt capture) but costs very differently.
+  Stock head at 960: 2,552 slots, hit rate 39.6%, **52.30 t/s against a 62.30 base pair (-16%)**.
+  Lamina head at 960: 2,633 slots, hit rate 47.8%, **60.77 t/s (-1.5, inside the spread)**.
+- So the head's real value is not the drafts, it is that 132 MiB is worth 81 expert slots at a fixed
+  reserve, which is worth about 8.5 t/s once the reserve has already been paid. That reverses the
+  earlier "do not promote" call: carry the head if the `#2065` margin is wanted, because it is what
+  makes the reserve increase affordable. Do not carry it for acceptance, which is flat at 80.5-80.8%
+  in every arm measured.
+- Still true: with no reserve increase, `base` is the fastest configuration measured (62.30 t/s,
+  2,711 slots) and the head buys nothing there.
+- **Decision 2026-11-05: not served.** The plat tier stays on the stock head and the stock reserve.
+  The measured write-up is `docs/strata-perf-next-steps-2026-10.md` §9. The head stays on disk at
+  `vendor/Strata-data/mtp/rt-lamina` and the `mtp_lamina` / `mtp_lamina_r960` / `base_r960` arms stay
+  in the harness, so re-testing it is one ladder, not a re-download.
 
 **PolyStrata: nothing for the model, three switches for this box.**
 For Qwen3.8-Flash-Next it runs Strata's engine unchanged, so its Qwen numbers are Strata's
@@ -346,9 +511,10 @@ Always benchmark using `bench-models/bench-qwen38-refresh-ab.sh` with the standa
    ```bash
    systemctl --user stop llama-swap.service
    ```
-2. Run the probe suite:
+2. Run the probe suite. The served quant is UD-IQ2_XS, so use the `_ud` arms, not the
+   IQ3_XXS one:
    ```bash
-   ARMS="strata_lean" bash bench-models/bench-qwen38-refresh-ab.sh
+   ARMS="strata_lean_ud strata_v0212 strata_lean_ud" bash bench-models/bench-qwen38-refresh-ab.sh
    ```
 3. Restart the router immediately:
    ```bash
@@ -363,7 +529,14 @@ Always benchmark using `bench-models/bench-qwen38-refresh-ab.sh` with the standa
 **Decision Rules**:
 - Pair the arm: run the same control arm before and after it in one boot, same CPU governor
   (`powersave` costs 15 to 25% of decode against `performance`). A delta under ~3 t/s is
-  inside this tier's spread.
+  inside this tier's spread. Read decode and prefill separately, because they behave
+  differently: on 2026-11-07 prefill held to about 1% across three ladders while identical
+  control arms read 51.4 and 57.2 t/s in one ladder and 61.8 and 63.4 in the next, with the
+  desktop stack (plasmashell, firefox, zed, the agent itself) as the only variable. Only paired
+  arms inside one ladder are comparable, and a control pair that disagrees by more than 3 t/s
+  invalidates that ladder's decode rows, not its prefill rows. When a decode delta matters,
+  run the same arm twice beside the control (the 2026-11-07 decisive ladder was
+  `control, v0212, control, v0212` and settled 62.60 against 62.59).
 - If decode improves and needle passes: keep the change.
 - If decode regresses (as happened with `--mtp-q4 head`, 69.60 to 67.88 t/s): revert
   immediately, and say so in the fork README so nobody re-runs it.

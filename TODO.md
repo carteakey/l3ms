@@ -1,11 +1,14 @@
 # TODO
 
-All intentionally committed TODO items were reconciled into the single Linear
-`L3MS` project and its `Operations backlog completion — 2026-08-10` milestone.
-Linear remains authoritative for committed work. This file is now only a concise
-forward index; see the [simplification plan](docs/migration/simplification-plan.md),
-[migration status](docs/migration/status.md), and [caller audit](docs/migration/upstream-first-audit.md)
-for scope and evidence.
+Committed work is tracked as GitHub Issues on `carteakey/l3ms`, which is
+authoritative. This file is the in-repo forward index that mirrors the open
+issues, plus speculative or research notes that are deliberately not issues.
+Linear was retired as the tracker on 2026-11-07; the eight `migrated-from-linear`
+issues are the only surviving tickets from it, and `CAR-*` identifiers in older
+notes are historical references. See the
+[simplification plan](docs/migration/simplification-plan.md),
+[migration status](docs/migration/status.md), and
+[caller audit](docs/migration/upstream-first-audit.md) for scope and evidence.
 
 ## Monorepo: next work
 
@@ -25,7 +28,7 @@ for scope and evidence.
 
 ## Remaining full-port acceptance gates
 
-- [ ] Verify HeartMuLa and H3 audio through the root CLI and `audiocpp_auto`
+- [ ] ([#22](https://github.com/carteakey/l3ms/issues/22)) Verify HeartMuLa and H3 audio through the root CLI and `audiocpp_auto`
   with real weights; then verify language-model return. HTTP fixtures are not
   real-model acceptance. H3 video was removed from the root workbench.
   Blocked on this host (checked 2026-10-15): neither `~/models/media/HeartMuLa-GGUF`
@@ -34,7 +37,7 @@ for scope and evidence.
   or restore the weights, then run the same four-step check used for Breeze
   (CLI run, decode the artifact, restore the language model, confirm no engine
   process remains).
-- [ ] Verify LTX and YuE2 ComfyUI workflow outputs with real weights;
+- [ ] ([#23](https://github.com/carteakey/l3ms/issues/23)) Verify LTX and YuE2 ComfyUI workflow outputs with real weights;
   decode each artifact and retain settings/logs. Both share the existing ComfyUI
   engine; separate Python runtimes are not workbench prerequisites.
   Blocked on this host (checked 2026-10-15): no LTX or YuE2 weights exist under
@@ -47,23 +50,44 @@ Optional follow-ups:
   The wrapper runs arbitrary user Python, so the scene, not L3MS, picks the render
   backend; the guard is what keeps that from colliding with the router's VRAM. Revisit
   only if Blender is pinned to CPU in the wrapper itself.
-- [ ] Blender headless acceptance (the only profile still using the idle-GPU
+- [ ] ([#24](https://github.com/carteakey/l3ms/issues/24)) Blender headless acceptance (the only profile still using the idle-GPU
   window) remains separate from the shared-engine workbench. Do not expand direct-script orchestration to fill
   unsupported model gaps by default; narrow the supported scope instead.
-- [ ] Finish source consolidation after shared-engine acceptance: keep one
+- [ ] ([#26](https://github.com/carteakey/l3ms/issues/26)) Finish source consolidation after shared-engine acceptance: keep one
   product/UI/config/history, relocate still-needed toolkit modules, audit callers
   before retiring standalone compatibility entry points. A folder rename alone
   is not runtime integration. Do not delete model/runtime data with source cleanup.
-- [ ] Measure `qwen38-flash-next-plat-abliterated-vision` so it can join the
+- [ ] ([#25](https://github.com/carteakey/l3ms/issues/25)) Measure `qwen38-flash-next-plat-abliterated-vision` so it can join the
   ranking; until then the site lists it as not measured.
-- [ ] Delete `~/repos/_retired/` once you are satisfied; history is bundled in
+- [ ] ([#30](https://github.com/carteakey/l3ms/issues/30)) Delete `~/repos/_retired/` once you are satisfied; history is bundled in
   `~/repos/_backups/siblings-20261015/`.
-- [ ] Comprehensive accessibility checks; the site already passes real
+- [ ] ([#28](https://github.com/carteakey/l3ms/issues/28)) Comprehensive accessibility checks; the site already passes real
   desktop/mobile keyboard, focus and overflow checks
   ([browser record](docs/migration/site-browser-acceptance.md)).
-- [ ] Audit the exact outgoing history/export, endpoints, host paths, secrets and
+- [ ] ([#27](https://github.com/carteakey/l3ms/issues/27)) Audit the exact outgoing history/export, endpoints, host paths, secrets and
   large files before publication. Publication remains **NO-GO**; no push or
   history rewrite without authorization.
+
+## Strata tuning (plat tier)
+
+Filed 2026-11-07 from `docs/strata-perf-next-steps-2026-10.md`. The blocking one is
+[#13](https://github.com/carteakey/l3ms/issues/13): no tuning arm can be promoted or
+rejected until warm-up is separated from steady state.
+
+- [#13](https://github.com/carteakey/l3ms/issues/13) Run the blocking `kv_grow` ladder (p0)
+- [#14](https://github.com/carteakey/l3ms/issues/14) Build an expert-cache-stable identity instrument (p0)
+- [#15](https://github.com/carteakey/l3ms/issues/15) Quality-gate `STRATA_ROUTE_PRIOR=1.5` before serving (p0)
+- [#16](https://github.com/carteakey/l3ms/issues/16) Build an expert profile from real traffic (p0)
+- [#17](https://github.com/carteakey/l3ms/issues/17) Put the four E-cores to work (p1)
+- [#18](https://github.com/carteakey/l3ms/issues/18) Prompt-side switches: prefill has not moved in a month (p0)
+- [#19](https://github.com/carteakey/l3ms/issues/19) Reserve huge pages for the expert arena (p1)
+- [#20](https://github.com/carteakey/l3ms/issues/20) Re-slice `strata-lean` onto upstream v0.2.x (p2)
+- [#21](https://github.com/carteakey/l3ms/issues/21) Batching, only if two clients ever run at once (p3)
+
+## Workbench
+
+- [#29](https://github.com/carteakey/l3ms/issues/29) Reconcile crate version, changelog and
+  tags: `Cargo.toml` says 1.0.0, the changelog stops at 0.7.0, and there are no git tags.
 
 ## Retired prototype scope
 

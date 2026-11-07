@@ -893,3 +893,257 @@ drives a deep-context decode probe (`bench-models/bench-qwen38-refresh-probe.py 
 - Open: the identity instrument. Until there is a way to hold the expert-cache state still (or to compare
   logits instead of text), a per-arm divergence count is a noise measurement, not a quality gate.
 
+## 9. The Lamina draft head and the Qwen3.8 fork family, 2026-11-05
+
+Three forks of Strata now ship for this one model. All three audited, one of them measured, and the answer
+is that the served tier does not change.
+
+- **`eddoursul/Lamina`**, a Strata fork that diverged on 2026-10-29. Its model
+  `eddoursul/Lamina-Qwen3.8-Flash-Next-MTP` is not a GGUF: it is a `--mtp` runtime directory (`dense.txt`,
+  `dense.bin`, `experts.bin`, `draft_vocab.bin`), which is the format `tools/mtp_rt.py` already writes and
+  `strata-lean` already loads. Verified identical to the shipped head: the same 29 tensor names, dtypes and
+  dims, the same `dense.bin` (116,099,072 B) and `experts.bin` (707,788,800 B), SHA-256 matching the model
+  card. The only structural difference is the draft vocab, 40,525 tokens against the served 106,299.
+- **`simplexai-labs/PolyStrata`**. For Qwen3.8 it runs "the Strata project's engine, unchanged", so its Qwen
+  numbers are Strata's numbers. Its own engine covers eleven other models and is out of scope here.
+- **`jesdga95/basalt`**. Blackwell `sm_120` only, NVFP4 packs. Nothing in it runs on Ada. Worth reading for
+  its per-switch KLD gate (`docs/precision/isolated-costs.md`) and its two-stage Q8_0 head, which is
+  lossless by proof, but there is no code to take.
+
+### What was measured
+
+Three paired ladders on the served `strata-ud-iq2_xs-ple_q8` config, `TG_PROBES=4`, `PP_SIZES=2048`, with
+`base` bookending each one:
+
+1. `base mtp_lamina base`, 16:21, 11 minutes.
+2. `base mtp_lamina mtp_lamina_r960 base`, 18:13, 14 minutes.
+3. `base base_r960 mtp_lamina_r960 base`, 18:50, 14 minutes.
+
+New arms: `mtp_lamina` (`--mtp vendor/Strata-data/mtp/rt-lamina`), `mtp_lamina_r960` (the same plus
+`--vram-reserve-mib 960`), and `base_r960` (`--vram-reserve-mib 960` on the stock head). The harness also
+gained acceptance accounting (`drafts_accepted`, `drafts_offered`, `draft_accept_pct`) parsed from the
+engine's own `drafts accepted X of Y` lines, and an `SRC_CFG` override, because the harness's default
+IQ3_XXS weights are not on this disk.
+
+### Acceptance: the claimed win does not reproduce
+
+| ladder | control | Lamina head |
+|---|---|---|
+| 1 | 80.7% (5,936 / 7,358) | 82.1% (2,921 / 3,560) |
+| 2 | 80.1% and 81.5% | 80.8% (2,985 / 3,694) |
+| 3 | 80.7% and 80.6% | 80.6% (3,030 / 3,761, the r960 arm) |
+
+Pooled over all three ladders: 80.8% (11,837 / 14,647) against 81.4% (5,906 / 7,254), which is +0.6 points
+at a standard error of 0.56. Not significant. The head's README claims 2.489 against 2.402 tokens a verify
+pass on IQ3_S (+3.6%), but that baseline is basalt's dense part rather than the stock unsloth head, and the
+dense part was trained on IQ3_S and UD-Q4_K_XL output while this tier serves UD-IQ2_XS.
+
+Decode contradicts itself the same way: +3.9 t/s in ladder 1, -2.9 in ladder 2.
+
+### The VRAM is real, and it is the actual finding
+
+The head is Q6_K over the vocabulary, so 106,299 tokens is 212.9 MiB and 40,525 is 81.2 MiB: 131.7 MiB
+freed, identical in every run. With `--expert-cache auto` the engine spends it on slots immediately, 2,711
+to 2,790 (+79, +2.9%), at unchanged headroom (412 to 414 MiB free with everything loaded). It never appears
+as free VRAM, which is why the first two ladders looked like a wash.
+
+Ladder 3 is where that matters, because it prices the head against the reserve increase it makes
+affordable. `#2065` is diagnostic only (`src/program/generate.cpp:11335`, "said, never changed"): the
+engine prints it and takes no other path. What it warns about is the driver paging VRAM to system RAM, so a
+higher reserve buys margin rather than throughput.
+
+| arm | slots | free (loaded) | worst capture | `#2065` | hit% | tg steady |
+|---|---|---|---|---|---|---|
+| `base` | 2,711 | 412 | 278 | fires | 52.7 and 50.1 | 62.47 and 62.13 |
+| `base_r960` | 2,552 | 674 | 540 | clear | 39.6 | 52.30 |
+| `mtp_lamina_r960` | 2,633 | 674 | 538 | clear | 47.8 | 60.77 |
+
+No spill in any arm (io 0.023 to 0.032 MB/token). The stock head at 960 loses 159 slots and 16% of decode.
+The Lamina head at 960 loses 78 slots and 1.5 t/s, inside the spread. At a fixed reserve the head is worth
+81 slots and about 8.5 t/s, which is a different justification from the one its README makes.
+
+### Verdict: serve `base`, carry nothing
+
+`base` is the fastest configuration measured (62.30 t/s, 2,711 slots) and the head buys nothing there. The
+head is not promoted: its acceptance claim does not reproduce, its speed effect is contradictory, and the
+one durable thing it provides (132 MiB) only pays once a reserve increase is already being paid for, which
+is a safety trade rather than a speed one.
+
+Kept for a future decision, not served: `--mtp vendor/Strata-data/mtp/rt-lamina --vram-reserve-mib 960` is
+the configuration that clears `#2065` at near-parity (60.77 against 62.30, no acceptance loss). If the
+driver-paging risk ever shows up in a real session, that is the line to take, not `base_r960`, which costs
+16%.
+
+### Harness defects this found
+
+- Repeated labels (the ladder convention runs the control first and last) shared one engine-log path, so
+  the closing control's cumulative counters were double-counted. `run_arm` now prefixes the log paths with
+  a sequence number.
+- `run_arm "$arm" || true` meant every arm could fail to load and the ladder still exited 0. On 2026-11-05
+  all four arms died on a bad `--config` path and the dark runner wrote `rc=0`. The ladder now counts
+  failures and returns non-zero when all of them fail.
+
+One thing to carry forward: `#2065` is the only place the engine reports its own headroom, and it is a
+warning with no branch behind it, so a headroom regression will never show up as a speed change until the
+driver starts paging.
+
+
+## 10. Upstream v0.2.12 re-slice, measured 2026-11-07
+
+Upstream moved from `v0.2.11` to `v0.2.12` and the fork's base (`477ac13c`, 2026-10-16) is now
+3,502 commits behind. Most of what the fork carried is already upstream: the Ada `sm_89` MMVQ
+tables (`kIlRows_89`, on by default), `STRATA_QSA_FUSE_NR` (default on), `STRATA_GR_NORM_FAST`,
+the hyper-connection inject/gate-mean fold in `gr.cu` (byte-identical file), the Q5_0 expert-dot
+offset fix, and `tools/iq_pack.py` v4. The re-slice therefore only needed two picks:
+`9842df41` (external PLE shard in split validation and the native dense loader) and `9aafcbf0`
+(the serve thinking wrap). Branch `4070-main-lite-0.2.12` at `vendor/strata-v0.2.12`, built CUDA
+only for `sm_89`, engine 0.1.58. `STRATA_ROUTE_TAIL_SKIP=0` was forced on both arms so the
+comparison is at the fork's exact-routing setting rather than upstream's rank-7 default.
+
+### What was measured
+
+Same UD-IQ2_XS pack, same run config, one boot per ladder, three ladders, governor `performance`.
+`strata_lean_ud` is the served fork; `strata_v0212` is the re-slice; `strata_v0212_pf0` adds
+`STRATA_PF_SMALL=0`; `strata_lean_share3072` is the fork with `STRATA_PREFILL_CPU_SHARE_MAX=3072`.
+
+| arm | tg steady | pp 2048 | pp 8192 | slots | VRAM free |
+| --- | --- | --- | --- | --- | --- |
+| `strata_lean_ud` (6 runs) | 56.6 to 63.4 | 939 | 1,866 | 2,711 | 412 MiB |
+| `strata_v0212` | 55.6 | 1,096 | 1,571 | 2,527 | 632 MiB |
+| `strata_v0212_pf0` (3 runs) | 62.6 | 1,142 | 1,650 | 2,527 | 632 MiB |
+| `strata_lean_share3072` | 58.5 | 1,116 | 1,860 | 2,711 | 412 MiB |
+
+Decode is a wash. The decisive ladder ran two controls and two copies of the v0.2.12 arm:
+62.60 against 62.59 t/s. The earlier single v0.2.12 row at 55.6 and the 61.8 in the isolation
+ladder are the same binary with a prefill-only switch between them, so those 6 t/s are boot noise,
+not an engine difference. Absolute decode also moved 51.4 to 63.4 t/s between identical control
+arms across ladders, which is desktop load on this box, not the engine.
+
+Prefill is the real signal, and it is stable across every ladder:
+
+- 2,048 tokens: v0.2.12 **+22%**, and the fork with `STRATA_PREFILL_CPU_SHARE_MAX=3072` **+19%**
+  with no 8k cost. The cause is upstream's `share_rules::kShareLimitNew` (3,072) against the
+  fork's `kStreamAllMinDefault` (1,024): the idle CPU pool now takes streamed experts for staged
+  chunks up to 3K tokens instead of 1K.
+- 8,192 tokens: v0.2.12 **-12%** even with `STRATA_PF_SMALL=0`. `PF_SMALL=0` recovers only 4 of
+  the 13 points, so the small-cache prompt path is not the cause. The cause is the cache itself:
+  v0.2.12 reserves an extra 256 MiB "for what is allocated after the cache", which costs 184
+  expert slots (2,527 against 2,711), shrinks the prompt chunk from 6,912 to 6,144, and that is
+  the 8k loss.
+
+### Verdict
+
+- **Promoted:** `STRATA_PREFILL_CPU_SHARE_MAX=3072` in `strata-ud-iq2_xs-ple_q8.json`'s `env`
+  block. It is one config line, reversible, and worth about 19% on prompts under 3K tokens with
+  no measurable cost at 8k or in decode. Quality note: upstream measures first-token KL 0.011 and
+  top-1 100% after a 1.1 to 2.8K prompt, against about 0.004 at the old 1K limit, so 1-3K prompts
+  shift slightly. The fork's log line still prints "below 1024 tokens" because that text is
+  hardcoded in `0.1.45`; the limit itself reads the env.
+- **Rejected:** adopting the v0.2.12 tree wholesale. Decode is equal, 8k prefill is 12% worse,
+  and the only thing it buys is 220 MiB of headroom that costs 184 expert slots. The branch stays
+  at `vendor/strata-v0.2.12` as a reference arm, not as a serving tree.
+- **Not taken:** the lean prune (`3c3312d4`) and build gate (`2b829e1e`) were not re-applied,
+  because neither changes performance and the re-slice is not being served. A future re-slice
+  that does get served needs them, in that order, before the serve fixes.
+
+### Harness notes
+
+- The refresh harness now takes an optional env JSON on `strata_arm_cfg`, which is what made the
+  two isolation arms possible without a rebuild. New arms: `strata_lean_ud`, `strata_v0212`,
+  `strata_v0212_pf0`, `strata_lean_share3072`.
+- Three ladders in one afternoon cost about 45 minutes of card time. The desktop stack
+  (plasmashell, firefox, zed, the agent itself) is enough to move decode 10 t/s between ladders,
+  so only paired arms inside one ladder are comparable, and a control pair that disagrees by more
+  than 3 t/s invalidates that ladder's decode rows.
+
+### What the 0.2.12 release notes point at next
+
+The notes name the card class and the quant with each change, which is a faster filter than the
+commit log. Filtered to this box (RTX 4070, 12 GB, `sm_89`, Linux, single GPU, UD-IQ2_XS, MTP,
+128k), four items survive:
+
+- **`STRATA_ADAPT_FETCH=1|2`** (upstream `24c6c2f6`, "fetched misses go into the card's cache,
+  decode +10.2% with =2 in one setup"). This is the best decode candidate left, because our tier
+  runs 10-12% PCIe misses and that is exactly the regime the switch targets. It is 0.2.x
+  expert-source code, absent from the fork, so it is a port rather than a flip.
+- **`STRATA_SELECT_TWO_PASS=1`** (upstream `386f9959`, 128K +1.65%). Prefill only, small, but we
+  do serve 128k.
+- **The tool-call fixes** (#5312, #5409, #5276, #5281, #4828, #4832, #4622). They live in
+  `serve/server.py`, so they are quality for agent use, not tps.
+- **The row-table over-read that faults long CUDA prompts** (#5108). Correctness, and 128k is
+  the exposure.
+
+The 12 GB file-tier fix (`0a0e4463`, "the second start-up check no longer counts the engine's own
+memory as free") does **not** fire here: the fallback line it changes, `expert reads now go through
+the file cache (X GiB of RAM free for them, Y GiB limit)`, never appears in our engine log. The
+`expert arena read through the file cache` line that does appear is the normal arena load. So the
+3060's 3x 2k prompt headline is not available to us; the applicable slice was the CPU share limit,
+already taken.
+
+Not applicable: the tuned DFlash2 drafter (12 GB gains are prompt-side on UD-IQ4_XS-v31, we run
+IQ2_XS and MTP), `STRATA_IQ4_W4A8` (IQ4 experts only), `STRATA_PF_FUSED_Q50` (Radeon gfx12 and
+Q5_0), `STRATA_VNNI_TIER` (AVX-512 without VNNI; Alder Lake has neither), and everything naming
+Mac, Metal, Strix Halo, gfx12/gfx1201, DGX Spark, Intel Arc, a peer device or a layer split.
+
+### `STRATA_ADAPT_FETCH` ported into the lean fork, 2026-11-07
+
+The 0.2.12 release notes' best decode candidate is upstream `24c6c2f6`: the PCIe share's fetched
+misses, which already cross into VRAM, are copied into the slot of a resident expert the window
+does not route, instead of being dropped after the window. It is 0.2.x code and absent from
+0.1.45, so it was measured on the reference tree first, then ported.
+
+Measured on the reference tree (`strata_v0212`), same binary, switch on and off, paired:
+
+| arm | decode | pair delta |
+| --- | --- | --- |
+| `strata_v0212` | 59.93, 58.07 | 1.87 |
+| `strata_v0212_af1` | 68.50, 68.33 | 0.17 |
+
+Isolated: **+9.42 t/s, +16.0%**, prefill unchanged. The pair deltas (1.87 and 0.17) are what make
+this row trustworthy; the earlier ladder that tried to compare it against the fork was invalid
+because the fork controls drifted 10.7 t/s apart.
+
+The port is `20c19b89` on `strata-lean`, a cherry-pick of `24c6c2f6` with three conflicts
+resolved: the pruned `metal/src/engine/stubs.cpp` dropped, `expert_source.cpp` kept the fork's
+simpler lookahead (upstream's hunk there was a separate confidence-scoring refactor), and
+`generate.cpp` kept the fork's verify call while gaining only the `STRATA_ADAPT_FETCH_VERIFY`
+read-back. 252 insertions across 7 files. `RouterLookahead::submit` now copies the residency rows
+into `res_`, because an admission writes the table the lookahead reads.
+
+Measured on the ported fork, one ladder:
+
+| arm | decode | hit rate (last window) | pp 8192 |
+| --- | --- | --- | --- |
+| current fork | 62.63, 56.47 | — | 1,886 / 1,868 |
+| ported, switch off | 55.63 | 46.6% | 1,880 |
+| ported, `=1` | **70.43** | **67.2%** | 1,884 |
+| ported, `=2` | **70.80** | 67.8% | 1,884 |
+
+The switch-off arm (55.63) matches the closing control (56.47), so the port is inert when unset.
+`=1` and `=2` agree within 0.37 t/s; `=1` is served as the conservative choice, not because it was
+proven cleaner. Upstream's only quality evidence is a token-forcing divergence test: 2.73% mismatch
+against 2.53% and 2.53% for two unset arms, +0.19 points, 90% CI -0.02 to +0.42, PASS. The row does
+not say which switch value that arm used, it is a divergence proxy rather than a task test, and it
+was measured on IQ3_S on an RTX PRO 5000, not on UD-IQ2_XS here.
+
+That is a divergence measurement, not a quality one, and the distinction matters. The engine already
+answered the quality question for this class of change in `bench/results/2026-09-27-cache-parity/`
+(issue #23): teacher-forced cache on against cache off over 2,557 tokens, perplexity of the actual
+text identical within one standard error (-0.005 +- 0.005 nats per token), 2-5% of positions flipping
+at a top-2 margin under 0.5 logits. A GPU expert and the CPU compute the same quantized expert in a
+different floating-point order, and both are equally good approximations of the model. `ADAPT_FETCH`
+only changes which experts sit in the cache, so it is inside that result: same routing, same weights,
+different accumulation order for the experts that move between the two paths. **No systematic quality
+loss is expected; the identity gate will still fail, because it measures divergence.**
+
+What is genuinely unverified on this box is correctness, not quality: whether an admission ever
+copies the wrong blob into a slot, which would corrupt the resident expert's weights. That is what
+`STRATA_ADAPT_FETCH_VERIFY=1` reads back, and it has not been run here yet. The mechanism is
+the hit rate, 46.6% to 67.2% in the same window, and a live session's second window read 81.5%.
+
+Served: `STRATA_ADAPT_FETCH=1` in `strata-ud-iq2_xs-ple_q8.json`'s `env`, beside
+`STRATA_PREFILL_CPU_SHARE_MAX=3072`. Prefill is untouched, so the fork keeps its 8k advantage over
+the 0.2.12 tree (1,884 against 1,644).
+
+Not yet done: a real Pi session read before calling the quality gate closed, and the
+`STRATA_ADAPT_FETCH_VERIFY=1` read-back pass on this card.

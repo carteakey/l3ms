@@ -1,0 +1,41 @@
+---
+# System Environment Frontmatter (l3ms bench standard)
+# bench_sys_json: {"kernel":"7.3.1-1-cachyos","session":"graphical","llama_swap_active":false,"cpu_model":"12th Gen Intel(R) Core(TM) i5-12600K","cpu_governor":"performance","cpu_epp":"performance","hwp_status":"active","hwp_min_perf_pct":17,"hwp_max_perf_pct":100,"hwp_no_turbo":0,"hwp_dynamic_boost":0,"cpu_governors":"performance","power_profile":"performance","cpu_temp_c":46.0,"ram_speed_mts":5200,"ram_topology":"4x16 GiB DDR5","mem_total_gib":61.63,"mem_free_gib":53.29,"mem_available_gib":54.89,"mem_active_anon_gib":1.34,"zram_used_mib":10236.5,"thp":"[always] madvise never","gpu_model":"NVIDIA GeForce RTX 4070","gpu_driver":"615.78.08","vram_total_mib":12282,"vram_free_baseline_mib":11913,"vram_used_baseline_mib":44,"gpu_temp_c":39.0,"pcie_link":"Gen2 (max Gen4)"}
+sys_env:
+  kernel: "7.3.1-1-cachyos"
+  session: "graphical"
+  llama_swap_active: false
+cpu:
+  model: "12th Gen Intel(R) Core(TM) i5-12600K"
+  governor: "performance"
+  governors_all: "performance"
+  epp: "performance"
+  hwp_status: "active"
+  hwp_min_perf_pct: 17
+  hwp_max_perf_pct: 100
+  hwp_no_turbo: 0
+  hwp_dynamic_boost: 0
+  power_profile: "performance"
+  temp_c: 46.0
+memory:
+  ram_speed_mts: 5200
+  ram_topology: "4x16 GiB DDR5"
+  mem_total_gib: 61.63
+  mem_free_gib: 53.29
+  mem_available_gib: 54.89
+  mem_active_anon_gib: 1.34
+  zram_used_mib: 10236.5
+  thp: "[always] madvise never"
+gpu:
+  model: "NVIDIA GeForce RTX 4070"
+  driver: "615.78.08"
+  vram_total_mib: 12282
+  vram_free_baseline_mib: 11913
+  vram_used_baseline_mib: 44
+  temp_c: 39.0
+  pcie_link: "Gen2 (max Gen4)"
+  # pcie_link is sampled once, at harness start. An idle card reports Gen1 through ASPM
+  # downclocking (measured 2026-10-28: Gen1 sampled after the handoff, Gen4 16x with the model
+  # loaded), so re-check with `nvidia-smi -q | grep -A6 "GPU Link Info"` while a model is on the
+  # card before reading a low link gen as the reason an expert-streaming arm lost.
+---

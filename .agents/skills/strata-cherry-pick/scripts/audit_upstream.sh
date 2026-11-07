@@ -7,7 +7,9 @@
 # two of the fork's seven commits (the sm_89 MMVQ-IL table and STRATA_GR_NORM_FAST) had
 # already been absorbed by v0.2.7, and the same check showed that the two levers I most
 # wanted to port (trimmed MTP draft head, cache-conditioned routing) already ship as
-# --mtp-draft-vocab and STRATA_ROUTE_PRIOR.
+# --mtp-draft-vocab and STRATA_ROUTE_PRIOR. On 2026-11-07 the same check against v0.2.12
+# found 14 of the fork's 16 commits already upstream; only the external PLE shard and the
+# serve thinking wrap still needed picking.
 set -eu   # no pipefail here: '| head' closes a pipe, and a closed pipe is not an error in an audit script
 
 ROOT="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

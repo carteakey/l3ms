@@ -1,6 +1,6 @@
 ---
 name: strata-tuning
-description: Measure and promote Strata serving switches on the RTX 4070 plat tier without rebuilding anything. Use when a flag, STRATA_* env var, taskset mask, profile or draft-vocab file needs an A/B verdict, when a bench row has to be judged (steady state, spill-free, comparable), when a winner gets promoted into vendor/strata-lean/strata-iq3_xxs-ple_q8.json and llama-swap.yaml, and whenever an agent has to benchmark the very model it is being served by.
+description: Measure and promote Strata serving switches on the RTX 4070 plat tier without rebuilding anything. Use when a flag, STRATA_* env var, taskset mask, profile or draft-vocab file needs an A/B verdict, when a bench row has to be judged (steady state, spill-free, comparable), when a winner gets promoted into vendor/strata-lean/strata-ud-iq2_xs-ple_q8.json and llama-swap.yaml, and whenever an agent has to benchmark the very model it is being served by.
 ---
 
 # Strata tuning and measurement workflow
@@ -34,11 +34,19 @@ setsid nohup bench-models/run-strata-tuning-dark.sh > logs/strata-dark-launch.lo
 tail -f logs/strata-dark-launch.log      # ends with a logs/strata-dark-<stamp>.status line, rc=0
 ```
 
-Arms are **overlays on the production run config**
-(`vendor/strata-lean/strata-iq3_xxs-ple_q8.json`), never a fresh cmd block. That is the whole
+Arms are **overlays on the production run config**, never a fresh cmd block. That is the whole
 design: an arm is the served thing plus one change, so a winner becomes one config line.
 `build_cfg` writes the override into the config's `args` and, for env arms, into its `env`
 block, which is how a winner is promotable without rewriting anything else.
+
+The harness's default `SRC_CFG` is still `vendor/strata-lean/strata-iq3_xxs-ple_q8.json`, but
+the served plat tier has run Unsloth `UD-IQ2_XS` since 2026-11-05. Override it, or the sweep
+measures a quant nobody serves:
+
+```bash
+SRC_CFG=vendor/strata-lean/strata-ud-iq2_xs-ple_q8.json \
+  ARMS="base kv_grow base" bash bench-models/bench-strata-tuning-ab.sh
+```
 
 Three places the evidence lands, deliberately separate:
 
@@ -75,6 +83,12 @@ Three places the evidence lands, deliberately separate:
 - **Pair it.** `base` runs first and last in the ladder. Run-to-run spread on this tier is about
   2 t/s (69.60 then 67.88 on the same build and probe; the 2026-10-28 ladder's own pair read 70.70 and
   71.55), so anything under ~3 t/s is noise unless the paired control moved with it.
+- **Decode and prefill do not share a noise floor.** On 2026-11-07 prefill held to about 1% across
+  three ladders while identical control arms read 51.4 and 57.2 t/s in one ladder and 61.8 and 63.4
+  in the next, with the desktop stack (plasmashell, firefox, zed, the agent itself) as the only
+  variable. Read a prefill delta from one paired ladder; read a decode delta only from a ladder whose
+  control pair agrees within ~3 t/s, and when it matters run the arm twice beside the control
+  (`control, arm, control, arm` settled 62.60 against 62.59 on 2026-11-07).
 - **Engine rates are per window, not per run.** `emit_diag` reads the last decode window the engine
   printed. On 2026-10-28 the two control arms reported 57.4% and 57.7% hit there while their mid-run
   windows read 69-71%. Quote hit rate as "last window in the arm", and only compare it between arms
@@ -117,10 +131,15 @@ Three places the evidence lands, deliberately separate:
 
 ```bash
 ts=$(date +%Y%m%d-%H%M%S)                       # house snapshot convention
-cp vendor/strata-lean/strata-iq3_xxs-ple_q8.json "vendor/strata-lean/strata-iq3_xxs-ple_q8.json.bak-$ts"
+CFG=vendor/strata-lean/strata-ud-iq2_xs-ple_q8.json   # the served plat config
+cp "$CFG" "$CFG.bak-$ts"
 cp llama-swap.yaml "llama-swap.yaml.bak-$ts"
-# add the arg to the config's "args", or the switch to its "env" block (env: null means add it)
-kill -HUP $(pgrep '[l]lama-swap')              # hot reload; the reload still swaps the resident model
+# add the arg to the config's "args", or the switch to its "env" block (no env key means add one)
+kill -HUP $(pgrep '[l]lama-swap')              # hot reload
+# A SIGHUP re-reads the config but does NOT respawn an already-resident model, so an env change
+# only lands on the next spawn. Restart the unit, then confirm the engine really has it:
+systemctl --user restart llama-swap.service
+PID=$(pgrep -f "build/strata.*--pack" | head -1); tr '\0' '\n' < /proc/$PID/environ | grep STRATA_
 curl -s -H "Authorization: Bearer $LLAMA_SWAP_API_KEY" http://127.0.0.1:8080/v1/chat/completions \
   -d '{"model":"qwen38-flash-next-plat","max_tokens":64,"messages":[{"role":"user","content":"say ok"}]}'
 ```

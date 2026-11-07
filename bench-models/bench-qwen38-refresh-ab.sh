@@ -20,7 +20,9 @@ source "$REPO/bench-models/bench-env.sh"
 M="$HOME/models/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf"
 PORT=8023
 OUT="$REPO/logs/results/qwen38-refresh-ab.jsonl"
-TMP=/tmp/refresh-ab; mkdir -p "$TMP" "$(dirname "$OUT")"
+# Persist the raw artifacts (engine logs, server logs, generated configs, frontmatter) with the
+# rows. /tmp used to hold them and a cleanup destroyed an earlier sweep's acceptance evidence.
+TMP="${RUN_DIR:-$REPO/logs/results/refresh-ab-$(date +%Y%m%d-%H%M%S)}"; mkdir -p "$TMP" "$(dirname "$OUT")"
 V="$REPO/vendor"
 MOE_CACHE_MIB="${MOE_CACHE_MIB:-2048}"
 
@@ -61,22 +63,64 @@ PY
   SRV=$!
 }
 
-strata_arm_cfg() { # label dir cfg_src
-  local label="$1" dir="$2" src="$3" cfg="$TMP/$1.json"
-  python3 - "$dir" "$src" "$cfg" <<'PY'
+strata_arm_cfg() { # label dir cfg_src [env_json]
+  local label="$1" dir="$2" src="$3" envjson="${4:-}" cfg="$TMP/$1.json"
+  python3 - "$dir" "$src" "$cfg" "$envjson" <<'PY'
 import json, os, sys
 d, src, out = sys.argv[1], sys.argv[2], sys.argv[3]
+envjson = sys.argv[4] if len(sys.argv) > 4 else ""
 c = json.load(open(src))
 exe = os.path.join(d, "build/strata") if os.path.exists(os.path.join(d, "build/strata")) else os.path.join(d, "engine/strata")
 c["exe"] = exe
 c["cwd"] = d
 c["log"] = out.replace(".json", ".engine.log")
 c["port"] = 8023
+if envjson:                                   # engine settings the config carries (a switch arm)
+    c["env"] = {**(c.get("env") or {}), **json.loads(envjson)}
 json.dump(c, open(out, "w"), indent=1)
 PY
   taskset -c 0-11 "$V/strata/.venv/bin/python" "$dir/serve/server.py" --engine strata --config "$cfg" \
     --port "$PORT" > "$TMP/$label.log" 2>&1 &
   SRV=$!
+}
+
+arm_meta() { # label -> JSON: engine, args, env, git commit, binary identity, frontmatter path
+  local label="$1" cfg="$TMP/$1.json"
+  python3 - "$label" "$cfg" "${BIN[$1]:-}" "$TMP/frontmatter.yaml" <<'PY'
+import json, os, subprocess, sys
+label, cfg_path, bin_path, front = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+def git(d, *a):
+    try:
+        return subprocess.check_output(["git", "-C", d, *a], stderr=subprocess.DEVNULL).decode().strip()
+    except Exception:
+        return ""
+def ver(exe):
+    try:
+        return subprocess.check_output([exe, "--version"], stderr=subprocess.STDOUT).decode().strip().splitlines()[0]
+    except Exception:
+        return ""
+meta = {"label": label, "frontmatter": front}
+if os.path.exists(cfg_path):
+    c = json.load(open(cfg_path))
+    exe, d = c.get("exe", ""), c.get("cwd", "")
+    meta.update({
+        "engine": "strata", "exe": exe, "config_path": cfg_path,
+        "engine_version": ver(exe) if exe else "",
+        "git_commit": git(d, "rev-parse", "HEAD") if d else "",
+        "git_describe": git(d, "describe", "--tags", "--always") if d else "",
+        "git_branch": git(d, "rev-parse", "--abbrev-ref", "HEAD") if d else "",
+        "args": c.get("args"), "env": c.get("env"), "model_name": c.get("model_name"),
+        "tokenizer": c.get("tokenizer"), "sampling": c.get("sampling"),
+        "exe_size": os.path.getsize(exe) if exe and os.path.exists(exe) else None,
+        "exe_mtime": os.path.getmtime(exe) if exe and os.path.exists(exe) else None,
+    })
+else:
+    meta.update({"engine": "llama.cpp", "exe": bin_path,
+                 "engine_version": ver(bin_path) if bin_path else "",
+                 "exe_size": os.path.getsize(bin_path) if bin_path and os.path.exists(bin_path) else None,
+                 "exe_mtime": os.path.getmtime(bin_path) if bin_path and os.path.exists(bin_path) else None})
+print(json.dumps(meta))
+PY
 }
 
 run_arm() {
@@ -90,6 +134,16 @@ run_arm() {
     strata_v026)       strata_arm "$label" "$V/strata-v0.2.6" ;;
     strata_master|strata_ple_q8) strata_arm_cfg "$label" "$V/strata-latest" "$V/strata-latest/strata-iq3_xxs-ple_q8.json" ;;
     strata_lean)       strata_arm_cfg "$label" "$V/strata-lean" "$V/strata-lean/strata-iq3_xxs-ple_q8.json" ;;
+    strata_lean_ud)    strata_arm_cfg "$label" "$V/strata-lean" "$V/strata-lean/strata-ud-iq2_xs-ple_q8.json" '{"STRATA_ROUTE_TAIL_SKIP":"0"}' ;;
+    strata_v0212)      strata_arm_cfg "$label" "$V/strata-v0.2.12" "$V/strata-lean/strata-ud-iq2_xs-ple_q8.json" '{"STRATA_ROUTE_TAIL_SKIP":"0"}' ;;
+    strata_lean_share3072) strata_arm_cfg "$label" "$V/strata-lean" "$V/strata-lean/strata-ud-iq2_xs-ple_q8.json" '{"STRATA_ROUTE_TAIL_SKIP":"0","STRATA_PREFILL_CPU_SHARE_MAX":"3072"}' ;;
+    strata_v0212_pf0)  strata_arm_cfg "$label" "$V/strata-v0.2.12" "$V/strata-lean/strata-ud-iq2_xs-ple_q8.json" '{"STRATA_ROUTE_TAIL_SKIP":"0","STRATA_PF_SMALL":"0"}' ;;
+    strata_v0212_af2)  strata_arm_cfg "$label" "$V/strata-v0.2.12" "$V/strata-lean/strata-ud-iq2_xs-ple_q8.json" '{"STRATA_ROUTE_TAIL_SKIP":"0","STRATA_ADAPT_FETCH":"2"}' ;;
+    strata_v0212_af1)  strata_arm_cfg "$label" "$V/strata-v0.2.12" "$V/strata-lean/strata-ud-iq2_xs-ple_q8.json" '{"STRATA_ROUTE_TAIL_SKIP":"0","STRATA_ADAPT_FETCH":"1"}' ;;
+    strata_v0212_twopass) strata_arm_cfg "$label" "$V/strata-v0.2.12" "$V/strata-lean/strata-ud-iq2_xs-ple_q8.json" '{"STRATA_ROUTE_TAIL_SKIP":"0","STRATA_SELECT_TWO_PASS":"1"}' ;;
+    strata_lean_af0)   strata_arm_cfg "$label" "$V/strata-adapt-fetch" "$V/strata-lean/strata-ud-iq2_xs-ple_q8.json" '{"STRATA_ROUTE_TAIL_SKIP":"0"}' ;;
+    strata_lean_af1)   strata_arm_cfg "$label" "$V/strata-adapt-fetch" "$V/strata-lean/strata-ud-iq2_xs-ple_q8.json" '{"STRATA_ROUTE_TAIL_SKIP":"0","STRATA_ADAPT_FETCH":"1"}' ;;
+    strata_lean_af2)   strata_arm_cfg "$label" "$V/strata-adapt-fetch" "$V/strata-lean/strata-ud-iq2_xs-ple_q8.json" '{"STRATA_ROUTE_TAIL_SKIP":"0","STRATA_ADAPT_FETCH":"2"}' ;;
     *) echo "unknown arm $label"; return 1 ;;
   esac
   [[ -n "${BIN[$label]:-}" && ! -x "${BIN[$label]}" ]] && { echo "== $label: binary missing"; kill $SRV 2>/dev/null; return 1; }
@@ -101,7 +155,10 @@ run_arm() {
     sleep 2
   done
   if [ -z "$ok" ]; then echo "   FAILED to load:"; tail -5 "$TMP/$label.log"; kill $SRV 2>/dev/null; wait $SRV 2>/dev/null; return 1; fi
-  python3 "$REPO/bench-models/bench-qwen38-refresh-probe.py" --url "http://127.0.0.1:$PORT" --label "$label" --out "$OUT"
+  local meta; meta="$(arm_meta "$label")"
+  printf '%s\n' "$meta" > "$TMP/$label.meta.json"
+  python3 "$REPO/bench-models/bench-qwen38-refresh-probe.py" --url "http://127.0.0.1:$PORT" --label "$label" --out "$OUT" \
+    --pp-sizes "${PP_SIZES:-2048,8192}" --meta "$meta"
   echo "   VRAM: $(nvidia-smi --query-gpu=memory.used --format=csv,noheader)  RAM avail: $(free -g | awk '/^Mem:/{print $7}') GiB"
   kill $SRV 2>/dev/null; wait $SRV 2>/dev/null
   pkill -f "strata.*--pack" 2>/dev/null
