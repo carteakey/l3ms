@@ -22,8 +22,8 @@ python3 .agents/skills/model-inventory-manager/scripts/audit_models.py --json
 ```
 
 The report categorizes every tracked model into:
-- **`ACTIVE (llama-swap)`**: Currently wired in `llama-swap.yaml` (including Strata config packs and shard splits). Safe to keep; deletion is blocked.
-- **`MEDIA (ComfyUI / L2M2)`**: Referenced in `toolkits/l2m2/media-runtimes.json` or active ComfyUI model directories (diffusers, text encoders, VAEs, LoRAs).
+- **`ACTIVE (llama-swap)`**: Currently wired in `llama-swap.yaml` (including Strata config packs in `vendor/strata-lean/` / [`maintenance/configs/strata/`](file:///home/kchauhan/repos/l3ms/maintenance/configs/strata/) and shard splits). Safe to keep; deletion is blocked.
+- **`MEDIA (ComfyUI)`**: Referenced in `media-runtimes.json` or active ComfyUI model directories (diffusers, text encoders, VAEs, LoRAs).
 - **`UNREFERENCED`**: Found on disk but not wired in active inference routes. Candidate for user review and cleanup.
 
 ### 2. Safely Prune Unreferenced Models
@@ -37,6 +37,8 @@ The script verifies that the target model is NOT currently served before deletin
 
 ### 3. Preserved Infrastructure
 Never remove active primary tiers unless explicitly instructed by the user:
-- `Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS` (`qwen38-flash-next-plat`)
+- `Qwen3.8-Flash-Next-UD-IQ2_XS` (`qwen38-flash-next-plat` primary daily driver)
+- `Qwen3.8-Flash-Next-GSQ-RCO-Q8_0-PLE` (shared 54.4 GB uncompressed PLE shard on NVMe)
+- `Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS` (`qwen38-flash-next-plat-vision` / baseline peer)
 - `Qwen3.8-Flash-Next-GSQ-RCO-abliterated-IQ3_XXS` (`qwen38-flash-next-plat-abliterated` / `abliterated-vision`)
 - Active media generators (FLUX.3 Klein, NoctQ, Krea, Breeze-TTS)

@@ -136,6 +136,7 @@ CFG=vendor/strata-lean/strata-ud-iq2_xs-ple_q8.json   # the served plat config
 cp "$CFG" "$CFG.bak-$ts"
 cp llama-swap.yaml "llama-swap.yaml.bak-$ts"
 # add the arg to the config's "args", or the switch to its "env" block (no env key means add one)
+cp vendor/strata-lean/*.json maintenance/configs/strata/   # sync tracked repo backups
 kill -HUP $(pgrep '[l]lama-swap')              # hot reload
 # A SIGHUP re-reads the config but does NOT respawn an already-resident model, so an env change
 # only lands on the next spawn. Restart the unit, then confirm the engine really has it:
@@ -147,8 +148,7 @@ curl -s -H "Authorization: Bearer $LLAMA_SWAP_API_KEY" http://127.0.0.1:8080/v1/
 
 A reasoning model asked for fewer than 64 tokens answers with empty `content` and everything in
 `reasoning_content`. That is not a failure; check `reasoning_content` before calling the tier down.
-Then write the measured row into `docs/strata-perf-next-steps-2026-10.md`, `AGENTS.md` (tier line)
-and `CHANGELOG.md`, and only then close the Linear ticket.
+Then record the verdict in [`docs/strata-tuning-matrix.md`](file:///home/kchauhan/repos/l3ms/docs/strata-tuning-matrix.md) (promoted or rejected table), write the measured row into [`docs/strata-perf-next-steps-2026-10.md`](file:///home/kchauhan/repos/l3ms/docs/strata-perf-next-steps-2026-10.md), [`AGENTS.md`](file:///home/kchauhan/repos/l3ms/AGENTS.md) (tier line) and `CHANGELOG.md`, and only then close the Linear ticket.
 
 ## Benching the model you are running on
 

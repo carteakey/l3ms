@@ -8,9 +8,9 @@ This document outlines the four router tiers configured in `llama-swap.yaml` for
 
 | Tier ID | Role | Source Tree | Binary Macro | Key Optimizations | Peak VRAM |
 |---|---|---|---|---|---|
-| `qwen38-flash-next` | **Gold** (Production Base) | `vendor/llama.cpp-master` | `qwen38_master_server` | Upstream master (sparse Flash Attention #28770, kernel fusions #28896/#28901) | ~11.2 GB |
-| `qwen38-flash-next-mtp` | **MTP** (Speculative) | `vendor/llama.cpp-pr-test-28770-28699-28213` | `qwen38_mtp_server` | Unified QSA Sparsity (#28770, #28699, #28213, #29166) + Daniel Han MTP (#28243) with compact `shared-Q4_K_M` head | ~11.8 GB |
-| `qwen38-flash-next-exp` | **Exp** (Experimental) | `vendor/llama.cpp-pr-test-28770-28699-28213` | `qwen38_exp_server` | Unified QSA Sparsity Stack (#28770, #28699, #28213, #29166) without MTP | ~11.2 GB |
+| `qwen38-flash-next` | **Gold** (Production Base) | `vendor/llama.cpp-master` | `qwen38_master_server` | Upstream master (sparse Flash Attention #28770, RMS_NORM+SCALE #29393, kernel fusions #28896/#28901) | ~11.2 GB |
+| `qwen38-flash-next-mtp` | **MTP** (Speculative) | `vendor/llama.cpp-exp-stack-v2` | `qwen38_mtp_server` | Unified QSA Sparsity V2 (#28770, #28699, #28213, #29166, #29599, #28671) + Daniel Han MTP (#28243) with compact `shared-Q4_K_M` head | ~11.0 GB |
+| `qwen38-flash-next-exp` | **Exp** (Experimental) | `vendor/llama.cpp-exp-stack-v2` | `qwen38_exp_server` | Unified QSA Sparsity Stack V2 (#28770, #28699, #28213, #29166, #29599, #28671) without MTP | ~10.0 GB |
 | `qwen38-flash-next-vision` | **Vision** (Multimodal) | `vendor/llama.cpp-master` | `qwen38_master_server` | Master + `mmproj-F16.gguf` projector, `-ncmoe 45` | ~10.4 GB |
 
 ---

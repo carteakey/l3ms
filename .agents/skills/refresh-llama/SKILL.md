@@ -58,17 +58,19 @@ When requested to refresh `llama.cpp` or check upstream sync:
    > [!IMPORTANT]
    > Always pass `--target llama-server llama-bench`. Do not invoke bare `cmake --build build`, as GCC 16 LTO (`lto1`) crashes with an internal compiler error on the `test-fusion` test target.
 
-### 3. Maintain Experimental & MTP Stack (`vendor/llama.cpp-pr-test-28770-28699-28213`)
-This branch carries the Unified QSA Sparsity + MTP stack:
+### 3. Maintain Experimental & MTP Stack (`vendor/llama.cpp-exp-stack-v2`)
+This branch carries the Unified QSA Sparsity Stack V2 + MTP:
 - **#28770** (Sparse Flash Attention for qwen4 - merged upstream in master `b11062`)
 - **#28699** (Incremental pooled-key cache for QSA indexer)
 - **#28213** (Gather-based sparse attention for QSA decode)
-- **#28243** (Daniel Han shared-module MTP head)
+- **#28243** (Daniel Han shared-module MTP head with compact `shared-Q4_K_M.gguf`)
 - **#29166** (Multi-sequence block bias indexing bugfix)
+- **#29599** (NVMe madvise row prefetching)
+- **#28671** (TOP_K radix select)
 
 When updating, rebase or merge upstream master commits and recompile targets:
 ```bash
-cmake --build vendor/llama.cpp-pr-test-28770-28699-28213/build --config Release --target llama-server llama-bench -j$(nproc)
+cmake --build vendor/llama.cpp-exp-stack-v2/build --config Release --target llama-server llama-bench -j$(nproc)
 ```
 
 ### 4. Hot-Reload & Smoke Test
@@ -95,5 +97,5 @@ cmake --build vendor/llama.cpp-pr-test-28770-28699-28213/build --config Release 
 ### 5. Document & Synchronize
 Record updated commit hashes, tags, and benchmarks in:
 - [AGENTS.md](file:///home/kchauhan/repos/l3ms/AGENTS.md)
-- [docs/qwen38-flash-next-internal.md](file:///home/kchauhan/repos/l3ms/docs/qwen38-flash-next-internal.md)
+- [docs/qwen38-flash-next-internal.md](file:///home/kchauhan/repos/l3ms/docs/qwen38-flash-next-internal.md) (indexed in [docs/README.md](file:///home/kchauhan/repos/l3ms/docs/README.md))
 - [CHANGELOG.md](file:///home/kchauhan/repos/l3ms/CHANGELOG.md)

@@ -12,7 +12,7 @@ This skill provides procedures for selectively porting high-value inference impr
 - **Strata is the primary serving engine**: Strata delivers 65 to 70 t/s steady decode and ~1,890 t/s 8k prefill on an RTX 4070 12 GB, outperforming llama.cpp (~20 to 25 t/s decode) by roughly 3x. Run-to-run spread on this tier is about 2 t/s, so a claimed win under ~3 t/s needs a paired control run in the same boot.
 - **Anti-Bloat Intake Policy (Never Blindly Re-slice)**: Upstream Strata continuously pulls in code for Metal (Apple Silicon), SYCL (Intel Arc), ROCm tuning, web UI wrappers, test suites, and unreleased engines (e.g. 2,200+ commits between 0.1.45 and 0.2.7). Do NOT suggest or execute a whole-tree rebase or "re-slice" onto upstream. My fork strips all non-Ada backends, targets `sm_89` strictly, and only pulls in verified inference kernels, speculative decoding logic, and memory routing.
 - **Optimization Priority**: 
-  1. *Switch first*: Most of the immediate headroom on this card is already compiled in as a runtime flag or a `STRATA_*` env switch (e.g. `--kv-grow` yielding +2.8 t/s with zero code changes). Measure with `bench-models/bench-strata-tuning-ab.sh` before touching C++/CUDA code.
+  1. *Switch first*: Most of the immediate headroom on this card is already compiled in as a runtime flag or a `STRATA_*` env switch (e.g. `--kv-grow` yielding +2.8 t/s with zero code changes, paired with `STRATA_PREFILL_LEND_PCT=40` to preserve 1,771 reclaimable slots up to 128k context; see [`docs/strata-tuning-matrix.md`](file:///home/kchauhan/repos/l3ms/docs/strata-tuning-matrix.md) and [`docs/incidents/2026-11-09-strata-kv-grow-oom.md`](file:///home/kchauhan/repos/l3ms/docs/incidents/2026-11-09-strata-kv-grow-oom.md)). Measure with `bench-models/bench-strata-tuning-ab.sh` before touching C++/CUDA code.
   2. *Cherry-pick second*: Selectively port verified CUDA kernels and algorithmic wins (from upstream Strata or llama.cpp PRs) into `vendor/strata-lean`.
   3. *Re-slice NEVER*: Do not pull multi-platform churn into the lean Ada tree.
 - **Porting from external engines**: Algorithmic ideas and CUDA kernel fusions from `llama.cpp` (e.g. MTP draft vocab trimming, direct quantized Q8_0 KV in FlashAttention) or `vLLM` can be ported directly into Strata rather than running them in slower runtimes. llama.cpp is a source of ideas, not a speed tier. The Qwen3.8-specific fork family (Lamina, PolyStrata, basalt) and what to take from each is Step 2b; for this model they are a data file and a handful of switches, not code.
@@ -24,8 +24,8 @@ This skill provides procedures for selectively porting high-value inference impr
 All evaluations are conducted against this fixed homelab target:
 - **GPU**: NVIDIA GeForce RTX 4070 (12 GB VRAM, Ada Lovelace `sm_89`, 46 SMs, PCIe 4.0 x16).
 - **CPU & RAM**: Intel Core i5-12600K (10 cores / 16 threads), 64 GB DDR5-5200 (4x16 GB).
-- **OS & Kernel**: Linux 7.3.0 CachyOS (`powersave` governor, `performance` EPP).
-- **Model**: `ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF/` (`IQ3_XXS`, unquantized Q8_0 PLE table on NVMe).
+- **OS & Kernel**: Linux 7.3.1 CachyOS (`performance` governor and `performance` EPP via `cpupower.service` since 2026-10-29).
+- **Model**: Unsloth Dynamic V3.1 `UD-IQ2_XS` (`strata-ud-iq2_xs-ple_q8.json`, primary served Plat tier since 2026-11-05) and `ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF/` (`IQ3_XXS`, baseline peer), both paired with the unquantized Q8_0 PLE table on NVMe. Tracked config backups live in [`maintenance/configs/strata/`](file:///home/kchauhan/repos/l3ms/maintenance/configs/strata/).
 - **Baseline numbers** (`logs/results/qwen38-refresh-ab.jsonl`, same quant, same probe):
 
   | arm | engine | decode mean | min / max | pp8192 |
@@ -215,9 +215,10 @@ in it.
 
 1. **Switch-only promote (no merge at all).** The change is a flag, a `STRATA_*` env var, a
    taskset mask, or a data file (`--expert-profile`, `--mtp-draft-vocab`). It is measured by
-   `strata-tuning`, and a winner lands as one line in the run config's `args` or `env` block plus a
-   `name`/`description` refresh in `llama-swap.yaml`. No git history changes. This is the most
-   common shape and it should be tried before any merge. It is also how an upstream *default*
+   `strata-tuning`, and a winner lands as one line in the run config's `args` or `env` block,
+   synced to `maintenance/configs/strata/`, recorded in [`docs/strata-tuning-matrix.md`](file:///home/kchauhan/repos/l3ms/docs/strata-tuning-matrix.md),
+   plus a `name`/`description` refresh in `llama-swap.yaml`. No engine git history changes. This is
+   the most common shape and it should be tried before any merge. It is also how an upstream *default*
    change gets taken when the tree itself is not worth carrying (Step 1d: the CPU share limit).
 2. **Single-commit cherry-pick.** Only when the commit is one kernel or one policy file that my
    fork has not touched, and only after `git show "$TAG:path/to/file"` proves the same file exists
@@ -477,8 +478,8 @@ ls -lh build/strata
 
 Use `bench-models/bench-strata-tuning-ab.sh` when the lever is a switch that already exists
 in the binary. It overlays arms on the **production** run config
-(`vendor/strata-lean/strata-iq3_xxs-ple_q8.json`), so a winner is one config line from
-being served, and it writes a second file of engine self-reporting:
+(`vendor/strata-lean/strata-ud-iq2_xs-ple_q8.json`, tracked backup in `maintenance/configs/strata/`),
+so a winner is one config line from being served, and it writes a second file of engine self-reporting:
 
 ```bash
 systemctl --user stop llama-swap.service
@@ -498,10 +499,12 @@ generated token). The diag file is what separates a real win from a run that got
 spilling to SSD: MB/token should stay in this arch's PLE design traffic band (about 5
 KB/token of n-gram rows); tens of MB/token means a spill.
 
-The tier's own current diag numbers, for reference when judging an arm: 2,583 expert slots
-(4.24 GiB) of 24,576 pairs, decode cache hit rate 58.6%, 3.8% of routed experts re-read
-over PCIe, 410 MiB free at request start with the `#2065` warning firing, window captures
-down to 282 MiB, arena on 4 KB pages (`vm.nr_hugepages=0`), draft head over 106,299 tokens.
+The tier's own current diag numbers, for reference when judging an arm: 2,711 to 3,277 expert
+slots (`--kv-grow` elastic K/V with `STRATA_PREFILL_LEND_PCT=40` capping prompt loan to 812
+slots / 1.31 GiB, leaving `lend_first=1899` and 1,771 reclaimable slots / 2.87 GiB up to 128k
+context), decode cache hit rate ~67.2% (`STRATA_ADAPT_FETCH=1`), 410-412 MiB free at request
+start with the `#2065` warning firing, arena on 4 KB pages (`vm.nr_hugepages=0`), draft head
+over 106,299 tokens.
 
 ### Step 5b: A/B parity benchmarking for a code change
 
@@ -553,11 +556,11 @@ Always benchmark using `bench-models/bench-qwen38-refresh-ab.sh` with the standa
 
 1. Document the change in `vendor/strata-lean/README.md`:
    - Add the commit hash, PR link, description of the change, and before/after numbers.
-2. Commit and push to `carteakey/Strata`:
+2. Commit and push to `carteakey/strata-lean`:
    ```bash
    cd vendor/strata-lean
    git commit -am "feat(cuda): <description of change>"
-   git push carteakey 4070-main-lite
+   git push origin strata-lean
    ```
 3. Hot-reload `llama-swap`:
    ```bash

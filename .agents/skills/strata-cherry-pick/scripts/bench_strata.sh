@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Benchmark Strata 4070-main-lite with safe GPU handoff (gpu-handoff skill rules).
+# Benchmark Strata strata-lean with safe GPU handoff (gpu-handoff skill rules).
 #
-# MODE=code (default)  the rebuild-and-compare path: bench-qwen38-refresh-ab.sh arm strata_lean.
+# MODE=code (default)  the rebuild-and-compare path: bench-qwen38-refresh-ab.sh arm strata_lean_ud.
 # MODE=tune           the switch path: bench-strata-tuning-ab.sh arm ladder, flags and env only,
 #                     no rebuild. Override the ladder with TUNE_ARMS="base kv_grow base".
 # Both take the plat tier off the router for the run and put it back on exit.
@@ -80,7 +80,7 @@ if [ -n "$used" ] && [ "$used" -gt "$MAX_MIB" ]; then
   exit 1
 fi
 
-echo "=== Running Strata 4070-main-lite A/B (MODE=$MODE) ==="
+echo "=== Running Strata strata-lean A/B (MODE=$MODE) ==="
 cd "$REPO_ROOT"
 if [ "$MODE" = "tune" ]; then
   # The sweep refuses to run while the router is active; we stopped it above, so FORCE is the
@@ -88,7 +88,7 @@ if [ "$MODE" = "tune" ]; then
   FORCE=1 ARMS="${TUNE_ARMS:-base reserve832 kv_grow ctx64k routeprior15 draft_en grnormfast base}" \
     bash bench-models/bench-strata-tuning-ab.sh
 else
-  ARMS="strata_lean" bash bench-models/bench-qwen38-refresh-ab.sh
+  ARMS="${CODE_ARMS:-strata_lean_ud}" bash bench-models/bench-qwen38-refresh-ab.sh
 fi
 
 echo ""

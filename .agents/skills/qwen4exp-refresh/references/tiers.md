@@ -1,11 +1,11 @@
 # Qwen3.8-Flash-Next (qwen4exp) Tiers Reference
 
 ### Platinum Tier (`strata`)
-* **Engine:** Strata (`vendor/strata` or `vendor/strata-latest`, build at `build/strata` or `engine/strata`).
-* **Config:** `strata-iq3_xxs.json` or `strata-vision.json`.
-* **Hardware Profile:** 3,086 hot experts cached in GPU VRAM (11.5–11.7 GB). Native MTP draft head (Q2_0), K8V4 KV cache @ 128k context (`131072`).
-* **Memory Management:** Linux Transparent Huge Pages (`MADV_HUGEPAGE`) on 43 GB host RAM expert arena (native since Strata v0.1.40+).
-* **Observed Metrics:** 53–60 t/s steady decode, 950–2,000 t/s prefill.
+* **Engine:** Strata Lean (`vendor/strata-lean/build/strata`, branch `strata-lean`).
+* **Config:** `vendor/strata-lean/strata-ud-iq2_xs-ple_q8.json` (text), `strata-vision-ple_q8.json` (vision), `strata-sc117-vision-ple_q8.json` (abliterated vision). Tracked backups in [`maintenance/configs/strata/`](file:///home/kchauhan/repos/l3ms/maintenance/configs/strata/).
+* **Hardware Profile:** 2,711 to 3,277 hot expert pairs cached in GPU VRAM (11.5-11.7 GB) with elastic K/V (`--kv-grow`) and `STRATA_PREFILL_LEND_PCT=40` (812-slot prompt loan cap, leaving 1,771 reclaimable slots / 2.87 GiB up to 128k context). Native MTP draft head (Q2_0 over 106,299 tokens), K8V4 KV cache @ 128k context (`131072`), `STRATA_ADAPT_FETCH=1`, `STRATA_PREFILL_CPU_SHARE_MAX=3072`.
+* **Memory Management:** `cudaHostRegister` on 4 KB pages (`vm.nr_hugepages=0`) over ~39.4 GB host RAM expert arena; unquantized Q8_0 PLE table (54.4 GB) streamed from NVMe.
+* **Observed Metrics:** 70-76 t/s steady decode on code, 1,116 t/s pp2048, 1,876-1,891 t/s pp8192.
 
 ### Gold Tier (`master`)
 * **Engine:** `vendor/llama.cpp-master/build/bin/llama-server`.
@@ -26,5 +26,5 @@
 * **Observed Metrics:** 23.9 t/s steady decode (+40% over plain offload), 11,454 MiB VRAM.
 
 ### Quantization Compatibility
-* **Primary Homelab Fast NVMe:** `ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF` (`IQ3_XXS`, 2 shards: 47 GB fast weights + 28.8 GB PLE shard).
+* **Primary Homelab Fast NVMe:** Unsloth `UD-IQ2_XS` (`Qwen3.8-Flash-Next-UD-IQ2_XS`, 39.4 GB fast weights) and `ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF` (`IQ3_XXS`), both paired with the shared 54.4 GB `Q8_0-PLE` shard on NVMe.
 * **Archived to NAS (`/mnt/storage`):** `AD-4.27bpw-Q4_K_M-M64` (33 shards, 89 GB).

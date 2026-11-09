@@ -12,7 +12,7 @@ This skill provides utilities and procedures for inspecting cumulative token thr
 Under L3MS, Strata serves Qwen3.8-Flash-Next (and multimodal vision variants) with speculative decoding (MTP), dynamic expert VRAM caching, and persistent conversation / KV caching. Token telemetry is available at three layers:
 
 1. **Live Runtime Metrics**: Strata's built-in HTTP server (`serve/server.py`) exposes real-time generation and cumulative session counters via `GET http://127.0.0.1:<PORT>/metrics`.
-2. **Current Deployment Logs**: The active worktree (currently `vendor/strata-lean`) maintains engine logs (`strata-sc117-vision-ple_q8.log`, `strata-iq3_xxs-ple_q8.log`) logging exact per-request prompt prefill, reuse, and decode tokens.
+2. **Current Deployment Logs**: The active worktree (currently `vendor/strata-lean`) maintains engine logs (`strata-ud-iq2_xs-ple_q8.log`, `strata-sc117-vision-ple_q8.log`, `strata-iq3_xxs-ple_q8.log`) logging exact per-request prompt prefill, reuse, and decode tokens.
 3. **Historical Host Logs**: Archived engine logs across version checkouts (`strata`, `strata-v0.1.44.1`, `strata-latest`, `strata-lean`) provide all-time host accounting.
 
 ### Token Classification
@@ -87,7 +87,9 @@ journalctl --user -u llama-swap.service --no-pager | grep -c "\[strata\] done:"
 ## Log Locations Reference
 
 - Active deployment:
+  - `vendor/strata-lean/strata-ud-iq2_xs-ple_q8.log` (Text Platinum UD-IQ2_XS + Q8 PLE daily driver)
   - `vendor/strata-lean/strata-sc117-vision-ple_q8.log` (Multimodal vision + SC117 abliterated Q8 PLE)
-  - `vendor/strata-lean/strata-iq3_xxs-ple_q8.log` (Text Platinum Q8 PLE)
-- Configuration file:
+  - `vendor/strata-lean/strata-iq3_xxs-ple_q8.log` (Text Platinum IQ3_XXS + Q8 PLE)
+- Configuration files:
   - `llama-swap.yaml` (`strata_server`, `strata_python`, model cmd entries)
+  - `vendor/strata-lean/*.json` (tracked copies in [`maintenance/configs/strata/`](file:///home/kchauhan/repos/l3ms/maintenance/configs/strata/))

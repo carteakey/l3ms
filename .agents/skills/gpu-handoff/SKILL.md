@@ -18,8 +18,8 @@ of VRAM after the service was stopped, `llama-swap` crash-looped on a port clash
 - `llama-swap` is a systemd **user** unit (`llama-swap.service`), listening on
   `:8080`, API key required (an unauthenticated request returns 401 and that is
   healthy).
-- ComfyUI: `bash /home/kchauhan/repos/l2m2/maintenance/run-comfyui.sh gpu`,
-  serving on `127.0.0.1:8188`.
+- ComfyUI: `bash /home/kchauhan/repos/l3ms/maintenance/run-comfyui.sh gpu` (or via
+  llama-swap's `/comfyui/` route), serving on `127.0.0.1:8188`.
 
 ## Rules
 
@@ -36,11 +36,11 @@ of VRAM after the service was stopped, `llama-swap` crash-looped on a port clash
 ```sh
 systemctl --user stop llama-swap.service
 sleep 4
-# Stopping the unit can leave its llama-server child running. Kill orphans by exact binary, by pid:
-for p in $(ps -eo pid,args | awk '$2 ~ /vendor\/llama.cpp\/build\/bin\/llama-server$/ {print $1}'); do kill $p; done
+# Stopping the unit can leave its llama-server or strata engine child running. Kill orphans by exact binary, by pid:
+for p in $(ps -eo pid,args | awk '$2 ~ /vendor\/(llama\.cpp.*\/build\/bin\/llama-server|strata.*\/build\/strata)$/ || $0 ~ /serve\/server\.py/ {print $1}'); do kill $p; done
 sleep 5
 nvidia-smi --query-gpu=memory.used --format=csv,noheader     # must be ~44 MiB before continuing
-(nohup bash /home/kchauhan/repos/l2m2/maintenance/run-comfyui.sh gpu > $SCRATCHPAD/comfy.log 2>&1 &)
+(nohup bash /home/kchauhan/repos/l3ms/maintenance/run-comfyui.sh gpu > $SCRATCHPAD/comfy.log 2>&1 &)
 for i in $(seq 1 40); do curl -s -m 2 http://127.0.0.1:8188/system_stats >/dev/null && break; sleep 3; done
 ```
 
