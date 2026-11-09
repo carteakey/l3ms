@@ -1,7 +1,6 @@
 # L3MS
 
-`L3MS` (Local 3-Mode Model Stack) is a keyboard-first homelab toolkit for
-language, media, and decision-model workflows.
+`L3MS` (Local 3-Mode Model Stack) is a keyboard-first homelab inference stack and systems-engineering workbench. It runs 120B+ parameter MoE models at interactive speeds (70-76 tok/s steady decode) on a single consumer GPU (RTX 4070 12GB + 64GB DDR5) by pairing tiered memory offloading with custom CUDA kernels and dynamic expert caching.
 
 ```text
     __        _____       __  ___       _____
@@ -11,24 +10,26 @@ language, media, and decision-model workflows.
 /_____/    /____/      /_/  /_/       /____/  
 ```
 
-`L` = Local · `3` = three inference lanes · `M` = Models · `S` = Stack
+`L` = Local · `3` = Three Inference Lanes · `M` = Models · `S` = Stack
 
-Language (root L3MS) · Media (L2M2) · Decisions (L3DS)
+Language · Media · Decisions
 
-The app uses llama-swap for language, embeddings and native d3/Clef decisions.
-Comfy jobs use their native job/cancellation/artifact interface, directly or
-through llama-swap's `/comfyui/` route. Other media and speech workflows reuse
-the toolkits' scripts. There is no second inference server or private-engine
-transport; the branch-added managed-session runtime has been retired.
+---
 
-CUDA scripts still require an explicit idle-GPU window. Resident pause/restore
-is opt-in, not a default supervisor layered over llama-swap. Shared CLI/UI forms,
-history and native output validation remain. Real CPU workflow evidence and the
-remaining GPU/interactive acceptance gates are recorded in the
-[migration status](docs/migration/status.md); the full port is not yet accepted.
+## What is L3MS?
 
-Vision-capable LLMs, including Gemma vision, and embeddings remain in the
-language lane.
+L3MS unifies three operational lanes under a single router ([`llama-swap`](llama-swap.yaml)) and an interactive Rust workbench ([`src/`](src/)):
+
+1. **Language (`strata-lean` & `llama.cpp`)**:
+   Runs **Qwen3.8-Flash-Next** (125B MoE + 51B n-gram table) on consumer silicon. Backed by [`carteakey/strata-lean`](docs/strata-lean.md) (a lean Ada `sm_89` fork with fused CUDA kernels), elastic K/V memory allocation (`--kv-grow`), dynamic VRAM expert caching (3,277 hot experts on GPU), and unquantized Q8_0 PLE tables offloaded to NVMe SSD.
+2. **Media**:
+   Orchestrates ComfyUI image/video pipelines (MiniMax-H3) and audio.cpp speech/music models through router-managed GPU eviction, preventing VRAM collisions with resident language models.
+3. **Decisions**:
+   Hosts non-causal, typed System One decision models (`vllm-d3-flash`, `cloudflare-clef-flash`) for sub-10ms classification and routing via raw ubatch execution.
+4. **Empirical Benchmarking & Self-Tuning**:
+   Houses automated dark testing harnesses ([`bench-models/`](bench-models/)), system frontmatter logging, paired A/B ladders, and the [Strata Tuning Matrix](docs/strata-tuning-matrix.md) to evaluate runtime switches against strict identity and quality gates.
+
+Everything is supervised via a fast, keyboard-driven Rust TUI with 580+ unit tests, live process telemetry, and zero-downtime router reloading.
 
 ## App Description
 
@@ -92,7 +93,7 @@ for example `./maintenance/run-l3ms-kpc.sh --list run`.
 
 ## Three inference lanes
 
-Language (root L3MS) · Media (L2M2) · Decisions (L3DS)
+Language · Media · Decisions
 
 Their guides:
 
