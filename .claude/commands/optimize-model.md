@@ -68,7 +68,7 @@ If using `FIT_TARGET=512` and serving at 64k+ context, verify the VMM pool won't
 
 ### Step 5 — Update llama-swap.yaml
 
-Replace the `--fit` based entry with the static placement. Follow this pattern:
+For llama.cpp models, replace the `--fit` based entry with the static placement. Follow this pattern:
 
 ```yaml
 "<model-key>":

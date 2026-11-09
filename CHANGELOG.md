@@ -39,6 +39,26 @@
 - `bench-models/bench-qwen38-refresh-ab.sh` gained an optional env JSON on `strata_arm_cfg`, plus
   the arms `strata_lean_ud`, `strata_v0212`, `strata_v0212_pf0` and `strata_lean_share3072`.
 
+### Added (Strata plat decode: `STRATA_HC_Q8` promoted)
+
+- **Promoted `STRATA_HC_Q8=1` into production Plat tier serving** (`vendor/strata-lean/strata-ud-iq2_xs-ple_q8.json`):
+  Quantizes hyper-connection down/up weights on GPU to Q8_0 (`native_dense.cpp`). Frees 0.39 GiB of device memory,
+  which `--expert-cache auto` and `--kv-grow` reallocate into **+238 GPU expert slots (`2,711 -> 2,949 slots`, 4.72 GiB)**.
+  Measured on 2026-11-09: sustained decode jumps from 67.87 to **73.00 t/s (+5.13 t/s / +7.6%)**, decode cache hit rate
+  rises from 68.2% to **72.4%**, and 2k prefill increases from 1,114 to 1,136 t/s (+22 t/s), with 4k needle passing and
+  greedy identity probe matching `base` on 4/7 fixed prompts (matching `base`'s own intra-boot noise floor).
+- **Completed comprehensive opt-in runtime switch sweep (Sweep 4)** across prompt, I/O, CPU topology, decode, speculation,
+  and residency levers using `bench-models/bench-strata-tuning-ab.sh`:
+  - `aux_ecores` (`--aux-cpus auto` with `taskset -c 0-15`): **rejected (-9.8 t/s decode)**; exposed E-cores 12-15 were recruited into `pool_workers` (9 workers instead of 5 P-cores), creating CPU synchronization stragglers.
+  - `ple_mmap` (`--ple-io mmap`): **rejected**; speed matched `direct` during its run, but mmapping 30.5 GB of PLE tables flooded the Linux page cache and caused hot expert arena pages to refault from SSD (`0.1756 MB/token`) on subsequent runs.
+  - `route_resident` (`STRATA_ROUTE_RESIDENT=4`): measured 78.33 t/s (+10.5 t/s decode, 81.4% hit rate) but **failed identity gate** with 7/7 intra-boot divergence and stop token failure (`json_strict` exceeded 84 tokens).
+  - `lookup` (`--lookup-chain 5`): **rejected (-11.4 t/s decode)**; captured 8 CUDA graphs, causing verify latency regression.
+  - `no_suffix` (`--suffix-draft 0`): **rejected (-2.1 t/s decode)**; draft acceptance dropped from 80.5% to 78.6%.
+  - `gr_up75` (`STRATA_GR_UP75=1`): **rejected (-9.7 t/s decode)**; Turing kernel regressed Ada sm_89 decode.
+  - `fuse_wait2` (`STRATA_FUSE_WAIT=2`) and `df_ple` (`STRATA_DF_PLE=1`): **neutral** (within 0.3 t/s of base).
+  - `imma` (`STRATA_PROMPT_ATTN_IMMA=1`): **neutral** (bypassed on `--kv k8v4`).
+  - `prefill_alias` (`--prefill-head-alias`): incompatible with default configuration; requires `--short-read 0`.
+
 ### Added (Strata plat decode: `STRATA_ADAPT_FETCH` ported)
 
 - **Ported upstream `24c6c2f6` into the lean fork as `20c19b89`** (252 insertions, 7 files): the

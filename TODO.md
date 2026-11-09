@@ -74,12 +74,12 @@ Filed 2026-11-07 from `docs/strata-perf-next-steps-2026-10.md`. The blocking one
 [#13](https://github.com/carteakey/l3ms/issues/13): no tuning arm can be promoted or
 rejected until warm-up is separated from steady state.
 
-- [#13](https://github.com/carteakey/l3ms/issues/13) Run the blocking `kv_grow` ladder (p0)
+- [x] ([#13](https://github.com/carteakey/l3ms/issues/13)) Run the blocking `kv_grow` ladder (p0): verified on 2026-10-28 at 98k deep context (`80,813` tokens); neutral at deep context (64.95 vs 65.80 nokvg) while gaining +2.5 to +2.8 t/s at short/medium context. Documented in matrix and next-steps.
 - [#14](https://github.com/carteakey/l3ms/issues/14) Build an expert-cache-stable identity instrument (p0)
 - [#15](https://github.com/carteakey/l3ms/issues/15) Quality-gate `STRATA_ROUTE_PRIOR=1.5` before serving (p0)
 - [#16](https://github.com/carteakey/l3ms/issues/16) Build an expert profile from real traffic (p0)
-- [#17](https://github.com/carteakey/l3ms/issues/17) Put the four E-cores to work (p1)
-- [#18](https://github.com/carteakey/l3ms/issues/18) Prompt-side switches: prefill has not moved in a month (p0)
+- [x] ([#17](https://github.com/carteakey/l3ms/issues/17)) Put the four E-cores to work (p1): evaluated 2026-11-09 (`aux_ecores`). Exposing mask `0-15` recruits E-cores into `pool_workers` (9 workers), regressing steady decode by -9.8 t/s. Rejected; maintain `taskset -c 0-11`.
+- [x] ([#18](https://github.com/carteakey/l3ms/issues/18)) Prompt-side switches: prefill has not moved in a month (p0): evaluated 2026-11-09 (`imma` neutral on `k8v4`, `prefill_alias` needs `--short-read 0`, `kg_upmix` regresses decode -15.6 t/s, `ple_mmap` pollutes page cache).
 - [#19](https://github.com/carteakey/l3ms/issues/19) Reserve huge pages for the expert arena (p1)
 - [#20](https://github.com/carteakey/l3ms/issues/20) Re-slice `strata-lean` onto upstream v0.2.x (p2)
 - [#21](https://github.com/carteakey/l3ms/issues/21) Batching, only if two clients ever run at once (p3)

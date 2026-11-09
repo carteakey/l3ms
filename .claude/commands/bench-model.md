@@ -107,6 +107,18 @@ STRATEGY=fused-muge ./bench-models/bench-ik-llama-cpp-<model-key>-strategies.sh
 - ⚠️ pp regresses significantly (-200-300 t/s)
 - Only use when tg is the sole metric and RAM headroom exists
 
+### Stage 4i - Strata runtime switch tuning sweep (RTX 4070 Platinum tier)
+```bash
+systemctl --user stop llama-swap.service
+ARMS="base hcq8 aux_ecores ple_mmap base" ./bench-models/bench-strata-tuning-ab.sh
+systemctl --user start llama-swap.service
+```
+- Consult `vendor/strata-lean/docs/DETAILS.md` and related topic guides first for switch definitions and defaults; fallback to `git -C vendor/strata-lean grep "STRATA_"` for undocumented switches
+- Overlays candidate flags and `STRATA_*` environment variables directly on top of the served production config (`strata-ud-iq2_xs-ple_q8.json`)
+- Evaluates steady-state decode (`tg_steady_mean`, `TG_WARMUP=6`, `TG_PROBES=4`), multi-length prefill (2k, 8k, 32k), and 4k needle retrieval
+- Emits engine diagnostics (`expert_slots`, cache hit rate, PCIe fraction, `io_mb_per_token`) to `logs/results/strata-tuning-diag.jsonl`
+- Use detached dark execution (`bench-models/run-strata-tuning-dark.sh`) when benchmarking the very engine serving the agent
+
 ## After benchmarking
 
 1. Results are **auto-logged** to `bench-models/results/<model-key>.jsonl`

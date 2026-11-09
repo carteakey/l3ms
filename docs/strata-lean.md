@@ -1,6 +1,6 @@
 # Strata `strata-lean` (`carteakey/strata-lean`)
 
-This branch (`strata-lean`) is a streamlined, minimal-bloat fork of Strata tailored specifically for an **RTX 4070 12 GB (Ada Lovelace, `sm_89`, 46 SMs)** paired with 64 GB DDR5-5200 host RAM running **Qwen3.8-Flash-Next** (`qwen4exp`, ISTA-DASLab GSQ-RCO IQ3_XXS with unquantized Q8_0 PLE table).
+This branch (`strata-lean`) is a streamlined, minimal-bloat fork of Strata tailored specifically for an **RTX 4070 12 GB (Ada Lovelace, `sm_89`, 46 SMs)** paired with 64 GB DDR5-5200 host RAM running **Qwen3.8-Flash-Next** (`qwen4exp`, Unsloth Dynamic V3.1 `UD-IQ2_XS` primary served Plat tier, and ISTA-DASLab GSQ-RCO IQ3_XXS peer, both with unquantized Q8_0 PLE table).
 
 Rather than tracking every upstream release or pulling in multi-vendor bloat, this fork cherry-picks only high-value inference kernels, speculative decoding improvements, and CUDA optimizations while pruning unused architectures.
 
@@ -8,17 +8,19 @@ Rather than tracking every upstream release or pulling in multi-vendor bloat, th
 
 ## Performance Progression on RTX 4070 (12 GB)
 
-Measured with `bench-models/bench-qwen38-refresh-ab.sh` on Linux 7.3.0 CachyOS, powersave governor, DDR5-5200 4x16 GB, serving `ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF/` (`IQ3_XXS`, unquantized Q8_0 PLE table on NVMe):
+Measured with `bench-models/bench-qwen38-refresh-ab.sh` and `bench-models/bench-strata-tuning-ab.sh` on Linux 7.3.1 CachyOS, performance governor, DDR5-5200 4x16 GB:
 
 | Engine / Revision | Sustained Decode (t/s) | Peak Decode (t/s) | 8k Prefill (t/s) | 4k Needle Pass | VRAM Footprint |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Strata v0.1.45 (upstream tag)** | 63.83 | 67.7 | 1,926.1 | Yes (`true`) | 11,696 MiB |
 | **Strata v0.2.6 (upstream tag)** | 65.53 | 70.5 | 1,890.7 | Yes (`true`) | 11,696 MiB |
 | **`4070-main-lite` (initial pruned + HC fusions)** | 65.08 | 72.9 | 1,894.1 | Yes (`true`) | 11,698 MiB |
-| **`4070-main-lite` + Ada `sm_89` MMVQ (PR #3453)** | **69.60** | **76.1** | **1,883.1** | Yes (`true`) | **11,696 MiB** |
-| **`4070-main-lite` + `--kv-grow` elastic cache** | **73.53** | **78.9** | **1,888.0** | Yes (`true`) | **11,696 MiB** |
+| **`4070-main-lite` + Ada `sm_89` MMVQ (PR #3453)** | 69.60 | 76.1 | 1,883.1 | Yes (`true`) | 11,696 MiB |
+| **`4070-main-lite` + `--kv-grow` elastic cache** | 73.53 | 78.9 | 1,888.0 | Yes (`true`) | 11,696 MiB |
+| **`strata-lean` UD-IQ2_XS + `STRATA_ADAPT_FETCH=1`** | 70.43 | 72.8 | 1,885.0 | Yes (`true`) | 11,614 MiB |
+| **`strata-lean` UD-IQ2_XS + `STRATA_HC_Q8=1` (2,949 slots)** | **73.00** | **75.0** | **1,888.0** | Yes (`true`) | **11,606 MiB** |
 
-Net gain: **+9.70 t/s (+15.2%) over upstream v0.1.45**, with peak decode reaching **78.9 t/s** (3,277 expert slots on GPU, 62.1% hit rate).
+Net gain: **+9.17 t/s (+14.4%) sustained decode over upstream v0.1.45** on the active `UD-IQ2_XS` quant with **2,949 expert slots on GPU (72.4% hit rate)**.
 
 Read that table with two caveats. A repeat run the same day came in at **67.88 t/s** (63.0 /
 71.6), so run-to-run spread on this tier is about 2 t/s and anything under ~3 t/s needs a

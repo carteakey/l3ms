@@ -92,7 +92,6 @@ TG_TOKENS="${TG_TOKENS:-256}"
 DEEP_SIZES="${DEEP_SIZES:-}"           # e.g. 98304: decode throughput with a deep context live, which is
                                       # where an elastic K/V gives back the expert slots it borrowed
 LOAD_WAIT_STEPS="${LOAD_WAIT_STEPS:-600}"     # 600 * 2 s = 20 min ceiling (huge-pages arm)
-mkdir -p "$TMP" "$(dirname "$OUT")"
 
 if [ ! -x "$ENGINE" ]; then echo "engine binary missing: $ENGINE"; exit 1; fi
 if [ ! -f "$SRC_CFG" ]; then echo "run config missing: $SRC_CFG"; exit 1; fi
@@ -146,6 +145,9 @@ arm_spec() { # label -> fills ARGS/ENV/MASK for one arm
     ple_mmap)      ARGS="--ple-io mmap" ;;
     aux_ecores)    ARGS="--aux-cpus auto"; MASK="0-15" ;;
     grnormfast)    ENV="STRATA_GR_NORM_FAST=1" ;;
+    gr_up75)       ENV="STRATA_GR_UP75=1" ;;
+    fuse_wait2)    ENV="STRATA_FUSE_WAIT=2" ;;
+    df_ple)        ENV="STRATA_DF_PLE=1" ;;
     # The served baseline carries --kv-grow from 2026-10-29, so the Exact-switch arms stack on top of
     # it and their rows compare against the kv_grow control rows, not the 2026-10-28 base rows.
     kg)            ARGS="$KG" ;;
@@ -198,6 +200,9 @@ hcq8          STRATA_HC_Q8=1
 ple_mmap      --ple-io mmap
 aux_ecores    --aux-cpus auto, taskset 0-15
 grnormfast    STRATA_GR_NORM_FAST=1
+gr_up75       STRATA_GR_UP75=1 (8-row-per-warp gr_up75_kernel for 3+ tokens)
+fuse_wait2    STRATA_FUSE_WAIT=2 (fold GPU plan host-flag wait into copy)
+df_ple        STRATA_DF_PLE=1 (batched PLE post-projection in verify window)
 TXT
 }
 
@@ -464,6 +469,7 @@ TXT
 fi
 
 bench_preflight_warn
+mkdir -p "$TMP" "$(dirname "$OUT")"
 bench_emit_frontmatter | tee "$TMP/frontmatter.yaml"
 
 ARMS="${ARMS:-$DEFAULT_ARMS}"

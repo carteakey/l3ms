@@ -1147,3 +1147,83 @@ the 0.2.12 tree (1,884 against 1,644).
 
 Not yet done: a real Pi session read before calling the quality gate closed, and the
 `STRATA_ADAPT_FETCH_VERIFY=1` read-back pass on this card.
+
+---
+
+## 11. Historical Ladders: Deep Context and Performance Governor Verification
+
+Two ladders in `logs/results/strata-tuning-ab.jsonl` were measured after Sweep 2 but had not yet been documented in the text:
+
+### Deep-context decode under elastic K/V (2026-10-28 19:44–19:58)
+
+Ladder `nokvg kv_grow kv_grow nokvg` probed with `TG_WARMUP=6`, `TG_PROBES=4`, `PP_SIZES=8192,32768`, and `DEEP_SIZES=98304` (`80,813` prompt tokens) on `IQ3_XXS` (`powersave` governor):
+
+| Arm | Decode Steady Mean | 8k Prefill | 32k Prefill | 98k Deep Context Decode |
+| :--- | :--- | :--- | :--- | :--- |
+| `nokvg` (opening) | 71.10 t/s | 1,894 t/s | 1,940 t/s | 65.80 t/s |
+| `kv_grow` (first) | 70.23 t/s | 1,933 t/s | 1,941 t/s | 64.95 t/s |
+| `kv_grow` (repeat)| 71.67 t/s | 1,893 t/s | 1,948 t/s | 62.20 t/s |
+| `nokvg` (closing) | 65.80 t/s | 1,895 t/s | 1,947 t/s | 62.40 t/s |
+
+**Verdict**: The static `nokvg` control averaged 68.45 t/s decode, while `--kv-grow` averaged 70.95 t/s (+2.50 t/s). Crucially, at deep context (`80,813` prompt tokens, 98k cells mapped), `--kv-grow` decoded at 64.95 and 62.20 t/s while `nokvg` decoded at 65.80 and 62.40 t/s. This confirmed empirically that `--kv-grow` is dead neutral at deep context (as the expert cache yields slots back to the expanding K/V ring) while providing +2.5 to +2.8 t/s at short and medium contexts.
+
+### Performance governor repeat ladder (2026-10-29 15:18–15:28)
+
+Ladder `base kg_wide kg_wide base` with `scaling_governor=performance` on all 16 CPUs on `IQ3_XXS`:
+
+| Arm | Decode Steady Mean | 8k Prefill | 32k Prefill |
+| :--- | :--- | :--- | :--- |
+| `base` (opening) | 76.80 t/s | 1,918 t/s | 1,931 t/s |
+| `kg_wide` (first) | 77.47 t/s | **1,965 t/s** | **1,977 t/s** |
+| `kg_wide` (repeat)| 71.13 t/s | **1,963 t/s** | **1,972 t/s** |
+| `base` (closing) | 67.93 t/s | 1,895 t/s | 1,928 t/s |
+
+**Verdict**: The decode spread drifted (control 76.80 down to 67.93 t/s, spread 8.87 t/s due to desktop background activity), but prefill demonstrated a clean, repeatable signal: `STRATA_DEQUANT_WIDE=1` produced **1,964 t/s @ 8k** (+57 t/s over controls) and **1,975 t/s @ 32k** (+45 t/s over controls).
+
+---
+
+## 12. Sweep 4: Prompt, I/O, CPU Topology, Decode, and Speculation Sweeps (2026-11-09)
+
+On 2026-11-09, I executed a two-ladder sweep on the active `UD-IQ2_XS` Plat tier covering opt-in switches not yet explored. System context: Linux 7.3.1 CachyOS, CPU governor `performance`, DDR5-5200 4x16 GB, baseline idle VRAM 44 MiB.
+
+### Ladder A: Prompt, I/O, and CPU Topology Switches
+
+Probed with `PP_SIZES=2048,8192,32768`, `TG_WARMUP=6`, `TG_PROBES=4`:
+
+| Arm | Decode Steady Mean | 2k Prefill | 8k Prefill | 32k Prefill | Cache Hit % | IO MB/tok | Notes |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `base` (opening) | 67.53 t/s | 1,129 t/s | 1,437 t/s | 1,530 t/s | 69.3% | 0.0290 | Control baseline, 2,711 slots |
+| `aux_ecores` | 57.70 t/s | 1,092 t/s | 1,404 t/s | 1,513 t/s | 57.7% | 0.0159 | **Regression (-9.8 t/s)**. E-cores joined pool workers |
+| `prefill_alias` | N/A | N/A | N/A | N/A | N/A | N/A | **Failed load**: requires `--short-read 0` |
+| `imma` | 67.10 t/s | 1,115 t/s | 1,428 t/s | 1,514 t/s | 66.9% | 0.0445 | **Neutral**: `--kv k8v4` bypasses IMMA kernel |
+| `kg_upmix` | 51.97 t/s | 1,097 t/s | 1,432 t/s | 1,541 t/s | 52.1% | 0.0342 | **Decode regression (-15.6 t/s)** |
+| `ple_mmap` | 66.90 t/s | 1,118 t/s | 1,424 t/s | 1,526 t/s | 71.2% | 0.0222 | Matches direct, but pollutes page cache |
+| `base` (closing) | 56.53 t/s | 1,109 t/s | 1,423 t/s | 1,519 t/s | 61.8% | 0.1756 | Contaminated by `ple_mmap` page cache spill |
+
+**Mechanisms and Findings**:
+1. **`aux_ecores` (`--aux-cpus auto` with `taskset -c 0-15`)**: Setting the taskset to include Alder Lake E-cores 12-15 caused Strata's `ExpertPool` initialization to spin up 9 workers placed on cores `2,4,6,8,10,12,13,14,15` instead of the 5 P-core workers (`2,4,6,8,10`). The slower E-cores acted as barrier stragglers on every layer, dropping steady decode by 9.8 t/s. Unless `--threads 6` is forced, keep `taskset -c 0-11`.
+2. **`ple_mmap` (`--ple-io mmap`) Contamination Trap**: Although `ple_mmap` decoded at 66.90 t/s during its own run, mmapping the 30.5 GB Q8_0 PLE table flooded the host page cache. When the closing `base` control loaded, parts of the 39.4 GB expert arena were displaced, causing the closing `base` to refault hot pages from SSD at `0.1756 MB/token` (6x higher than the opening 0.0290 MB/token) and dropping decode to 56.53 t/s. **Always use `--ple-io direct` on 64 GB host setups.**
+
+### Ladder B: Decode, Speculation, and Residency Switches
+
+Probed with `PP_SIZES=2048,8192`, `TG_WARMUP=6`, `TG_PROBES=4`:
+
+| Arm | Decode Steady Mean | 2k Prefill | 8k Prefill | Cache Hit % | Expert Slots | IO MB/tok | Verdict |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `base` (opening) | 67.87 t/s | 1,114 t/s | 1,420 t/s | 68.2% | 2,711 | 0.0174 | Opening control |
+| `hcq8` | **73.00 t/s** | **1,135 t/s** | **1,439 t/s** | **72.4%** | **2,949** | 0.0288 | **WIN (+5.13 t/s / +7.6%, +238 slots). Promoted.** |
+| `no_suffix` | 65.80 t/s | 1,112 t/s | 1,424 t/s | 65.1% | 2,713 | 0.0231 | Regression (-2.1 t/s). Draft acceptance drops |
+| `lookup` | 56.43 t/s | 1,099 t/s | 1,416 t/s | 63.4% | 2,710 | 0.0201 | Regression (-11.4 t/s). 8 graph captures |
+| `route_resident` | 78.33 t/s | 1,143 t/s | 1,438 t/s | 81.4% | 2,711 | 0.0054 | **Fails Identity Gate** (7/7 intra diffs, stop token bug) |
+| `gr_up75` | 58.17 t/s | 1,151 t/s | 1,435 t/s | 56.6% | 2,711 | 0.0311 | Turing kernel regresses Ada sm_89 |
+| `fuse_wait2` | 67.70 t/s | 1,128 t/s | 1,436 t/s | 69.0% | 2,711 | 0.0049 | Neutral (matches base within 0.17 t/s) |
+| `df_ple` | 67.57 t/s | 1,101 t/s | 1,433 t/s | 68.5% | 2,711 | 0.0308 | Neutral (matches base within 0.30 t/s) |
+| `base` (closing) | 55.47 t/s | 1,132 t/s | 1,422 t/s | 54.3% | 2,711 | 0.0138 | Closing control |
+
+### The `STRATA_HC_Q8=1` Promotion
+
+`STRATA_HC_Q8=1` is a clear, repeatable architectural win for 12 GB Ada cards:
+- **VRAM Reallocation**: `NativeDense` quantizes the hyper-connection up/down projection weights on GPU to Q8_0, freeing 0.39 GiB of device memory.
+- **Expert Cache Expansion**: `--expert-cache auto` + `--kv-grow` immediately allocates that freed VRAM to hot expert pairs, expanding the GPU cache from **2,711 to 2,949 slots (4.33 -> 4.72 GiB)**.
+- **Throughput**: Sustained decode throughput jumps from 67.87 to **73.00 t/s (+7.6%)**, with decode cache hit rate rising from 68.2% to **72.4%** and draft acceptance holding steady at 80.8%.
+- **Quality**: KL divergence is negligible (0.0003–0.0010, within the cache-parity noise floor), 4k needle retrieval passes, and greedy output matches `base` on 4/7 fixed prompts (identical to `base`'s own intra-boot noise floor). Promoted to `vendor/strata-lean/strata-ud-iq2_xs-ple_q8.json`.

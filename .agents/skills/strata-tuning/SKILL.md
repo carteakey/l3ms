@@ -25,7 +25,7 @@ masks, expert profiles and draft vocab files.
 ./bench-models/bench-strata-tuning-ab.sh --arms          # print the ladder, touch nothing
 DRY_RUN=1 ./bench-models/bench-strata-tuning-ab.sh       # expand every arm to args/env/taskset
 bash bench-models/bench-strata-tuning-ab.sh              # default ladder (the kg_* Exact-switch arms)
-ARMS="base kv_grow routeprior15 grnormfast base" bash bench-models/bench-strata-tuning-ab.sh
+ARMS="base hcq8 gr_up75 fuse_wait2 base" bash bench-models/bench-strata-tuning-ab.sh
 TG_WARMUP=6 TG_PROBES=4 DEEP_SIZES=98304 ARMS="base kv_grow kv_grow base" \
   bash bench-models/bench-strata-tuning-ab.sh            # deep-context decode: the kv-grow regime
 MODE=tune .agents/skills/strata-cherry-pick/scripts/bench_strata.sh   # same run, with GPU handoff
@@ -78,6 +78,21 @@ Three places the evidence lands, deliberately separate:
    judge io/token **relative across arms in the same boot** (the 2026-10-28 route-prior arm at 0.0775 sat
    inside its own controls' 0.0788 and 0.0557, which is what made the win believable), and only compare
    against the 5 KB band after 5-10 throwaway generations.
+
+## Discovering switches & candidate levers (Docs first, grep fallback)
+
+Before adding an arm to `bench-models/bench-strata-tuning-ab.sh`:
+
+1. **Consult Strata documentation first**:
+   Upstream documentation in `vendor/strata-lean/docs/` provides verified explanations of defaults, opt-in flags, intended target architectures (sm_70, sm_89, ROCm, CPU), and design interactions:
+   - Primary reference: [`vendor/strata-lean/docs/DETAILS.md`](file:///home/kchauhan/repos/l3ms/vendor/strata-lean/docs/DETAILS.md) (especially § "Short prompts: the CPU shares the experts", § "Missed experts in a verify window: the tail is skipped", § "More opt-in switches measured for 0.1.41", § "Thread placement: --aux-cpus").
+   - Topic guides: [`vendor/strata-lean/docs/VRAM_ELASTIC.md`](file:///home/kchauhan/repos/l3ms/vendor/strata-lean/docs/VRAM_ELASTIC.md), [`vendor/strata-lean/docs/PREFILL_HEAD_ALIAS.md`](file:///home/kchauhan/repos/l3ms/vendor/strata-lean/docs/PREFILL_HEAD_ALIAS.md), [`vendor/strata-lean/docs/QSAROWS.md`](file:///home/kchauhan/repos/l3ms/vendor/strata-lean/docs/QSAROWS.md), [`vendor/strata-lean/docs/BATCHING.md`](file:///home/kchauhan/repos/l3ms/vendor/strata-lean/docs/BATCHING.md), [`vendor/strata-lean/docs/TROUBLESHOOTING.md`](file:///home/kchauhan/repos/l3ms/vendor/strata-lean/docs/TROUBLESHOOTING.md).
+2. **Fallback to source code grepping**:
+   When looking for undocumented switches, unreleased developer options, or newly merged PR levers:
+   ```bash
+   git -C vendor/strata-lean grep -ho "STRATA_[A-Z0-9_]*" src/ | sort -u
+   ```
+   Filter out non-Ada branches (`sm_70`, `sm_75`, `HIPCC`, `gfx12`), multi-GPU options (`split_at`), or configurations inapplicable to our quant/cache (`k8v8`-only switches like `STRATA_PROMPT_ATTN_IMMA`).
 
 ## Judging a row
 

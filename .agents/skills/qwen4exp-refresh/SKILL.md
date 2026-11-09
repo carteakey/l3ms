@@ -11,7 +11,7 @@ Provides end-to-end orchestration to inspect upstream changes, track pull reques
 
 | Tier | Engine / Stack | Description & Target |
 | :--- | :--- | :--- |
-| **Platinum (`strata`)** | `vendor/strata-lean` (fork branch `strata-lean`, cut from upstream `v0.1.45`) | Served tier (`strata-ud-iq2_xs-ple_q8.json`, tracked backup in [`maintenance/configs/strata/`](file:///home/kchauhan/repos/l3ms/maintenance/configs/strata/)). Serves Unsloth Dynamic V3.1 `UD-IQ2_XS` (Q5_0 down-experts) paired with unquantized Q8_0 PLE table on NVMe (75.8 GB iso-size, +11.5 pt DeepSWE over GSQ-RCO). **70.4 t/s steady decode on code** (`STRATA_ADAPT_FETCH=1`, ported as `20c19b89`, hit rate 46.6% -> 67.2%), **1,116 t/s pp2048** (`STRATA_PREFILL_CPU_SHARE_MAX=3072`, +19%), **1,885 t/s pp8192**, 77-88% draft acceptance, elastic K/V (`--kv-grow`) with `STRATA_PREFILL_LEND_PCT=40` (caps prompt loan to 812 slots / 2,560 tokens, giving `--kv-grow` 1,771 reclaimable slots / 2.87 GiB up to 128k context; see [`docs/incidents/2026-11-09-strata-kv-grow-oom.md`](file:///home/kchauhan/repos/l3ms/docs/incidents/2026-11-09-strata-kv-grow-oom.md) and [`docs/strata-tuning-matrix.md`](file:///home/kchauhan/repos/l3ms/docs/strata-tuning-matrix.md)). Upstream is at `v0.2.12`; the 2026-11-07 re-slice (`vendor/strata-v0.2.12`) is kept as a reference arm. |
+| **Platinum (`strata`)** | `vendor/strata-lean` (fork branch `strata-lean`, cut from upstream `v0.1.45`) | Served tier (`strata-ud-iq2_xs-ple_q8.json`, tracked backup in [`maintenance/configs/strata/`](file:///home/kchauhan/repos/l3ms/maintenance/configs/strata/)). Serves Unsloth Dynamic V3.1 `UD-IQ2_XS` (Q5_0 down-experts) paired with unquantized Q8_0 PLE table on NVMe (75.8 GB iso-size, +11.5 pt DeepSWE over GSQ-RCO). **73.0 t/s steady decode on code** (`STRATA_HC_Q8=1` Q8_0 hyper-connections yielding +238 GPU expert slots to 2,949 slots / 4.72 GiB; `STRATA_ADAPT_FETCH=1`, hit rate 72.4%), **1,136 t/s pp2048** (`STRATA_PREFILL_CPU_SHARE_MAX=3072`, +19%), **1,440–1,885 t/s pp8192**, 80.8% draft acceptance, elastic K/V (`--kv-grow`) with `STRATA_PREFILL_LEND_PCT=40` (caps prompt loan to 812 slots / 2,560 tokens, giving `--kv-grow` 1,771 reclaimable slots / 2.87 GiB up to 128k context; see [`docs/incidents/2026-11-09-strata-kv-grow-oom.md`](file:///home/kchauhan/repos/l3ms/docs/incidents/2026-11-09-strata-kv-grow-oom.md) and [`docs/strata-tuning-matrix.md`](file:///home/kchauhan/repos/l3ms/docs/strata-tuning-matrix.md)). Upstream is at `v0.2.12`; the 2026-11-07 re-slice (`vendor/strata-v0.2.12`) is kept as a reference arm. |
 | **Gold (`master`)** | llama.cpp master (`vendor/llama.cpp-master`, b11913 `7aca0d2ea`) | Plain upstream master. Native CUDA sparse Flash Attention (#28770), RMS_NORM+SCALE CUDA fusion (#29393), native MTP (#29761), NVMe row prefetching (#29599). Measured 22.77 t/s decode, 595 t/s pp8192 on the same quant. |
 | **Experimental (`exp`)** | llama.cpp PR stack (`vendor/llama.cpp-exp-latest`, b11924 `86d69ec57`) | Master plus cutting-edge MoE and speculative work. PR #29887 (GPU LRU cache for host MoE experts, `--moe-cache-mib`) is **merged upstream** now; open follow-ups are #27861 (GPU-resident LRU), #27210 (adaptive MTP draft depth), and #31469 (--moe-direct-io). Measured `exp_cache` 24.53 t/s decode. |
 | **MTP (served tier)** | `vendor/llama.cpp-exp-stack-v2` (`qwen38_mtp_server`) | The tree the served `qwen38-flash-next-mtp` tier runs from, and the one that has fallen behind: b11268 from 2026-09-28, against master's b11913. Rebuild this tree, not `exp-latest`, if the MTP tier should keep up. |
@@ -170,7 +170,7 @@ Results append directly to `logs/results/qwen38-refresh-ab.jsonl`.
    ```bash
    systemctl --user stop llama-swap.service
    bash bench-models/bench-strata-tuning-ab.sh              # default arm ladder
-   ARMS="base kv_grow routeprior15 draft_en base" bash bench-models/bench-strata-tuning-ab.sh
+   ARMS="base hcq8 aux_ecores ple_mmap base" bash bench-models/bench-strata-tuning-ab.sh
    systemctl --user start llama-swap.service
    ```
    Rows: `logs/results/strata-tuning-ab.jsonl`. Engine self-report (expert slots, decode hit
@@ -178,6 +178,44 @@ Results append directly to `logs/results/qwen38-refresh-ab.jsonl`.
    head token count, `read_bytes` per generated token): `logs/results/strata-tuning-diag.jsonl`.
    Read the diag row before believing a speed number: tens of MB/token means the run got
    faster by spilling to SSD.
+
+### Step 3b: Strata Param Sweep & Switch Discovery Workflow
+
+Use this workflow to discover, audit, benchmark, and promote candidate flags or `STRATA_*` environment switches:
+
+1. **Consult Strata Documentation First (Fallback to Source Code Grepping):**
+   Always check the Strata documentation first before exploring or testing candidate parameters. Upstream documentation explains default values, opt-in flags, intended target architectures, and architectural interactions:
+   - Primary reference: [`vendor/strata-lean/docs/DETAILS.md`](file:///home/kchauhan/repos/l3ms/vendor/strata-lean/docs/DETAILS.md) (especially § "Short prompts: the CPU shares the experts", § "Missed experts in a verify window: the tail is skipped", § "More opt-in switches measured for 0.1.41", § "Thread placement: --aux-cpus").
+   - Topic guides: [`vendor/strata-lean/docs/VRAM_ELASTIC.md`](file:///home/kchauhan/repos/l3ms/vendor/strata-lean/docs/VRAM_ELASTIC.md), [`vendor/strata-lean/docs/PREFILL_HEAD_ALIAS.md`](file:///home/kchauhan/repos/l3ms/vendor/strata-lean/docs/PREFILL_HEAD_ALIAS.md), [`vendor/strata-lean/docs/QSAROWS.md`](file:///home/kchauhan/repos/l3ms/vendor/strata-lean/docs/QSAROWS.md), [`vendor/strata-lean/docs/BATCHING.md`](file:///home/kchauhan/repos/l3ms/vendor/strata-lean/docs/BATCHING.md), [`vendor/strata-lean/docs/TROUBLESHOOTING.md`](file:///home/kchauhan/repos/l3ms/vendor/strata-lean/docs/TROUBLESHOOTING.md).
+   - **Fallback to source code scanning** only for undocumented switches, newly merged PRs, or unpublished developer flags:
+     ```bash
+     git -C vendor/strata-lean grep -ho "STRATA_[A-Z0-9_]*" src/ | sort -u
+     ```
+   Filter out non-Ada (`HIPCC`, `sm_70`, `sm_75`, `gfx12`), multi-GPU (`split_at`), or conflicting branches (e.g. `STRATA_PROMPT_ATTN_IMMA` only acts on `k8v8`, not our `k8v4`).
+
+2. **Define Candidate Arms in `bench-models/bench-strata-tuning-ab.sh`:**
+   Add new candidate specs to `arm_spec()` and document them in `list_arms()`. Verify syntax without touching the GPU:
+   ```bash
+   DRY_RUN=1 ARMS="base hcq8 gr_up75 fuse_wait2 base" ./bench-models/bench-strata-tuning-ab.sh
+   ```
+
+3. **Execute Paired A/B Bracketed Ladders:**
+   Always bracket arms with identical `base` controls at both ends (`base <candidates...> base`) to detect memory-spill contamination or thermal drift:
+   - **Ladder A (Prompt / I/O / CPU topology)**: `aux_ecores`, `prefill_alias`, `imma`, `kg_upmix`, `ple_mmap`.
+   - **Ladder B (Decode / Speculation / Residency)**: `hcq8`, `no_suffix`, `lookup`, `route_resident`, `gr_up75`, `fuse_wait2`, `df_ple`.
+   - For long runs where dark detached execution is preferred:
+     ```bash
+     bench-models/run-strata-tuning-dark.sh
+     ```
+
+4. **Judge Results via Diagnostic Separation (`strata-tuning-diag.jsonl`):**
+   - **VRAM Reallocation Win**: `STRATA_HC_Q8=1` (+5.13 t/s steady decode, +238 expert slots to 2,949, 72.4% hit rate, zero quality loss).
+   - **Page Cache Contamination Trap**: `--ple-io mmap` matches `--ple-io direct` on speed, but pollutes the Linux page cache with 30.5 GB of PLE tables, causing subsequent runs to spill expert arena pages to SSD (`io_mb_per_token: 0.1756` vs `0.0290`). **Always keep `--ple-io direct`**.
+   - **CPU Pool Straggler Trap**: `--aux-cpus auto` with `taskset -c 0-15` recruits Alder Lake E-cores `12-15` into `pool_workers` (9 workers instead of 5 on P-cores `2,4,6,8,10`), dropping decode by -9.8 t/s.
+   - **Residency Routing Drift**: `STRATA_ROUTE_RESIDENT=4` gains +10.5 t/s decode (81.4% hit rate) but changes expert picks, causing 7/7 intra-boot prompt diffs. Reject for agent tasks.
+
+5. **Promote Winner to Production Config:**
+   Snapshot `vendor/strata-lean/strata-ud-iq2_xs-ple_q8.json`, add the switch under `"env"` or `"args"`, copy to `maintenance/configs/strata/`, and restart `llama-swap.service`. Run a chat completion smoke test with `max_tokens >= 64`.
 
 ---
 

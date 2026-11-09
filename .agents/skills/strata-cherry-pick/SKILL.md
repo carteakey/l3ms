@@ -34,8 +34,9 @@ All evaluations are conducted against this fixed homelab target:
   | `strata_new` | v0.1.45 | 63.83 | 62.0 / 67.7 | 1919 |
   | `strata_v026` | v0.2.6 | 65.53 | 62.2 / 70.5 | 1876 |
   | `strata_lean` (before the sm_89 table) | fork | 65.08 | 59.3 / 72.9 | 1891 |
-  | `strata_lean` (after PR #3453 table) | fork | **69.60** | 65.4 / 76.1 | 1876 |
-  | `strata_lean` repeat, same day | fork | 67.88 | 63.0 / 71.6 | 1890 |
+  | `strata_lean` (after PR #3453 table) | fork | 69.60 | 65.4 / 76.1 | 1876 |
+  | `strata_lean` + `STRATA_ADAPT_FETCH=1` | fork | 70.43 | 68.2 / 72.8 | 1885 |
+  | `strata_lean` + `STRATA_HC_Q8=1` (2,949 slots) | fork | **73.00** | **69.0 / 75.0** | **1888** |
 
   All these runs passed `needle_4k`. Prefill has been flat (1,876 to 1,996) across every
   Strata arm since 2026-10-07 while decode moved 52 to 69.6: the prompt lane is the part
@@ -499,10 +500,11 @@ generated token). The diag file is what separates a real win from a run that got
 spilling to SSD: MB/token should stay in this arch's PLE design traffic band (about 5
 KB/token of n-gram rows); tens of MB/token means a spill.
 
-The tier's own current diag numbers, for reference when judging an arm: 2,711 to 3,277 expert
-slots (`--kv-grow` elastic K/V with `STRATA_PREFILL_LEND_PCT=40` capping prompt loan to 812
-slots / 1.31 GiB, leaving `lend_first=1899` and 1,771 reclaimable slots / 2.87 GiB up to 128k
-context), decode cache hit rate ~67.2% (`STRATA_ADAPT_FETCH=1`), 410-412 MiB free at request
+The tier's own current diag numbers, for reference when judging an arm: 2,949 expert
+slots (`STRATA_HC_Q8=1` saving 0.39 GiB of hyper-connection VRAM for +238 slots, paired with
+`--kv-grow` elastic K/V and `STRATA_PREFILL_LEND_PCT=40` capping prompt loan to 881
+slots / 1.41 GiB, leaving 1,771+ reclaimable slots up to 128k
+context), decode cache hit rate ~72.4% (`STRATA_ADAPT_FETCH=1`), 412 MiB free at request
 start with the `#2065` warning firing, arena on 4 KB pages (`vm.nr_hugepages=0`), draft head
 over 106,299 tokens.
 

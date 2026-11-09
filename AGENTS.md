@@ -96,11 +96,11 @@ Deep detail, decisions and next steps: `docs/qwen38-flash-next-internal.md` and 
 Seven router tiers:
 
 - plat `qwen38-flash-next-plat` (alias `strata`): Strata strata-lean (`carteakey/strata-lean`,
-  branch `strata-lean`, cut from upstream `v0.1.45`; upstream is at `v0.2.10`, audit it with
+  branch `strata-lean`, cut from upstream `v0.1.45`; upstream is at `v0.2.12`, audit it with
   `.agents/skills/strata-cherry-pick/scripts/audit_upstream.sh`, analysis in
-  `docs/strata-perf-next-steps-2026-10.md` and `docs/strata-lean.md`) with ISTA-DASLab GSQ-RCO IQ3_XXS quant,
-  unquantized Q8_0 PLE table on NVMe, dynamic VRAM expert caching (2,583 hot expert pairs in
-  4.24 GiB at the 128k config; 2,444 to 3,086 across configs) with **`--kv-grow` served since 2026-10-28
+  `docs/strata-perf-next-steps-2026-10.md` and `docs/strata-lean.md`) with Unsloth Dynamic V3.1 `UD-IQ2_XS` quant,
+  unquantized Q8_0 PLE table on NVMe, dynamic VRAM expert caching (2,949 hot expert pairs in
+  4.72 GiB at the 128k config with `STRATA_HC_Q8=1` promoted on 2026-11-09) with **`--kv-grow` served since 2026-10-28
   19:15** (elastic K/V: 16,384 of 131,072 cells mapped at load, 0.21 of 1.32 GiB; the expert cache takes
   the room first, so 3,276 slots / 5.35 GiB at short context, measured 2,642 slots holding experts at
   114,688 cells in a live session), native MTP speculative decoding
@@ -112,7 +112,9 @@ Seven router tiers:
   tokens** (`STRATA_PREFILL_CPU_SHARE_MAX=3072` in the run config's `env` since 2026-11-07: 2k prefill
   939 -> 1,116 t/s, no 8k or decode cost, first-token KL about 0.011 at 1-3K), the PCIe share's fetched
   misses admitted into the cache (`STRATA_ADAPT_FETCH=1`, ported as `20c19b89` since 2026-11-07: decode
-  55.6 -> 70.4 t/s, hit rate 46.6% -> 67.2%, prefill unchanged), prefill loan capped at 40%
+  55.6 -> 70.4 t/s, hit rate 46.6% -> 67.2%, prefill unchanged), Q8_0 hyper-connection projections
+  (`STRATA_HC_Q8=1` in `env` since 2026-11-09: saves 0.39 GiB VRAM, expanding expert cache by +238 slots
+  to 2,949 slots and lifting decode 67.87 -> **73.00 t/s**, hit rate 68.2% -> 72.4%), prefill loan capped at 40%
   (`STRATA_PREFILL_LEND_PCT=40` in the run config's `env` since 2026-11-09: caps prompt borrowing to 812 slots / 2,560
   tokens, lifting `lend_first` from 283 to 1,899 and expanding `--kv-grow` reclaimable headroom from 155 slots / 248 MiB
   to 1,771 slots / 2.87 GiB, preventing `verify: instantiate: out of memory` and K/V growth OOM crashes at extended
@@ -122,11 +124,9 @@ Seven router tiers:
   stopped requesting `MADV_HUGEPAGE` while THP is `always`, #771 and #2126 - the lever is a
   reserved hugetlb pool, not `MADV_HUGEPAGE`), 4-slot / 3 GiB host-RAM conversation parking,
   and `ttl: 3600` (1-hour idle timeout).
-  **69.60 t/s steady decode on real code (65.4 to 76.1 range; a same-day repeat measured
-  67.88, so run-to-run spread is about 2 t/s), pp 1,876 to 1,891 t/s @ 8k**, 11.7 GB VRAM,
-  47 GB RAM (14 GB headroom). The engine reports 410 MiB of VRAM free at request start, under
-  its own 512 MiB floor (#2065, it asks for `--vram-reserve-mib 832`), and a 58.6% decode
-  expert-cache hit rate: those two lines are where the remaining headroom is.
+  **73.00 t/s steady decode on real code (69.0 to 75.0 range, hit rate 72.4%), pp 1,136 t/s @ 2k, 1,439 to 1,888 t/s @ 8k**, 11.6 GB VRAM,
+  47 GB RAM (14 GB headroom). The engine reports 412 MiB of VRAM free at request start, under
+  its own 512 MiB floor (#2065, it asks for `--vram-reserve-mib 832`).
   `STRATA_GR_NORM_FAST` is opt-in on CUDA (`fused_gr.cu:1179`, upstream's comment: "measured on sm_70
   only") and the tier's run config has no `env` block, so it is NOT on; an earlier revision of this file
   listed it as a tier feature, and measuring it on 2026-10-28 settled it: 64.85 against a 71.13 base pair
