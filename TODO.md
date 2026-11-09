@@ -83,6 +83,21 @@ rejected until warm-up is separated from steady state.
 - [#19](https://github.com/carteakey/l3ms/issues/19) Reserve huge pages for the expert arena (p1)
 - [#20](https://github.com/carteakey/l3ms/issues/20) Re-slice `strata-lean` onto upstream v0.2.x (p2)
 - [#21](https://github.com/carteakey/l3ms/issues/21) Batching, only if two clients ever run at once (p3)
+- [#31](https://github.com/carteakey/l3ms/issues/31) Verify and quality-gate `STRATA_ADAPT_FETCH` on the 4070 (p0)
+- [#32](https://github.com/carteakey/l3ms/issues/32) Port the 0.2.11 server tool-call and conversation-slot fixes (p1)
+- [#36](https://github.com/carteakey/l3ms/issues/36) Evaluate the DFlash2 drafter on the 4070 (p3)
+
+Filed 2026-11-09 from the v0.2.12 intake: the CPU prefill share limit (3,072) and
+`STRATA_ADAPT_FETCH=1` are served; the re-slice is a reference arm, not served.
+
+## Serving stability
+
+- [#33](https://github.com/carteakey/l3ms/issues/33) The CPU governor resets to `powersave` on resume (p1)
+
+## Docs and publication
+
+- [#34](https://github.com/carteakey/l3ms/issues/34) Add a prefill chart to the Strata post (p2)
+- [#35](https://github.com/carteakey/l3ms/issues/35) Bring the self-tuning post up to the l3ms mirror and fix the bit-identical claim (p1)
 
 ## Workbench
 
