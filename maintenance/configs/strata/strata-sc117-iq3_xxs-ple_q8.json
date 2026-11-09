@@ -1,0 +1,63 @@
+{
+ "exe": "/home/kchauhan/repos/l3ms/vendor/strata-lean/build/strata",
+ "args": [
+  "--pack",
+  "/home/kchauhan/repos/l3ms/vendor/Strata-data/packs/sc117_iq3_xxs",
+  "--native",
+  "/mnt/dev/models/qwen38-sc117-ple-q8/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-IQ3_XXS-00001-of-00002.gguf",
+  "--ple-gguf",
+  "/mnt/dev/models/qwen38-sc117-ple-q8/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-IQ3_XXS-00002-of-00002.gguf",
+  "--expert-profile",
+  "/home/kchauhan/repos/l3ms/vendor/strata-lean/data/expert-profile.bin",
+  "--expert-cache",
+  "auto",
+  "--prefill",
+  "auto",
+  "--spec",
+  "4",
+  "--spec-min-p",
+  "0.5",
+  "--mtp",
+  "/home/kchauhan/repos/l3ms/vendor/Strata-data/mtp/sc117_rt",
+  "--max-context",
+  "131072",
+  "--kv",
+  "k8v4",
+  "--conversation-cache-mib",
+  "3072",
+  "--conversation-cache-slots",
+  "4",
+  "--conversation-cache-min-free-mib",
+  "1024",
+  "--conversation-cache-min-tokens",
+  "1000",
+  "--kv-grow"
+ ],
+ "cwd": "/home/kchauhan/repos/l3ms/vendor/strata-lean",
+ "tokenizer": "/home/kchauhan/repos/l3ms/vendor/Strata-data/packs/sc117_iq3_xxs/tokenizer",
+ "model_name": "qwen3.8-flash-next-sc117-iq3_xxs-ple_q8",
+ "log": "/home/kchauhan/repos/l3ms/vendor/strata-lean/strata-sc117-iq3_xxs-ple_q8.log",
+ "lib_dirs": [
+  "/opt/cuda/bin",
+  "/opt/cuda/lib64"
+ ],
+ "port": 8088,
+ "gpu": 0,
+ "gpus_asked": true,
+ "fit_max_tokens": true,
+ "reasoning_loop_recovery": "recover",
+ "reasoning_close_retry": true,
+ "reasoning_budget_tokens": 8192,
+ "repeat_stop_tokens": 48,
+ "sampling": {
+  "temperature": 1.0,
+  "top_p": 0.95,
+  "top_k": 20,
+  "min_p": 0.05,
+  "presence_penalty": 0.0,
+  "repetition_penalty": 1.0
+ },
+ "env": {
+  "STRATA_PREFILL_LEND_PCT": "40"
+ }
+}

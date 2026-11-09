@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # bench-strata-tuning-ab.sh - Strata plat-tier tuning sweep: flags and env only, no rebuild.
 #
-# Same binary (vendor/strata-lean/build/strata), same quant (ISTA-DASLab GSQ-RCO IQ3_XXS),
+# Same binary (vendor/strata-lean/build/strata), same quant (Unsloth UD-IQ2_XS),
 # same probe as bench-qwen38-refresh-ab.sh. Every arm is an overlay on the PRODUCTION run
-# config (vendor/strata-lean/strata-iq3_xxs-ple_q8.json): extra args, exported STRATA_* env,
+# config (vendor/strata-lean/strata-ud-iq2_xs-ple_q8.json): extra args, exported STRATA_* env,
 # or a wider taskset mask. That is deliberate: a winner becomes one config line in the
 # served tier instead of a cherry-pick.
 #
@@ -74,7 +74,7 @@ source "$REPO/bench-models/bench-env.sh"
 
 V="$REPO/vendor"
 LEAN="$V/strata-lean"
-SRC_CFG="${SRC_CFG:-$LEAN/strata-iq3_xxs-ple_q8.json}"
+SRC_CFG="${SRC_CFG:-$LEAN/strata-ud-iq2_xs-ple_q8.json}"
 ENGINE="$LEAN/build/strata"
 PY="$V/strata/.venv/bin/python"
 PORT="${PORT:-8024}"

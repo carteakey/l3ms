@@ -7,8 +7,9 @@ description: Measure and promote Strata serving switches on the RTX 4070 plat ti
 
 Companion to `strata-cherry-pick` (which owns re-slices, cherry-picks and rebuilds).
 This skill owns the part of the loop that needs **no compile**: flags, env switches, CPU
-masks, expert profiles and draft vocab files. Evidence and ranked backlog:
-`docs/strata-perf-next-steps-2026-10.md`.
+masks, expert profiles and draft vocab files.
+- Single source of truth for all evaluated switches: [`docs/strata-tuning-matrix.md`](file:///home/kchauhan/repos/l3ms/docs/strata-tuning-matrix.md).
+- Evidence and ranked backlog: [`docs/strata-perf-next-steps-2026-10.md`](file:///home/kchauhan/repos/l3ms/docs/strata-perf-next-steps-2026-10.md).
 
 ## When to use which lane
 
@@ -39,12 +40,12 @@ design: an arm is the served thing plus one change, so a winner becomes one conf
 `build_cfg` writes the override into the config's `args` and, for env arms, into its `env`
 block, which is how a winner is promotable without rewriting anything else.
 
-The harness's default `SRC_CFG` is still `vendor/strata-lean/strata-iq3_xxs-ple_q8.json`, but
-the served plat tier has run Unsloth `UD-IQ2_XS` since 2026-11-05. Override it, or the sweep
-measures a quant nobody serves:
+The harness defaults `SRC_CFG` to `vendor/strata-lean/strata-ud-iq2_xs-ple_q8.json` (the
+active production Plat tier since 2026-11-05). To benchmark a different quant (such as
+the legacy IQ3_XXS config), override `SRC_CFG`:
 
 ```bash
-SRC_CFG=vendor/strata-lean/strata-ud-iq2_xs-ple_q8.json \
+SRC_CFG=vendor/strata-lean/strata-iq3_xxs-ple_q8.json \
   ARMS="base kv_grow base" bash bench-models/bench-strata-tuning-ab.sh
 ```
 

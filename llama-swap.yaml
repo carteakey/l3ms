@@ -346,7 +346,7 @@ models:
   ## ===========================================================================
 
   "qwen38-flash-next-plat":
-    name: "Qwen3.8-Flash-Next Plat (Strata v0.1.45, Unsloth UD-IQ2_XS, Q8_0 PLE Table, 128k ctx, 75-90 t/s)"
+    name: "Qwen3.8-Flash-Next Plat (Strata v0.1.45, Unsloth UD-IQ2_XS, Q8_0 PLE Table, 128k ctx, 70-76 t/s)"
     description: "Platinum: Strata v0.1.45 with Unsloth Dynamic UD-IQ2_XS (75.8 GB iso-peer to IQ3_XXS, 43.8 GB fast RAM) + dynamic expert VRAM caching + unquantized Q8_0 PLE n-gram table (54.4 GB on NVMe, 0 MiB VRAM overhead) + native MTP speculative decoding (Q2_0 draft head) + K8V4 KV cache + 128k context + 4-slot conversation cache."
     ttl: 3600
     cmd: |
@@ -397,8 +397,8 @@ models:
       --port ${PORT}
 
   "qwen38-flash-next-plat-abliterated":
-    name: "Qwen3.8-Flash-Next Plat Abliterated (Strata v0.1.45, SC117 IQ3_XXS, Q8_0 PLE, 128k ctx, 75-90 t/s)"
-    description: "Platinum Abliterated: Strata v0.1.45 with SC117 unaligned/uncensored weights + unquantized Q8_0 PLE n-gram table (54.4 GB on NVMe, 0 MiB VRAM overhead) + dynamic expert VRAM caching (3,086 hot experts in VRAM) + native MTP speculative decoding + K8V4 KV cache + 128k ctx + 4-slot conversation cache. 70-90 t/s decode."
+    name: "Qwen3.8-Flash-Next Plat Abliterated (Strata v0.1.45, SC117 IQ3_XXS, Q8_0 PLE, 128k ctx, 70-76 t/s)"
+    description: "Platinum Abliterated: Strata v0.1.45 with SC117 unaligned/uncensored weights + unquantized Q8_0 PLE n-gram table (54.4 GB on NVMe, 0 MiB VRAM overhead) + dynamic expert VRAM caching (3,086 hot experts in VRAM) + native MTP speculative decoding + K8V4 KV cache + 128k ctx + 4-slot conversation cache. 70-76 t/s steady decode."
     ttl: 3600
     cmd: |
       taskset -c ${cpu_range} ${strata_python}
