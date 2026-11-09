@@ -112,7 +112,11 @@ Seven router tiers:
   tokens** (`STRATA_PREFILL_CPU_SHARE_MAX=3072` in the run config's `env` since 2026-11-07: 2k prefill
   939 -> 1,116 t/s, no 8k or decode cost, first-token KL about 0.011 at 1-3K), the PCIe share's fetched
   misses admitted into the cache (`STRATA_ADAPT_FETCH=1`, ported as `20c19b89` since 2026-11-07: decode
-  55.6 -> 70.4 t/s, hit rate 46.6% -> 67.2%, prefill unchanged), thinking wrap-up
+  55.6 -> 70.4 t/s, hit rate 46.6% -> 67.2%, prefill unchanged), prefill loan capped at 40%
+  (`STRATA_PREFILL_LEND_PCT=40` in the run config's `env` since 2026-11-09: caps prompt borrowing to 812 slots / 2,560
+  tokens, lifting `lend_first` from 283 to 1,899 and expanding `--kv-grow` reclaimable headroom from 155 slots / 248 MiB
+  to 1,771 slots / 2.87 GiB, preventing `verify: instantiate: out of memory` and K/V growth OOM crashes at extended
+  context; full postmortem in `docs/incidents/2026-11-09-strata-kv-grow-oom.md`), thinking wrap-up
   on repeat loops inside <think>, K8V4 KV cache @ 128k ctx (`131072`), expert arena pinned with
   `cudaHostRegister` on **4 KB pages** (`vm.nr_hugepages=0` so `MAP_HUGETLB` fails; upstream
   stopped requesting `MADV_HUGEPAGE` while THP is `always`, #771 and #2126 - the lever is a
