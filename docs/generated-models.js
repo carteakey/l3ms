@@ -182,7 +182,9 @@ window.L3MS_DASHBOARD = {
       "name": "Inkling 2 Mini 26.4B-A5.4B (polystrata-4070, UD-Q4_K_XL + CPU Vision)",
       "description": "Primary fast coding and vision MoE tier: Thinking Machines Lab 26.4B looped transformer (48 logical passes) on polystrata-4070 (v0.2.20-poly.5 + PR #313) with CUDA VMM 256k elastic FP8 KV, 1,678 resident GPU experts (8.1 GiB, ~95% hit), Ada INT8 Tensor Core prefill (STRATA_PREFILL_NVFP4=w4a8, STRATA_INK_FAST_CTRL=1), lossless prompt lookup (--window 6 --lookup 3), and zero-VRAM CPU strata-vision. Delivers 77.5 t/s fresh coding, 99.7 t/s code edits, and 1,833 / 2,296 / 2,270 t/s pp2k / pp8k / pp20k.",
       "preload": false,
-      "aliases": [],
+      "aliases": [
+        "inkling-2-mini-128k"
+      ],
       "context": "256k",
       "evidence": {
         "scope": "local",
@@ -289,7 +291,13 @@ window.L3MS_DASHBOARD = {
       "id": "qwen38-flash-next-plat",
       "name": "Qwen3.8-Flash-Next Plat (strata-lean, UD-IQ2_XS + Q8_0 PLE)",
       "description": "Startup preload and primary Frontier MoE tier: custom Ada sm_89 strata-lean fork running Unsloth Dynamic V3.1 UD-IQ2_XS with unquantized Q8_0 PLE streamed from NVMe. 2,949 GPU expert slots (72.4% hit rate) via STRATA_HC_Q8=1, STRATA_ADAPT_FETCH=1, STRATA_PREFILL_LEND_PCT=40, and STRATA_PREFILL_CPU_SHARE_MAX=3072. Delivers 73.0 t/s steady decode and 1,136 / 1,888 t/s pp2k / pp8k at 128k elastic K8V4 context.",
-      "aliases": [],
+      "aliases": [
+        "strata",
+        "plat",
+        "qwen38-flash-next-plat-ud-iq2",
+        "qwen38-flash-next-plat-ple-q8",
+        "plat-q8"
+      ],
       "context": "128k",
       "evidence": {
         "scope": "local",
@@ -494,7 +502,9 @@ window.L3MS_DASHBOARD = {
       "name": "Qwen3.8-Flash-Next Plat Abliterated (strata-lean, SC117)",
       "description": "Platinum Abliterated peer: strata-lean with SC117 unaligned IQ3_XXS weights, Q8_0 PLE on NVMe, 3,086 hot GPU expert slots, native Q2_0 MTP, and elastic 128k K8V4 context. 62.2 t/s steady decode and 1,992 t/s pp8k.",
       "preload": false,
-      "aliases": [],
+      "aliases": [
+        "abliterated"
+      ],
       "context": "128k",
       "evidence": {
         "scope": "local",
@@ -596,7 +606,12 @@ window.L3MS_DASHBOARD = {
       "name": "Qwen3.8-Flash-Next Plat Vision (strata-lean + strata-vision)",
       "description": "Platinum multimodal peer: strata-lean paired with pure-CPU strata-vision image encoder (mmproj-F16) and Unsloth UD-IQ2_XS + Q8_0 PLE. Retains 100% of the GPU expert cache with zero VRAM loss for vision at 128k context.",
       "preload": false,
-      "aliases": [],
+      "aliases": [
+        "strata-vision",
+        "plat-vision",
+        "qwen38-flash-next-plat-vision-iq4",
+        "plat-vision-iq4"
+      ],
       "context": "128k",
       "evidence": {
         "scope": "local",
@@ -750,7 +765,9 @@ window.L3MS_DASHBOARD = {
       "name": "Humanizer 12B (Q6_K)",
       "description": "Fine-tuned Gemma-4-12B text-rewriting model from jialinyyzz/humanizer. Rewrites AI drafts to natural human voice while strictly preserving facts, numbers, dates, and names. 100% GPU offload (-ngl 99, 10.5 GB VRAM) at 8k context.",
       "preload": false,
-      "aliases": [],
+      "aliases": [
+        "humanizer"
+      ],
       "context": "8k",
       "evidence": {
         "scope": "local",
@@ -848,7 +865,10 @@ window.L3MS_DASHBOARD = {
       "name": "Qwen3.8-Flash-Next Gold (llama.cpp master b12073)",
       "description": "Plain upstream llama.cpp master fallback (b12073 d1044bc82). 22.77 t/s steady decode, 596 t/s pp8k at 96k q8_0 KV context with --fit on --fit-target 512 and ngram-mod speculation.",
       "preload": false,
-      "aliases": [],
+      "aliases": [
+        "qwen38-flash-next-ple-q8",
+        "gold-q8"
+      ],
       "context": "96k",
       "evidence": {
         "scope": "local",
@@ -993,7 +1013,9 @@ window.L3MS_DASHBOARD = {
         "Abliterated",
         "128k"
       ],
-      "aliases": [],
+      "aliases": [
+        "abliterated-vision"
+      ],
       "recipeKind": "strata",
       "recipeLabel": "Portable Strata / PolyStrata Recipe",
       "command": "# Active engine runtime switches\nexport STRATA_PREFILL_LEND_PCT=\"40\"\n\n# Launch server\nCPU_RANGE=\"${CPU_RANGE:-0-11}\"\nPORT=\"${PORT:-8080}\"\nSTRATA_ABLITERATED_VISION_CONFIG=\"/path/to/strata_abliterated_vision_config\"\nSTRATA_PYTHON=\"/path/to/strata_python\"\nSTRATA_SERVER=\"/path/to/strata_server\"\n\ntaskset -c \"$CPU_RANGE\" \"$STRATA_PYTHON\" \\\n  \"$STRATA_SERVER\" \\\n  --engine strata \\\n  --config \"$STRATA_ABLITERATED_VISION_CONFIG\" \\\n  --fit-max-tokens \\\n  --host 127.0.0.1 \\\n  --port \"$PORT\"\n\n# Portable engine JSON config excerpt\n{\n  \"exe\": \"./vendor/strata-lean/build/strata\",\n  \"args\": [\n    \"--pack\",\n    \"/path/to/strata-pack\",\n    \"--native\",\n    \"/path/to/model.gguf\",\n    \"--ple-gguf\",\n    \"/path/to/ple-q8.gguf\",\n    \"--expert-profile\",\n    \"/path/to/expert-profile.bin\",\n    \"--expert-cache\",\n    \"auto\",\n    \"--prefill\",\n    \"auto\",\n    \"--spec\",\n    \"4\",\n    \"--spec-min-p\",\n    \"0.5\",\n    \"--mtp\",\n    \"/path/to/mtp-draft-dir\",\n    \"--max-context\",\n    \"131072\",\n    \"--kv\",\n    \"k8v4\",\n    \"--vision\",\n    \"--conversation-cache-mib\",\n    \"3072\",\n    \"--conversation-cache-slots\",\n    \"4\",\n    \"--conversation-cache-min-free-mib\",\n    \"1024\",\n    \"--conversation-cache-min-tokens\",\n    \"1000\",\n    \"--kv-grow\"\n  ],\n  \"env\": {\n    \"STRATA_PREFILL_LEND_PCT\": \"40\"\n  },\n  \"sampling\": {\n    \"temperature\": 1.0,\n    \"top_p\": 0.95,\n    \"top_k\": 20,\n    \"min_p\": 0.05,\n    \"presence_penalty\": 0.0,\n    \"repetition_penalty\": 1.0\n  },\n  \"vision\": {\n    \"exe\": \"./vendor/strata/engine/strata-vision\",\n    \"mmproj\": \"/path/to/mmproj-F16.gguf\",\n    \"model\": \"/path/to/model.gguf\",\n    \"threads\": 8\n  },\n  \"fit_max_tokens\": true,\n  \"reasoning_loop_recovery\": \"recover\",\n  \"reasoning_close_retry\": true,\n  \"reasoning_budget_tokens\": 8192,\n  \"repeat_stop_tokens\": 48\n}",
@@ -1123,8 +1145,8 @@ window.L3MS_DASHBOARD = {
   "embeddings": [
     {
       "id": "embeddinggemma-2",
-      "name": "EmbeddingGemma 2 (Q8_0, CPU, 768 dimensions)",
-      "description": "OpenAI-compatible embeddings for Lytte search by meaning. CPU-only so it never evicts a chat model from VRAM; unloads after 5 minutes idle.",
+      "name": "EmbeddingGemma 2 (Q8_0, CPU E-cores, 768 dimensions)",
+      "description": "OpenAI-compatible embeddings for Lytte search by meaning. CPU-only and pinned to E-cores (12-15) in the non-exclusive co-resident group so it never evicts or contends with a burst model in VRAM; unloads after 5 minutes idle.",
       "engine": "llama.cpp-master",
       "tier": "co-resident",
       "device": "cpu",
@@ -1133,7 +1155,7 @@ window.L3MS_DASHBOARD = {
       "ramGb": 0.6,
       "recipeKind": "llama.cpp",
       "recipeLabel": "Portable llama.cpp command",
-      "command": "MODEL_PATH=\"/path/to/model.gguf\"\nCPU_RANGE=\"${CPU_RANGE:-0-11}\"\nPORT=\"${PORT:-8080}\"\nQWEN38_MASTER_SERVER=\"/path/to/qwen38_master_server\"\n\nenv CUDA_VISIBLE_DEVICES= \"$QWEN38_MASTER_SERVER\" \\\n  -m \"$MODEL_PATH\" \\\n  --alias embeddinggemma-2 \\\n  --embedding \\\n  --ctx-size 2048 \\\n  --batch-size 2048 --ubatch-size 2048 \\\n  --n-gpu-layers 0 \\\n  --parallel 2 \\\n  --threads 4 \\\n  --host 127.0.0.1 --port \"$PORT\" \\\n  --no-warmup",
+      "command": "MODEL_PATH=\"/path/to/model.gguf\"\nCPU_RANGE=\"${CPU_RANGE:-0-11}\"\nECORES=\"${ECORES:-12-15}\"\nPORT=\"${PORT:-8080}\"\nQWEN38_MASTER_SERVER=\"/path/to/qwen38_master_server\"\n\nenv CUDA_VISIBLE_DEVICES= taskset -c \"$ECORES\" \"$QWEN38_MASTER_SERVER\" \\\n  -m \"$MODEL_PATH\" \\\n  --alias embeddinggemma-2 \\\n  --embedding \\\n  --ctx-size 2048 \\\n  --batch-size 2048 --ubatch-size 2048 \\\n  --n-gpu-layers 0 \\\n  --parallel 2 \\\n  --threads 4 \\\n  --host 127.0.0.1 --port \"$PORT\" \\\n  --no-warmup",
       "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/llama-swap.yaml"
     }
   ],
