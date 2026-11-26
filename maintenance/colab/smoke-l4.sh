@@ -24,7 +24,10 @@ for i in $(seq 1 "$tries"); do
 done
 echo "boot: $(( $(date +%s) - t0 )) s"
 
-"$acct" "$profile" exec -s "$sess" <<'PY'
+# Hard timeout: on 2026-11-26 `colab exec` hit "Connection was lost" and then
+# hung for ~1.5 h with the L4 still allocated (3.65 CU burned). Never block
+# unbounded while a VM is billing; the EXIT trap releases it.
+timeout --kill-after=15 "${COLAB_EXEC_TIMEOUT:-300}" "$acct" "$profile" exec -s "$sess" <<'PY' || echo "WARN: exec failed or timed out (rc=$?)"
 import subprocess
 print(subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total,driver_version,compute_cap",
                       "--format=csv,noheader"], capture_output=True, text=True).stdout.strip())
