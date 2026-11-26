@@ -1,0 +1,26 @@
+[Unit]
+Description=L3MS Local Live Control Dashboard (:8085)
+After=network-online.target llama-swap.service
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# Override L3MS_ROOT, L3MS_DASHBOARD_PORT, or L3MS_SWAP_URL in a drop-in if needed:
+#   systemctl --user edit l3ms-dashboard.service
+Environment=L3MS_ROOT=%h/repos/l3ms
+Environment=L3MS_DASHBOARD_HOST=0.0.0.0
+Environment=L3MS_DASHBOARD_PORT=8085
+Environment=L3MS_SWAP_URL=http://127.0.0.1:8080
+WorkingDirectory=%h/repos/l3ms
+ExecStart=/bin/sh -c 'exec /usr/bin/python3 ${L3MS_ROOT}/tools/local-dashboard/server.py --host ${L3MS_DASHBOARD_HOST} --port ${L3MS_DASHBOARD_PORT} --repo-root ${L3MS_ROOT} --swap-url ${L3MS_SWAP_URL}'
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+KillSignal=SIGTERM
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
