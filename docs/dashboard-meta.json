@@ -1,638 +1,715 @@
 {
-  "updated": "2026-11-05",
+  "updated": "2026-11-26",
   "system": {
-    "gpu": "RTX 4070 12GB",
-    "cpu": "i5-12600K",
-    "ram": "64GB DDR5 (4x16, running 5600 MT/s)",
-    "os": "CachyOS / CUDA 12.8"
+    "gpu": "RTX 4070 12GB (sm_89)",
+    "cpu": "i5-12600K (6P+4E)",
+    "ram": "64GB DDR5 (4x16 @ 4800 MT/s)",
+    "os": "CachyOS / CUDA 13.5 / Driver 620.73.04"
   },
-  "methodology": "The ranked list contains only results from the RTX 4070 node above. Historical fields that were not captured in the same run are shown as not recorded instead of being inferred. Community hardware is kept in a separate, unranked dataset. Retired profiles keep their last measured performance in the archive tab; they are no longer reproducible on this node. Qwen3.8 serving metadata was imported from original checkout commit ed7538a; these are source-reported historical measurements, not monorepo acceptance results. Referenced new benchmark harnesses were not committed in that source snapshot and have not been imported. Historical model results may use different hardware settings.",
+  "methodology": "The ranked list contains only results measured on the RTX 4070 12 GB node above under performance CPU governor. Historical fields not captured in the same run are shown as not recorded instead of being inferred. Community hardware stays in a separate, unranked dataset. Media and decision manifests describe native L3MS toolkit profiles and link directly to their setup guides and experiments; a listed profile is not a claim that its model is installed, running, or benchmarked.",
   "models": {
     "qwen38-flash-next-plat": {
-      "displayName": "Qwen3.8-Flash-Next Plat (Strata v0.1.45, UD-IQ2_XS)",
-      "summary": "Platinum tier: Strata v0.1.45 with Unsloth Dynamic V3.1 UD-IQ2_XS quant (Q5_0 down-experts) paired with unquantized Q8_0 PLE on NVMe. Dynamic VRAM expert caching (2,711 expert pairs in 4.44 GiB VRAM), native MTP draft head (Q2_0, 77-88% acceptance), 128k context with --kv-grow elastic KV allocation. 59.7 t/s steady decode on code (62.3 t/s peak), pp 1,885 t/s on DDR5-5600, 39.4 GB working set (4.4 GB RAM freed).",
-      "tps": 59.7,
-      "pp": 1885,
+      "displayName": "Qwen3.8-Flash-Next Plat (strata-lean, UD-IQ2_XS + Q8_0 PLE)",
+      "summary": "Startup preload and primary Frontier MoE tier: custom Ada sm_89 strata-lean fork running Unsloth Dynamic V3.1 UD-IQ2_XS with unquantized Q8_0 PLE streamed from NVMe. 2,949 GPU expert slots (72.4% hit rate) via STRATA_HC_Q8=1, STRATA_ADAPT_FETCH=1, STRATA_PREFILL_LEND_PCT=40, and STRATA_PREFILL_CPU_SHARE_MAX=3072. Delivers 73.0 t/s steady decode and 1,136 / 1,888 t/s pp2k / pp8k at 128k elastic K8V4 context.",
+      "role": "Frontier MoE (Preload)",
+      "tier": "burst",
+      "engine": "strata-lean",
+      "modalities": ["Language"],
+      "preload": true,
+      "vramGb": 11.6,
+      "ramGb": 39.4,
+      "diskGb": 95.0,
+      "nvmeStream": "54.4 GB Q8_0 PLE",
+      "tps": 73.0,
+      "pp": 1888,
+      "pp2k": 1136,
+      "pp8k": 1888,
       "testedContext": "128k",
-      "cacheState": "k8v4 KV; 2,711 hot expert pairs in VRAM; --kv-grow; native THP 2MB pages",
-      "draftAcceptance": "77-88% (native Q2_0 MTP, spec 4)",
-      "llamaCppCommit": "Strata v0.1.45 (sm_89 Ada + dynamic expert VRAM cache + MTP + UD-IQ2_XS)",
-      "quant": "Unsloth Dynamic UD-IQ2_XS + Q8_0 PLE",
-      "tags": [
-        "MoE",
-        "Strata",
-        "MTP",
-        "Platinum",
-        "128k"
-      ],
-      "benchmark": "bench-models/bench-qwen38-refresh-ab.sh"
+      "cacheState": "k8v4 KV (--kv-grow); 2,949 GPU expert slots (72.4% hit); STRATA_HC_Q8=1, STRATA_ADAPT_FETCH=1, STRATA_PREFILL_LEND_PCT=40, STRATA_PREFILL_CPU_SHARE_MAX=3072",
+      "draftAcceptance": "77-90% (native Q2_0 MTP, spec 4)",
+      "llamaCppCommit": "strata-lean (Ada sm_89, 73.0 MB, PR #3453 + HC_Q8 + ADAPT_FETCH)",
+      "quant": "Unsloth UD-IQ2_XS + Q8_0 PLE",
+      "tags": ["MoE", "Strata", "MTP", "Platinum", "128k", "Preload"],
+      "benchmark": "docs/strata-tuning-matrix.md"
     },
-    "qwen38-flash-next-plat-vision": {
-      "displayName": "Qwen3.8-Flash-Next Plat Vision (Strata v0.1.44.1, UD-IQ2_XS)",
-      "summary": "Platinum multimodal tier: Strata engine paired with CPU-offloaded strata-vision image encoder (mmproj-F16) and Unsloth Dynamic UD-IQ2_XS weights. Retains 100% of GPU expert cache with zero VRAM loss for vision. 53-60 t/s decode, 128k context.",
-      "tps": 58.0,
-      "pp": 1800,
-      "testedContext": "128k",
-      "cacheState": "k8v4 KV; CPU vision encoder; 2,711 hot expert pairs in VRAM; THP 2MB pages",
-      "draftAcceptance": "77-88% (native Q2_0 MTP)",
-      "llamaCppCommit": "Strata v0.1.44.1 + strata-vision (mtmd)",
-      "quant": "Unsloth Dynamic UD-IQ2_XS + mmproj-F16",
-      "tags": [
-        "MoE",
-        "Vision",
-        "Strata",
-        "128k"
-      ],
-      "benchmark": "bench-models/bench_strata_long_horizon.py"
+    "inkling-2-mini": {
+      "displayName": "Inkling 2 Mini 26.4B-A5.4B (polystrata-4070, UD-Q4_K_XL + CPU Vision)",
+      "summary": "Primary fast coding and vision MoE tier: Thinking Machines Lab 26.4B looped transformer (48 logical passes) on polystrata-4070 (v0.2.20-poly.5 + PR #313) with CUDA VMM 256k elastic FP8 KV, 1,678 resident GPU experts (8.1 GiB, ~95% hit), Ada INT8 Tensor Core prefill (STRATA_PREFILL_NVFP4=w4a8, STRATA_INK_FAST_CTRL=1), lossless prompt lookup (--window 6 --lookup 3), and zero-VRAM CPU strata-vision. Delivers 77.5 t/s fresh coding, 99.7 t/s code edits, and 1,833 / 2,296 / 2,270 t/s pp2k / pp8k / pp20k.",
+      "role": "Fast Coding + Vision",
+      "tier": "burst",
+      "engine": "polystrata-4070",
+      "modalities": ["Language", "Vision"],
+      "vramGb": 11.7,
+      "ramGb": 6.9,
+      "diskGb": 17.0,
+      "tps": 77.5,
+      "editTps": 99.7,
+      "pp": 2296,
+      "pp2k": 1833,
+      "pp8k": 2296,
+      "pp20k": 2270,
+      "testedContext": "256k",
+      "cacheState": "Elastic FP8 KV (--vram-pool --loop-bf16); 1,678 GPU experts (8.1 GiB, ~95% hit); --window 6 --lookup 3; STRATA_PREFILL_NVFP4=w4a8, STRATA_INK_FAST_CTRL=1, STRATA_INK_PRESTAGE=0; CPU strata-vision",
+      "draftAcceptance": "Lossless prompt lookup (--window 6 --lookup 3; +37% on code edits)",
+      "llamaCppCommit": "polystrata-4070 (v0.2.20-poly.5 + PR #313, sm_89 + AVX-VNNI)",
+      "quant": "Unsloth UD-Q4_K_XL + mmproj-F16",
+      "tags": ["MoE", "Coding", "Vision", "PolyStrata", "256k"],
+      "benchmark": "docs/inkling-2-mini-optimization.md"
+    },
+    "inkling-2-mini-llama": {
+      "displayName": "Inkling 2 Mini 26.4B-A5.4B (llama.cpp-inkling2-lean fallback)",
+      "summary": "GGUF fallback engine for Inkling 2 Mini: custom Ada sm_89 llama.cpp-inkling2-lean with elastic borrowed-cache prefill (LLAMA_MOE_CACHE_ELASTIC=1), visit-weighted loop budget (LLAMA_MOE_CACHE_VISIT_BUDGET=1), PR #264 CUDA MoE prompt kernels, 7,800 MiB GPU MoE LRU cache (--moe-cache-cpu-share 0.70), DSpark n=3, and CPU-offloaded mmproj. Delivers 68.7 t/s steady decode and 820 / 727 t/s pp2k / pp8k at 32k.",
+      "role": "Coding Fallback (GGUF)",
+      "tier": "burst",
+      "engine": "llama.cpp-inkling2-lean",
+      "modalities": ["Language", "Vision"],
+      "vramGb": 11.6,
+      "ramGb": 9.2,
+      "diskGb": 17.5,
+      "tps": 68.7,
+      "pp": 820,
+      "pp2k": 820,
+      "pp8k": 727,
+      "testedContext": "32k",
+      "cacheState": "q8_0 KV; 7,800 MiB elastic MoE LRU cache (cpu-share 0.70, VISIT_BUDGET=1); CPU mmproj",
+      "draftAcceptance": "55-60% (DSpark n=3, ubatch 256)",
+      "llamaCppCommit": "llama.cpp-inkling2-lean (b12651 + elastic cache + PR #264)",
+      "quant": "Unsloth UD-Q4_K_XL + DSpark Q8_0",
+      "tags": ["MoE", "Coding", "Vision", "DSpark", "MoE-Cache"],
+      "benchmark": "docs/inkling-2-mini-optimization.md"
+    },
+    "qwen3-8-27b-iq3-xxs": {
+      "displayName": "Qwen3.8-27B (UD-IQ3_XXS, Pure-VRAM Dense 27B)",
+      "summary": "Confirmed pure-VRAM dense 27B language tier: fits 100% in 10.17 GiB VRAM with native 262k context (q5_0 K / q4_1 V) and zero DDR5 decode traffic at 36.7 t/s. Chosen over smaller 9B models for strong dense factual precision and long-context stability.",
+      "role": "Pure-VRAM Dense 27B",
+      "tier": "burst",
+      "engine": "llama.cpp-master",
+      "modalities": ["Language"],
+      "vramGb": 10.2,
+      "ramGb": 0.0,
+      "diskGb": 10.2,
+      "tps": 36.7,
+      "pp": null,
+      "testedContext": "262k",
+      "cacheState": "100% VRAM (zero RAM spill); q5_0 K / q4_1 V; fit-target 128",
+      "draftAcceptance": null,
+      "llamaCppCommit": "llama.cpp (pure-VRAM dense 27B)",
+      "quant": "UD-IQ3_XXS (3.06 bpw)",
+      "tags": ["Dense", "Pure-VRAM", "Long-context"],
+      "benchmark": "docs/qwen3-8-27b-local-post.md"
     },
     "gemma-4-26b-qat-mtp": {
       "displayName": "Gemma 4 26B QAT + MTP",
-      "summary": "Current startup preload and the best quality/speed balance in the Gemma set.",
+      "summary": "Fastest speculative-decoding Gemma 4 profile on this node, pairing UD-Q4_K_XL QAT weights with an MTP draft head for 100.6 t/s peak profile throughput at 128k context.",
+      "role": "High-Speed QAT + MTP",
+      "tier": "burst",
+      "engine": "llama.cpp-master",
+      "modalities": ["Language"],
+      "vramGb": 10.8,
+      "ramGb": 6.4,
+      "diskGb": 16.8,
       "tps": 100.6,
+      "pp": null,
+      "testedContext": "128k",
+      "cacheState": "f16 KV; --fit on --fit-target 1536; mlock",
+      "draftAcceptance": "60-82% (MTP draft-mtp, n-max 2)",
+      "llamaCppCommit": "llama.cpp (QAT + MTP)",
       "quant": "UD-Q4_K_XL (QAT)",
-      "tags": [
-        "MTP",
-        "MoE",
-        "QAT",
-        "Preload"
-      ],
+      "tags": ["MTP", "MoE", "QAT"],
       "benchmark": "mtp_bench_gemma.py"
     },
     "gemma-4-26b-qat": {
       "displayName": "Gemma 4 26B QAT",
-      "summary": "Full model without speculative drafting; useful as the MTP control profile.",
+      "summary": "Gemma 4 26B QAT without speculative drafting; maintained as the baseline MTP control profile at 69.0 t/s.",
+      "role": "QAT Baseline Control",
+      "tier": "burst",
+      "engine": "llama.cpp-master",
+      "modalities": ["Language"],
+      "vramGb": 10.5,
+      "ramGb": 6.0,
+      "diskGb": 16.2,
       "tps": 69.0,
+      "pp": null,
+      "testedContext": "128k",
+      "cacheState": "q8_0 KV; --fit on --fit-target 512; mlock",
+      "draftAcceptance": null,
+      "llamaCppCommit": "llama.cpp (QAT baseline)",
       "quant": "UD-Q4_K_XL (QAT)",
-      "tags": [
-        "MoE",
-        "QAT"
-      ],
+      "tags": ["MoE", "QAT"],
       "benchmark": "mtp_bench_gemma.py"
     },
-    "qwen38-flash-next-mtp": {
-      "displayName": "Qwen3.8-Flash-Next MTP",
-      "summary": "PR #28243 on master with compact 1.78 GB shared-Q4_K_M draft head. Offloads 3 MoE layers to GPU (-ncmoe 45), breaking 20 t/s across all tasks: 20.65 t/s aggregate (up to 21.9-22.4 t/s on code/SQL), 77-96% draft acceptance, 11.78 GB VRAM footprint.",
-      "tps": 20.65,
-      "pp": null,
-      "testedContext": "16k",
-      "cacheState": "warm; q8_0 KV",
-      "draftAcceptance": "77-96% (gated, p-min 0.7)",
-      "llamaCppCommit": "d1a92352c on master b78a39a2f (PR #28243)",
-      "quant": "AD-4.27bpw Q4_K_M M64 + shared-Q4_K_M MTP",
-      "tags": [
-        "MoE",
-        "MTP",
-        "PLE-on-SSD"
-      ],
-      "benchmark": "bench-models/bench-llama-qwen38-flash-next-mtp.sh"
+    "qwen38-flash-next-plat-abliterated": {
+      "displayName": "Qwen3.8-Flash-Next Plat Abliterated (strata-lean, SC117)",
+      "summary": "Platinum Abliterated peer: strata-lean with SC117 unaligned IQ3_XXS weights, Q8_0 PLE on NVMe, 3,086 hot GPU expert slots, native Q2_0 MTP, and elastic 128k K8V4 context. 62.2 t/s steady decode and 1,992 t/s pp8k.",
+      "role": "Frontier MoE (Abliterated)",
+      "tier": "burst",
+      "engine": "strata-lean",
+      "modalities": ["Language"],
+      "vramGb": 11.6,
+      "ramGb": 42.5,
+      "diskGb": 97.0,
+      "nvmeStream": "54.4 GB Q8_0 PLE",
+      "tps": 62.2,
+      "pp": 1992,
+      "testedContext": "128k",
+      "cacheState": "k8v4 KV (--kv-grow); 3,086 hot GPU experts; STRATA_PREFILL_LEND_PCT=40",
+      "draftAcceptance": "70-82% (native Q2_0 MTP, spec 4)",
+      "llamaCppCommit": "strata-lean (Ada sm_89 + SC117 + Q8_0 PLE)",
+      "quant": "SC117 GSQ-RCO IQ3_XXS + Q8_0 PLE",
+      "tags": ["MoE", "Strata", "MTP", "Abliterated", "128k"],
+      "benchmark": "bench-models/bench-qwen38-refresh-ab.sh"
+    },
+    "qwen38-flash-next-plat-vision": {
+      "displayName": "Qwen3.8-Flash-Next Plat Vision (strata-lean + strata-vision)",
+      "summary": "Platinum multimodal peer: strata-lean paired with pure-CPU strata-vision image encoder (mmproj-F16) and Unsloth UD-IQ2_XS + Q8_0 PLE. Retains 100% of the GPU expert cache with zero VRAM loss for vision at 128k context.",
+      "role": "Frontier MoE + Vision",
+      "tier": "burst",
+      "engine": "strata-lean",
+      "modalities": ["Language", "Vision"],
+      "vramGb": 11.6,
+      "ramGb": 41.0,
+      "diskGb": 96.0,
+      "nvmeStream": "54.4 GB Q8_0 PLE",
+      "tps": 58.0,
+      "pp": 1800,
+      "testedContext": "128k",
+      "cacheState": "k8v4 KV (--kv-grow); CPU strata-vision (0 MiB VRAM); STRATA_PREFILL_LEND_PCT=40",
+      "draftAcceptance": "77-88% (native Q2_0 MTP)",
+      "llamaCppCommit": "strata-lean + strata-vision (mtmd CPU)",
+      "quant": "Unsloth UD-IQ2_XS + mmproj-F16",
+      "tags": ["MoE", "Vision", "Strata", "128k"],
+      "benchmark": "bench-models/bench_strata_long_horizon.py"
+    },
+    "humanizer-12b": {
+      "displayName": "Humanizer 12B (Q6_K)",
+      "summary": "Fine-tuned Gemma-4-12B text-rewriting model from jialinyyzz/humanizer. Rewrites AI drafts to natural human voice while strictly preserving facts, numbers, dates, and names. 100% GPU offload (-ngl 99, 10.5 GB VRAM) at 8k context.",
+      "role": "Text Rewrite (Full VRAM)",
+      "tier": "burst",
+      "engine": "llama.cpp-master",
+      "modalities": ["Language"],
+      "vramGb": 10.5,
+      "ramGb": 0.0,
+      "diskGb": 10.0,
+      "tps": 29.4,
+      "pp": 560,
+      "testedContext": "8k",
+      "cacheState": "f16 KV; full GPU offload (10.5 GB VRAM)",
+      "draftAcceptance": null,
+      "llamaCppCommit": "b11619 683bbc0dc (llama.cpp-master)",
+      "quant": "Q6_K",
+      "tags": ["Dense", "Rewrite", "Pure-VRAM"],
+      "benchmark": "bench-models/bench-llama-humanizer.sh"
+    },
+    "qwen38-flash-next-exp": {
+      "displayName": "Qwen3.8-Flash-Next EXP (llama.cpp MoE LRU Cache #30966)",
+      "summary": "Experimental llama.cpp fallback: b12100 with dynamic GPU MoE expert LRU caching (--moe-cache-mib 2048) and CPU-shared misses (#30966) + MTP fix (#30592). 24.53 t/s steady decode (26.99 t/s peak) in 11.5 GB VRAM.",
+      "role": "llama.cpp MoE Cache",
+      "tier": "burst",
+      "engine": "llama.cpp-master",
+      "modalities": ["Language"],
+      "vramGb": 11.5,
+      "ramGb": 42.5,
+      "diskGb": 97.0,
+      "nvmeStream": "PLE on NVMe",
+      "tps": 24.53,
+      "pp": 452,
+      "testedContext": "64k",
+      "cacheState": "warm; q8_0 KV; 2,048 MiB MoE LRU cache",
+      "draftAcceptance": "83-100% (ngram-mod)",
+      "llamaCppCommit": "b12100 + #30966 + #30592 (exp-latest)",
+      "quant": "ISTA-DASLab GSQ-RCO IQ3_XXS",
+      "tags": ["MoE", "Experimental", "MoE-Cache"],
+      "benchmark": "bench-models/bench-qwen38-refresh-ab.sh"
     },
     "qwen38-flash-next": {
-      "displayName": "Qwen3.8-Flash-Next (master b11913)",
-      "summary": "Plain upstream master b11913 (7aca0d2ea). 22.77 t/s steady decode, pp 596 t/s @ 8k context (q8_0 KV, --fit on --fit-target 512, ub 2048). Includes PR #29761, #29887 (host MoE LRU cache), #28770 (sparse FA), #29393 (RMS_NORM+SCALE fusion), #30602 (chain fusions), #30927. Peak decode 24.82 t/s with 86.3% draft acceptance.",
+      "displayName": "Qwen3.8-Flash-Next Gold (llama.cpp master b12073)",
+      "summary": "Plain upstream llama.cpp master fallback (b12073 d1044bc82). 22.77 t/s steady decode, 596 t/s pp8k at 96k q8_0 KV context with --fit on --fit-target 512 and ngram-mod speculation.",
+      "role": "llama.cpp Gold Fallback",
+      "tier": "burst",
+      "engine": "llama.cpp-master",
+      "modalities": ["Language"],
+      "vramGb": 11.4,
+      "ramGb": 42.5,
+      "diskGb": 97.0,
+      "nvmeStream": "PLE on NVMe",
       "tps": 22.77,
       "pp": 596,
       "testedContext": "96k",
       "cacheState": "q8_0 KV, ngram-mod pool warm",
       "draftAcceptance": "75-86% (ngram-mod)",
-      "llamaCppCommit": "b11913 7aca0d2ea (llama.cpp-master)",
+      "llamaCppCommit": "b12073 d1044bc82 (llama.cpp-master)",
       "quant": "ISTA-DASLab GSQ-RCO IQ3_XXS",
-      "tags": [
-        "MoE",
-        "Master",
-        "PLE-on-SSD"
-      ],
+      "tags": ["MoE", "Master", "PLE-on-SSD"],
       "benchmark": "bench-models/bench-qwen38-refresh-ab.sh"
     },
-    "qwen38-flash-next-exp": {
-      "displayName": "Qwen3.8-Flash-Next EXP (MoE LRU Cache #30966)",
-      "summary": "Experimental tier: master b11923 + PR #30966 (CPU-shared MoE cache misses, --moe-cache-mib 2048) + PR #30592 (MTP fix). 24.53 t/s steady decode (26.99 t/s peak) within 11,566 MiB VRAM.",
-      "tps": 24.53,
-      "pp": 452,
-      "testedContext": "64k",
-      "cacheState": "warm; q8_0 KV; 2048 MiB MoE LRU cache",
-      "draftAcceptance": "83-100% (ngram-mod)",
-      "llamaCppCommit": "b11923 + #30966 + #30592 (exp-latest)",
-      "quant": "ISTA-DASLab GSQ-RCO IQ3_XXS",
-      "tags": [
-        "MoE",
-        "Experimental",
-        "MoE-Cache"
-      ],
-      "benchmark": "bench-models/bench-qwen38-refresh-ab.sh"
+    "qwen38-flash-next-mtp": {
+      "displayName": "Qwen3.8-Flash-Next MTP (llama.cpp QSA Sparsity V2 + #28243)",
+      "summary": "Speculative llama.cpp fallback pairing Unified QSA Sparsity Stack V2 and compact 1.78 GB shared-Q4_K_M MTP draft head (-ncmoe 46). 20.65 t/s aggregate decode with 77-96% draft acceptance in 11.0 GB VRAM.",
+      "role": "llama.cpp MTP Fallback",
+      "tier": "burst",
+      "engine": "llama.cpp-master",
+      "modalities": ["Language"],
+      "vramGb": 11.0,
+      "ramGb": 42.5,
+      "diskGb": 98.8,
+      "nvmeStream": "PLE on NVMe",
+      "tps": 20.65,
+      "pp": null,
+      "testedContext": "16k",
+      "cacheState": "warm; q8_0 KV; -ncmoe 46",
+      "draftAcceptance": "77-96% (gated, p-min 0.7)",
+      "llamaCppCommit": "d1a92352c + Unified QSA Sparsity V2 (PR #28243)",
+      "quant": "ISTA IQ3_XXS + shared-Q4_K_M MTP",
+      "tags": ["MoE", "MTP", "PLE-on-SSD"],
+      "benchmark": "bench-models/bench-llama-qwen38-flash-next-mtp.sh"
     },
     "qwen38-flash-next-vision": {
-      "displayName": "Qwen3.8-Flash-Next Vision (master b11475)",
-      "summary": "Multimodal vision tier: upstream master b11475 with mmproj-F16.gguf projector. Offloads 3 MoE layers to GPU (-ncmoe 45), 18.2-18.6 t/s @ 32k ctx, 10.8 GB VRAM with 1.3 GB headroom.",
+      "displayName": "Qwen3.8-Flash-Next Vision (llama.cpp master)",
+      "summary": "Multimodal llama.cpp fallback with mmproj-F16 projector and 3 MoE layers on GPU (-ncmoe 45). 18.4 t/s at 32k context in 10.8 GB VRAM.",
+      "role": "llama.cpp Vision Fallback",
+      "tier": "burst",
+      "engine": "llama.cpp-master",
+      "modalities": ["Language", "Vision"],
+      "vramGb": 10.8,
+      "ramGb": 42.5,
+      "diskGb": 98.0,
+      "nvmeStream": "PLE on NVMe",
       "tps": 18.4,
       "pp": 185,
       "testedContext": "32k",
-      "cacheState": "warm; q8_0 KV",
+      "cacheState": "warm; q8_0 KV; -ncmoe 45",
       "draftAcceptance": null,
-      "llamaCppCommit": "b11475 7e8324f5f (llama.cpp-master)",
+      "llamaCppCommit": "b11619 (llama.cpp-master)",
       "quant": "ISTA-DASLab GSQ-RCO IQ3_XXS + mmproj-F16",
-      "tags": [
-        "MoE",
-        "Vision",
-        "Master",
-        "PLE-on-SSD"
-      ],
+      "tags": ["MoE", "Vision", "Master", "PLE-on-SSD"],
       "benchmark": "bench-models/bench-llama-qwen38-flash-next-build-ab.sh"
     },
-    "qwen3-8-27b-iq3-xxs": {
-      "displayName": "Qwen3.8-27B (UD-IQ3_XXS)",
-      "summary": "Dense 27B hybrid; middle quant tier. Fits the native 262k window in VRAM with q5_0/q4_1 KV at ~36.7 t/s — the long-context + quality play on 12 GB.",
-      "tps": 36.7,
-      "pp": null,
-      "testedContext": "262k",
-      "cacheState": "q5_0 K / q4_1 V; fit-target 128",
-      "draftAcceptance": null,
-      "llamaCppCommit": null,
-      "quant": "UD-IQ3_XXS (3.06 bpw)",
-      "tags": [
-        "Dense",
-        "Long-context"
-      ],
-      "benchmark": "docs/qwen3-8-27b-local-post.md"
-    },
-    "qwen38-flash-next-plat-abliterated": {
-      "displayName": "Qwen3.8-Flash-Next Plat Abliterated (Strata v0.1.44.1)",
-      "summary": "Platinum Abliterated tier: Strata v0.1.44.1 with SC117 uncensored/unaligned weights, online dynamic expert VRAM caching (3,086 hot experts in VRAM), native MTP draft head, 128k context with dynamic KV streaming, and native THP acceleration. 62.2 t/s decode on code (up to 90.2 peak), pp 1,992 t/s.",
-      "tps": 62.2,
-      "pp": 1992,
-      "testedContext": "128k",
-      "cacheState": "k8v4 KV; 3,086 hot experts in VRAM; native THP 2MB pages",
-      "draftAcceptance": "70-82% (native Q2_0 MTP, spec 4)",
-      "llamaCppCommit": "Strata v0.1.44.1 (native SM89 Ada + dynamic expert VRAM cache + MTP)",
-      "quant": "SC117 GSQ-RCO IQ3_XXS",
-      "tags": [
-        "MoE",
-        "Strata",
-        "MTP",
-        "Abliterated",
-        "128k"
-      ],
-      "benchmark": "bench-models/bench-qwen38-refresh-ab.sh"
-    },
-    "humanizer-12b": {
-      "displayName": "Humanizer 12B (Q6_K)",
-      "summary": "Fine-tuned Gemma-4-12B text-rewriting model from jialinyyzz/humanizer. Rewrites AI drafts to natural human voice while strictly preserving all facts, numbers, dates and names. Full GPU offload (-ngl 99), 8k context.",
-      "tps": 29.4,
-      "pp": 560,
-      "testedContext": "8k",
-      "cacheState": "warm; f16 KV; full GPU offload (10.5 GB VRAM)",
-      "draftAcceptance": null,
-      "llamaCppCommit": "b11619 683bbc0dc (llama.cpp-master)",
-      "quant": "Q6_K",
-      "tags": [
-        "Dense",
-        "Gemma-4",
-        "Rewrite",
-        "Full-GPU"
-      ],
-      "benchmark": "bench-models/bench-llama-humanizer.sh"
-    },
     "qwen38-flash-next-plat-abliterated-vision": {
-      "displayName": "Qwen3.8-Flash-Next Plat Abliterated Vision (Strata v0.1.44.1)",
-      "summary": "Platinum Abliterated Vision: Strata v0.1.44.1 with SC117 uncensored/unaligned weights and a CPU-offloaded strata-vision image encoder (mmproj-F16) that keeps the full GPU expert cache. 128k context. Declared in llama-swap.yaml; no throughput has been measured for this profile yet.",
+      "displayName": "Qwen3.8-Flash-Next Plat Abliterated Vision (strata-lean)",
+      "summary": "Platinum Abliterated Vision peer: strata-lean with SC117 unaligned IQ3_XXS weights, Q8_0 PLE, and pure-CPU strata-vision image encoder (mmproj-F16) at 128k context. Declared in llama-swap.yaml; no throughput has been measured for this profile yet.",
+      "role": "Abliterated Vision MoE",
+      "tier": "burst",
+      "engine": "strata-lean",
+      "modalities": ["Language", "Vision"],
+      "vramGb": 11.6,
+      "ramGb": 42.5,
+      "diskGb": 98.0,
+      "nvmeStream": "54.4 GB Q8_0 PLE",
       "tps": null,
       "pp": null,
       "testedContext": "128k",
       "quant": "SC117 GSQ-RCO IQ3_XXS + mmproj-F16",
-      "tags": [
-        "MoE",
-        "Vision",
-        "Strata",
-        "Abliterated",
-        "128k"
-      ],
+      "tags": ["MoE", "Vision", "Strata", "Abliterated", "128k"],
+      "benchmark": null
+    },
+    "inkling-2-mini-unbound-v2.1": {
+      "displayName": "Inkling 2 Mini Unbound v2.1 (Q4_K_M, llama.cpp-inkling2-lean)",
+      "summary": "Conv-aware abliterated and self-distilled attention-patched GGUF (17.78 GB) running on llama.cpp-inkling2-lean with 7,800 MiB elastic MoE LRU cache and CPU-offloaded mmproj-F16 at 32k context. Declared in llama-swap.yaml; not yet benchmarked on this stack.",
+      "role": "Unbound Coding + Vision",
+      "tier": "burst",
+      "engine": "llama.cpp-inkling2-lean",
+      "modalities": ["Language", "Vision"],
+      "vramGb": 11.6,
+      "ramGb": 10.0,
+      "diskGb": 18.4,
+      "tps": null,
+      "pp": null,
+      "testedContext": "32k",
+      "quant": "Unbound v2.1 Q4_K_M + mmproj-F16",
+      "tags": ["MoE", "Coding", "Vision", "Abliterated", "MoE-Cache"],
+      "benchmark": null
+    },
+    "nemotron-3.5-bolt": {
+      "displayName": "Nemotron 3.5 Bolt 74B-A9B (24GB IQ2 QAT + LiLiCorr DFlash)",
+      "summary": "NVIDIA Nemotron 3.5 Bolt 74B-A9B hybrid Mamba-2/Transformer LatentMoE VLM (text, images, video) with LiLiCorr DFlash speculative decoding on llama.cpp master (b12621+) with auto-fit RAM offload at 64k context. Declared in llama-swap.yaml; not yet benchmarked on this stack.",
+      "role": "Hybrid VLM + DFlash",
+      "tier": "burst",
+      "engine": "llama.cpp-master",
+      "modalities": ["Language", "Vision"],
+      "vramGb": 11.2,
+      "ramGb": 16.0,
+      "diskGb": 25.0,
+      "tps": null,
+      "pp": null,
+      "testedContext": "64k",
+      "quant": "24GB IQ2 QAT + LiLiCorr DFlash",
+      "tags": ["MoE", "Vision", "DFlash", "Master"],
       "benchmark": null
     }
   },
+  "spotlight": [
+    {
+      "slot": "Frontier MoE (Preload)",
+      "title": "Qwen3.8-Flash-Next Plat",
+      "modelId": "qwen38-flash-next-plat",
+      "lane": "language",
+      "engine": "strata-lean",
+      "tier": "burst",
+      "headline": "73.0 t/s TG · 1,888 t/s pp8k",
+      "subline": "UD-IQ2_XS + 54.4 GB Q8_0 PLE on NVMe · 128k elastic K8V4 · 2,949 GPU expert slots",
+      "vramGb": 11.6,
+      "ramGb": 39.4
+    },
+    {
+      "slot": "Fast Coding + Vision",
+      "title": "Inkling 2 Mini",
+      "modelId": "inkling-2-mini",
+      "lane": "language",
+      "engine": "polystrata-4070",
+      "tier": "burst",
+      "headline": "77.5 t/s fresh · 99.7 t/s edits",
+      "subline": "UD-Q4_K_XL + CPU strata-vision · 256k elastic FP8 KV · 2,296 t/s pp8k (Ada INT8 w4a8)",
+      "vramGb": 11.7,
+      "ramGb": 6.9
+    },
+    {
+      "slot": "Pure-VRAM Dense 27B",
+      "title": "Qwen3.8-27B UD-IQ3_XXS",
+      "modelId": "qwen3-8-27b-iq3-xxs",
+      "lane": "language",
+      "engine": "llama.cpp-master",
+      "tier": "burst",
+      "headline": "36.7 t/s · 0 GB RAM spill",
+      "subline": "10.17 GiB 100% VRAM with native 262k context (q5_0 K / q4_1 V)",
+      "vramGb": 10.2,
+      "ramGb": 0.0
+    },
+    {
+      "slot": "Image Turbo",
+      "title": "Qwen Image 2.1 Turbo",
+      "modelId": "qwen-image-2.1-turbo",
+      "lane": "media",
+      "engine": "ComfyUI",
+      "tier": "burst",
+      "headline": "8.83 s / 1024px (8 steps)",
+      "subline": "Native INT8 ConvRot + shared Qwen3-VL 8B encoder + BF16 VAE via /comfyui/",
+      "vramGb": 9.6,
+      "ramGb": 4.0
+    },
+    {
+      "slot": "Speech & ASR",
+      "title": "Breeze-TTS-2 + Nemotron 3.5 ASR",
+      "modelId": "breeze-tts-2",
+      "lane": "media",
+      "engine": "audio.cpp / speech.cpp",
+      "tier": "burst",
+      "headline": "TTS / Clone / Stream + 30B ASR",
+      "subline": "Breeze-TTS-2 Q8_0 (CUDA or CPU) + Nemotron 3.5 Transcribe 30B-A4B (Vulkan + VAD + diarization)",
+      "vramGb": 6.5,
+      "ramGb": 12.0
+    },
+    {
+      "slot": "Decisions (/v1/systemone)",
+      "title": "d3-flash & Clef-Flash 9B",
+      "modelId": "cloudflare-clef-flash",
+      "lane": "decisions",
+      "engine": "llama.cpp-d3",
+      "tier": "burst",
+      "headline": "Native System One JSON",
+      "subline": "Choice / noul / score probabilities with text + image inputs (-c = -b = -ub = 8192)",
+      "vramGb": 8.9,
+      "ramGb": 1.0
+    },
+    {
+      "slot": "Co-Resident Embeddings",
+      "title": "EmbeddingGemma-2",
+      "modelId": "embeddinggemma-2",
+      "lane": "embeddings",
+      "engine": "llama.cpp-master",
+      "tier": "co-resident",
+      "headline": "0 GiB VRAM · E-cores 12-15",
+      "subline": "Q8_0 768-dim semantic search running non-exclusively alongside the resident chat model",
+      "vramGb": 0.0,
+      "ramGb": 0.6
+    }
+  ],
+  "roofline": {
+    "measuredDate": "2026-11-24",
+    "usableVramGib": 11.64,
+    "gpuGeometry": "46 SMs · 36 MiB L2 · sm_89 (Ada Lovelace)",
+    "hardwareBaselines": [
+      {
+        "path": "VRAM Bandwidth (D2D 512 MiB)",
+        "measured": 455.8,
+        "spec": 504.2,
+        "unit": "GB/s",
+        "pct": 90.4,
+        "notes": "90.4% of theoretical GDDR6X peak"
+      },
+      {
+        "path": "DDR5 Read (12 threads, 4x16 @ 4800)",
+        "measured": 60.0,
+        "spec": 76.0,
+        "unit": "GB/s",
+        "pct": 78.9,
+        "notes": "Hard floor for AVX-VNNI CPU-offloaded expert misses"
+      },
+      {
+        "path": "PCIe Gen4 x16 H2D Pinned (256 MiB)",
+        "measured": 25.0,
+        "spec": 28.0,
+        "unit": "GB/s",
+        "pct": 89.3,
+        "notes": "Hard floor for host-to-GPU expert streaming"
+      },
+      {
+        "path": "FP16 Tensor Core GEMM (F32 accum)",
+        "measured": 60.5,
+        "spec": 58.0,
+        "unit": "TFLOPS",
+        "pct": 100.0,
+        "notes": "4096^3: 59.9 TFLOPS; 8192^3: 60.5 TFLOPS"
+      }
+    ],
+    "contextScaling": [
+      {
+        "ctx": "4K",
+        "vramPlain": 114,
+        "vramDspark": 119,
+        "real12gbCeil": 90,
+        "polystrata": 77.5,
+        "strataLean": 73.0,
+        "prefillCeil": 2750
+      },
+      {
+        "ctx": "20K",
+        "vramPlain": 107,
+        "vramDspark": 116,
+        "real12gbCeil": 82,
+        "polystrata": 71.4,
+        "strataLean": 70.5,
+        "prefillCeil": 2562
+      },
+      {
+        "ctx": "64K",
+        "vramPlain": 91,
+        "vramDspark": 108,
+        "real12gbCeil": 68,
+        "polystrata": 58.0,
+        "strataLean": 67.5,
+        "prefillCeil": 2157
+      },
+      {
+        "ctx": "128K",
+        "vramPlain": 74,
+        "vramDspark": 99,
+        "real12gbCeil": 52,
+        "polystrata": 42.0,
+        "strataLean": 64.95,
+        "prefillCeil": 1754
+      },
+      {
+        "ctx": "256K",
+        "vramPlain": 55,
+        "vramDspark": 84,
+        "real12gbCeil": 35,
+        "polystrata": 29.5,
+        "strataLean": null,
+        "prefillCeil": 1277
+      }
+    ],
+    "trafficComparison": [
+      {
+        "model": "Qwen3.8-Flash-Next (180B UD-IQ2_XS)",
+        "activeGbPerTok": 2.25,
+        "denseGb": 1.5,
+        "expertGb": 0.75,
+        "missRate": "~27.6% misses (2,949 GPU slots)",
+        "steadyTg": "73.0 t/s",
+        "prefill8k": "1,888 t/s",
+        "takeaway": "2-bit experts transfer ~43% fewer bytes/token than Inkling Q4, and native MTP amortizes each verify step across ~2.8 accepted tokens."
+      },
+      {
+        "model": "Inkling 2 Mini (26.4B UD-Q4_K_XL)",
+        "activeGbPerTok": 3.92,
+        "denseGb": 2.07,
+        "expertGb": 1.85,
+        "missRate": "~5% misses (1,678-1,809 GPU slots)",
+        "steadyTg": "77.5 fresh / 99.7 edit",
+        "prefill8k": "2,296 t/s",
+        "takeaway": "Hits 79-90% of the physical 12 GB plain-decode ceiling; Ada INT8 Tensor Core w4a8 lifts prefill to 84% of practical FP16 compute ceiling."
+      }
+    ]
+  },
+  "colabBurst": {
+    "status": "Phase 0 active (CLI & dual-account auth verified; L4 smoke & on-demand llama-swap wrapper queued)",
+    "role": "Remote burst tier for jobs that exceed 12 GB VRAM without evicting the local resident model: fine-tuning (QLoRA/LoRA), bigger-than-VRAM 70B+ evals, and backup serving.",
+    "accounts": [
+      {
+        "name": "pro",
+        "tier": "Google AI Pro",
+        "balance": "400.00 CU verified (200/mo, 90-day rollover)",
+        "background": "Interactive only",
+        "useCase": "Short L4 sm_89 smoke tests & kernel checks"
+      },
+      {
+        "name": "ultra",
+        "tier": "Google AI Ultra 5x",
+        "balance": "1,000-2,000 CU/mo (sync audit open)",
+        "background": "Runs after disconnect (up to 24h)",
+        "useCase": "Background fine-tuning, A100/G4/H100 evals, backup endpoint"
+      }
+    ],
+    "shapes": [
+      { "gpu": "T4", "arch": "Turing sm_75", "vram": "16 GB", "cuHr": "~1.2-1.8", "notes": "Fallback availability when L4 returns 503" },
+      { "gpu": "L4", "arch": "Ada sm_89 (= RTX 4070)", "vram": "24 GB", "cuHr": "~1.94", "notes": "Binary-compatible with strata-lean & polystrata-4070; fits 16.4 GiB Inkling 100% in VRAM" },
+      { "gpu": "G4", "arch": "Blackwell sm_120", "vram": "96 GB", "cuHr": "~10", "notes": "Native NVFP4/FP4 tensor cores; fits dense 70B or high-precision Qwen3.8 all-in-VRAM" },
+      { "gpu": "A100", "arch": "Ampere sm_80", "vram": "40/80 GB", "cuHr": "~5-13", "notes": "Full-precision quant-quality A/B evals & LoRA training" },
+      { "gpu": "H100", "arch": "Hopper sm_90", "vram": "80 GB", "cuHr": "~16-20", "notes": "Fastest FP8/BF16 training bursts" }
+    ],
+    "safetyLayers": [
+      "Local wrapper cleanup trap invokes `colab stop` immediately on ttl or exit.",
+      "VM-side idle watchdog shuts down the remote host when requests stop.",
+      "Scheduled sweep checks `colab sessions` on both accounts to kill any stray l3ms-* session."
+    ]
+  },
+  "hardwareTuning": {
+    "node": "yeti-cachy",
+    "osKernel": "CachyOS Linux · CUDA 13.5 · NVIDIA Driver 620.73.04",
+    "storage": "Dedicated NVMe ext4 model volume + symlinks for PLE streaming and weights",
+    "findings": [
+      {
+        "title": "Alder Lake P-Core vs E-Core Pinning",
+        "status": "Verified & Active",
+        "detail": "GPU-offloaded LLM profiles pin to P-core logical CPUs `0-11` (`taskset -c 0-11`). Recruiting E-cores `12-15` into Strata's worker pool (`--aux-cpus auto` / `0-15`) regressed decode by -9.8 t/s due to barrier latency. On Inkling 2 Mini, `-t 12` (44.1 t/s) beat physical-only `-t 6` (38.1 t/s). E-cores `12-15` are reserved for non-exclusive co-resident utilities (`embeddinggemma-2`)."
+      },
+      {
+        "title": "DDR5-4800 JEDEC 2DPC Floor (60.0 GB/s)",
+        "status": "Confirmed by Microbench",
+        "detail": "Live `inxi -m` confirmed 4x16 GiB DDR5 running at 4800 MT/s (2DPC), matching the measured 60.0 GB/s 12-thread CPU read ceiling. Every offloaded MoE miss hits this floor, which is why raising GPU expert cache hit rate (STRATA_HC_Q8=1, --vram-pool, STRATA_ADAPT_FETCH=1) yields outsized decode gains."
+      },
+      {
+        "title": "CPU Governor & Zram Swappiness Hygiene",
+        "status": "Active + Monitored",
+        "detail": "Benchmarks gate on `cpupower.service` (`performance` governor); `powersave` throttles DDR5 bus switches and collapses decode from 12.2 to 6.5 t/s. Live audit flagged CachyOS default `vm.swappiness=150` paging 6.6 GiB into zram while 37 GiB RAM sat free; tuning `vm.swappiness=10` keeps hot host experts out of zram."
+      },
+      {
+        "title": "NVMe PLE Stream & Page-Cache Isolation",
+        "status": "Enforced",
+        "detail": "Qwen3.8-Flash-Next's 54.4 GB Q8_0 PLE table stays on NVMe (`--ple-io direct` on Strata, `-ot per_layer_token_embd.weight=CPU` on llama.cpp). Never pass `--ple-io mmap` on Strata or `--mlock` on Qwen3.8: mmapping 30-54 GB of PLE evicts the 39.4 GB expert arena from RAM and triggers heavy SSD refaulting (`0.1756 MB/tok`)."
+      }
+    ]
+  },
   "benchmarks": {
-    "qwen38-flash-next-refresh-202610": {
-      "title": "Qwen3.8-Flash-Next: October 2026 Refresh Matrix (Strata v0.1.40.2 vs llama.cpp b11475 & MoE Cache)",
-      "description": "Standardized 7-way parity benchmark on identical ISTA-DASLab IQ3_XXS quant (256-token code decode, unique-prefix 2k & 8k prefill, 4k needle verification) on RTX 4070 12GB + 64GB DDR5.",
+    "inkling-2-mini-shootout-202611": {
+      "title": "Inkling 2 Mini: 5-Engine Shootout on RTX 4070 12 GB",
+      "description": "Apples-to-apples server shootout on identical Inkling-2-Mini-UD-Q4_K_XL.gguf (RTX 4070 12 GB, performance governor). Compares steady fresh-coding decode (baseline bar) vs peak/optimized or prefill-scaled throughput across PolyStrata, llama.cpp-inkling2-lean, Project Maya PR #1208, Upstream Strata v0.2.21, and plain llama.cpp master.",
+      "legend": ["Plain / Baseline TG (t/s)", "Best / Tuned TG (t/s)"],
       "metrics": [
-        [
-          "Strata v0.1.40.2 tg",
-          "56.1 t/s"
-        ],
-        [
-          "Strata v0.1.40.2 pp @ 8k",
-          "1,999 t/s"
-        ],
-        [
-          "llama.cpp MoE Cache #29887",
-          "23.9 t/s"
-        ],
-        [
-          "llama.cpp master b11475",
-          "17.3 t/s"
-        ]
+        ["PolyStrata fresh / edit", "77.5 / 99.7 t/s"],
+        ["PolyStrata pp8k (w4a8)", "2,296 t/s"],
+        ["llama.cpp-inkling2-lean", "68.7 t/s"],
+        ["Speedup vs master", "13.2x (16.9x edit)"]
       ],
       "tasks": [
-        [
-          "strata_v0.1.40.2_vs_v0.1.30",
-          52.03,
-          56.08,
-          "1,999 pp"
-        ],
-        [
-          "llama_exp_moe_cache_#29887",
-          17.07,
-          23.92,
-          "449 pp"
-        ],
-        [
-          "llama_master_b11475_vs_b11241",
-          14.91,
-          17.34,
-          "587 pp"
-        ],
-        [
-          "llama_exp_new_vs_exp_old",
-          12.63,
-          17.07,
-          "447 pp"
-        ]
+        ["polystrata_v5_lookup_w6", 77.5, 99.7, "2,296 pp8k"],
+        ["llama_inkling2_lean_pr264", 65.8, 68.7, "820 pp2k"],
+        ["project_maya_pr1208_256k", 60.9, 63.8, "874 pp5k"],
+        ["upstream_strata_v0.2.21", 42.9, 46.8, "833 pp5k"],
+        ["unsloth_b12651_autofit", 33.1, 44.1, "547 pp2k"],
+        ["upstream_strata_v0.2.20", 25.7, 25.8, "686 pp8k"],
+        ["llama_master_b12621", 5.9, 5.9, "baseline"]
+      ]
+    },
+    "qwen38-flash-next-strata-lean-202611": {
+      "title": "Qwen3.8-Flash-Next: strata-lean Tuning Ladder (UD-IQ2_XS + Q8_0 PLE)",
+      "description": "Paired A/B progression on RTX 4070 12 GB from upstream llama.cpp and Strata v0.1.45 through Ada sm_89 MMVQ (PR #3453), --kv-grow, STRATA_ADAPT_FETCH=1, and STRATA_HC_Q8=1 (2,949 GPU expert slots, 72.4% hit rate).",
+      "legend": ["Steady Decode TG (t/s)", "Peak / Tuned TG (t/s)"],
+      "metrics": [
+        ["strata-lean + HC_Q8", "73.0 t/s"],
+        ["pp2k / pp8k", "1,136 / 1,888 t/s"],
+        ["GPU expert cache", "2,949 slots (72.4%)"],
+        ["vs llama.cpp master", "3.21x decode"]
+      ],
+      "tasks": [
+        ["strata_lean_hc_q8_2949", 73.0, 75.0, "1,888 pp8k"],
+        ["strata_lean_adapt_fetch", 70.4, 72.8, "1,885 pp8k"],
+        ["strata_lean_pr3453_mmvq", 69.6, 76.1, "1,883 pp8k"],
+        ["strata_v0.2.6_upstream", 65.5, 70.5, "1,891 pp8k"],
+        ["strata_v0.1.45_upstream", 63.8, 67.7, "1,926 pp8k"],
+        ["llama_exp_moe_cache", 24.5, 27.0, "452 pp"],
+        ["llama_master_b12073", 22.8, 24.8, "596 pp"]
+      ]
+    },
+    "qwen-image-2.1-turbo-vs-base": {
+      "title": "ComfyUI Media: Qwen Image 2.1 Base (25 steps) vs Turbo (8 steps)",
+      "description": "Measured 1024x1024 INT8 ConvRot image generation on RTX 4070 12 GB (same prompt, seed 42, shared Qwen3-VL 8B text encoder and BF16 VAE). Lower seconds is faster.",
+      "legend": ["ComfyUI Exec (s)", "Total Wall Time (s)"],
+      "metrics": [
+        ["Base 25-step exec", "19.74 s"],
+        ["Turbo 8-step exec", "8.83 s"],
+        ["Latency speedup", "2.24x faster"],
+        ["Peak VRAM", "9.6 GiB"]
+      ],
+      "tasks": [
+        ["qwen_image_2.1_base_25st", 19.74, 20.13, "9.6 GiB"],
+        ["qwen_image_2.1_turbo_8st", 8.83, 10.12, "9.6 GiB"],
+        ["qwen_turbo_img_edit_8st", 15.42, 16.13, "10.1 GiB"]
       ]
     },
     "qwen38-flash-next-strata": {
-      "title": "Qwen3.8-Flash-Next: Strata Platinum vs llama.cpp Gold/MTP",
-      "description": "Long-horizon and workload scaling comparison between llama.cpp master, MTP stack, and Strata v0.1.30 with online expert caching, K8V4 KV, and StrataGP 2MB THP optimization.",
+      "title": "Qwen3.8-Flash-Next: Strata Platinum vs llama.cpp Gold by Task",
+      "description": "Workload scaling comparison between llama.cpp master and Strata Platinum with online expert caching, K8V4 KV, and 2MB THP optimization across 8 prompt categories.",
+      "legend": ["llama.cpp Master (t/s)", "Strata Platinum (t/s)"],
       "metrics": [
-        [
-          "Strata peak tg",
-          "90.2 t/s"
-        ],
-        [
-          "Strata steady tg",
-          "60.3 t/s"
-        ],
-        [
-          "llama.cpp MTP avg",
-          "25.3 t/s"
-        ],
-        [
-          "llama.cpp master",
-          "20.5 t/s"
-        ]
+        ["Strata peak tg", "90.2 t/s"],
+        ["Strata steady tg", "60.3 t/s"],
+        ["llama.cpp MTP avg", "25.3 t/s"],
+        ["llama.cpp master", "20.5 t/s"]
       ],
       "tasks": [
-        [
-          "code_python",
-          19.64,
-          62.6,
-          "97.0%"
-        ],
-        [
-          "sql_gen",
-          19.45,
-          61.8,
-          "96.4%"
-        ],
-        [
-          "code_cpp",
-          19.51,
-          60.4,
-          "94.8%"
-        ],
-        [
-          "qa_factual",
-          19.38,
-          56.5,
-          "91.2%"
-        ],
-        [
-          "summarize",
-          19.3,
-          54.8,
-          "89.5%"
-        ],
-        [
-          "stepwise_math",
-          19.22,
-          53.5,
-          "86.2%"
-        ],
-        [
-          "explain_concept",
-          19.32,
-          52.8,
-          "84.9%"
-        ],
-        [
-          "creative_short",
-          19.25,
-          51.4,
-          "80.1%"
-        ]
-      ]
-    },
-    "qwen38-flash-next": {
-      "title": "Qwen3.8-Flash-Next: Master vs Compact MTP (PR #28243)",
-      "description": "Task-level comparison between upstream master (b78a39a2f) and PR #28243 with the 1.78 GB shared-Q4_K_M compact draft head (-ncmoe 45). Breaking through the 20 t/s barrier on every task.",
-      "metrics": [
-        [
-          "Master avg",
-          "19.35 t/s"
-        ],
-        [
-          "MTP peak",
-          "22.40 t/s"
-        ],
-        [
-          "MTP run avg",
-          "20.65 t/s"
-        ],
-        [
-          "Accept rate",
-          "88.2%"
-        ]
-      ],
-      "tasks": [
-        [
-          "code_python",
-          19.64,
-          22.4,
-          "95.8%"
-        ],
-        [
-          "sql_gen",
-          19.45,
-          22.15,
-          "94.6%"
-        ],
-        [
-          "code_cpp",
-          19.51,
-          21.92,
-          "92.4%"
-        ],
-        [
-          "qa_factual",
-          19.38,
-          20.91,
-          "89.1%"
-        ],
-        [
-          "summarize",
-          19.3,
-          20.85,
-          "88.2%"
-        ],
-        [
-          "stepwise_math",
-          19.22,
-          20.45,
-          "84.5%"
-        ],
-        [
-          "explain_concept",
-          19.32,
-          20.38,
-          "83.7%"
-        ],
-        [
-          "creative_short",
-          19.25,
-          20.12,
-          "77.2%"
-        ]
-      ]
-    },
-    "gemma4-12b": {
-      "title": "Gemma 4 12B QAT: baseline vs MTP (archived model)",
-      "description": "Task-level generation throughput, kept for historical reference. The 12B family has been retired; MTP averaged 120.8 t/s across this run and acceptance varies materially by task.",
-      "metrics": [
-        [
-          "Baseline avg",
-          "59.9 t/s"
-        ],
-        [
-          "MTP peak",
-          "135.7 t/s"
-        ],
-        [
-          "MTP avg",
-          "120.8 t/s"
-        ],
-        [
-          "Accept rate",
-          "65.8%"
-        ]
-      ],
-      "tasks": [
-        [
-          "stepwise_math",
-          59.8,
-          135.7,
-          "81.8%"
-        ],
-        [
-          "summarize",
-          59.9,
-          133.5,
-          "79.8%"
-        ],
-        [
-          "code_python",
-          59.9,
-          130.5,
-          "77.3%"
-        ],
-        [
-          "translation",
-          60,
-          128.6,
-          "75.4%"
-        ],
-        [
-          "code_cpp",
-          60,
-          120.4,
-          "68.4%"
-        ],
-        [
-          "long_code_review",
-          57.6,
-          111.7,
-          "63.4%"
-        ],
-        [
-          "qa_factual",
-          59.9,
-          107.2,
-          "57.1%"
-        ],
-        [
-          "explain_concept",
-          59.9,
-          105.7,
-          "55.9%"
-        ],
-        [
-          "creative_short",
-          60,
-          94,
-          "45.8%"
-        ]
+        ["code_python", 19.64, 62.6, "97.0%"],
+        ["sql_gen", 19.45, 61.8, "96.4%"],
+        ["code_cpp", 19.51, 60.4, "94.8%"],
+        ["qa_factual", 19.38, 56.5, "91.2%"],
+        ["summarize", 19.3, 54.8, "89.5%"],
+        ["stepwise_math", 19.22, 53.5, "86.2%"],
+        ["explain_concept", 19.32, 52.8, "84.9%"],
+        ["creative_short", 19.25, 51.4, "80.1%"]
       ]
     },
     "gemma4-26b": {
-      "title": "Gemma 4 26B QAT: baseline vs MTP",
-      "description": "Task-level MTP run. The 100.6 t/s profile result above comes from a separate optimized throughput run; these rows show how acceptance changes by workload.",
+      "title": "Gemma 4 26B QAT: Baseline vs MTP",
+      "description": "Task-level MTP run showing how speculative draft acceptance shifts across coding, math, translation, and summarization workloads.",
+      "legend": ["Baseline (t/s)", "MTP (t/s)"],
       "metrics": [
-        [
-          "Q5 reference",
-          "38.5 t/s"
-        ],
-        [
-          "QAT profile",
-          "69.0 t/s"
-        ],
-        [
-          "Best MTP profile",
-          "100.6 t/s"
-        ],
-        [
-          "Best speedup",
-          "2.61x"
-        ]
+        ["Q5 reference", "38.5 t/s"],
+        ["QAT profile", "69.0 t/s"],
+        ["Best MTP profile", "100.6 t/s"],
+        ["Best speedup", "2.61x"]
       ],
       "tasks": [
-        [
-          "stepwise_math",
-          44.45,
-          57.77,
-          "81.6%"
-        ],
-        [
-          "translation",
-          44.59,
-          49.6,
-          "82.5%"
-        ],
-        [
-          "qa_factual",
-          44.66,
-          49.57,
-          "80.6%"
-        ],
-        [
-          "code_python",
-          44.62,
-          45.99,
-          "60.3%"
-        ],
-        [
-          "code_cpp",
-          44.78,
-          45.1,
-          "70.5%"
-        ],
-        [
-          "creative_short",
-          45.32,
-          40.96,
-          "66.0%"
-        ],
-        [
-          "summarize",
-          44.94,
-          32.31,
-          "38.3%"
-        ],
-        [
-          "long_code_review",
-          43.98,
-          26.22,
-          "28.2%"
-        ],
-        [
-          "explain_concept",
-          44.74,
-          25.8,
-          "31.4%"
-        ]
+        ["stepwise_math", 44.45, 57.77, "81.6%"],
+        ["translation", 44.59, 49.6, "82.5%"],
+        ["qa_factual", 44.66, 49.57, "80.6%"],
+        ["code_python", 44.62, 45.99, "60.3%"],
+        ["code_cpp", 44.78, 45.1, "70.5%"],
+        ["creative_short", 45.32, 40.96, "66.0%"],
+        ["summarize", 44.94, 32.31, "38.3%"],
+        ["long_code_review", 43.98, 26.22, "28.2%"],
+        ["explain_concept", 44.74, 25.8, "31.4%"]
       ]
     },
-    "qwen3-6-35b": {
-      "title": "Qwen3.6 35B-A3B: baseline vs MTP",
-      "description": "Task-level comparison for Qwen3.6 35B. The served profile uses the conservative 60.3 t/s validated configuration; this separate run averaged 68.5 t/s.",
+    "gemma4-12b": {
+      "title": "Gemma 4 12B QAT: Baseline vs MTP (Archived)",
+      "description": "Historical task-level generation throughput retained for reference after retiring the 12B family in favor of 26B QAT.",
+      "legend": ["Baseline (t/s)", "MTP (t/s)"],
       "metrics": [
-        [
-          "Baseline avg",
-          "51.3 t/s"
-        ],
-        [
-          "MTP peak",
-          "74.0 t/s"
-        ],
-        [
-          "MTP run avg",
-          "68.5 t/s"
-        ],
-        [
-          "Accept rate",
-          "82.7%"
-        ]
+        ["Baseline avg", "59.9 t/s"],
+        ["MTP peak", "135.7 t/s"],
+        ["MTP avg", "120.8 t/s"],
+        ["Accept rate", "65.8%"]
       ],
       "tasks": [
-        [
-          "code_python",
-          51.31,
-          73.97,
-          "96.2%"
-        ],
-        [
-          "qa_factual",
-          51.77,
-          71.61,
-          "87.7%"
-        ],
-        [
-          "code_cpp",
-          51.24,
-          70.15,
-          "85.7%"
-        ],
-        [
-          "translation",
-          51.25,
-          69.71,
-          "81.3%"
-        ],
-        [
-          "stepwise_math",
-          51.1,
-          69.11,
-          "85.1%"
-        ],
-        [
-          "explain_concept",
-          51.22,
-          67.33,
-          "81.9%"
-        ],
-        [
-          "summarize",
-          51.15,
-          67.06,
-          "80.0%"
-        ],
-        [
-          "long_code_review",
-          51.04,
-          65.03,
-          "77.9%"
-        ],
-        [
-          "creative_short",
-          51.36,
-          62.2,
-          "70.3%"
-        ]
+        ["stepwise_math", 59.8, 135.7, "81.8%"],
+        ["summarize", 59.9, 133.5, "79.8%"],
+        ["code_python", 59.9, 130.5, "77.3%"],
+        ["translation", 60.0, 128.6, "75.4%"],
+        ["code_cpp", 60.0, 120.4, "68.4%"],
+        ["long_code_review", 57.6, 111.7, "63.4%"],
+        ["qa_factual", 59.9, 107.2, "57.1%"],
+        ["explain_concept", 59.9, 105.7, "55.9%"],
+        ["creative_short", 60.0, 94.0, "45.8%"]
       ]
     }
   },
@@ -645,7 +722,7 @@
       "prefill": 45.0,
       "quant": "AD-4.27bpw",
       "vram": "11.2 GB",
-      "breakthrough": "Initial baseline; CPU powersave governor throttled DDR5 clock & bus switches."
+      "breakthrough": "Initial baseline; CPU powersave governor throttled DDR5 clock and bus switches."
     },
     {
       "date": "2026-08-24",
@@ -695,7 +772,7 @@
       "prefill": 210.0,
       "quant": "AD-4.27bpw + shared-Q4_K_M",
       "vram": "11.8 GB",
-      "breakthrough": "Daniel Han compact 1.78 GB MTP head; first time breaking 20 t/s on 12GB GPU."
+      "breakthrough": "Compact 1.78 GB MTP head; first time breaking 20 t/s on 12 GB GPU."
     },
     {
       "date": "2026-09-28",
@@ -710,7 +787,7 @@
     {
       "date": "2026-09-30",
       "milestone": "Strata v0.1.30 Platinum Debut",
-      "engine": "Strata v0.1.30 (+THP patch)",
+      "engine": "Strata v0.1.30 (+THP)",
       "decode": 52.03,
       "prefill": 1545.2,
       "quant": "ISTA IQ3_XXS",
@@ -719,134 +796,212 @@
     },
     {
       "date": "2026-10-07",
-      "milestone": "llama.cpp Master Refresh",
-      "engine": "llama.cpp master b11475",
-      "decode": 17.34,
-      "prefill": 586.6,
-      "quant": "ISTA IQ3_XXS",
-      "vram": "11.1 GB",
-      "breakthrough": "PR #29761 native MTP, PR #29825 indexer memory halved, VRAM reduced by 344 MiB."
-    },
-    {
-      "date": "2026-10-07",
-      "milestone": "llama.cpp MoE LRU Cache",
-      "engine": "exp-latest + #29887",
-      "decode": 23.92,
-      "prefill": 449.1,
-      "quant": "ISTA IQ3_XXS",
-      "vram": "11.5 GB",
-      "breakthrough": "--moe-cache-mib 2048 caches host MoE experts on GPU; +40.1% decode acceleration."
-    },
-    {
-      "date": "2026-10-07",
       "milestone": "Strata v0.1.40.2 Refresh",
-      "engine": "Strata v0.1.40.2 (native)",
+      "engine": "Strata v0.1.40.2",
       "decode": 56.08,
       "prefill": 1999.2,
       "quant": "ISTA IQ3_XXS",
       "vram": "11.7 GB",
-      "breakthrough": "Native upstream 2MB THP, #783 sub-warp IQ kernels, prefill reaches ~2,000 t/s @ 8k."
+      "breakthrough": "Native upstream 2MB THP and #783 sub-warp IQ kernels; prefill reaches ~2,000 t/s @ 8k."
     },
     {
       "date": "2026-10-14",
-      "milestone": "Strata v0.1.44.1 Refresh & Abliterated Staging",
-      "engine": "Strata v0.1.44.1 (native)",
+      "milestone": "Strata v0.1.44.1 + Abliterated",
+      "engine": "Strata v0.1.44.1",
       "decode": 62.2,
       "prefill": 1992.0,
       "quant": "ISTA IQ3_XXS / SC117",
       "vram": "11.7 GB",
-      "breakthrough": "Strata v0.1.44.1 engine refresh under verified performance governor: 62.2 t/s steady decode (64.8 max, 90.2 peak), 1,992 t/s prefill @ 8k, expert cache hit rate 75-78%, and abliterated SC117 variant integration."
+      "breakthrough": "Verified performance governor run: 62.2 t/s steady (90.2 peak), 75-78% cache hit rate."
     },
     {
-      "date": "2026-11-05",
-      "milestone": "Unsloth Dynamic UD-IQ2_XS + Q8_0 PLE",
-      "engine": "Strata v0.1.45 (sm_89 Ada)",
-      "decode": 59.7,
+      "date": "2026-10-28",
+      "milestone": "strata-lean Fork + Ada MMVQ (#3453)",
+      "engine": "strata-lean (sm_89)",
+      "decode": 69.6,
+      "prefill": 1883.1,
+      "quant": "ISTA IQ3_XXS + Q8_0 PLE",
+      "vram": "11.7 GB",
+      "breakthrough": "Pruned 172k LOC non-Ada bloat; cherry-picked Ada sm_89 MMVQ interleave tables (+4.52 t/s) and --kv-grow."
+    },
+    {
+      "date": "2026-11-07",
+      "milestone": "UD-IQ2_XS + STRATA_ADAPT_FETCH=1",
+      "engine": "strata-lean (sm_89)",
+      "decode": 70.43,
       "prefill": 1885.0,
       "quant": "UD-IQ2_XS + Q8_0 PLE",
       "vram": "11.6 GB",
-      "breakthrough": "Unsloth Dynamic V3.1 (Q5_0 down-experts) paired with unquantized Q8_0 PLE on NVMe: freed 4.4 GB RAM, 77-88% draft acceptance, 59.7 t/s steady decode with 2,711 expert pairs in VRAM."
+      "breakthrough": "Admitting PCIe-streamed misses into GPU cache lifted steady decode +26.6% (55.6 -> 70.4 t/s) and hit rate to 67.2%; CPU share boosted pp2k +18.8%."
+    },
+    {
+      "date": "2026-11-09",
+      "milestone": "STRATA_HC_Q8=1 + LEND_PCT=40 (Active)",
+      "engine": "strata-lean (sm_89)",
+      "decode": 73.0,
+      "prefill": 1888.0,
+      "quant": "UD-IQ2_XS + Q8_0 PLE",
+      "vram": "11.6 GB",
+      "breakthrough": "Quantizing hyper-connections to Q8_0 freed 0.39 GiB VRAM for +238 GPU expert slots (2,949 total, 72.4% hit rate); LEND_PCT=40 unlocked 2.87 GiB --kv-grow headroom."
+    }
+  ],
+  "inklingProgression": [
+    {
+      "date": "2026-11-23",
+      "milestone": "Plain llama.cpp Master Baseline",
+      "engine": "llama.cpp master b12621",
+      "decode": 5.89,
+      "editDecode": null,
+      "prefill": null,
+      "quant": "UD-Q4_K_XL",
+      "vram": "11.3 GB",
+      "breakthrough": "Initial --fit on 32k baseline before Inkling 2 CUDA fusions."
+    },
+    {
+      "date": "2026-11-23",
+      "milestone": "Unsloth CUDA Fusions (b12651)",
+      "engine": "llama.cpp b12651",
+      "decode": 33.13,
+      "editDecode": null,
+      "prefill": null,
+      "quant": "UD-Q4_K_XL",
+      "vram": "11.3 GB",
+      "breakthrough": "Banded FlashAttention (#386) and SiTU/conv/depth-mix/Ada 4-row MoE CUDA fusions (+5.6x)."
+    },
+    {
+      "date": "2026-11-23",
+      "milestone": "Looped Core Static GPU Pinning",
+      "engine": "llama.cpp b12651",
+      "decode": 44.08,
+      "editDecode": null,
+      "prefill": 547.0,
+      "quant": "UD-Q4_K_XL",
+      "vram": "11.7 GB",
+      "breakthrough": "Pinned blk.4-19 (40 of 48 logical passes) on GPU with -t 12 P-core threads."
+    },
+    {
+      "date": "2026-11-23",
+      "milestone": "Pure MoE LRU Cache + DSpark + CPU Share 0.70",
+      "engine": "llama.cpp b12651",
+      "decode": 65.8,
+      "editDecode": null,
+      "prefill": 184.0,
+      "quant": "UD-Q4_K_XL + DSpark",
+      "vram": "11.7 GB",
+      "breakthrough": "7,500 MiB GPU MoE LRU cache + 70% CPU miss overlap lifted decode +11.2x over master, but -ub 256 capped prefill."
+    },
+    {
+      "date": "2026-11-23",
+      "milestone": "Elastic Borrowed-Cache + Visit Budget + PR #264",
+      "engine": "llama.cpp-inkling2-lean",
+      "decode": 68.66,
+      "editDecode": null,
+      "prefill": 819.6,
+      "quant": "UD-Q4_K_XL + DSpark",
+      "vram": "11.65 GB",
+      "breakthrough": "Released MoE cache during -ub 2048 prefill and weighted cache budget by 3x loop visits; +4.4x prefill and 68.7 t/s steady decode."
+    },
+    {
+      "date": "2026-11-24",
+      "milestone": "PolyStrata VMM Pool + PRs #284/#288/#291",
+      "engine": "polystrata-4070 (poly.4)",
+      "decode": 74.65,
+      "editDecode": null,
+      "prefill": 1301.6,
+      "quant": "UD-Q4_K_XL (no draft)",
+      "vram": "11.62 GB",
+      "breakthrough": "1,688 GPU experts in 8.1 GiB CUDA VMM pool + FP8 elastic KV + warp-per-row MMVQ beat DSpark without a draft model."
+    },
+    {
+      "date": "2026-11-24",
+      "milestone": "Ada INT8 w4a8 Prefill + Lossless Prompt Lookup",
+      "engine": "polystrata-4070 (poly.4)",
+      "decode": 75.57,
+      "editDecode": 99.7,
+      "prefill": 2152.5,
+      "quant": "UD-Q4_K_XL",
+      "vram": "11.70 GB",
+      "breakthrough": "STRATA_PREFILL_NVFP4=w4a8 unlocked Ada INT8 Tensor Cores (+74-97% prefill); zero-VRAM --window 6 --lookup 3 hit 99.7 t/s on code edits (+37%)."
+    },
+    {
+      "date": "2026-11-25",
+      "milestone": "PolyStrata v0.2.20-poly.5 + PR #313 (Active)",
+      "engine": "polystrata-4070 (poly.5)",
+      "decode": 77.5,
+      "editDecode": 99.7,
+      "prefill": 2296.1,
+      "quant": "UD-Q4_K_XL + CPU Vision",
+      "vram": "11.72 GB",
+      "breakthrough": "Rebased onto v0.2.20-poly.5 (+#343 prefix-cache fix, +#313 streaming tool headers): 7.8s cold boot, +14.5% pp2k (1,833 t/s), 2,296 t/s pp8k, 77.5 t/s fresh coding."
     }
   ],
   "archived": [
+    {
+      "name": "Qwen3.8-Flash-Next Plat (IQ3_S Full-Fidelity)",
+      "profiles": "qwen38-flash-next-plat-iq3s",
+      "tps": 60.0,
+      "quant": "ISTA-DASLab IQ3_S",
+      "diskReclaimed": "78 GB NVMe",
+      "reason": "Deleted to reclaim 78 GB NVMe after Unsloth Dynamic UD-IQ2_XS + Q8_0 PLE reached 73.0 t/s with 4.4 GB less RAM.",
+      "retired": "October 2026",
+      "replacement": "qwen38-flash-next-plat"
+    },
+    {
+      "name": "Qwen3.6 35B-A3B MTP (UD-Q6_K)",
+      "profiles": "qwen3-6-mtp-q6",
+      "tps": 60.3,
+      "quant": "UD-Q6_K",
+      "diskReclaimed": "28 GiB NVMe",
+      "reason": "Weights removed in the 2026-10-15 cleanup once Qwen3.8-Flash-Next Platinum and Qwen3.8-27B covered both MoE and dense tiers.",
+      "retired": "October 2026",
+      "replacement": "qwen38-flash-next-plat"
+    },
     {
       "name": "Qwen3.8-Flash-Next (AtomicChat AD-4.27bpw)",
       "profiles": "qwen38-flash-next, qwen38-flash-next-mtp, qwen38-flash-next-exp",
       "tps": 27.06,
       "quant": "AD-4.27bpw Q4_K_M M64",
-      "reason": "Archived to /mnt/storage NAS (89 GB, 33 shards) following Strata Platinum validation (60-90 t/s on DASLab IQ3_XXS/IQ3_S); local fast SSD storage reclaimed.",
+      "diskReclaimed": "89 GB NVMe",
+      "reason": "Archived to NAS (89 GB, 33 shards) following Strata Platinum validation; local fast NVMe reclaimed.",
       "retired": "September 2026",
       "replacement": "qwen38-flash-next-plat"
-    },
-    {
-      "name": "Gemma 4 12B QAT family",
-      "profiles": "gemma-4-12b-qat-mtp, gemma-4-12b-qat, gemma-4-12b-qat-mtp-vision",
-      "tps": 120.8,
-      "quant": "UD-Q4_K_XL (QAT)",
-      "reason": "Retired after the 26B QAT profiles proved the better quality/speed balance on this node; 12B files removed from disk.",
-      "retired": "July 2026",
-      "replacement": "gemma-4-26b-qat-mtp"
-    },
-    {
-      "name": "Gemma 4 26B (standard / non-QAT)",
-      "profiles": "gemma-4-26b-a4b, gemma-4-26b-mtp, gemma-4-26b-mtp-q6",
-      "reason": "The standard model spilled to system RAM. QAT profiles fit substantially more weights in VRAM and replaced it.",
-      "retired": "June 2026",
-      "replacement": "gemma-4-26b-qat-mtp"
-    },
-    {
-      "name": "Mistral Small 4 119B MoE",
-      "profiles": "mistral-small-4-119b family",
-      "reason": "Generation latency and storage cost were poor on this 12GB node even with aggressive expert offload.",
-      "retired": "May 2026",
-      "replacement": "qwen38-flash-next"
-    },
-    {
-      "name": "NVIDIA Nemotron 3 Super 120B",
-      "profiles": "nemotron-super-120b",
-      "reason": "Retired to recover storage; the 3-bit profile traded away too much quality for its throughput.",
-      "retired": "April 2026",
-      "replacement": "qwen38-flash-next"
-    },
-    {
-      "name": "Qwen3.6 35B baseline",
-      "profiles": "unsloth/Qwen3.6-35B-A3B-GGUF",
-      "reason": "Removed after MTP profiles were validated.",
-      "retired": "June 2026",
-      "replacement": "qwen3-6-mtp-q6"
     },
     {
       "name": "Qwen3-Coder-Next 80B.A3B",
       "profiles": "qwen3-coder-next, qwen3-coder-next-legacy, qwen3-coder-next-ik",
       "tps": 39.6,
       "quant": "UD-Q4_K_XL",
-      "reason": "Model files deleted in the 2026-08-31 storage cleanup; superseded as production coder by Qwen3.8-Flash-Next.",
+      "diskReclaimed": "48 GB NVMe",
+      "reason": "Deleted in the 2026-08-31 storage cleanup; superseded by Qwen3.8-Flash-Next and Inkling 2 Mini.",
       "retired": "August 2026",
-      "replacement": "qwen38-flash-next"
+      "replacement": "inkling-2-mini"
     },
     {
       "name": "gpt-oss 120B",
       "profiles": "gpt-oss-120b, gpt-oss-120b-legacy, gpt-oss-120b-low",
       "tps": 28.5,
       "quant": "MXFP4",
-      "reason": "Model files deleted in the 2026-08-31 storage cleanup; was production default before Qwen3.8-Flash-Next.",
+      "diskReclaimed": "65 GB NVMe",
+      "reason": "Deleted in the 2026-08-31 storage cleanup; was production default before Qwen3.8-Flash-Next.",
       "retired": "August 2026",
-      "replacement": "qwen38-flash-next"
+      "replacement": "qwen38-flash-next-plat"
     },
     {
       "name": "Qwen3.6 35B-A3B MTP (UD-Q4_K_XL)",
       "profiles": "qwen3-6-mtp, qwen3-6-mtp-vision",
       "tps": 60.3,
       "quant": "UD-Q4_K_XL",
-      "reason": "UD-Q4_K_XL weights and the mmproj-F16 projector deleted; the higher-precision Q6 profile remains active.",
+      "diskReclaimed": "22 GB NVMe",
+      "reason": "UD-Q4_K_XL weights and mmproj-F16 projector deleted in the 2026-08-31 cleanup.",
       "retired": "August 2026",
-      "replacement": "qwen3-6-mtp-q6"
+      "replacement": "inkling-2-mini"
     },
     {
       "name": "Gemma 4 26B QAT + MTP (Vision)",
       "profiles": "gemma-4-26b-qat-mtp-vision",
       "tps": 39.0,
       "quant": "UD-Q4_K_XL (QAT)",
+      "diskReclaimed": "2 GB NVMe",
       "reason": "BF16 vision projector deleted in the 2026-08-31 cleanup; text-only QAT + MTP profiles remain active.",
       "retired": "August 2026",
       "replacement": "gemma-4-26b-qat-mtp"
@@ -856,16 +1011,48 @@
       "profiles": "sarvam-30b",
       "tps": 15.0,
       "quant": "Q6_K",
-      "reason": "Weights and the PR-20275 custom build dropped in the 2026-08-31 storage cleanup.",
+      "diskReclaimed": "25 GB NVMe",
+      "reason": "Weights and PR-20275 custom build dropped in the 2026-08-31 storage cleanup.",
       "retired": "August 2026",
       "replacement": "qwen3-8-27b-iq3-xxs"
     },
     {
+      "name": "Gemma 4 12B QAT family",
+      "profiles": "gemma-4-12b-qat-mtp, gemma-4-12b-qat, gemma-4-12b-qat-mtp-vision",
+      "tps": 120.8,
+      "quant": "UD-Q4_K_XL (QAT)",
+      "diskReclaimed": "11 GB NVMe",
+      "reason": "Retired after the 26B QAT profiles proved the better quality/speed balance on this node; 12B files removed from disk.",
+      "retired": "July 2026",
+      "replacement": "gemma-4-26b-qat-mtp"
+    },
+    {
+      "name": "Gemma 4 26B (standard / non-QAT)",
+      "profiles": "gemma-4-26b-a4b, gemma-4-26b-mtp, gemma-4-26b-mtp-q6",
+      "reason": "Standard model spilled to system RAM; QAT profiles fit substantially more weights in VRAM.",
+      "retired": "June 2026",
+      "replacement": "gemma-4-26b-qat-mtp"
+    },
+    {
+      "name": "Mistral Small 4 119B MoE",
+      "profiles": "mistral-small-4-119b family",
+      "reason": "Generation latency and storage cost were poor on this 12 GB node even with aggressive expert offload.",
+      "retired": "May 2026",
+      "replacement": "qwen38-flash-next-plat"
+    },
+    {
+      "name": "NVIDIA Nemotron 3 Super 120B",
+      "profiles": "nemotron-super-120b",
+      "reason": "Retired to recover storage; the 3-bit profile traded away too much quality for its throughput.",
+      "retired": "April 2026",
+      "replacement": "qwen38-flash-next-plat"
+    },
+    {
       "name": "OmniCoder 9B",
       "profiles": "Tesslate/OmniCoder-9B-GGUF",
-      "reason": "Replaced by Qwen3-Coder-Next, which delivered stronger coding quality at usable hybrid-MoE throughput.",
+      "reason": "Replaced by larger hybrid-MoE coding models once dynamic expert caching made 26B-180B tiers interactive.",
       "retired": "March 2026",
-      "replacement": "qwen3-coder-next (now archived)"
+      "replacement": "inkling-2-mini"
     }
   ]
 }

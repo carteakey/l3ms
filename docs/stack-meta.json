@@ -2,60 +2,149 @@
   "media": {
     "minimax-h3": {
       "guide": "docs/media-generation-runbook.md",
-      "experiment": "docs/experiments/h3-reference-baseline.md"
+      "experiment": "docs/experiments/h3-reference-baseline.md",
+      "tier": "burst",
+      "role": "Audio + Short Video (Experimental)",
+      "vramGb": 10.5,
+      "ramGb": 8.0
     },
     "ltx-2.5": {
       "guide": "docs/media-generation-runbook.md",
-      "experiment": null
+      "experiment": null,
+      "tier": "burst",
+      "role": "Synchronized Video (Gated)",
+      "vramGb": 11.0,
+      "ramGb": 16.0
     },
     "heartmula-music": {
       "guide": "docs/audio-cpp-runtimes.md",
-      "experiment": null
+      "experiment": null,
+      "tier": "burst",
+      "role": "Music Synthesis",
+      "vramGb": 8.5,
+      "ramGb": 4.0
     },
     "breeze-tts-2": {
       "guide": "docs/audio-cpp-runtimes.md",
       "experiment": "docs/experiments/breeze-tts-2-baseline.md",
-      "modes": ["Standard TTS", "Voice design", "Voice cloning", "Streaming"]
+      "modes": ["Standard TTS", "Voice design", "Voice cloning", "Streaming"],
+      "tier": "burst",
+      "role": "Primary Speech & Voice Cloning",
+      "vramGb": 6.5,
+      "ramGb": 2.0
     },
     "breeze-tts-2-cpu": {
       "guide": "docs/cpu-native-workflows.md",
       "experiment": "docs/cpu-native-workflows.md",
-      "modes": ["Standard TTS (CPU)", "Offline voice design (CPU)", "Voice cloning (CPU)", "TTS chunks after completion (CPU)"]
+      "modes": ["Standard TTS (CPU)", "Offline voice design (CPU)", "Voice cloning (CPU)", "TTS chunks after completion (CPU)"],
+      "tier": "co-resident",
+      "role": "Zero-VRAM CPU Speech",
+      "vramGb": 0.0,
+      "ramGb": 6.5
     },
     "yue2-music": {
       "guide": "docs/yue2-setup.md",
-      "experiment": null
+      "experiment": null,
+      "tier": "burst",
+      "role": "Music Generation (ABC)",
+      "vramGb": 10.0,
+      "ramGb": 8.0
     },
     "flux-3-klein": {
       "guide": "docs/comfyui-setup.md",
-      "experiment": null
+      "experiment": null,
+      "tier": "burst",
+      "role": "Layout-Guided Image (16 steps)",
+      "vramGb": 10.0,
+      "ramGb": 6.0
     },
     "qwen-image-2.1-turbo": {
       "guide": "docs/qwen-image-2.1-turbo-setup.md",
-      "experiment": "docs/experiments/qwen-image-2.1-turbo-vs-base.md"
+      "experiment": "docs/experiments/qwen-image-2.1-turbo-vs-base.md",
+      "tier": "burst",
+      "role": "Primary Image Turbo (8 steps)",
+      "vramGb": 9.6,
+      "ramGb": 4.0
     },
     "blender-3d": {
       "guide": "docs/blender-mcp-setup.md",
-      "experiment": null
+      "experiment": null,
+      "tier": "burst",
+      "role": "3D Scene & Mesh (MCP / Headless)",
+      "vramGb": 4.0,
+      "ramGb": 4.0
     },
     "qwen-image-2.1": {
       "guide": "docs/qwen-image-2.1-setup.md",
-      "experiment": "docs/experiments/qwen-vs-krea2-comparison.md"
+      "experiment": "docs/experiments/qwen-vs-krea2-comparison.md",
+      "tier": "burst",
+      "role": "High-Step Image Base (25 steps)",
+      "vramGb": 9.6,
+      "ramGb": 4.0
     },
     "krea-2": {
       "guide": "docs/krea-2-setup.md",
-      "experiment": "docs/experiments/qwen-vs-krea2-comparison.md"
+      "experiment": "docs/experiments/qwen-vs-krea2-comparison.md",
+      "tier": "burst",
+      "role": "Stylized Image Turbo LoRA (12 steps)",
+      "vramGb": 10.2,
+      "ramGb": 5.0
     }
   },
   "decisions": {
-    "vllm-d3-flash": {"guide": "docs/decision-models-cli.md", "experiment": null},
-    "cloudflare-clef-flash": {"guide": "docs/decision-models-cli.md", "experiment": null},
-    "nagi-smol": {"guide": "README.md", "experiment": null},
-    "nagi-smol-cpu": {"guide": "docs/cpu-native-workflows.md", "experiment": "docs/cpu-native-workflows.md"},
-    "nagi-big": {"guide": "README.md", "experiment": null},
-    "laya-en": {"guide": "README.md", "experiment": null},
-    "semif-openjev": {"guide": "README.md", "experiment": null},
-    "jev-api": {"guide": "README.md", "experiment": null},
-    "systemone": {"guide": "README.md", "experiment": null}
+    "vllm-d3-flash": {
+      "guide": "docs/decision-models-cli.md",
+      "experiment": null,
+      "tier": "burst",
+      "role": "Primary 9B Q8_0 Decision (Text+Image)"
+    },
+    "cloudflare-clef-flash": {
+      "guide": "docs/decision-models-cli.md",
+      "experiment": null,
+      "tier": "burst",
+      "role": "Joint-Pass 9B Q4_K_M Decision (Text+Image)"
+    },
+    "nagi-smol": {
+      "guide": "README.md",
+      "experiment": null,
+      "tier": "burst",
+      "role": "Lightweight Encoder Classifier"
+    },
+    "nagi-smol-cpu": {
+      "guide": "docs/cpu-native-workflows.md",
+      "experiment": "docs/cpu-native-workflows.md",
+      "tier": "co-resident",
+      "role": "Zero-VRAM CPU Classifier"
+    },
+    "nagi-big": {
+      "guide": "README.md",
+      "experiment": null,
+      "tier": "burst",
+      "role": "4B Local Decision Adapter"
+    },
+    "laya-en": {
+      "guide": "README.md",
+      "experiment": null,
+      "tier": "burst",
+      "role": "Single-Pass ModernBERT Router"
+    },
+    "semif-openjev": {
+      "guide": "README.md",
+      "experiment": null,
+      "tier": "burst",
+      "role": "3B Logit-Readout Classifier"
+    },
+    "jev-api": {
+      "guide": "README.md",
+      "experiment": null,
+      "tier": "remote",
+      "role": "Hosted System One Alias"
+    },
+    "systemone": {
+      "guide": "README.md",
+      "experiment": null,
+      "tier": "remote",
+      "role": "Hosted TypeSafe System One API"
+    }
   }
 }

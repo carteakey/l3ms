@@ -1,0 +1,357 @@
+{
+  "updated": "2026-11-26",
+  "engines": [
+    {
+      "id": "strata-lean",
+      "name": "strata-lean (carteakey/strata-lean)",
+      "role": "Primary Frontier MoE Engine",
+      "targets": [
+        "qwen38-flash-next-plat",
+        "qwen38-flash-next-plat-vision",
+        "qwen38-flash-next-plat-abliterated",
+        "qwen38-flash-next-plat-abliterated-vision"
+      ],
+      "arch": "Ada Lovelace sm_89 · CUDA 13.5 · 73.0 MB lean binary",
+      "commitStack": [
+        "172,853 LOC pruned (Metal/SYCL/ROCm/Qwen3.5/tests removed)",
+        "PR #3453 Ada sm_89 MMVQ interleave tables (+4.52 t/s)",
+        "8645328d Fused Hyper-Connections + 1bd03954 QSA Fused RMSNorm+RoPE",
+        "20c19b89 STRATA_ADAPT_FETCH + STRATA_HC_Q8 + --kv-grow",
+        "3733343d Strict routing default (STRATA_ROUTE_TAIL_SKIP=0)",
+        "9aafcbf0 Reasoning loop recovery + pure-CPU strata-vision"
+      ],
+      "highlights": "Holds 2,949 Qwen3.8 expert slots in VRAM (72.4% hit rate) while streaming 54.4 GB Q8_0 PLE from NVMe via direct I/O. Reaches 73.0 t/s steady decode and 1,136 / 1,888 t/s pp2k / pp8k at 128k elastic K8V4 context.",
+      "policy": "Anti-bloat policy: never blindly re-slice or rebase; only runtime switches and isolated Ada CUDA kernel cherry-picks."
+    },
+    {
+      "id": "polystrata-4070",
+      "name": "polystrata-4070 (strata-poly)",
+      "role": "Primary Inkling 2 Mini Engine",
+      "targets": [
+        "inkling-2-mini",
+        "inkling-2-mini-128k"
+      ],
+      "arch": "Ada sm_89 + AVX-VNNI + cuBLASLt MXFP8 + CPU strata-vision",
+      "commitStack": [
+        "v0.2.20-poly.5 base (d62dfacb) + #343 system-prompt prefix cache fix",
+        "PR #313 streaming tool-call header emission",
+        "PR #284 warp-per-row MMVQ + #288 doorbell launch reduction + #291 eager prompt load",
+        "CUDA VMM elastic --vram-pool (8.2 GiB shared experts + FP8 KV)",
+        "Ada INT8 Tensor Core NVFP4 prefill (STRATA_PREFILL_NVFP4=w4a8)",
+        "Zero-VRAM lossless prompt lookup (--window 6 --lookup 3)"
+      ],
+      "highlights": "7.8 s cold boot, 1,678 resident GPU experts (~95% hit rate), 77.5 t/s fresh coding / 99.7 t/s code edits, and 1,833 / 2,296 / 2,270 t/s pp2k / pp8k / pp20k at 256k elastic FP8 KV.",
+      "policy": "Isolated in vendor/polystrata so strata-lean stays dedicated to Qwen3.8-Flash-Next."
+    },
+    {
+      "id": "llama.cpp-inkling2-lean",
+      "name": "llama.cpp-inkling2-lean",
+      "role": "Inkling 2 Mini GGUF Fallback & Unbound Engine",
+      "targets": [
+        "inkling-2-mini-llama",
+        "inkling-2-mini-unbound-v2.1"
+      ],
+      "arch": "Ada sm_89 · CUDA 13.5 · Elastic Borrowed-Cache MoE LRU",
+      "commitStack": [
+        "Unsloth b12651 base + 16 Inkling-2-only CUDA fusions (#386, #401-#421, DSpark #405)",
+        "Local LLAMA_MOE_CACHE_ELASTIC=1 (releases 7,800 MiB cache during -ub 2048 prefill)",
+        "Local LLAMA_MOE_CACHE_VISIT_BUDGET=1 (weights cache slots by 3x looped-core visits)",
+        "Unsloth PR #264 CUDA MoE prompt kernels (+26% pp8k)"
+      ],
+      "highlights": "Broke the 12 GB prefill-vs-decode cliff on llama.cpp: 68.7 t/s steady decode and 820 / 727 t/s pp2k / pp8k with DSpark n=3 and CPU mmproj.",
+      "policy": "Maintained as the standard GGUF fallback and host for Unbound v2.1 Q4_K_M."
+    },
+    {
+      "id": "llama.cpp-master",
+      "name": "llama.cpp-master (+ exp-stack-v2)",
+      "role": "General Mainline LLM, Dense 27B & Embeddings Engine",
+      "targets": [
+        "qwen3-8-27b-iq3-xxs",
+        "gemma-4-26b-qat-mtp",
+        "gemma-4-26b-qat",
+        "humanizer-12b",
+        "nemotron-3.5-bolt",
+        "qwen38-flash-next",
+        "qwen38-flash-next-exp",
+        "qwen38-flash-next-mtp",
+        "qwen38-flash-next-vision",
+        "embeddinggemma-2"
+      ],
+      "arch": "Ada sm_89 CUDA + AVX2/AVX-VNNI CPU (E-core mode for embeddings)",
+      "commitStack": [
+        "Master b12073 / b12621+ (nemotron_h_moe, DFlash, Qwen3.8, Gemma 4)",
+        "exp-latest: PR #30966 CPU-shared MoE LRU cache + #30592 MTP fix",
+        "exp-stack-v2: Unified QSA Sparsity V2 (#28770, #29599 NVMe prefetch, #28243 MTP)"
+      ],
+      "highlights": "Serves the 100% VRAM dense 27B tier (36.7 t/s @ 262k), Gemma 4 QAT+MTP (100.6 t/s), Nemotron 3.5 Bolt VLM, Qwen3.8 fallbacks, and co-resident CPU EmbeddingGemma-2.",
+      "policy": "Uses --lazy-mode on for master builds and pins GPU profiles to P-cores 0-11."
+    },
+    {
+      "id": "llama.cpp-d3",
+      "name": "llama.cpp-d3 (d3_server)",
+      "role": "Native Typed Decisions Engine (/v1/systemone)",
+      "targets": [
+        "vllm-d3-flash",
+        "cloudflare-clef-flash"
+      ],
+      "arch": "Ada sm_89 CUDA · Non-causal single-ubatch (-c = -b = -ub = 8192)",
+      "commitStack": [
+        "llama.cpp master @ efe3626b1 + PR #30383 (vllm-d3 & clef System One endpoint)",
+        "Native choice / noul (yes-no) / score logit probabilities via POST /v1/systemone",
+        "Multimodal BF16 mmproj support (up to ~4 full-size images in 8,192 tokens)"
+      ],
+      "highlights": "Runs 9B vLLM-SR d3-flash (11.5 GiB Q8_0) and Cloudflare Clef-Flash (8.9 GiB Q4_K_M, joint single-pass image encoding) behind llama-swap.",
+      "policy": "Keep -c = -b = -ub and verify <arch>.decision.type before onboarding new GGUFs."
+    },
+    {
+      "id": "ComfyUI",
+      "name": "ComfyUI (comfyui_auto)",
+      "role": "Image, Video & Music Diffusion Engine",
+      "targets": [
+        "qwen-image-2.1-turbo",
+        "qwen-image-2.1",
+        "flux-3-klein",
+        "krea-2",
+        "ltx-2.5",
+        "yue2-music"
+      ],
+      "arch": "PyTorch CUDA 13.5 · Native INT8 ConvRot · --lowvram --reserve-vram 1.0",
+      "commitStack": [
+        "Pinned commit 20b46065ef (Qwen Image 2.1, FLUX.3 Klein, Krea 2, LTX-2.5, YuE2)",
+        "Native INT8 ConvRot weights (avoids ComfyUI-GGUF custom node breakage)",
+        "Managed on-demand via llama-swap /comfyui/ route (auto-evicts resident LLM)"
+      ],
+      "highlights": "Qwen Image 2.1 Turbo renders 1024x1024 in 8.83 s (8 steps, 9.6 GiB VRAM), sharing the Qwen3-VL INT8 text encoder and BF16 VAE.",
+      "policy": "Budget ~246 s cold start and treat batches as one blocking call with no concurrent LLM traffic."
+    },
+    {
+      "id": "audio.cpp",
+      "name": "audio.cpp (audiocpp_auto)",
+      "role": "Speech Synthesis, Voice Cloning & Audio Generation",
+      "targets": [
+        "breeze-tts-2",
+        "breeze-tts-2-cpu",
+        "heartmula-music",
+        "minimax-h3"
+      ],
+      "arch": "CUDA 13.5 (BF16 rounding parity) + Explicit CPU Backend",
+      "commitStack": [
+        "audio.cpp release-0.6 (commit 955c872) audiocpp_server + audiocpp_cli",
+        "Breeze-TTS-2 Q8_0 (standard TTS, voice design, voice cloning, streaming)",
+        "HeartMuLa-oss-3B Q8_0 music & MiniMax-H3 staged Q4_K audio/video"
+      ],
+      "highlights": "Serves OpenAI-compatible /audiocpp/v1/audio/speech and task APIs through llama-swap, plus a zero-VRAM explicit CPU path for Breeze-TTS-2.",
+      "policy": "Configured via audiocpp-server.json; memory saver enabled for 12 GB VRAM safety."
+    },
+    {
+      "id": "speech.cpp",
+      "name": "speech.cpp (lytte-nemotron)",
+      "role": "Speech-to-Text ASR, VAD & Diarization",
+      "targets": [
+        "nemotron-3.5-transcribe"
+      ],
+      "arch": "Vulkan1 GPU + CPU Expert Offload (10 threads)",
+      "commitStack": [
+        "NVIDIA Nemotron 3.5 Transcribe 30B-A4B (IQ4_NL GGUF)",
+        "Integrated Silero VAD + Nemotron-3 speaker diarization",
+        "OpenAI-compatible POST /v1/audio/transcriptions via llama-swap"
+      ],
+      "highlights": "Delivers 30B-class local transcription with voice-activity detection and speaker diarization on demand (600 s idle TTL).",
+      "policy": "Runs unlisted under llama-swap for dedicated audio transcription clients."
+    },
+    {
+      "id": "llama-swap",
+      "name": "llama-swap Router",
+      "role": "Unified OpenAI / Anthropic / SystemOne / Media Control Plane",
+      "targets": [
+        "All 32+ local profiles across co-resident & exclusive burst groups"
+      ],
+      "arch": "Go systemd --user router on :8080 · Fixed inference port :8089",
+      "commitStack": [
+        "Exclusive burst group on 0.0.0.0:8089 (Web UI always reachable on Tailscale)",
+        "Non-exclusive co-resident group for CPU embeddings (0 MiB VRAM)",
+        "Startup preload on qwen38-flash-next-plat + per-profile TTL unloading",
+        "Native /audiocpp/, /comfyui/, and /v1/systemone routing"
+      ],
+      "highlights": "Single endpoint multiplexing language, vision, decisions, embeddings, speech, and diffusion on one 12 GB GPU without manual process juggling.",
+      "policy": "Use `systemctl --user restart llama-swap.service` rather than SIGHUP on fixed port 8089."
+    }
+  ],
+  "promotedSwitches": [
+    {
+      "engine": "strata-lean",
+      "switch": "STRATA_HC_Q8=1",
+      "date": "2026-11-09",
+      "gain": "+5.13 t/s decode (+7.6%: 67.87 -> 73.00 t/s); +238 GPU expert slots",
+      "detail": "Quantizes hyper-connection up/down weights to Q8_0, freeing 0.39 GiB VRAM for 2,949 GPU expert slots (72.4% hit rate). KL 0.0003-0.0010, passes 4k needle."
+    },
+    {
+      "engine": "strata-lean",
+      "switch": "STRATA_PREFILL_LEND_PCT=40",
+      "date": "2026-11-09",
+      "gain": "11.5x --kv-grow reclaimable headroom (248 MiB -> 2.87 GiB)",
+      "detail": "Caps prefill cache loan to 40% (812 slots), eliminating 128k KV growth OOM and CUDA graph verify failures with zero short-context decode loss."
+    },
+    {
+      "engine": "strata-lean",
+      "switch": "STRATA_ADAPT_FETCH=1",
+      "date": "2026-11-07",
+      "gain": "+14.8 t/s decode (+26.6%: 55.6 -> 70.4 t/s); hit rate 46.6% -> 67.2%",
+      "detail": "Cherry-pick 20c19b89: admits PCIe-streamed expert misses directly into the GPU expert cache."
+    },
+    {
+      "engine": "strata-lean",
+      "switch": "STRATA_PREFILL_CPU_SHARE_MAX=3072",
+      "date": "2026-11-07",
+      "gain": "+18.8% pp2k prefill (939 -> 1,116 t/s; now 1,136 t/s)",
+      "detail": "Arms concurrent CPU expert prefill for chunks <= 3,072 tokens with zero decode or pp8k regression (~0.011 nats KL)."
+    },
+    {
+      "engine": "strata-lean",
+      "switch": "--kv k8v4 + --kv-grow",
+      "date": "2026-10-28",
+      "gain": "1.32 GiB full 128k KV; +270-500 extra GPU expert slots at boot",
+      "detail": "Hybrid FP8 Key / Hadamard-rotated INT4 Value cache mapped elastically starting from 16k cells (0.21 GiB)."
+    },
+    {
+      "engine": "strata-lean",
+      "switch": "--spec 4 --spec-min-p 0.5",
+      "date": "2026-10-15",
+      "gain": "2.76-2.93 tok/step (77-90%+ acceptance, mathematically exact)",
+      "detail": "Native Q2_0 MTP draft head over 106,299-token runtime vocabulary."
+    },
+    {
+      "engine": "polystrata-4070",
+      "switch": "STRATA_PREFILL_NVFP4=w4a8",
+      "date": "2026-11-24",
+      "gain": "+74-97% prefill (751/1,135/1,234 -> 1,833/2,296/2,270 t/s pp2k/8k/20k)",
+      "detail": "Routes all 44 NVFP4 visits to Ada INT8 Tensor Cores (matching MMQ) instead of the 60.5 TFLOPS FP16 halves fallback."
+    },
+    {
+      "engine": "polystrata-4070",
+      "switch": "--window 6 --lookup 3",
+      "date": "2026-11-24",
+      "gain": "+37% code-edit decode (72.7 -> 99.7 t/s); 77.5 t/s fresh coding",
+      "detail": "Zero-VRAM lossless prompt lookup speculation; preserves 1,678 GPU experts and beats DSpark on 12 GB."
+    },
+    {
+      "engine": "polystrata-4070",
+      "switch": "--vram-pool --kv fp8 --loop-bf16 --prompt-batch 2048",
+      "date": "2026-11-24",
+      "gain": "77.5 t/s steady @ 256k elastic KV (11.7 GiB peak VRAM)",
+      "detail": "Shared 8.2 GiB CUDA VMM pool dynamically balances GPU experts and live FP8 KV (16.5 KiB/tok); BF16 loop controllers cut dense traffic from 1.79 to 1.58 GB/tok."
+    },
+    {
+      "engine": "polystrata-4070",
+      "switch": "STRATA_INK_FAST_CTRL=1 + STRATA_INK_PRESTAGE=0",
+      "date": "2026-11-24",
+      "gain": "Bit-exact faster loop-controller down kernel; avoids -8.5 t/s prestage dip",
+      "detail": "Enables the fast loop controller while explicitly keeping PR #271 prestaging off."
+    },
+    {
+      "engine": "llama.cpp-inkling2-lean",
+      "switch": "LLAMA_MOE_CACHE_ELASTIC=1 + VISIT_BUDGET=1 + cpu-share 0.70",
+      "date": "2026-11-23",
+      "gain": "68.7 t/s decode (+10.5 t/s) and 820 t/s pp2k (+4.4x)",
+      "detail": "Borrows 7,800 MiB cache VRAM for -ub 2048 prefill, weights cache slots by 3x looped-core visits, and overlaps 70% of misses on 12 P-core threads."
+    }
+  ],
+  "rejectedSwitches": [
+    {
+      "engine": "strata-lean",
+      "switch": "STRATA_ROUTE_PRIOR=1.5",
+      "measured": "102.23 t/s (93.0% hit rate)",
+      "reason": "Failed Agent Quality Gate: re-biasing routing toward cached experts drops agent task completion from 5.6 to 4.5 / 10."
+    },
+    {
+      "engine": "strata-lean",
+      "switch": "STRATA_ROUTE_RESIDENT=4",
+      "measured": "78.33 t/s vs 67.87 base",
+      "reason": "Failed Identity Gate (7/7 intra-boot diffs): alters tail expert selection and breaks strict JSON stop lengths."
+    },
+    {
+      "engine": "strata-lean",
+      "switch": "STRATA_ROUTE_TAIL_SKIP=7",
+      "measured": "Upstream default in 0.1.56",
+      "reason": "Disabled by default in strata-lean: dropping rank >= 7 expert misses introduces KL 0.003-0.006 output drift."
+    },
+    {
+      "engine": "strata-lean",
+      "switch": "STRATA_HC_UPMIX=1",
+      "measured": "51.97 t/s (-15.6 t/s)",
+      "reason": "Severe decode regression on Ada sm_89 from fused HC up-projection + gr_mix_r kernel."
+    },
+    {
+      "engine": "strata-lean",
+      "switch": "--lookup-chain 5",
+      "measured": "56.43 t/s (-11.4 t/s)",
+      "reason": "Captures 8 CUDA graph windows instead of 6, shrinking expert VRAM and slowing verify passes."
+    },
+    {
+      "engine": "strata-lean",
+      "switch": "--spec 5",
+      "measured": "61.00 t/s (-10.1 t/s)",
+      "reason": "Over-speculation penalty: 5th draft candidate falls below break-even acceptance on code."
+    },
+    {
+      "engine": "strata-lean",
+      "switch": "--aux-cpus auto (taskset 0-15)",
+      "measured": "57.70 t/s (-9.8 t/s)",
+      "reason": "Recruits Alder Lake E-cores 12-15 into worker pool (9 workers vs 5 P-core workers), adding barrier stalls."
+    },
+    {
+      "engine": "strata-lean",
+      "switch": "STRATA_GR_UP75=1 / STRATA_GR_NORM_FAST=1",
+      "measured": "58.17 t/s (-9.7) / 64.85 t/s (-6.3)",
+      "reason": "Turing/Volta sm_70/75 kernels that regress occupancy and fusion efficiency on Ada sm_89."
+    },
+    {
+      "engine": "strata-lean",
+      "switch": "--ple-io mmap",
+      "measured": "66.90 t/s + 0.1756 MB/tok SSD spill",
+      "reason": "Page-cache trap: mmapping 30-54 GB PLE evicts the 39.4 GB expert arena from RAM, causing heavy SSD refaults."
+    },
+    {
+      "engine": "strata-lean",
+      "switch": "STRATA_L2_PF=1 (+ L2_PF_MIB=8)",
+      "measured": "69.43 / 70.90 t/s vs 73.10 base",
+      "reason": "Uncapped prefetch overflows Ada's 36 MiB L2 (-3.7 t/s); 8 MiB cap is neutral. Reverted from strata-lean."
+    },
+    {
+      "engine": "strata-lean",
+      "switch": "--mtp-q4 head / --mtp-draft-vocab en",
+      "measured": "67.88 t/s / 65.78 t/s",
+      "reason": "On-the-fly Q4 dequant ALU cost and reduced 40k English vocab both trail the native 106k Q8_0 draft head."
+    },
+    {
+      "engine": "polystrata-4070",
+      "switch": "PR #320 (--prompt-batch auto)",
+      "measured": "56.55 t/s (-27% decode, -25% pp2k/8k)",
+      "reason": "Widening to 4096-token batches evicted 1,994 MiB of experts per long prompt, triggering 4.6 GiB RAM churn and VMM remap stalls."
+    },
+    {
+      "engine": "polystrata-4070",
+      "switch": "DSpark on 12 GB (PR #311 + 16K ring)",
+      "measured": "65.6-69.3 t/s fresh (vs 77.5 plain/lookup)",
+      "reason": "Even with a 16K ring cap, DSpark evicts 154-272 resident GPU experts. Keeping hot experts in VRAM + zero-VRAM --lookup 3 wins decisively."
+    },
+    {
+      "engine": "polystrata-4070",
+      "switch": "STRATA_INK_PRESTAGE=1 (PR #271)",
+      "measured": "pp8k 1,218 vs 1,302; post-8k tg 67.2 vs 75.7",
+      "reason": "Regressed both long prefill and post-prefill decode on 12 GB RTX 4070; pinned explicitly to 0."
+    },
+    {
+      "engine": "polystrata-4070",
+      "switch": "STRATA_FAST_ATTN=1",
+      "measured": "post-20k tg 45.3 vs 51.2",
+      "reason": "Slower post-20K decode and slightly slower pp20k in the 7-arm isolation sweep."
+    },
+    {
+      "engine": "llama.cpp-inkling2-lean",
+      "switch": "--moe-cache-cpu-share 1.00",
+      "measured": "40.98 t/s (-24.8 t/s cliff vs 0.70)",
+      "reason": "Running 100% of misses on CPU eliminates GPU PCIe overlap and stalls expert admission."
+    }
+  ]
+}
