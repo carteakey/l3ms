@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#090e10">
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <title>L3MS // Live Local Control</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <main class="container">
+    <!-- Header -->
+    <header class="surface top-header">
+      <div>
+        <h1 class="brand-title">L3MS <span class="accent">///</span> LIVE CONTROL</h1>
+        <span class="eyebrow">Local Model Stack Telemetry &amp; Router Console · RTX 4070 12 GB · i5-12600K · 64 GB DDR5-4800</span>
+        <nav class="header-links" aria-label="Links">
+          <a href="https://l3ms.carteakey.dev" target="_blank" rel="noopener">Public Stack Site</a>
+          <a id="link-chat-top" href="#" target="_blank" rel="noopener">Open :8089 Chat UI</a>
+          <a id="link-comfy-top" href="#" target="_blank" rel="noopener">Open ComfyUI</a>
+        </nav>
+      </div>
+      <div class="header-status">
+        <div class="status-pill" id="sse-pill">
+          <span class="pulse-dot" id="sse-dot"></span>
+          <span id="sse-status-text">CONNECTING SSE...</span>
+        </div>
+        <div class="header-meta-grid">
+          <div><span class="label">Router (:8080)</span><span class="meta-value" id="router-status-val">--</span></div>
+          <div><span class="label">Last Sample</span><span class="meta-value" id="last-sample-val">--</span></div>
+        </div>
+      </div>
+    </header>
+
+    <!-- Live Silicon Header Strip -->
+    <section class="silicon-strip" aria-label="Live silicon telemetry">
+      <!-- VRAM + GPU -->
+      <article class="surface gauge-card">
+        <div class="gauge-head">
+          <span class="label">RTX 4070 VRAM</span>
+          <span class="gauge-metric" id="gpu-vram-val">-- / -- MiB</span>
+        </div>
+        <div class="meter-track"><div class="meter-fill" id="gpu-vram-bar" style="width:0%"></div></div>
+        <div class="gauge-sub" id="gpu-sub-val">Util --% · -- °C · -- / -- W</div>
+      </article>
+
+      <!-- DDR5 RAM + zram -->
+      <article class="surface gauge-card">
+        <div class="gauge-head">
+          <span class="label">DDR5 RAM + zram</span>
+          <span class="gauge-metric" id="ram-val">-- / -- GiB</span>
+        </div>
+        <div class="meter-track"><div class="meter-fill meter-blue" id="ram-bar" style="width:0%"></div></div>
+        <div class="gauge-sub" id="zram-sub-val">Swap/zram: -- GiB · Avail: -- GiB</div>
+      </article>
+
+      <!-- CPU P-Core / E-Core -->
+      <article class="surface gauge-card">
+        <div class="gauge-head">
+          <span class="label">i5-12600K P / E Load</span>
+          <span class="gauge-metric" id="cpu-val">P --% · E --%</span>
+        </div>
+        <div class="dual-meter">
+          <div class="dual-row">
+            <span class="dual-tag">P 0-11</span>
+            <div class="meter-track"><div class="meter-fill" id="cpu-p-bar" style="width:0%"></div></div>
+          </div>
+          <div class="dual-row">
+            <span class="dual-tag">E 12-15</span>
+            <div class="meter-track"><div class="meter-fill meter-blue" id="cpu-e-bar" style="width:0%"></div></div>
+          </div>
+        </div>
+      </article>
+
+      <!-- Governor + Host Tuning + NVMe Spill -->
+      <article class="surface gauge-card">
+        <div class="gauge-head">
+          <span class="label">Governor &amp; NVMe Spill</span>
+          <span class="gov-pill" id="gov-pill">GOV: --</span>
+        </div>
+        <div class="spill-row">
+          <span class="spill-badge" id="spill-badge">NVMe: IDLE</span>
+          <span class="tuning-chip" id="swappiness-chip">swap=--</span>
+          <span class="tuning-chip" id="thp-chip">THP=--</span>
+        </div>
+        <div class="disk-strip" id="disk-strip">Disks: --</div>
+      </article>
+    </section>
+
+    <!-- Action Toast / Eviction Confirmation Banner -->
+    <section id="confirm-banner" class="surface confirm-banner" hidden role="alert">
+      <div class="confirm-text" id="confirm-text"></div>
+      <div class="confirm-actions">
+        <button class="button btn-amber" id="confirm-proceed-btn">Confirm Switch</button>
+        <button class="button" id="confirm-cancel-btn">Cancel</button>
+      </div>
+    </section>
+
+    <section id="toast-bar" class="surface toast-bar" hidden role="status" aria-live="polite">
+      <span id="toast-message"></span>
+      <button class="button btn-quiet" id="toast-close-btn" aria-label="Dismiss">×</button>
+    </section>
+
+    <!-- Active Resident Hero Panel -->
+    <section class="surface hero-panel" aria-label="Active resident model">
+      <div class="hero-top">
+        <div>
+          <span class="label">Active Resident Model(s)</span>
+          <h2 class="hero-title" id="resident-title">Checking llama-swap...</h2>
+          <p class="hero-subtitle" id="resident-subtitle">Querying /running and active engine config.</p>
+        </div>
+        <div class="hero-actions">
+          <a class="button btn-blue" id="hero-chat-link" href="#" target="_blank" rel="noopener">Open :8089 Chat UI</a>
+          <a class="button btn-blue" id="hero-comfy-link" href="#" target="_blank" rel="noopener">Open ComfyUI</a>
+          <button class="button btn-pink" id="unload-all-btn">Unload All</button>
+        </div>
+      </div>
+
+      <div id="resident-list" class="resident-chips"></div>
+
+      <div id="engine-inspector" class="engine-inspector" hidden>
+        <div class="inspector-head">
+          <span class="label">Active Engine Inspector</span>
+          <span class="inspector-path" id="inspector-path"></span>
+        </div>
+        <div class="inspector-grid">
+          <div>
+            <span class="label">Runtime Env (STRATA_* / Engine)</span>
+            <div class="flag-chips" id="inspector-env"></div>
+          </div>
+          <div>
+            <span class="label">Vision / Sampling</span>
+            <div class="inspector-meta" id="inspector-vision"></div>
+          </div>
+        </div>
+        <details class="inspector-args-details">
+          <summary>Engine CLI Arguments (<span id="inspector-args-count">0</span>)</summary>
+          <pre id="inspector-args"></pre>
+        </details>
+      </div>
+    </section>
+
+    <!-- Model Switcher Grid -->
+    <section class="switcher-section" aria-label="Model switcher">
+      <div class="section-header">
+        <div>
+          <span class="label">Router Catalog</span>
+          <h2 class="section-title">Model Switcher Grid</h2>
+        </div>
+        <div class="switcher-controls">
+          <input class="search" id="model-search" type="search" placeholder="Filter models, engines, aliases..." aria-label="Filter models">
+          <label class="toggle-unlisted">
+            <input type="checkbox" id="toggle-unlisted">
+            <span>Show unlisted (<span id="unlisted-count">0</span>)</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="filters" id="category-filters" role="group" aria-label="Filter by category"></div>
+      <div id="model-groups" class="model-groups"></div>
+    </section>
+
+    <!-- Live Log Tailer & Bench History Console -->
+    <section class="surface console-section" aria-label="Logs and benchmark history">
+      <div class="console-header">
+        <div class="tabs" role="tablist" aria-label="Console views">
+          <button class="tab active" role="tab" aria-selected="true" data-console-tab="llama-swap">[1] llama-swap Journal</button>
+          <button class="tab" role="tab" aria-selected="false" data-console-tab="engine">[2] Active Engine Log</button>
+          <button class="tab" role="tab" aria-selected="false" data-console-tab="benches">[3] Bench History (JSONL)</button>
+        </div>
+        <div class="console-controls" id="log-controls">
+          <select id="log-lines-select" class="select-input" aria-label="Line count">
+            <option value="50">50 lines</option>
+            <option value="100" selected>100 lines</option>
+            <option value="250">250 lines</option>
+          </select>
+          <label class="toggle-unlisted">
+            <input type="checkbox" id="log-autofollow" checked>
+            <span>Auto-refresh</span>
+          </label>
+          <button class="button" id="refresh-console-btn">Refresh</button>
+        </div>
+        <div class="console-controls" id="bench-controls" hidden>
+          <select id="bench-file-select" class="select-input" aria-label="Benchmark file">
+            <option value="">All JSONL files</option>
+          </select>
+          <button class="button" id="refresh-bench-btn">Refresh</button>
+        </div>
+      </div>
+
+      <div id="console-log-view" class="console-body">
+        <div class="console-meta" id="log-meta">Source: llama-swap journal</div>
+        <pre class="log-pre" id="log-output">Loading logs...</pre>
+      </div>
+
+      <div id="console-bench-view" class="console-body" hidden>
+        <div class="table-wrap">
+          <table class="bench-table">
+            <thead>
+              <tr>
+                <th>Timestamp</th>
+                <th>File</th>
+                <th>Arm / Label</th>
+                <th>TG Steady</th>
+                <th>Edit / Draft</th>
+                <th>PP 2k / 8k / Long</th>
+                <th>Peak VRAM</th>
+              </tr>
+            </thead>
+            <tbody id="bench-table-body">
+              <tr><td colspan="7" class="empty-cell">Loading benchmark history...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <footer>
+      L3MS Local Live Control Dashboard · Server-side auth via <code>llama-swap.service</code> · Local filesystems only (<code>df -hlT</code>)
+    </footer>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
