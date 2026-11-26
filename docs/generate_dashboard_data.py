@@ -11,6 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "llama-swap.yaml"
 META = ROOT / "docs" / "dashboard-meta.json"
+ENGINES_META = ROOT / "docs" / "engines-meta.json"
 COMMUNITY_RUNS = ROOT / "docs" / "community-runs.json"
 MEDIA_MANIFEST = ROOT / "media-runtimes.json"
 DECISION_MANIFEST = ROOT / "decision-runtimes.json"
@@ -28,6 +29,27 @@ EVIDENCE_FIELDS = (
     "benchmarkCommand",
 )
 
+ALLOWED_STACK_META_KEYS = {
+    "guide",
+    "experiment",
+    "modes",
+    "tier",
+    "role",
+    "vramGb",
+    "ramGb",
+}
+
+STRATA_PATH_FLAGS = {
+    "--pack": "/path/to/strata-pack",
+    "--native": "/path/to/model.gguf",
+    "--ple-gguf": "/path/to/ple-q8.gguf",
+    "--expert-profile": "/path/to/expert-profile.bin",
+    "--mtp": "/path/to/mtp-draft-dir",
+    "--model": "/path/to/model.gguf",
+    "--draft-model": "/path/to/draft-model.gguf",
+    "--mmproj": "/path/to/mmproj.gguf",
+}
+
 
 def parse_scalar(value: str):
     value = value.strip()
@@ -35,7 +57,94 @@ def parse_scalar(value: str):
         return value == "true"
     if value.startswith('"'):
         return json.loads(value)
+    if value.startswith("[") and value.endswith("]"):
+        inner = value[1:-1].strip()
+        if not inner:
+            return []
+        return [parse_scalar(part) for part in inner.split(",")]
     return value
+
+
+def parse_macros(text: str) -> dict[str, str]:
+    lines = text.splitlines()
+    macros: dict[str, str] = {}
+    in_macros = False
+    for line in lines:
+        if line == "macros:":
+            in_macros = True
+            continue
+        if in_macros and line and not line.startswith((" ", "#")):
+            break
+        if not in_macros:
+            continue
+        match = re.match(r'^\s+"([^"]+)":\s*(.+?)\s*$', line)
+        if not match:
+            match = re.match(r"^\s+([A-Za-z0-9_.-]+):\s*(.+?)\s*$", line)
+        if match:
+            key, raw = match.groups()
+            val = parse_scalar(raw)
+            if isinstance(val, str):
+                macros[key] = val
+    return macros
+
+
+def parse_preload(text: str) -> list[str]:
+    lines = text.splitlines()
+    preloaded: list[str] = []
+    in_preload = False
+    for line in lines:
+        if re.match(r"^\s+preload:\s*$", line):
+            in_preload = True
+            continue
+        if in_preload:
+            item_match = re.match(r'^\s+-\s+"([^"]+)"\s*$', line)
+            if not item_match:
+                item_match = re.match(r"^\s+-\s+([A-Za-z0-9_.-]+)\s*$", line)
+            if item_match:
+                preloaded.append(item_match.group(1))
+            elif line.strip() and not line.strip().startswith("#"):
+                break
+    return preloaded
+
+
+def parse_groups(text: str) -> dict[str, dict]:
+    lines = text.splitlines()
+    groups: dict[str, dict] = {}
+    in_groups = False
+    current_group: str | None = None
+    in_members = False
+    for line in lines:
+        if line == "groups:":
+            in_groups = True
+            continue
+        if in_groups and line and not line.startswith((" ", "#")):
+            break
+        if not in_groups:
+            continue
+        group_match = re.match(r'^  "?([A-Za-z0-9_.-]+)"?:\s*$', line)
+        if group_match:
+            current_group = group_match.group(1)
+            groups[current_group] = {"members": [], "exclusive": True, "swap": True}
+            in_members = False
+            continue
+        if not current_group:
+            continue
+        if re.match(r"^    members:\s*$", line):
+            in_members = True
+            continue
+        if in_members:
+            member_match = re.match(r'^      -\s+"?([^"\s]+)"?\s*$', line)
+            if member_match:
+                groups[current_group]["members"].append(member_match.group(1))
+                continue
+            if line.strip() and not line.strip().startswith("#"):
+                in_members = False
+        field_match = re.match(r"^    ([a-zA-Z_]+):\s*(.*)$", line)
+        if field_match:
+            field, raw = field_match.groups()
+            if raw:
+                groups[current_group][field] = parse_scalar(raw)
+    return groups
 
 
 def parse_models(text: str) -> dict[str, dict]:
@@ -55,9 +164,11 @@ def parse_models(text: str) -> dict[str, dict]:
             break
 
         model_match = re.match(r'^  "([^"]+)":\s*$', line) if in_models else None
+        if not model_match and in_models:
+            model_match = re.match(r"^  ([A-Za-z0-9_.-]+):\s*$", line)
         if model_match:
             current_id = model_match.group(1)
-            models[current_id] = {"id": current_id, "env": []}
+            models[current_id] = {"id": current_id, "env": [], "aliases": []}
             index += 1
             continue
 
@@ -65,7 +176,8 @@ def parse_models(text: str) -> dict[str, dict]:
             field_match = re.match(r"^    ([a-zA-Z_]+):\s*(.*)$", line)
             if field_match:
                 field, raw_value = field_match.groups()
-                if field == "cmd" and raw_value == "|":
+                raw_stripped = raw_value.strip()
+                if field == "cmd" and raw_stripped in {"|", "|-", ">", ">-"}:
                     command_lines = []
                     index += 1
                     while index < len(lines):
@@ -80,28 +192,49 @@ def parse_models(text: str) -> dict[str, dict]:
                 if field == "env":
                     index += 1
                     while index < len(lines):
-                        env_match = re.match(r'^      - "(.*)"\s*$', lines[index])
+                        env_match = re.match(r'^      -\s+"(.*)"\s*$', lines[index])
+                        if not env_match:
+                            env_match = re.match(r"^      -\s+([^\s#]+)\s*$", lines[index])
                         if not env_match:
                             break
                         models[current_id]["env"].append(env_match.group(1))
                         index += 1
                     continue
-                if raw_value:
-                    models[current_id][field] = parse_scalar(raw_value)
+                if field == "aliases":
+                    if raw_stripped.startswith("["):
+                        parsed_aliases = parse_scalar(raw_stripped)
+                        if isinstance(parsed_aliases, list):
+                            models[current_id]["aliases"].extend(str(a) for a in parsed_aliases)
+                        index += 1
+                        continue
+                    index += 1
+                    while index < len(lines):
+                        alias_match = re.match(r'^      -\s+"([^"]+)"\s*$', lines[index])
+                        if not alias_match:
+                            alias_match = re.match(r"^      -\s+([A-Za-z0-9_.:-]+)\s*$", lines[index])
+                        if not alias_match:
+                            break
+                        models[current_id]["aliases"].append(alias_match.group(1))
+                        index += 1
+                    continue
+                if raw_stripped:
+                    models[current_id][field] = parse_scalar(raw_stripped)
         index += 1
 
     return models
 
 
 def context_from_command(command: str) -> str:
-    match = re.search(r"--ctx-size\s+(\d+)", command)
+    match = re.search(r"(?:--ctx-size|-c)\s+(\d+)", command)
     if not match:
         return "Custom"
     size = int(match.group(1))
     return f"{round(size / 1024)}k" if size >= 1024 else str(size)
 
 
-def benchmark_command(path_value: str) -> str | None:
+def benchmark_command(path_value: str | None) -> str | None:
+    if not path_value:
+        return None
     if Path(path_value).name.startswith("run-"):
         return None
     if path_value.endswith(".py"):
@@ -121,7 +254,7 @@ def profile_evidence(display: dict) -> dict:
         "draftAcceptance": display.get("draftAcceptance"),
         "llamaCppCommit": display.get("llamaCppCommit"),
         "benchmarkCommand": display.get(
-            "benchmarkCommand", benchmark_command(display["benchmark"])
+            "benchmarkCommand", benchmark_command(display.get("benchmark"))
         ),
     }
     missing = [field for field in EVIDENCE_FIELDS if field not in evidence]
@@ -166,16 +299,89 @@ def validate_community_runs(data: dict) -> list[dict]:
     return runs
 
 
+def detect_recipe_kind(model: dict) -> str:
+    cmd = model.get("cmd", "")
+    if "--engine strata" in cmd:
+        if "polystrata" in cmd.lower():
+            return "polystrata"
+        return "strata"
+    return "llama.cpp"
+
+
+def recipe_label_for(kind: str) -> str:
+    if kind in {"strata", "polystrata"}:
+        return "Portable Strata / PolyStrata Recipe"
+    return "Portable llama.cpp command"
+
+
+def _sanitize_path_value(value: str, fallback: str = "/path/to/asset") -> str:
+    if any(marker in value for marker in ("/home/", "/mnt/", "/opt/", ".ts.net", "/root/")):
+        return fallback
+    return value
+
+
+def sanitize_strata_config(raw: dict, kind: str = "strata") -> dict:
+    """Return a public-safe, host-path-free excerpt of a Strata/PolyStrata JSON config."""
+    exe_default = "./vendor/polystrata/build/strata-poly" if kind == "polystrata" else "./vendor/strata-lean/build/strata"
+    raw_args = raw.get("args", [])
+    clean_args: list[str] = []
+    idx = 0
+    while idx < len(raw_args):
+        token = str(raw_args[idx])
+        clean_args.append(token)
+        if token in STRATA_PATH_FLAGS and idx + 1 < len(raw_args):
+            clean_args.append(STRATA_PATH_FLAGS[token])
+            idx += 2
+            continue
+        idx += 1
+    clean_args = [
+        _sanitize_path_value(arg, "/path/to/file") if arg not in STRATA_PATH_FLAGS else arg
+        for arg in clean_args
+    ]
+
+    excerpt: dict = {
+        "exe": exe_default,
+        "args": clean_args,
+    }
+    if isinstance(raw.get("env"), dict) and raw["env"]:
+        excerpt["env"] = dict(raw["env"])
+    if isinstance(raw.get("sampling"), dict) and raw["sampling"]:
+        excerpt["sampling"] = dict(raw["sampling"])
+    if isinstance(raw.get("vision"), dict):
+        v = raw["vision"]
+        clean_vision: dict = {
+            "exe": "./build-vision/bin/strata-vision" if kind == "polystrata" else "./vendor/strata/engine/strata-vision",
+            "mmproj": "/path/to/mmproj-F16.gguf",
+            "model": "/path/to/model.gguf",
+        }
+        for key in ("gpu", "threads", "max_tokens"):
+            if key in v:
+                clean_vision[key] = v[key]
+        excerpt["vision"] = clean_vision
+    for key in (
+        "fit_max_tokens",
+        "reasoning_loop_recovery",
+        "reasoning_close_retry",
+        "reasoning_budget_tokens",
+        "repeat_stop_tokens",
+    ):
+        if key in raw:
+            excerpt[key] = raw[key]
+    return excerpt
+
+
 def portable_command(model: dict) -> str:
     command = model.get("cmd", "")
     command = re.sub(r"(?m)^\s*#.*\n?", "", command).strip()
     replacements = {
         "${cpu_range}": '"$CPU_RANGE"',
+        "${ecores}": '"$ECORES"',
         "${llama_server}": '"$LLAMA_SERVER"',
         "${ik_server}": '"$IK_LLAMA_SERVER"',
         "${qwen_mtp_server}": '"$QWEN_MTP_SERVER"',
         "${sarvam_server}": '"$SARVAM_SERVER"',
         "${PORT}": '"$PORT"',
+        "${inference_port}": '"$PORT"',
         "${chat_template}": '"$CHAT_TEMPLATE_PATH"',
     }
     for source, target in replacements.items():
@@ -185,6 +391,7 @@ def portable_command(model: dict) -> str:
     command = re.sub(r"(?m)(--model\s+)\S+", r'\1"$MODEL_PATH"', command, count=1)
     command = re.sub(r"(?m)(--spec-draft-model\s+)\S+", r'\1"$DRAFT_MODEL_PATH"', command)
     command = re.sub(r"(?m)(--mmproj\s+)\S+", r'\1"$MMPROJ_PATH"', command)
+    command = re.sub(r"(?m)(--config\s+)/(?:home|mnt)/\S+", r'\1"$ENGINE_CONFIG"', command)
     command = command.replace("--host 0.0.0.0", "--host 127.0.0.1")
 
     # New engine macros must not leak into shell snippets as unset lowercase
@@ -193,10 +400,12 @@ def portable_command(model: dict) -> str:
     if "${env.L3MS_ROOT}" in command:
         command = command.replace("${env.L3MS_ROOT}", "${L3MS_ROOT}")
         extra_variables.add("L3MS_ROOT")
+    if "${env.HOME}" in command:
+        command = command.replace("${env.HOME}", "${HOME}")
 
     def portable_macro(match):
         name = match.group(1)
-        if name == "L3MS_ROOT":
+        if name in {"L3MS_ROOT", "HOME"}:
             return match.group(0)
         variable = name.upper()
         extra_variables.add(variable)
@@ -206,11 +415,14 @@ def portable_command(model: dict) -> str:
 
     lines = [line.strip() for line in command.splitlines() if line.strip()]
     shell_command = " \\\n  ".join(lines)
-    preamble = [
-        'MODEL_PATH="/path/to/model.gguf"',
-        'CPU_RANGE="${CPU_RANGE:-0-11}"',
-        'PORT="${PORT:-8080}"',
-    ]
+    preamble = []
+    if "$MODEL_PATH" in shell_command or "--engine strata" not in shell_command:
+        preamble.append('MODEL_PATH="/path/to/model.gguf"')
+    if "$CPU_RANGE" in shell_command or "--engine strata" not in shell_command:
+        preamble.append('CPU_RANGE="${CPU_RANGE:-0-11}"')
+    if "$ECORES" in shell_command:
+        preamble.append('ECORES="${ECORES:-12-15}"')
+    preamble.append('PORT="${PORT:-8080}"')
     preamble.extend(
         f'{variable}="/path/to/{variable.lower()}"'
         for variable in sorted(extra_variables)
@@ -232,6 +444,52 @@ def portable_command(model: dict) -> str:
     for env_value in model.get("env", []):
         preamble.append(f"export {env_value}")
     return "\n".join(preamble) + "\n\n" + shell_command
+
+
+def portable_recipe(
+    model: dict,
+    macros: dict[str, str] | None = None,
+    root: Path = ROOT,
+) -> tuple[str, str, str, dict | None]:
+    """Return (recipe_kind, recipe_label, command_text, engine_config_excerpt)."""
+    kind = detect_recipe_kind(model)
+    label = recipe_label_for(kind)
+    base_command = portable_command(model)
+    if kind not in {"strata", "polystrata"}:
+        return kind, label, base_command, None
+
+    config_excerpt = None
+    cmd_raw = model.get("cmd", "")
+    config_match = re.search(r"--config\s+\$\{([A-Za-z_][A-Za-z_0-9]*)\}", cmd_raw)
+    if config_match and macros:
+        macro_name = config_match.group(1)
+        macro_val = macros.get(macro_name, "")
+        if macro_val:
+            resolved_str = macro_val.replace("${env.L3MS_ROOT}", str(root))
+            config_path = Path(resolved_str)
+            if config_path.is_file():
+                try:
+                    raw_cfg = json.loads(config_path.read_text())
+                    config_excerpt = sanitize_strata_config(raw_cfg, kind=kind)
+                except (OSError, json.JSONDecodeError):
+                    config_excerpt = None
+
+    if not config_excerpt:
+        return kind, label, base_command, None
+
+    env_lines = [
+        f"export {k}={json.dumps(str(v))}"
+        for k, v in sorted(config_excerpt.get("env", {}).items())
+    ]
+    parts = []
+    if env_lines:
+        parts.append("# Active engine runtime switches\n" + "\n".join(env_lines))
+    parts.append("# Launch server\n" + base_command)
+    parts.append(
+        "# Portable engine JSON config excerpt\n"
+        + json.dumps(config_excerpt, indent=2)
+    )
+    return kind, label, "\n\n".join(parts), config_excerpt
 
 
 def public_doc_url(relative: str) -> str:
@@ -268,7 +526,7 @@ def checked_stack_metadata(profiles: list[dict], metadata: dict, lane: str) -> N
             f"stale={stale or 'none'}"
         )
     for profile_id, display in metadata.items():
-        if not isinstance(display, dict) or set(display) - {"guide", "experiment", "modes"}:
+        if not isinstance(display, dict) or set(display) - ALLOWED_STACK_META_KEYS:
             raise SystemExit(f"Invalid {lane} display metadata for {profile_id}")
         public_doc_url(display.get("guide"))
         if display.get("experiment") is not None:
@@ -301,9 +559,15 @@ def media_public_profiles(manifest: dict, metadata: dict) -> list[dict]:
             "id": profile_id,
             "name": profile["name"],
             "runtime": profile["runtime"],
+            "device": profile.get("device", "cuda"),
+            "variant": profile.get("variant", ""),
             "status": profile["status"],
             "tasks": profile["tasks"],
             "modes": display.get("modes", []),
+            "tier": display.get("tier", "burst"),
+            "role": display.get("role", ""),
+            "vramGb": display.get("vramGb"),
+            "ramGb": display.get("ramGb"),
             "sourceUrl": profile_source_url(MEDIA_MANIFEST, profile_id),
             "guideUrl": public_doc_url(display["guide"]),
             "experimentUrl": public_doc_url(display["experiment"]) if display.get("experiment") else None,
@@ -327,12 +591,18 @@ def decision_public_profiles(manifest: dict, metadata: dict) -> list[dict]:
         if entrypoint.is_absolute() or ".." in entrypoint.parts or not (DECISION_MANIFEST.parent / entrypoint).is_file():
             raise SystemExit(f"Invalid decision entrypoint for {profile_id}")
         display = metadata[profile_id]
+        kind = "hosted" if profile["type"] == "api" else "local"
         public.append({
             "id": profile_id,
             "name": profile["name"],
             "engine": profile["engine"],
-            "kind": "hosted" if profile["type"] == "api" else "local",
+            "backbone": profile.get("backbone", ""),
+            "kind": kind,
             "device": profile.get("device", "unspecified"),
+            "tier": display.get("tier", "remote" if kind == "hosted" else "burst"),
+            "role": display.get("role", ""),
+            "vramGb": profile.get("vram_gb"),
+            "ramGb": 0.0 if kind == "hosted" else (1.0 if profile.get("vram_gb", 0) else 1.5),
             "declaredLatencyMs": profile.get("expected_latency_ms"),
             "sourceUrl": profile_source_url(DECISION_MANIFEST, profile_id),
             "guideUrl": public_doc_url(display["guide"]),
@@ -341,15 +611,52 @@ def decision_public_profiles(manifest: dict, metadata: dict) -> list[dict]:
     return public
 
 
+def embedding_public_profiles(parsed: dict[str, dict], groups: dict[str, dict]) -> list[dict]:
+    co_resident_ids = set()
+    for group in groups.values():
+        if group.get("exclusive") is False or group.get("swap") is False:
+            co_resident_ids.update(group.get("members", []))
+    public = []
+    for model_id, source in parsed.items():
+        cmd = source.get("cmd", "")
+        if not cmd or source.get("unlisted", False) or "--embedding" not in cmd:
+            continue
+        is_coresident = model_id in co_resident_ids or "--n-gpu-layers 0" in cmd
+        public.append({
+            "id": model_id,
+            "name": source.get("name", model_id),
+            "description": source.get("description", ""),
+            "engine": "llama.cpp-master",
+            "tier": "co-resident" if is_coresident else "burst",
+            "device": "cpu" if "--n-gpu-layers 0" in cmd else "cuda",
+            "context": context_from_command(cmd),
+            "vramGb": 0.0 if "--n-gpu-layers 0" in cmd else 1.0,
+            "ramGb": 0.6,
+            "recipeKind": "llama.cpp",
+            "recipeLabel": "Portable llama.cpp command",
+            "command": portable_command(source),
+            "sourceUrl": SOURCE_BASE + "llama-swap.yaml",
+        })
+    return public
+
+
 def main() -> None:
-    parsed = parse_models(CONFIG.read_text())
+    config_text = CONFIG.read_text()
+    parsed = parse_models(config_text)
+    macros = parse_macros(config_text)
+    groups = parse_groups(config_text)
+    preloaded = parse_preload(config_text)
+
     meta = json.loads(META.read_text())
+    engines_meta = json.loads(ENGINES_META.read_text()) if ENGINES_META.is_file() else {}
     community_runs = validate_community_runs(json.loads(COMMUNITY_RUNS.read_text()))
     stack_meta = json.loads(STACK_META.read_text())
     media = media_public_profiles(json.loads(MEDIA_MANIFEST.read_text()), stack_meta["media"])
     decision_manifest = json.loads(DECISION_MANIFEST.read_text())
     decisions = decision_public_profiles(decision_manifest, stack_meta["decisions"])
-    # Router declarations for native decisions belong in the Decisions view,
+    embeddings = embedding_public_profiles(parsed, groups)
+
+    # Router declarations for native decisions belong in the Decisions lane,
     # never in the token-generation ranking.
     native_decision_ids = {
         profile["model"] for profile in decision_manifest["profiles"]
@@ -361,8 +668,8 @@ def main() -> None:
         for model_id, model in parsed.items()
         if model.get("cmd")
         and not model.get("unlisted", False)
-        # The public leaderboard measures token generation. Utility embedding
-        # profiles remain discoverable through llama-swap but do not have TPS.
+        # Utility embedding profiles remain discoverable in the embeddings lane
+        # and never enter the token-generation ranking.
         and "--embedding" not in model.get("cmd", "")
         and model_id not in native_decision_ids
         # llama-swap-managed media engines (reserved *_auto ids) are not LLMs.
@@ -388,31 +695,55 @@ def main() -> None:
         context = context_from_command(source.get("cmd", ""))
         if context == "Custom" and display.get("testedContext"):
             context = display["testedContext"]
+        recipe_kind, recipe_label, command_text, config_excerpt = portable_recipe(
+            source, macros=macros, root=ROOT
+        )
+        aliases = source.get("aliases", [])
+        is_preload = bool(display.get("preload")) or model_id in preloaded
+
         if display.get("tps") is None:
             unmeasured.append(
                 {
                     "id": model_id,
                     "name": display.get("displayName", source.get("name", model_id)),
                     "description": display.get("summary", source.get("description", "")),
+                    "role": display.get("role", ""),
+                    "tier": display.get("tier", "burst"),
+                    "engine": display.get("engine", recipe_kind),
+                    "modalities": display.get("modalities", ["Language"]),
+                    "vramGb": display.get("vramGb"),
+                    "ramGb": display.get("ramGb"),
+                    "diskGb": display.get("diskGb"),
+                    "nvmeStream": display.get("nvmeStream"),
                     "context": context,
                     "quant": display.get("quant"),
                     "tags": display.get("tags", []),
-                    "command": portable_command(source),
-                    "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/llama-swap.yaml",
+                    "aliases": aliases,
+                    "recipeKind": recipe_kind,
+                    "recipeLabel": recipe_label,
+                    "command": command_text,
+                    "engineConfig": config_excerpt,
+                    "sourceUrl": SOURCE_BASE + "llama-swap.yaml",
                 }
             )
             continue
+
         public_models.append(
             {
                 **display,
                 "id": model_id,
                 "name": display.get("displayName", source.get("name", model_id)),
                 "description": display.get("summary", source.get("description", "")),
+                "preload": is_preload,
+                "aliases": aliases,
                 "context": context,
                 "evidence": profile_evidence(display),
-                "command": portable_command(source),
-                "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/llama-swap.yaml",
-                "benchmarkUrl": f"https://github.com/carteakey/l3ms/blob/main/{display['benchmark']}",
+                "recipeKind": recipe_kind,
+                "recipeLabel": recipe_label,
+                "command": command_text,
+                "engineConfig": config_excerpt,
+                "sourceUrl": SOURCE_BASE + "llama-swap.yaml",
+                "benchmarkUrl": f"{SOURCE_BASE}{display['benchmark']}",
             }
         )
 
@@ -421,12 +752,20 @@ def main() -> None:
         "generatedAt": meta["updated"],
         "system": meta["system"],
         "methodology": meta["methodology"],
+        "preloadedModels": preloaded,
+        "spotlight": meta.get("spotlight", []),
         "models": public_models,
         "unmeasured": unmeasured,
+        "embeddings": embeddings,
         "media": media,
         "decisions": decisions,
+        "engines": engines_meta,
+        "roofline": meta.get("roofline", {}),
+        "colabBurst": meta.get("colabBurst", {}),
+        "hardwareTuning": meta.get("hardwareTuning", {}),
         "benchmarks": meta["benchmarks"],
         "progression": meta.get("progression", []),
+        "inklingProgression": meta.get("inklingProgression", []),
         # Deliberately separate from models: community hardware must never
         # enter the local RTX 4070 ranking or its sort order.
         "communityRuns": community_runs,
@@ -436,7 +775,11 @@ def main() -> None:
         "// Generated by docs/generate_dashboard_data.py. Do not edit by hand.\n"
         f"window.L3MS_DASHBOARD = {json.dumps(payload, indent=2)};\n"
     )
-    print(f"Generated {OUTPUT.relative_to(ROOT)} with {len(public_models)} measured and {len(unmeasured)} unmeasured served profiles")
+    print(
+        f"Generated {OUTPUT.relative_to(ROOT)} with {len(public_models)} measured, "
+        f"{len(unmeasured)} unmeasured, {len(embeddings)} embedding, "
+        f"{len(media)} media, and {len(decisions)} decision profiles"
+    )
 
 
 if __name__ == "__main__":

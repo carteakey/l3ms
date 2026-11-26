@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import re
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -71,10 +72,34 @@ class DashboardDataTest(unittest.TestCase):
         metadata = json.loads((ROOT / "docs" / "dashboard-meta.json").read_text())
         self.assertEqual(active, set(metadata["models"]))
 
+    def test_parse_models_handles_native_aliases_blocks_and_inline_lists(self):
+        sample = """
+macros:
+  "cpu_range": "0-11"
+
+models:
+  "qwen38-flash-next-plat":
+    name: "Qwen Plat"
+    aliases:
+      - "strata"
+      - "plat"
+    cmd: |
+      taskset -c ${cpu_range} ${strata_python} --engine strata --config ${strata_ud_iq2_config}
+  "inkling-2-mini":
+    name: "Inkling 2 Mini"
+    aliases: ["inkling-2-mini-128k", "inkling"]
+    cmd: >-
+      taskset -c ${cpu_range} ${strata_python} --engine strata --config ${polystrata_inkling2_config}
+"""
+        parsed = dashboard.parse_models(sample)
+        self.assertEqual(parsed["qwen38-flash-next-plat"]["aliases"], ["strata", "plat"])
+        self.assertEqual(parsed["inkling-2-mini"]["aliases"], ["inkling-2-mini-128k", "inkling"])
+        self.assertIn("--engine strata", parsed["inkling-2-mini"]["cmd"])
+
     def test_unmeasured_profiles_are_listed_but_never_ranked(self):
         meta = json.loads((ROOT / "docs" / "dashboard-meta.json").read_text())
         unmeasured_ids = {k for k, v in meta["models"].items() if v.get("tps") is None}
-        self.assertTrue(unmeasured_ids, "fixture expects at least one unmeasured profile")
+        self.assertGreaterEqual(len(unmeasured_ids), 3)
         text = (ROOT / "docs" / "generated-models.js").read_text()
         payload = json.loads(text.split("window.L3MS_DASHBOARD = ", 1)[1].rsplit(";", 1)[0])
         ranked = {m["id"] for m in payload["models"]}
@@ -85,6 +110,7 @@ class DashboardDataTest(unittest.TestCase):
         for item in payload["unmeasured"]:
             self.assertNotIn("tps", item)
             self.assertNotIn("/home/", item["command"])
+            self.assertNotIn("/mnt/", item["command"])
 
     def test_every_local_profile_has_complete_evidence_shape(self):
         meta = json.loads((ROOT / "docs" / "dashboard-meta.json").read_text())
@@ -107,16 +133,81 @@ class DashboardDataTest(unittest.TestCase):
         self.assertNotIn("${env.", snippet)
         self.assertIn('"$MODEL_PATH"', snippet)
 
+    def test_engine_aware_portable_recipes_for_strata_and_fallback(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            cfg_path = tmp / "poly.json"
+            cfg_path.write_text(json.dumps({
+                "exe": "/home/user/vendor/polystrata/build/strata-poly",
+                "args": ["--model", "/mnt/dev/models/inkling.gguf", "--kv", "fp8", "--vram-pool"],
+                "env": {"STRATA_PREFILL_NVFP4": "w4a8"},
+                "allowed_hosts": ["yeti-cachy.llama-alnair.ts.net", "100.110.126.24"],
+                "log": "/home/user/polystrata.log",
+            }))
+            model = {
+                "cmd": "taskset -c ${cpu_range} ${strata_python} ${polystrata_server} --engine strata --config ${poly_cfg} --port ${inference_port}",
+                "env": [],
+            }
+            kind, label, snippet, excerpt = dashboard.portable_recipe(
+                model,
+                macros={"poly_cfg": str(cfg_path)},
+                root=tmp,
+            )
+            self.assertEqual(kind, "polystrata")
+            self.assertEqual(label, "Portable Strata / PolyStrata Recipe")
+            self.assertIsNotNone(excerpt)
+            self.assertIn('export STRATA_PREFILL_NVFP4="w4a8"', snippet)
+            for forbidden in ("/home/", "/mnt/", ".ts.net", "100.110."):
+                self.assertNotIn(forbidden, snippet)
+
+            # Fallback when JSON config does not exist locally (e.g. CI without vendor/)
+            kind2, label2, snippet2, excerpt2 = dashboard.portable_recipe(
+                model,
+                macros={"poly_cfg": str(tmp / "missing.json")},
+                root=tmp,
+            )
+            self.assertEqual(kind2, "polystrata")
+            self.assertEqual(label2, "Portable Strata / PolyStrata Recipe")
+            self.assertIsNone(excerpt2)
+            self.assertIn('"$POLY_CFG"', snippet2)
+
     def test_published_commands_do_not_include_host_paths_or_router_macros(self):
-        parsed = dashboard.parse_models((ROOT / "llama-swap.yaml").read_text())
+        config_text = (ROOT / "llama-swap.yaml").read_text()
+        parsed = dashboard.parse_models(config_text)
+        macros = dashboard.parse_macros(config_text)
         meta = json.loads((ROOT / "docs" / "dashboard-meta.json").read_text())
         for profile_id in meta["models"]:
             with self.subTest(profile=profile_id):
-                snippet = dashboard.portable_command(parsed[profile_id])
-                self.assertNotIn("/home/", snippet)
-                self.assertNotIn("${env.", snippet)
-                self.assertNotIn("${qwen", snippet)
-                self.assertNotIn("${strata", snippet)
+                kind, label, snippet, _ = dashboard.portable_recipe(parsed[profile_id], macros=macros, root=ROOT)
+                for forbidden in ("/home/", "/mnt/", ".ts.net", "${env.", "${qwen", "${strata", "${polystrata"):
+                    self.assertNotIn(forbidden, snippet)
+                if kind in {"strata", "polystrata"}:
+                    self.assertEqual(label, "Portable Strata / PolyStrata Recipe")
+                else:
+                    self.assertEqual(label, "Portable llama.cpp command")
+
+    def test_confirmed_stack_facts_and_zero_legacy_naming(self):
+        html = (ROOT / "docs" / "index.html").read_text()
+        js = (ROOT / "docs" / "generated-models.js").read_text()
+        for label, text in (("index.html", html), ("generated-models.js", js)):
+            with self.subTest(file=label):
+                self.assertIsNone(re.search(r"l2m2|l3ds", text, re.IGNORECASE))
+                self.assertNotIn("/home/", text)
+                self.assertNotIn(".ts.net", text)
+
+        payload = json.loads(js.split("window.L3MS_DASHBOARD = ", 1)[1].rsplit(";", 1)[0])
+        by_id = {m["id"]: m for m in payload["models"]}
+        self.assertEqual(by_id["qwen38-flash-next-plat"]["tps"], 73.0)
+        self.assertTrue(by_id["qwen38-flash-next-plat"]["preload"])
+        self.assertEqual(by_id["inkling-2-mini"]["tps"], 77.5)
+        self.assertEqual(by_id["inkling-2-mini"]["editTps"], 99.7)
+        self.assertEqual(by_id["inkling-2-mini-llama"]["tps"], 68.7)
+        self.assertEqual(by_id["qwen3-8-27b-iq3-xxs"]["ramGb"], 0.0)
+        self.assertNotIn("Preload", by_id["gemma-4-26b-qat-mtp"]["tags"])
+        self.assertNotIn("startup preload", by_id["gemma-4-26b-qat-mtp"]["description"].lower())
+        self.assertEqual(len(payload["engines"]["engines"]), 9)
+        self.assertGreaterEqual(len(payload["inklingProgression"]), 8)
+        self.assertEqual(payload["roofline"]["hardwareBaselines"][0]["measured"], 455.8)
 
     def test_community_run_requires_reproducibility_fields(self):
         run = valid_community_run()
@@ -171,9 +262,7 @@ class DashboardDataTest(unittest.TestCase):
             self.assertNotIn("tps", profile)
 
     def test_stack_metadata_must_match_native_manifests_and_safe_paths(self):
-        manifest = json.loads(
-            (ROOT / "media-runtimes.json").read_text()
-        )
+        manifest = json.loads((ROOT / "media-runtimes.json").read_text())
         metadata = json.loads((ROOT / "docs" / "stack-meta.json").read_text())["media"]
         missing = dict(metadata)
         missing.pop("breeze-tts-2")
@@ -194,16 +283,20 @@ class DashboardDataTest(unittest.TestCase):
         self.assertIn("voice-quality evaluation", text)
         self.assertIn("standard text-only speech", text)
 
-    def test_site_has_separate_lane_panels_and_explicit_evidence_labels(self):
+    def test_site_has_five_crisp_tabs_and_explicit_evidence_labels(self):
         html = (ROOT / "docs" / "index.html").read_text()
-        for lane in ("models", "media", "decisions"):
-            with self.subTest(lane=lane):
-                self.assertIn(f'data-tab="{lane}"', html)
-                self.assertIn(f'id="{lane}-panel"', html)
-                self.assertIn(f'id="{lane}-tab" role="tab" aria-controls="{lane}-panel"', html)
-                self.assertIn(f'id="{lane}-panel" role="tabpanel" aria-labelledby="{lane}-tab"', html)
+        for tab in ("stack", "engines", "roofline", "hardware", "archive"):
+            with self.subTest(tab=tab):
+                self.assertIn(f'data-tab="{tab}"', html)
+                self.assertIn(f'id="{tab}-panel"', html)
+                self.assertIn(f'id="{tab}-tab" role="tab" aria-controls="{tab}-panel"', html)
+                self.assertIn(f'id="{tab}-panel" role="tabpanel" aria-labelledby="{tab}-tab"', html)
         self.assertIn('id="media-list"', html)
         self.assertIn('id="decision-list"', html)
+        self.assertIn('id="engines-grid"', html)
+        self.assertIn('id="evolution-svg"', html)
+        self.assertIn('id="roofline-bars-svg"', html)
+        self.assertIn('id="roofline-ctx-svg"', html)
         self.assertIn('role="tablist"', html)
         self.assertIn('event.key === "ArrowRight"', html)
         self.assertIn("not a claim that its model is installed", html)
