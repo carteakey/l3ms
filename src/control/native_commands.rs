@@ -127,7 +127,7 @@ pub struct NativeCommandRecipe {
     pub executable: PathBuf,
     pub argv: Vec<CommandArgument>,
     pub cwd: PathBuf,
-    /// Present only for the L3DS decision runner's bounded `--input-stdin`
+    /// Present only for the decision runner's bounded `--input-stdin`
     /// contract. The caller must pipe this payload without logging it.
     pub stdin_payload: Option<SensitivePayload>,
     pub expectation: NativeOutputExpectation,
@@ -152,7 +152,7 @@ impl fmt::Debug for NativeCommandRecipe {
 
 /// Refresh and validate a request, verify its current native entrypoint, and
 /// prepare an argv recipe for a supported media script, Breeze speech mode, or
-/// L3DS decision. Catalog route metadata is refreshed again after path
+/// local decision. Catalog route metadata is refreshed again after path
 /// verification; a changed runtime identity is rejected so the caller cannot
 /// reuse a stale resource reservation.
 pub fn prepare_native_command(

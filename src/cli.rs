@@ -914,7 +914,10 @@ fn direct_comfy_adapter_from_environment() -> Result<crate::control::comfy::Comf
     }
 
     let scoped_jobs = optional_environment_value("L3MS_COMFY_SCOPED_JOBS")?;
-    let endpoint = optional_environment_value("L2M2_COMFY_URL")?;
+    let endpoint = match optional_environment_value("L3MS_COMFY_URL")? {
+        Some(endpoint) => Some(endpoint),
+        None => optional_environment_value("L2M2_COMFY_URL")?,
+    };
     let api_key = optional_environment_value("L3MS_COMFY_API_KEY")?;
     let (router_endpoint, router_api_key) = if endpoint.is_none() {
         (

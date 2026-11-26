@@ -1,6 +1,6 @@
 # L3DS phase 0/1 preparation
 
-Recorded 2026-09-28 for the [consolidation plan](../monorepo-consolidation-plan.md).
+Recorded 2026-09-28 for the [consolidation plan](../.archive/monorepo-consolidation-plan.md).
 This is L3DS-only preparation evidence; it does not complete the repository-wide
 Phase 0 gate.
 
