@@ -152,7 +152,7 @@ impl SpeechMode {
 pub enum MediaInput {
     /// A native ComfyUI graph, kept as a graph rather than a universal prompt.
     Workflow { task: Task, graph: Value },
-    /// Arguments for the native L2M2 profile script. Never persist these.
+    /// Arguments for the native media profile script. Never persist these.
     Script { task: Task, args: Vec<String> },
     /// Breeze-style speech parameters; the adapter chooses native flags.
     Speech(SpeechInput),

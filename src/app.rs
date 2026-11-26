@@ -5278,23 +5278,29 @@ impl App {
                 "Set L3MS_COMFY_SCOPED_JOBS=1 only after confirming canonical Comfy job IDs and atomic scoped cancellation",
             );
         }
-        let endpoint = match env::var("L2M2_COMFY_URL") {
+        let endpoint = match env::var("L3MS_COMFY_URL") {
             Ok(endpoint) => endpoint,
-            Err(env::VarError::NotPresent) => {
-                let client = self
-                    .chat_client
-                    .as_ref()
-                    .ok_or("Connect Chat before running a routed Comfy workflow")?;
-                if self.chat_endpoint_committed.as_deref() != Some(client.base_url()) {
-                    return Err("Reconnect Chat to confirm the Comfy router endpoint");
-                }
-                return client
-                    .comfy_adapter()
-                    .map_err(|_| "The confirmed Comfy router connection is invalid");
-            }
             Err(env::VarError::NotUnicode(_)) => {
                 return Err("The configured Comfy endpoint is invalid");
             }
+            Err(env::VarError::NotPresent) => match env::var("L2M2_COMFY_URL") {
+                Ok(endpoint) => endpoint,
+                Err(env::VarError::NotPresent) => {
+                    let client = self
+                        .chat_client
+                        .as_ref()
+                        .ok_or("Connect Chat before running a routed Comfy workflow")?;
+                    if self.chat_endpoint_committed.as_deref() != Some(client.base_url()) {
+                        return Err("Reconnect Chat to confirm the Comfy router endpoint");
+                    }
+                    return client
+                        .comfy_adapter()
+                        .map_err(|_| "The confirmed Comfy router connection is invalid");
+                }
+                Err(env::VarError::NotUnicode(_)) => {
+                    return Err("The configured Comfy endpoint is invalid");
+                }
+            },
         };
         let api_key = match env::var("L3MS_COMFY_API_KEY") {
             Ok(api_key) => Some(api_key),

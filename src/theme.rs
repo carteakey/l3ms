@@ -1,6 +1,6 @@
 //! Signal / 03 theme: ink-blue graphite surfaces, phosphor-mint focus, and one
 //! accent per lane (language = phosphor, media = mineral cyan, decisions = amber).
-//! See `docs/interface-direction.md`. Accents mark location, never runtime state;
+//! See `docs/.archive/interface-direction.md`. Accents mark location, never runtime state;
 //! state always carries a text label as well.
 
 use ratatui::style::{Color, Modifier, Style};

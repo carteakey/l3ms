@@ -391,7 +391,7 @@ impl JobHistory {
         anyhow::ensure!(
             job.kind == "cross-toolkit"
                 && job.status == "running"
-                && job.metadata.toolkit.as_deref() == Some("l2m2")
+                && matches!(job.metadata.toolkit.as_deref(), Some("media" | "l2m2"))
                 && job.metadata.result_state.as_deref() == Some("running")
                 && job.metadata.profile.is_some()
                 && job.metadata.task.is_some()

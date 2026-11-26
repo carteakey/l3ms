@@ -1,6 +1,6 @@
 # L2M2 Phase 0/1 preparation
 
-Recorded 2026-09-28 for the [consolidation plan](../monorepo-consolidation-plan.md).
+Recorded 2026-09-28 for the [consolidation plan](../.archive/monorepo-consolidation-plan.md).
 This evidence covers L2M2 only; it does not complete the repository-wide Phase 0 gate.
 
 ## Decision

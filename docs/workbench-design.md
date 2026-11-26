@@ -1,7 +1,7 @@
 # Workbench design: sidebar, toolbar, tabs, sections
 
 Proposal, 2026-10-15. Not implemented. Supersedes the tab layout; keeps the
-Signal / 03 look from [interface direction](interface-direction.md).
+Signal / 03 look from [interface direction](.archive/interface-direction.md).
 
 ## Problem
 
@@ -174,4 +174,4 @@ What each frontend adds:
 - Should Tune expose every flag or only a curated set per engine (today's
   `param_registry.rs` is the curated set)?
 
-Implementation steps, gates and system monitoring: [workbench plan](workbench-plan.md).
+Implementation steps, gates and system monitoring: [workbench plan](.archive/workbench-plan.md).

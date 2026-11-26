@@ -593,8 +593,8 @@ pub fn validate_job_metadata(metadata: &JobMetadata) -> Vec<String> {
         if !is_canonical_lower_hex_uuid(candidate) {
             errors.push("comfy_dispatch_candidate must be a canonical lowercase UUID".to_owned());
         }
-        if metadata.toolkit.as_deref() != Some("l2m2") {
-            errors.push("comfy_dispatch_candidate requires the l2m2 toolkit".to_owned());
+        if !matches!(metadata.toolkit.as_deref(), Some("media" | "l2m2")) {
+            errors.push("comfy_dispatch_candidate requires the media toolkit".to_owned());
         }
         for (field, value) in [
             ("profile", metadata.profile.as_deref()),
