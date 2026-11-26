@@ -4,7 +4,7 @@ Agent and contributor guide for `L3MS` (RTX 4070 12 GB `sm_89` + i5-12600K + 64 
 
 ## Scope & Lanes
 
-One product, three lanes, served by shared engines (`l2m2` and `l3ds` folded in on 2026-10-15; historical guides in `docs/migration/history/`). Direct scripts are a last resort (only Blender headless); see `docs/migration/runtime-policy.md`.
+One product, three lanes (Language, Media, Decisions), served by shared engines (historical migration guides in `docs/migration/history/`). Direct scripts are a last resort (only Blender headless); see `docs/migration/runtime-policy.md`.
 
 - **Language:** Rust workbench (`src/`), `llama-swap`, `Strata` (`strata-lean`), `PolyStrata` (`polystrata-4070`), and `llama.cpp`. `llama-swap.yaml` is the serving source of truth.
 - **Media:** `media-runtimes.json`, `media-models/`, `workflows/`, `maintenance/`. Images/video run on ComfyUI (`comfyui_auto`), speech/music on `audio.cpp` (`audiocpp_auto`) via `llama-swap` (start at `docs/media-models.md` and `docs/migration/media-through-llama-swap.md`):
@@ -28,12 +28,12 @@ One product, three lanes, served by shared engines (`l2m2` and `l3ds` folded in 
 
 - **Strata Anti-Bloat Policy:** Never blindly rebase or re-slice `carteakey/strata-lean` (`vendor/strata-lean`, branch `strata-lean`) onto upstream. Keep it lean Ada `sm_89` for Qwen3.8-Flash-Next (`vendor/polystrata` is separate for Inkling 2 Mini). Headroom hierarchy: 1. runtime switches; 2. isolated CUDA kernel cherry-picks; 3. re-slicing is rejected.
 - **Serve / bench parity & guardrails:** Keep `llama-swap.yaml` and `bench-models/*.sh` aligned. Run `python3 maintenance/check-serving-configs.py --local-paths` after editing `llama-swap.yaml` or Strata/PolyStrata JSON configs.
-- **Snapshots & downloads:** Snapshot `llama-swap.yaml` (`llama-swap.yaml.bak-YYYYmmdd-HHMMSS`) before edits. Preserve existing files by default on downloads.
+- **Snapshots & downloads:** Snapshot `llama-swap.yaml` into `.local/backups/` (`.local/backups/llama-swap.yaml.bak-YYYYmmdd-HHMMSS`) before edits. Preserve existing files by default on downloads.
 - **Disk checks:** Use `df -hlT` (local filesystems only) on KPC so dead/unreachable NFS mounts never hang the check.
 
 ## llama-swap Operations
 
-- Always pass `--user` to `systemctl` (`systemctl --user is-active llama-swap.service`). Router listens on `:8080`; all 32 mutually exclusive LLM profiles bind `0.0.0.0:8089` (`inference_port: "8089"`) so Strata/PolyStrata Web UI is always reachable at `http://yeti-cachy.llama-alnair.ts.net:8089/` (with `allowed_hosts` configured in every Strata/PolyStrata JSON).
+- Always pass `--user` to `systemctl` (`systemctl --user is-active llama-swap.service`). Router listens on `:8080`; all mutually exclusive LLM and decision profiles bind `0.0.0.0:8089` (`inference_port: "8089"`) so Strata/PolyStrata Web UI is always reachable at `http://yeti-cachy.llama-alnair.ts.net:8089/` (with `allowed_hosts` configured in every Strata/PolyStrata JSON).
 - **Use `maintenance/l3ms-ctl.sh`** (`health`, `models`, `wake <id>`, `smoke <id>`, `ui-check`, `restart`) so `LLAMA_SWAP_API_KEY` is read in-process from the systemd unit and never echoed or passed inline on command lines.
 - **Reload caveat on fixed port `8089`:** Prefer `systemctl --user restart llama-swap.service` over `kill -HUP $(pgrep '[l]lama-swap')` whenever a model is resident on `:8089` (`SIGHUP` can start the new preload before the old server releases port `8089`).
 - **Full-VRAM experiments:** `systemctl --user stop llama-swap.service`, run the experiment, then `systemctl --user start llama-swap.service`.

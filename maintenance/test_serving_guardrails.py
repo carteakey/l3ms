@@ -76,6 +76,73 @@ class ServingConfigValidatorTests(unittest.TestCase):
             self.assertIn("--host 0.0.0.0", joined)
             self.assertIn("allowed_hosts", joined)
 
+    def test_aliases_and_co_resident_group_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            troot = Path(tmp)
+            (troot / "llama-swap.yaml").write_text(
+                'macros:\n'
+                '  "inference_port": "8089"\n'
+                '  "ecores": "12-15"\n'
+                'models:\n'
+                '  "primary-llm":\n'
+                '    aliases:\n'
+                '      - "fast"\n'
+                '      - "default"\n'
+                '    proxy: http://127.0.0.1:${inference_port}\n'
+                '    cmd: |\n'
+                '      llama-server --host 0.0.0.0 --port ${inference_port}\n'
+                '  "embed-util":\n'
+                '    cmd: |\n'
+                '      taskset -c ${ecores} llama-server --embedding --host 0.0.0.0 --port ${PORT}\n'
+                'groups:\n'
+                '  co-resident:\n'
+                '    swap: false\n'
+                '    exclusive: false\n'
+                '    members:\n'
+                '      - "embed-util"\n',
+                encoding="utf-8",
+            )
+            errors = check_serving.validate_configs(root=troot, local_paths=False)
+            self.assertEqual(errors, [])
+
+    def test_duplicate_alias_and_collision_and_bad_group_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            troot = Path(tmp)
+            (troot / "llama-swap.yaml").write_text(
+                'macros:\n'
+                '  "inference_port": "8089"\n'
+                'models:\n'
+                '  "model-a":\n'
+                '    aliases:\n'
+                '      - "shared-alias"\n'
+                '      - "model-b"\n'
+                '    proxy: http://127.0.0.1:${inference_port}\n'
+                '    cmd: |\n'
+                '      llama-server --host 0.0.0.0 --port ${inference_port}\n'
+                '  "model-b":\n'
+                '    aliases:\n'
+                '      - "shared-alias"\n'
+                '    proxy: http://127.0.0.1:${inference_port}\n'
+                '    cmd: |\n'
+                '      llama-server --host 0.0.0.0 --port ${inference_port}\n'
+                'groups:\n'
+                '  co-resident:\n'
+                '    swap: false\n'
+                '    exclusive: false\n'
+                '    members:\n'
+                '      - "model-b"\n'
+                '      - "shared-alias"\n'
+                '      - "ghost-model"\n',
+                encoding="utf-8",
+            )
+            errors = check_serving.validate_configs(root=troot, local_paths=False)
+            joined = "\n".join(errors)
+            self.assertIn("collides with existing model ID", joined)
+            self.assertIn("duplicate alias 'shared-alias'", joined)
+            self.assertIn("non-exclusive member 'model-b' must not bind shared ${inference_port}", joined)
+            self.assertIn("member 'shared-alias' is an alias", joined)
+            self.assertIn("unknown member 'ghost-model'", joined)
+
 
 if __name__ == "__main__":
     unittest.main()
