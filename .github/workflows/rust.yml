@@ -38,8 +38,10 @@ jobs:
         run: python3 -m unittest discover -s decision-models -p 'test_*.py'
       - name: Check bounded acceptance harness without services or models
         run: python3 maintenance/probe-breeze-acceptance.py --self-test
+      - name: Check serving config invariants
+        run: python3 maintenance/check-serving-configs.py
       - name: Check shell syntax
         run: |
-          for script in media-models/*.sh maintenance/*.sh; do
+          for script in media-models/*.sh maintenance/*.sh bench-models/*.sh; do
             bash -n "$script"
           done

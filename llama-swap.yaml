@@ -26,6 +26,7 @@ globalTTL: 600
 sendLoadingState: true
 
 macros:
+  "inference_port":        "8089"
   # --- binary paths ---
   "llama_server":  "${env.L3MS_ROOT}/vendor/llama.cpp/build/bin/llama-server"
   "ik_server":     "${env.L3MS_ROOT}/vendor/ik_llama.cpp/build/bin/llama-server"
@@ -51,6 +52,12 @@ macros:
   "strata_ple_q8_config":  "${env.L3MS_ROOT}/vendor/strata-lean/strata-ud-iq2_xs-ple_q8.json"
   # humanizer: master binary with full Gemma 4 support & jinja chat template
   "humanizer_server":      "${env.L3MS_ROOT}/vendor/llama.cpp-master/build/bin/llama-server"
+  # master binary (b12621+): Nemotron 3.5 Bolt (nemotron_h_moe + DFlash) & general latest mainline models
+  "llama_master_server":   "${env.L3MS_ROOT}/vendor/llama.cpp-master/build/bin/llama-server"
+  # inkling2: custom lean Ada sm_89 llama.cpp build (fallback) + PolyStrata strata-poly (primary, 256k elastic)
+  "inkling2_server":            "${env.L3MS_ROOT}/vendor/llama.cpp-inkling2-lean/build/bin/llama-server"
+  "polystrata_server":          "${env.L3MS_ROOT}/vendor/polystrata/terminal/serve/server.py"
+  "polystrata_inkling2_config": "${env.L3MS_ROOT}/vendor/polystrata/polystrata-inkling2-256k.json"
 
   # media engines owned by llama-swap (reserved model ids audiocpp_auto / comfyui_auto)
   "audiocpp_server":       "${env.L3MS_ROOT}/vendor/audio.cpp-955c872/build/bin/audiocpp_server"
@@ -71,6 +78,7 @@ models:
     description: "Native decision model: choice / noul (yes-no) / score questions answered with probabilities via POST /v1/systemone (TypeSafe System One API). Image input via `images` data URLs (up to 1.6 MP each). Non-causal: whole prompt (images + state + question) must fit one ubatch, so ub = ctx = 8192 (~4 full-size images). 11.5 GB VRAM. Warm: ~0.11 s text (3 questions), ~1.7 s with one 1024x768 image + 4 questions (each question re-reads the image: 3.4k tokens)."
     metadata:
       task: decision
+    proxy: http://127.0.0.1:${inference_port}
     cmd: |
       taskset -c ${cpu_range} ${d3_server}
       -m /home/kchauhan/models/ggml-org/vllm-d3-flash-GGUF/vllm-d3-flash-Q8_0.gguf
@@ -80,13 +88,14 @@ models:
       -c 8192 --parallel 1
       -b 8192 -ub 8192
       -t 10 --threads-batch 12 --prio 2
-      --host 0.0.0.0 --port ${PORT}
+      --host 0.0.0.0 --port ${inference_port}
 
   "cloudflare-clef-flash":
     name: "Cloudflare Clef-Flash 9B Decision (Q4_K_M + mmproj-BF16, text+image)"
     description: "Native decision model (clef): all questions of a request decided jointly in one pass, so images are read once. POST /v1/systemone with the model in the JSON body. Clef server is decision-only (no text generation). Whole prompt must fit one ubatch: ub = ctx = 8192. 8.9 GB VRAM. Warm: ~0.09 s text (3 questions), ~0.5 s with one 1024x768 image + 4 questions (1.1k tokens)."
     metadata:
       task: decision
+    proxy: http://127.0.0.1:${inference_port}
     cmd: |
       taskset -c ${cpu_range} ${d3_server}
       -m /home/kchauhan/models/ggml-org/Clef-Flash-GGUF/Clef-Flash-Q4_K_M.gguf
@@ -96,7 +105,7 @@ models:
       -c 8192 --parallel 1
       -b 8192 -ub 8192
       -t 10 --threads-batch 12 --prio 2
-      --host 0.0.0.0 --port ${PORT}
+      --host 0.0.0.0 --port ${inference_port}
 
   # ===========================================================================
   # Media engines. llama-swap swaps these like any model: /audiocpp/ and
@@ -349,192 +358,222 @@ models:
     name: "Qwen3.8-Flash-Next Plat (Strata v0.1.45, Unsloth UD-IQ2_XS, Q8_0 PLE Table, 128k ctx, 70-76 t/s)"
     description: "Platinum: Strata v0.1.45 with Unsloth Dynamic UD-IQ2_XS (75.8 GB iso-peer to IQ3_XXS, 43.8 GB fast RAM) + dynamic expert VRAM caching + unquantized Q8_0 PLE n-gram table (54.4 GB on NVMe, 0 MiB VRAM overhead) + native MTP speculative decoding (Q2_0 draft head) + K8V4 KV cache + 128k context + 4-slot conversation cache."
     ttl: 3600
+    proxy: http://127.0.0.1:${inference_port}
     cmd: |
       taskset -c ${cpu_range} ${strata_python}
       ${strata_server}
       --engine strata
       --config ${strata_ud_iq2_config}
       --fit-max-tokens
-      --port ${PORT}
+      --host 0.0.0.0
+      --port ${inference_port}
 
   "qwen38-flash-next-plat-ud-iq2":
     name: "Qwen3.8-Flash-Next Plat UD-IQ2_XS (Strata v0.1.45, Unsloth UD-IQ2_XS, Q8_0 PLE Table, 128k ctx)"
     description: "Alias for qwen38-flash-next-plat running Unsloth UD-IQ2_XS."
     unlisted: true
     ttl: 3600
+    proxy: http://127.0.0.1:${inference_port}
     cmd: |
       taskset -c ${cpu_range} ${strata_python}
       ${strata_server}
       --engine strata
       --config ${strata_ud_iq2_config}
       --fit-max-tokens
-      --port ${PORT}
+      --host 0.0.0.0
+      --port ${inference_port}
 
   "strata":
     name: "Strata (Qwen3.8-Flash-Next Plat, Unsloth UD-IQ2_XS, 128k ctx, 60-90 t/s)"
     description: "Alias for qwen38-flash-next-plat. High-throughput 60+ t/s coding and reasoning tier."
     unlisted: true
     ttl: 3600
+    proxy: http://127.0.0.1:${inference_port}
     cmd: |
       taskset -c ${cpu_range} ${strata_python}
       ${strata_server}
       --engine strata
       --config ${strata_ud_iq2_config}
       --fit-max-tokens
-      --port ${PORT}
+      --host 0.0.0.0
+      --port ${inference_port}
 
   "plat":
     name: "Plat (Qwen3.8-Flash-Next Plat Alias)"
     description: "Alias for qwen38-flash-next-plat. High-throughput 60+ t/s coding and reasoning tier."
     unlisted: true
     ttl: 3600
+    proxy: http://127.0.0.1:${inference_port}
     cmd: |
       taskset -c ${cpu_range} ${strata_python}
       ${strata_server}
       --engine strata
       --config ${strata_ud_iq2_config}
       --fit-max-tokens
-      --port ${PORT}
+      --host 0.0.0.0
+      --port ${inference_port}
 
   "qwen38-flash-next-plat-abliterated":
     name: "Qwen3.8-Flash-Next Plat Abliterated (Strata v0.1.45, SC117 IQ3_XXS, Q8_0 PLE, 128k ctx, 70-76 t/s)"
     description: "Platinum Abliterated: Strata v0.1.45 with SC117 unaligned/uncensored weights + unquantized Q8_0 PLE n-gram table (54.4 GB on NVMe, 0 MiB VRAM overhead) + dynamic expert VRAM caching (3,086 hot experts in VRAM) + native MTP speculative decoding + K8V4 KV cache + 128k ctx + 4-slot conversation cache. 70-76 t/s steady decode."
     ttl: 3600
+    proxy: http://127.0.0.1:${inference_port}
     cmd: |
       taskset -c ${cpu_range} ${strata_python}
       ${strata_server}
       --engine strata
       --config ${strata_abliterated_config}
       --fit-max-tokens
-      --port ${PORT}
+      --host 0.0.0.0
+      --port ${inference_port}
 
   "abliterated":
     name: "Abliterated (Qwen3.8-Flash-Next Plat Abliterated Alias)"
     description: "Alias for qwen38-flash-next-plat-abliterated. Uncensored/unaligned high-throughput tier."
     unlisted: true
     ttl: 3600
+    proxy: http://127.0.0.1:${inference_port}
     cmd: |
       taskset -c ${cpu_range} ${strata_python}
       ${strata_server}
       --engine strata
       --config ${strata_abliterated_config}
       --fit-max-tokens
-      --port ${PORT}
+      --host 0.0.0.0
+      --port ${inference_port}
 
   "qwen38-flash-next-plat-vision":
     name: "Qwen3.8-Flash-Next Plat Vision (Strata v0.1.45 + strata-vision, Unsloth UD-IQ2_XS, Q8_0 PLE, mmproj-F16, 128k ctx)"
     description: "Platinum Vision: Strata v0.1.45 with Unsloth UD-IQ2_XS + native CPU-offloaded strata-vision image encoder (mmproj-F16) + full Q8_0 PLE table preserving 100% VRAM expert cache. Multimodal image understanding via OpenAI / Anthropic API."
     ttl: 3600
+    proxy: http://127.0.0.1:${inference_port}
     cmd: |
       taskset -c ${cpu_range} ${strata_python}
       ${strata_server}
       --engine strata
       --config ${strata_vision_config}
       --fit-max-tokens
-      --port ${PORT}
+      --host 0.0.0.0
+      --port ${inference_port}
 
   "strata-vision":
     name: "Strata Vision (Qwen3.8-Flash-Next Plat Vision, Unsloth UD-IQ2_XS, mmproj-F16)"
     description: "Alias for qwen38-flash-next-plat-vision. High-throughput multimodal tier."
     unlisted: true
     ttl: 3600
+    proxy: http://127.0.0.1:${inference_port}
     cmd: |
       taskset -c ${cpu_range} ${strata_python}
       ${strata_server}
       --engine strata
       --config ${strata_vision_config}
       --fit-max-tokens
-      --port ${PORT}
+      --host 0.0.0.0
+      --port ${inference_port}
 
   "plat-vision":
     name: "Plat Vision (Qwen3.8-Flash-Next Plat Vision Alias)"
     description: "Alias for qwen38-flash-next-plat-vision. High-throughput multimodal tier."
     unlisted: true
     ttl: 3600
+    proxy: http://127.0.0.1:${inference_port}
     cmd: |
       taskset -c ${cpu_range} ${strata_python}
       ${strata_server}
       --engine strata
       --config ${strata_vision_config}
       --fit-max-tokens
-      --port ${PORT}
+      --host 0.0.0.0
+      --port ${inference_port}
 
   "qwen38-flash-next-plat-vision-iq4":
     name: "Qwen3.8-Flash-Next Plat Vision IQ4 (Strata v0.1.45 + strata-vision, Original IQ4_NL PLE, mmproj-F16, 128k ctx)"
     description: "Platinum Vision Baseline: Strata v0.1.45 with original shipped IQ4_NL PLE table (28.8 GB) + native CPU-offloaded strata-vision image encoder (mmproj-F16)."
     unlisted: true
     ttl: 3600
+    proxy: http://127.0.0.1:${inference_port}
     cmd: |
       taskset -c ${cpu_range} ${strata_python}
       ${strata_server}
       --engine strata
       --config ${strata_vision_iq4_config}
       --fit-max-tokens
-      --port ${PORT}
+      --host 0.0.0.0
+      --port ${inference_port}
 
   "plat-vision-iq4":
     name: "Plat Vision IQ4 Baseline (Alias)"
     description: "Alias for qwen38-flash-next-plat-vision-iq4."
     unlisted: true
     ttl: 3600
+    proxy: http://127.0.0.1:${inference_port}
     cmd: |
       taskset -c ${cpu_range} ${strata_python}
       ${strata_server}
       --engine strata
       --config ${strata_vision_iq4_config}
       --fit-max-tokens
-      --port ${PORT}
+      --host 0.0.0.0
+      --port ${inference_port}
 
   "qwen38-flash-next-plat-abliterated-vision":
     name: "Qwen3.8-Flash-Next Plat Abliterated Vision (Strata v0.1.45 + strata-vision, mmproj-F16, SC117, Q8_0 PLE, 128k ctx)"
     description: "Platinum Abliterated Vision: Strata v0.1.45 uncensored/unaligned SC117 weights with native CPU-offloaded strata-vision image encoder (mmproj-F16) + unquantized Q8_0 PLE table preserving 100% VRAM expert cache. Multimodal image understanding."
     ttl: 3600
+    proxy: http://127.0.0.1:${inference_port}
     cmd: |
       taskset -c ${cpu_range} ${strata_python}
       ${strata_server}
       --engine strata
       --config ${strata_abliterated_vision_config}
       --fit-max-tokens
-      --port ${PORT}
+      --host 0.0.0.0
+      --port ${inference_port}
 
   "abliterated-vision":
     name: "Abliterated Vision (Qwen3.8-Flash-Next Plat Abliterated Vision Alias)"
     description: "Alias for qwen38-flash-next-plat-abliterated-vision. High-throughput uncensored multimodal tier."
     unlisted: true
     ttl: 3600
+    proxy: http://127.0.0.1:${inference_port}
     cmd: |
       taskset -c ${cpu_range} ${strata_python}
       ${strata_server}
       --engine strata
       --config ${strata_abliterated_vision_config}
       --fit-max-tokens
-      --port ${PORT}
+      --host 0.0.0.0
+      --port ${inference_port}
 
   "qwen38-flash-next-plat-ple-q8":
     name: "Qwen3.8-Flash-Next Plat Q8 PLE (Strata v0.1.45, Q8_0 PLE Table, 128k ctx)"
     description: "Platinum Q8 PLE: Strata v0.1.45 with full unquantized Q8_0 PLE n-gram table (54.4 GB) streamed via mmap from SSD + ISTA-DASLab IQ3_XXS base + dynamic expert VRAM caching (3,086 hot experts in VRAM) + native MTP speculative decoding + K8V4 KV cache + 128k ctx. 60-90 t/s decode, 0 MiB VRAM overhead."
     unlisted: true
     ttl: 3600
+    proxy: http://127.0.0.1:${inference_port}
     cmd: |
       taskset -c ${cpu_range} ${strata_python}
       ${strata_server}
       --engine strata
       --config ${strata_ple_q8_config}
       --fit-max-tokens
-      --port ${PORT}
+      --host 0.0.0.0
+      --port ${inference_port}
 
   "plat-q8":
     name: "Plat Q8 PLE (Qwen3.8-Flash-Next Plat Q8 PLE Alias)"
     description: "Alias for qwen38-flash-next-plat-ple-q8. Full precision Q8_0 PLE n-gram table tier."
     unlisted: true
     ttl: 3600
+    proxy: http://127.0.0.1:${inference_port}
     cmd: |
       taskset -c ${cpu_range} ${strata_python}
       ${strata_server}
       --engine strata
       --config ${strata_ple_q8_config}
       --fit-max-tokens
-      --port ${PORT}
+      --host 0.0.0.0
+      --port ${inference_port}
 
   # [retired 2026-10-15 — IQ3_S files deleted from disk to reclaim 78 GB SSD; primary daily driver remains IQ3_XXS plat]
   # "qwen38-flash-next-plat-iq3s":
@@ -547,7 +586,7 @@ models:
   #     --engine strata
   #     --config ${strata_iq3s_config}
   #     --fit-max-tokens
-  #     --port ${PORT}
+  #     --port ${inference_port}
 
   ## ===========================================================================
   ## Qwen3.8 Flash Next (177B: 125B-A6B MoE + 51B ngram table on SSD)
@@ -559,6 +598,7 @@ models:
     description: "Gold: plain upstream master b12073 (d1044bc82). 96k ctx, q8 KV, ngram-mod spec. Natively includes PR #29761, #29824, #29825, #30480, #29181, #30239, #29887, #30602, #30927, #31188, #31243, #31443. Reasoning: effort=xhigh, budget=4000. See docs/qwen38-flash-next-internal.md."
     env:
       - "GGML_CUDA_GRAPH_OPT=1"
+    proxy: http://127.0.0.1:${inference_port}
     cmd: |
       taskset -c ${cpu_range} ${qwen38_master_server}
       -m /home/kchauhan/models/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf
@@ -575,7 +615,7 @@ models:
       --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
       --reasoning-effort xhigh --reasoning-budget -1 --reasoning-preserve
       --no-warmup
-      --host 0.0.0.0 --port ${PORT}
+      --host 0.0.0.0 --port ${inference_port}
 
   "qwen38-flash-next-ple-q8":
     name: "Qwen3.8-Flash-Next Gold Q8 PLE (master b11913, Q8_0 PLE Table, 96k ctx)"
@@ -583,6 +623,7 @@ models:
     unlisted: true
     env:
       - "GGML_CUDA_GRAPH_OPT=1"
+    proxy: http://127.0.0.1:${inference_port}
     cmd: |
       taskset -c ${cpu_range} ${qwen38_master_server}
       -m /mnt/dev/models/qwen38-ple-q8/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf
@@ -599,7 +640,7 @@ models:
       --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
       --reasoning-effort xhigh --reasoning-budget -1 --reasoning-preserve
       --no-warmup
-      --host 0.0.0.0 --port ${PORT}
+      --host 0.0.0.0 --port ${inference_port}
 
   "gold-q8":
     name: "Gold Q8 PLE (Qwen3.8-Flash-Next Gold Q8 PLE Alias)"
@@ -607,6 +648,7 @@ models:
     unlisted: true
     env:
       - "GGML_CUDA_GRAPH_OPT=1"
+    proxy: http://127.0.0.1:${inference_port}
     cmd: |
       taskset -c ${cpu_range} ${qwen38_master_server}
       -m /mnt/dev/models/qwen38-ple-q8/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf
@@ -623,13 +665,14 @@ models:
       --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
       --reasoning-effort xhigh --reasoning-budget -1 --reasoning-preserve
       --no-warmup
-      --host 0.0.0.0 --port ${PORT}
+      --host 0.0.0.0 --port ${inference_port}
 
   "qwen38-flash-next-exp":
     name: "Qwen3.8-Flash-Next EXP (b12100 + MoE Cache #30966 + MTP Fix #30592, ISTA-DASLab IQ3_XXS)"
     description: "Experimental tier: llama.cpp b12100 with dynamic GPU MoE expert LRU caching (--moe-cache-mib 2048) + CPU-shared misses (#30966) + fused MoE MMQ. 65k ctx. See docs/qwen38-flash-next-internal.md."
     env:
       - "GGML_CUDA_GRAPH_OPT=1"
+    proxy: http://127.0.0.1:${inference_port}
     cmd: |
       taskset -c ${cpu_range} ${qwen38_exp_server}
       -m /home/kchauhan/models/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf
@@ -647,7 +690,7 @@ models:
       --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
       --reasoning-effort xhigh --reasoning-budget 4000 --reasoning-preserve
       --no-warmup
-      --host 0.0.0.0 --port ${PORT}
+      --host 0.0.0.0 --port ${inference_port}
 
   # ===========================================================================
   # Qwen3.8-Flash-Next MTP (PR #28243 on master + shared-Q4_K_M draft head)
@@ -658,6 +701,7 @@ models:
     description: "Speculative tier: Unified QSA Sparsity Stack V2 (#28770 + #28699 + #28213 + #29166) + PR #28243 with unsloth mtp-Qwen3.8-Flash-Next-shared-Q4_K_M.gguf (1.78 GB) + NVMe row prefetching (#29599). Offloads 2 MoE layers to GPU (-ncmoe 46), 97-100% draft acceptance (2.76-2.93 tok/step), 25.3-27.06 t/s decode, 11.0 GB VRAM. See docs/qwen38-flash-next-internal.md."
     env:
       - "GGML_CUDA_GRAPH_OPT=1"
+    proxy: http://127.0.0.1:${inference_port}
     cmd: |
       taskset -c ${cpu_range} ${qwen38_mtp_server}
       -m /home/kchauhan/models/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf
@@ -675,7 +719,7 @@ models:
       --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
       --reasoning-effort xhigh --reasoning-budget -1 --reasoning-preserve
       --no-warmup
-      --host 0.0.0.0 --port ${PORT}
+      --host 0.0.0.0 --port ${inference_port}
 
   # ===========================================================================
   # Qwen3.8 Flash Next Vision (ISTA-DASLab IQ3_XXS + mmproj-F16)
@@ -686,6 +730,7 @@ models:
     description: "Multimodal tier: plain upstream master b11619 with mmproj-F16 vision projector. Offloads 3 MoE layers to GPU (-ncmoe 45), 18.2-18.6 t/s @ 32k ctx, ub 1024, 10.8 GB VRAM (1.32 GB headroom for image activations/KV). See docs/qwen38-flash-next-internal.md."
     env:
       - "GGML_CUDA_GRAPH_OPT=1"
+    proxy: http://127.0.0.1:${inference_port}
     cmd: |
       taskset -c ${cpu_range} ${qwen38_master_server}
       -m /home/kchauhan/models/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf
@@ -701,7 +746,7 @@ models:
       --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
       --reasoning-effort xhigh --reasoning-budget 4000 --reasoning-preserve
       --no-warmup
-      --host 0.0.0.0 --port ${PORT}
+      --host 0.0.0.0 --port ${inference_port}
 
   # ===========================================================================
   # Qwen3.6 MTP
@@ -717,7 +762,7 @@ models:
   #    --alias "unsloth/Qwen3.6-35B-A3B MTP"
   #    --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.00
   #    --presence-penalty 0.0 --repeat-penalty 1.0
-  #    --host 0.0.0.0 --port ${PORT}
+  #    --host 0.0.0.0 --port ${inference_port}
   #    --jinja
   #    --chat-template-kwargs '{"preserve_thinking": true}'
   #    --ctx-size 131072 --n-predict 32768
@@ -743,7 +788,7 @@ models:
   #    --alias "unsloth/Qwen3.6-35B-A3B MTP (vision/mmproj-F16)"
   #    --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.00
   #    --presence-penalty 0.0 --repeat-penalty 1.0
-  #    --host 0.0.0.0 --port ${PORT}
+  #    --host 0.0.0.0 --port ${inference_port}
   #    --jinja
   #    --chat-template-kwargs '{"preserve_thinking": true}'
   #    --ctx-size 131072 --n-predict 32768
@@ -769,7 +814,7 @@ models:
   #     --alias "unsloth/Qwen3.6-35B-A3B MTP (Q6_K)"
   #     --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.00
   #     --presence-penalty 0.0 --repeat-penalty 1.0
-  #     --host 0.0.0.0 --port ${PORT}
+  #     --host 0.0.0.0 --port ${inference_port}
   #     --jinja
   #     --chat-template-kwargs '{"preserve_thinking": true}'
   #     --ctx-size 131072 --n-predict 32768
@@ -788,13 +833,14 @@ models:
     description: "Dense 27B hybrid, 10.17 GiB. Middle tier: better fidelity than Q2_K_XL, still holds 262k native ctx in VRAM on 12 GB. tg128 ~36.7 t/s. See docs/qwen3-8-27b-local-post.md. No MTP."
     env:
       - "GGML_CUDA_GRAPH_OPT=1"
+    proxy: http://127.0.0.1:${inference_port}
     cmd: |
       taskset -c ${cpu_range} ${llama_server}
       -m /home/kchauhan/models/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-IQ3_XXS.gguf
       --alias "unsloth/Qwen3.8-27B UD-IQ3_XXS"
       --temp 1.0 --top-p 0.95 --top-k 20
       --presence-penalty 0.0 --repeat-penalty 1.0
-      --host 0.0.0.0 --port ${PORT}
+      --host 0.0.0.0 --port ${inference_port}
       --jinja
       --ctx-size 262144 --n-predict 32768
       --fit on --fit-ctx 262144 --fit-target 128
@@ -821,7 +867,7 @@ models:
   #     --alias "unsloth/Mistral-Small-4-119B-2603 (standard)"
   #     --seed 3407
   #     --temp 0.15 --top-p 0.95 --top-k 40 --min-p 0.0 --repeat-penalty 1.0
-  #     --host 0.0.0.0 --port ${PORT}
+  #     --host 0.0.0.0 --port ${inference_port}
   #     --jinja
   #     --ctx-size 32768
   #     --fit on --fit-ctx 32768 --fit-target 512
@@ -845,7 +891,7 @@ models:
   #     --override-tensor ".ffn_(up|down)_(ch|)exps=CPU"
   #     --seed 3407
   #     --temp 0.15 --top-p 0.95 --top-k 40 --min-p 0.0 --repeat-penalty 1.0
-  #     --host 0.0.0.0 --port ${PORT}
+  #     --host 0.0.0.0 --port ${inference_port}
   #     --jinja
   #     --ctx-size 32768 --parallel 1
   #     -ctk q8_0 -ctv q8_0
@@ -868,7 +914,7 @@ models:
   #     --override-tensor ".ffn_(up|down)_(ch|)exps=CPU"
   #     --seed 3407
   #     --temp 0.15 --top-p 0.95 --top-k 40 --min-p 0.0 --repeat-penalty 1.0
-  #     --host 0.0.0.0 --port ${PORT}
+  #     --host 0.0.0.0 --port ${inference_port}
   #     --jinja
   #     --ctx-size 32768 --parallel 1
   #     -ctk q8_0 -ctv q8_0
@@ -890,7 +936,7 @@ models:
   #     --override-tensor ".ffn_(up|down)_(ch|)exps=CPU"
   #     --seed 3407
   #     --temp 0.7 --top-p 0.95 --top-k 40 --min-p 0.0 --repeat-penalty 1.0
-  #     --host 0.0.0.0 --port ${PORT}
+  #     --host 0.0.0.0 --port ${inference_port}
   #     --jinja
   #     --ctx-size 65536 --parallel 1
   #     --no-mmap --mlock
@@ -917,7 +963,7 @@ models:
   #     --override-tensor ".ffn_(up|down)_(ch|)exps=CPU"
   #     --seed 3407
   #     --temp 0.15 --top-p 0.95 --top-k 40 --min-p 0.0 --repeat-penalty 1.0
-  #     --host 0.0.0.0 --port ${PORT}
+  #     --host 0.0.0.0 --port ${inference_port}
   #     --jinja
   #     --ctx-size 32768 --parallel 1
   #     -ctk q8_0 -ctv q8_0
@@ -940,7 +986,7 @@ models:
   #     --alias "unsloth/NVIDIA-Nemotron-3-Super-120B-A12B (UD-Q3_K_XL)"
   #     --seed 3407
   #     --temp 0.6 --top-p 0.95 --top-k 40 --min-p 0.05 --repeat-penalty 1.0
-  #     --host 0.0.0.0 --port ${PORT}
+  #     --host 0.0.0.0 --port ${inference_port}
   #     --jinja
   #     --ctx-size 32768
   #     --fit on --fit-ctx 32768 --fit-target 512
@@ -952,13 +998,14 @@ models:
     name: "gemma-4-26B QAT (UD-Q4_K_XL, text, 131k ctx)"
     env:
       - "GGML_CUDA_GRAPH_OPT=1"
+    proxy: http://127.0.0.1:${inference_port}
     cmd: |
       taskset -c ${cpu_range} ${llama_server}
       -m /home/kchauhan/models/unsloth/gemma-4-26B-A4B-it-qat-GGUF/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
       --alias "unsloth/gemma-4-26B-A4B QAT (UD-Q4_K_XL)"
       --seed 3407
       --temp 1.0 --top-p 0.95 --top-k 64 --min-p 0.0 --repeat-penalty 1.0
-      --host 0.0.0.0 --port ${PORT}
+      --host 0.0.0.0 --port ${inference_port}
       --jinja
       --ctx-size 131072
       --fit on --fit-ctx 131072 --fit-target 512
@@ -973,6 +1020,7 @@ models:
     name: "gemma-4-26B QAT + MTP (UD-Q4_K_XL + Assistant, 131k ctx)"
     env:
       - "GGML_CUDA_GRAPH_OPT=1"
+    proxy: http://127.0.0.1:${inference_port}
     cmd: |
       taskset -c ${cpu_range} ${llama_server}
       -m /home/kchauhan/models/unsloth/gemma-4-26B-A4B-it-qat-GGUF/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
@@ -980,7 +1028,7 @@ models:
       --alias "unsloth/gemma-4-26B-A4B QAT + MTP"
       --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.00
       --presence-penalty 0.0 --repeat-penalty 1.0
-      --host 0.0.0.0 --port ${PORT}
+      --host 0.0.0.0 --port ${inference_port}
       --jinja
       --chat-template-kwargs '{"preserve_thinking": true}'
       --ctx-size 131072 --n-predict 32768
@@ -1001,6 +1049,7 @@ models:
   "humanizer-12b":
     name: "Humanizer 12B (Q6_K, Gemma 4 text rewriting)"
     description: "Fine-tuned Gemma-4-12B text-completion rewrite model. Rewrites AI drafts to natural human voice preserving all facts, numbers, dates and names."
+    proxy: http://127.0.0.1:${inference_port}
     cmd: |
       taskset -c ${cpu_range} ${humanizer_server}
       -m /home/kchauhan/models/jialinyyzz/humanizer/humanizer-12b-Q6_K.gguf
@@ -1013,12 +1062,13 @@ models:
       --threads 10 --threads-batch 12 --prio 2
       --batch-size 2048 --ubatch-size 512
       --no-warmup
-      --host 0.0.0.0 --port ${PORT}
+      --host 0.0.0.0 --port ${inference_port}
 
   "humanizer":
     name: "Humanizer 12B Alias"
     description: "Alias for humanizer-12b."
     unlisted: true
+    proxy: http://127.0.0.1:${inference_port}
     cmd: |
       taskset -c ${cpu_range} ${humanizer_server}
       -m /home/kchauhan/models/jialinyyzz/humanizer/humanizer-12b-Q6_K.gguf
@@ -1031,7 +1081,118 @@ models:
       --threads 10 --threads-batch 12 --prio 2
       --batch-size 2048 --ubatch-size 512
       --no-warmup
-      --host 0.0.0.0 --port ${PORT}
+      --host 0.0.0.0 --port ${inference_port}
+
+  "inkling-2-mini":
+    name: "Inkling 2 Mini 26.4B-A5.4B (PolyStrata, UD-Q4_K_XL + CPU Vision, 256k)"
+    description: "Thinking Machines Lab 26.4B MoE (3.4B/5.4B looped active) coding, agentic & vision model. Runs on PolyStrata strata-poly (Ada sm_89 + AVX-VNNI + PRs #284/#288/#291/#296/#297/#301/#313) with CUDA VMM elastic 256k FP8 KV pool (--vram-pool --loop-bf16 --prompt-batch 2048 --lock-experts --window 6 --lookup 3), Ada INT8 Tensor Core NVFP4 prefill (STRATA_PREFILL_NVFP4=w4a8, STRATA_INK_FAST_CTRL=1), ~1,681 resident GPU experts (8.1 GiB), zero-VRAM CPU strata-vision, and 4-slot conversation cache (~75.6 tok/s fresh coding, ~99.7 tok/s code edits via lossless prompt lookup, ~1,483 tok/s pp2k, ~2,036 tok/s pp8k, ~2,153 tok/s pp20k, 11.70 GB peak VRAM on RTX 4070 12 GB; see docs/inkling-2-mini-optimization.md)."
+    ttl: 3600
+    proxy: http://127.0.0.1:${inference_port}
+    cmd: |
+      taskset -c ${cpu_range} ${strata_python}
+      ${polystrata_server}
+      --engine strata
+      --config ${polystrata_inkling2_config}
+      --fit-max-tokens
+      --host 0.0.0.0
+      --port ${inference_port}
+
+  "inkling-2-mini-128k":
+    name: "Inkling 2 Mini 128k Alias (PolyStrata)"
+    description: "Alias for inkling-2-mini (which runs 128k natively on PolyStrata)."
+    unlisted: true
+    ttl: 3600
+    proxy: http://127.0.0.1:${inference_port}
+    cmd: |
+      taskset -c ${cpu_range} ${strata_python}
+      ${polystrata_server}
+      --engine strata
+      --config ${polystrata_inkling2_config}
+      --fit-max-tokens
+      --host 0.0.0.0
+      --port ${inference_port}
+
+  "inkling-2-mini-llama":
+    name: "Inkling 2 Mini 26.4B-A5.4B (llama.cpp-inkling2-lean fallback, 32k)"
+    description: "Fallback llama.cpp engine: custom Ada sm_89 llama.cpp-inkling2-lean with elastic borrowed-cache prefill (LLAMA_MOE_CACHE_ELASTIC=1), visit-weighted loop budget (LLAMA_MOE_CACHE_VISIT_BUDGET=1), PR #264 CUDA MoE prompt kernels, 7,800 MiB GPU MoE LRU cache (--moe-cache-cpu-share 0.70), DSpark n=3 (--spec-draft-n-ubatch 256), and CPU-offloaded mmproj (~68.7 tok/s steady decode, ~820 tok/s pp2k, ~726 tok/s pp8k, 11.65 GB peak VRAM)."
+    env:
+      - "LLAMA_MOE_CACHE_ELASTIC=1"
+      - "LLAMA_MOE_CACHE_VISIT_BUDGET=1"
+    proxy: http://127.0.0.1:${inference_port}
+    cmd: |
+      taskset -c ${cpu_range} ${inkling2_server}
+      -m /mnt/dev/models/unsloth/Inkling-2-Mini-GGUF/Inkling-2-Mini-UD-Q4_K_XL.gguf
+      --mmproj /mnt/dev/models/unsloth/Inkling-2-Mini-GGUF/mmproj-F16.gguf
+      --no-mmproj-offload
+      --spec-draft-model /mnt/dev/models/unsloth/Inkling-2-Mini-GGUF/dspark-Inkling-2-Mini-Q8_0.gguf
+      --spec-type draft-dspark --spec-draft-n-max 3 --spec-draft-ngl 99 --spec-draft-n-ubatch 256
+      --alias inkling-2-mini-llama
+      --jinja --flash-attn on
+      -c 32768 --parallel 1
+      -ngl 99 --fit off --load-mode none
+      -cmoe --moe-cache-mib 7800 --moe-cache-cpu-share 0.70
+      -ot "token_embd\.weight=CPU"
+      -ctk q8_0 -ctv q8_0
+      --temp 1.0 --top-p 1.0 --top-k 0 --min-p 0.0
+      --batch-size 2048 --ubatch-size 2048
+      --threads 12 --threads-batch 12 --prio 2
+      --no-warmup
+      --host 0.0.0.0 --port ${inference_port}
+
+  # ===========================================================================
+  # Inkling 2 Mini 26.4B-A5.4B — Unbound v2.1 (abliterated; no refusals)
+  # 120 attention tensors differ from ggml-org's original; every expert, router,
+  # embedding and head tensor is byte-identical. Not started on boot. Local use
+  # with your own content policy — not for public deployment.
+  # Sampling per the model card: temp 0.6 / top_p 0.95 (thinking cap 4,096 is a
+  # client-side max_tokens, set it at the request). No DRY.
+  # Not yet benchmarked on this stack. Vision not yet measured for v2.1.
+  # ===========================================================================
+  "inkling-2-mini-unbound-v2.1":
+    name: "Inkling 2 Mini 26.4B-A5.4B (Unbound v2.1 Q4_K_M, llama.cpp-inkling2-lean, 32k)"
+    description: "nokeepai Unbound v2.1 (conv-aware abliterated + self-distilled attention-patched GGUF). GGUF Q4_K_M 17.78 GB at /mnt/dev/models/nokeepai/Inkling-2-Mini-Unbound-GGUF, CPU-offloaded mmproj-F16 (same projector as the original). Non-startup profile: wake it explicitly. Sampling temp 0.6 / top_p 0.95, no DRY. Not yet benchmarked on this stack."
+    env:
+      - "LLAMA_MOE_CACHE_ELASTIC=1"
+      - "LLAMA_MOE_CACHE_VISIT_BUDGET=1"
+    proxy: http://127.0.0.1:${inference_port}
+    cmd: |
+      taskset -c ${cpu_range} ${inkling2_server}
+      -m /mnt/dev/models/nokeepai/Inkling-2-Mini-Unbound-GGUF/Inkling-2-Mini-Unbound-v2.1-Q4_K_M.gguf
+      --mmproj /mnt/dev/models/unsloth/Inkling-2-Mini-GGUF/mmproj-F16.gguf
+      --no-mmproj-offload
+      --alias inkling-2-mini-unbound-v2.1
+      --jinja --flash-attn on
+      -c 32768 --parallel 1
+      -ngl 99 --fit off --load-mode none
+      -cmoe --moe-cache-mib 7800 --moe-cache-cpu-share 0.70
+      -ot "token_embd\.weight=CPU"
+      -ctk q8_0 -ctv q8_0
+      --temp 0.6 --top-p 0.95 --top-k 0 --min-p 0.0
+      --batch-size 2048 --ubatch-size 2048
+      --threads 12 --threads-batch 12 --prio 2
+      --no-warmup
+      --host 0.0.0.0 --port ${inference_port}
+
+  "nemotron-3.5-bolt":
+    name: "Nemotron 3.5 Bolt 74B-A9B (24GB IQ2 QAT + mmproj + LiLiCorr DFlash)"
+    description: "NVIDIA Nemotron 3.5 Bolt 74B-A9B hybrid Mamba-2/Transformer LatentMoE VLM (text, images, video) with LiLiCorr DFlash speculative decoding. Runs on llama.cpp master (b12621+) with auto-fit MoE RAM offload on RTX 4070 12 GB."
+    proxy: http://127.0.0.1:${inference_port}
+    cmd: |
+      taskset -c ${cpu_range} ${llama_master_server}
+      -m /mnt/dev/models/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-GGUF/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf
+      --mmproj /mnt/dev/models/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-GGUF/mmproj-NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf
+      --spec-draft-model /mnt/dev/models/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-GGUF/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr.gguf
+      --spec-type draft-dflash --spec-draft-n-max 6 --spec-draft-ngl 99
+      --alias nemotron-3.5-bolt
+      --jinja --flash-attn on
+      -c 65536 --parallel 1
+      -ngl 99 --fit on --fit-ctx 65536 --fit-target 1024
+      -ctk q8_0 -ctv q8_0
+      --temp 1.0 --top-p 0.95
+      --batch-size 2048 --ubatch-size 512
+      --threads 10 --threads-batch 12 --prio 2
+      --no-warmup
+      --host 0.0.0.0 --port ${inference_port}
 
   #"gemma-4-26b-qat-mtp-vision":
   #  name: "Gemma 4 26B QAT + MTP (UD-Q4_K_XL + Assistant, vision, Mainline)"
@@ -1045,7 +1206,7 @@ models:
   #    --alias "unsloth/Gemma 4 26B QAT + MTP (vision)"
   #    --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.00
   #    --presence-penalty 0.0 --repeat-penalty 1.0
-  #    --host 0.0.0.0 --port ${PORT}
+  #    --host 0.0.0.0 --port ${inference_port}
   #    --jinja
   #    --chat-template-kwargs '{"preserve_thinking": true}'
   #    --ctx-size 131072 --n-predict 32768
@@ -1065,7 +1226,7 @@ models:
   #  description: "Requires the PR-20275 llama.cpp build (./maintenance/build-sarvam-llama-cpp.sh)."
   #  cmd: |
   #    ${sarvam_server}
-  #    --host 0.0.0.0 --port ${PORT}
+  #    --host 0.0.0.0 --port ${inference_port}
   #    --model /home/kchauhan/models/Sumitc13/sarvam-30b-GGUF/sarvam-30B-Q6_K.gguf
   #    --ctx-size 4096
   #    --n-gpu-layers 99

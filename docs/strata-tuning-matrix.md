@@ -45,6 +45,7 @@ Switches evaluated during tuning sweeps (`bench-models/bench-strata-tuning-ab.sh
 | **`STRATA_ATTN_DAILY`** | `1` | 72.03 tok/s (vs 77.07 control) | Undecided/negative decode delta (-5.0 tok/s). |
 | **`STRATA_QSA_ROWS`** | `1` | 70.43 tok/s (vs 77.07 control) | Slower decode (-6.6 tok/s), increased I/O churn. |
 | **`STRATA_B6_MMVQ_ROWS`** | `1` | 72.70 tok/s (vs 77.07 control) | Negative delta on Ada tensor cores. |
+| **`STRATA_L2_PF`** | `1` / `1 + L2_PF_MIB=8` | 69.43 / 70.90 tok/s (vs 73.10 base) | **Regression / Neutral on RTX 4070 (`sm_89`)** (upstream `3a0e346db`). Uncapped prefetches 139.1 MiB per layer into a 36 MiB L2 cache (-3.7 tok/s decode, -36.7 tok/s pp2k); 8 MiB cap recovers the regression but shows no speedup. Reverted from `strata-lean`. |
 
 ---
 

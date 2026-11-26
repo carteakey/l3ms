@@ -335,6 +335,48 @@
       "force_download": false,
       "max_workers": 2,
       "description": "Humanizer 12B (Gemma 4 fine-tune text-rewriting model)"
+    },
+    {
+      "enabled": true,
+      "repo_id": "unsloth/Inkling-2-Mini-GGUF",
+      "local_dir": "/mnt/media/models/unsloth/Inkling-2-Mini-GGUF",
+      "allow_patterns": [
+        "Inkling-2-Mini-UD-Q4_K_XL.gguf",
+        "mmproj-F16.gguf",
+        "dspark-Inkling-2-Mini-Q8_0.gguf"
+      ],
+      "ignore_patterns": [],
+      "revision": "",
+      "force_download": false,
+      "max_workers": 2,
+      "description": "Inkling 2 Mini 26.4B MoE (5.4B active looped) UD-Q4_K_XL + mmproj-F16 + DSpark Q8_0 drafter"
+    },
+    {
+      "enabled": true,
+      "repo_id": "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-GGUF",
+      "local_dir": "/mnt/media/models/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-GGUF",
+      "allow_patterns": [
+        "NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf",
+        "mmproj-NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf"
+      ],
+      "ignore_patterns": [],
+      "revision": "",
+      "force_download": false,
+      "max_workers": 2,
+      "description": "NVIDIA Nemotron 3.5 Bolt 74B-A9B 24GB (IQ2 QAT VLM + C-RADIO v4-H mmproj)"
+    },
+    {
+      "enabled": true,
+      "repo_id": "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr-GGUF",
+      "local_dir": "/mnt/media/models/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-GGUF",
+      "allow_patterns": [
+        "NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr.gguf"
+      ],
+      "ignore_patterns": [],
+      "revision": "",
+      "force_download": false,
+      "max_workers": 2,
+      "description": "NVIDIA Nemotron 3.5 Bolt 74B-A9B LiLiCorr DFlash speculative drafter"
     }
   ]
 }

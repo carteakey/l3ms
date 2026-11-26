@@ -94,6 +94,12 @@ Filed 2026-11-09 from the v0.2.12 intake: the CPU prefill share limit (3,072) an
 
 - [#33](https://github.com/carteakey/l3ms/issues/33) The CPU governor resets to `powersave` on resume (p1)
 
+## Colab burst lane
+
+- [ ] Phase 0-3: fine-tuning, bigger-model evals, llama-swap backup endpoint on the
+  Ultra + Pro Colab accounts ([#37](https://github.com/carteakey/l3ms/issues/37),
+  [plan](docs/colab-burst-lane.md)).
+
 ## Docs and publication
 
 - [#34](https://github.com/carteakey/l3ms/issues/34) Add a prefill chart to the Strata post (p2)
@@ -117,3 +123,14 @@ reduction. None is a pending task. Older status entries and
 - A native Rust/GPUI frontend remains optional and separate from the CLI. Only
   consider a bounded read-only prototype after full-port acceptance; preserve
   keyboard parity before replacing any existing UI.
+
+## Agent environment & guardrails (2026-11-25 retro)
+
+Implemented from [docs/retro-2026-11-25.md](docs/retro-2026-11-25.md):
+
+- [x] Trim `AGENTS.md` from `31.7 KB` to `8.6 KB` (`70` lines; disclosed Qwen3.8 / Inkling 2 Mini sweep history into `docs/`, documented `restart` vs `SIGHUP` on port `8089`, added `~/repos/homelabbr/wiki/` pointer).
+- [x] Fix `.agents/skills/model-inventory-manager/scripts/audit_models.py` multi-shard GGUF protection (all `UD-IQ2_XS` shards now `ACTIVE`) and replace stale `/run/media/kchauhan/Games/models` with `/mnt/media/models` (unit-tested in `maintenance/test_serving_guardrails.py`).
+- [x] Add stdlib-only `maintenance/check-serving-configs.py` (wired into `.github/workflows/rust.yml`) validating `llama-swap.yaml` `--host 0.0.0.0` / `${inference_port}`, Strata/PolyStrata `allowed_hosts`, and `bench-models/*.sh` syntax.
+- [x] Add `maintenance/l3ms-ctl.sh` (`health`, `models`, `wake`, `smoke`, `ui-check`, `restart`) reading `LLAMA_SWAP_API_KEY` from systemd env in-process.
+- [x] In `homelabbr`: add `wiki/.rgignore`, `scripts/lint-wiki.py`, fix malformed `||` rows in `homelab-services.md`, and deduplicate `wiki/AGENTS.md` + `wiki/CLAUDE.md` symlink (`17.1 KB -> 4.2 KB`).
+- [x] Removed retired Glowdesk `192.168.0.141:/mnt/storage` NFS mount from KPC `/etc/fstab` so `df -h` no longer hangs.

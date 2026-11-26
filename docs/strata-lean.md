@@ -177,6 +177,15 @@ Closed items, do not re-run:
   #31037 / #29143 (trimmed MTP draft head) are the same idea this engine already ships as
   `--mtp-draft-vocab` plus `tools/draft_vocab.py`. Reading them is a second opinion, not a
   port.
+- **`STRATA_L2_PF=1` (upstream `3a0e346db`, 2026-11-21)**: Ported and bracket-tested on `UD-IQ2_XS`.
+  Uncapped (139.1 MiB/layer into the RTX 4070's 36 MiB L2) regressed to 69.43 t/s vs 73.10 t/s base
+  and slowed `pp2k` (1,134.5 vs 1,171.2); 8 MiB cap read 70.90 t/s (neutral/slower). Reverted.
+- **`strata-inkling` shape engine (upstream `v0.2.20`, 2026-11-23)**: Built standalone Ada `sm_89`
+  binary (`strata-inkling 0.1.66`) and benchmarked on `Inkling-2-Mini-UD-Q4_K_XL.gguf`. Strong prefill
+  (665.5 t/s at 2k, 685.6 t/s at 8k) and zero-cost 128k Auto Host KV Offload, but decode sat at
+  25.7 to 25.8 t/s (4.03 GB trunk leaving only 1,411/3,072 experts on GPU; GGUF DSpark tensor-name
+  mismatch) against Unsloth `b12651`'s **65.80 t/s** (2.56x faster decode). Not ported into
+  `strata-lean`; keep `strata-lean` strictly focused on Qwen3.8-Flash-Next.
 
 ### 6. Upstream distance and the anti-bloat decision
 

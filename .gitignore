@@ -60,6 +60,8 @@ vendor-forks
 # macOS
 .DS_Store
 
-# Local backup snapshots
+# Local backup snapshots & workspace runtime clutter
 *.bak*
 scratch/
+.local/
+

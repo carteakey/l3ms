@@ -1,0 +1,8 @@
+[team]
+name = "l3ms"
+template = "small"
+bootstrap_symlinks = [
+  ".venv",
+  "vendor",
+  ".local",
+]
