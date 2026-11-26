@@ -10,8 +10,8 @@ import subprocess
 import urllib.request
 import urllib.error
 
-DEST_DIR = "/home/kchauhan/models/SC117/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-GGUF/IQ3_XXS"
-STRATA_RT_DIR = "/home/kchauhan/models/SC117/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-GGUF/strata/rt"
+DEST_DIR = "/mnt/dev/models/SC117/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-GGUF/IQ3_XXS"
+STRATA_RT_DIR = "/mnt/dev/models/SC117/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-GGUF/strata/rt"
 SOURCE_SHARD2 = "/home/kchauhan/models/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00002-of-00002.gguf"
 TARGET_SHARD2 = os.path.join(DEST_DIR, "Qwen3.8-Flash-Next-GSQ-RCO-abliterated-IQ3_XXS-00002-of-00002.gguf")
 

@@ -2,6 +2,53 @@
 
 ## [Unreleased]
 
+### Changed (PolyStrata v0.2.20-poly.5 upgrade, /mnt/dev ext4 & Tailscale port 8089, 2026-11-25)
+
+- **Upgraded `vendor/polystrata` (`polystrata-4070`) onto `v0.2.20-poly.5` (`d62dfacb`) + PR `#313` (`f2578edf`), keeping fixed `--prompt-batch 2048`.**
+  Bracketed 4-arm RTX 4070 A/B (`docs/inkling-2-mini-optimization.md`) verified `+14.5%` faster `pp2k` (`1,833` vs `1,601 tok/s`), faster cold load (`7.8 s`), parity on fresh decode (`77.47` vs `77.38 tok/s`), `pp8k` (`2,296`), and `pp20k` (`2,270`), plus PR `#343` (Inkling 2 system-prompt prefix cache fix + `strata_pin`), the `vram_ahead()` staging race fix, and temp-0 tool-call JSON fixes. Rejected PR `#320` (`--prompt-batch auto`, `-27%` decode / `-25%` pp8k due to 2 GB expert-cache eviction churn under `w4a8`). Deleted unused `mtp.safetensors` (`607 MB`).
+- **Added `.agents/skills/inkling-refresh/` skill** (`audit-upstream.sh`, bracketed `bench-inkling-ab.py`), standardized all 32 LLM profiles on `0.0.0.0:8089` with Tailscale `allowed_hosts`, migrated `/mnt/dev` from `ntfs-3g` to `ext4` with consolidated model storage, and added `maintenance/check-serving-configs.py` + `maintenance/l3ms-ctl.sh`.
+
+### Added (Inkling 2 Mini Unbound v2.1 setup, 2026-11-25)
+
+- **Installed `nokeepai/Inkling-2-Mini-Unbound-GGUF` v2.1 (Q4_K_M, 17.78 GB) as a non-startup `inkling-2-mini-unbound-v2.1` profile on `vendor/llama.cpp-inkling2-lean`.**
+  120 attention tensors differ from ggml-org's original (every expert, router, embedding and head tensor byte-identical). Download verified against the card's SHA-256 and wired into `llama-swap.yaml` (snapshot before edit) with the same llama.cpp-inkling2-lean params as `inkling-2-mini-llama`, sampling per the card (`temp 0.6 / top_p 0.95`, no DRY) and reusing the original `mmproj-F16.gguf`. Not benchmarked on this stack yet; vision not measured for v2.1; no draft model (the DSpark drafter is not verified against the patched attention weights). Local use with your own content policy - not for public deployment.
+
+### Added (Inkling 2 Mini & Nemotron 3.5 Bolt setup, 2026-11-23)
+
+- **Promoted zero-VRAM n-gram speculative lookup (`--window 6 --lookup 3`) on `inkling-2-mini` after sweeping DSpark PR `#311` + `STRATA_DS_CTX` (2026-11-24).**
+  Tested DSpark across `--window 3 / 4 / 5 / 6 / 8` with PolyStrata PR `#311` (51 MB INT8 Markov fold) and a 16K drafter KV cap (cutting eviction to 154 GPU experts): DSpark still lost on fresh coding (`65.6-69.3` vs `72.6-73.2 tok/s`) and post-8K decode (`40.6-50.0` vs `51.4-53.8`). Zero-VRAM n-gram prompt lookup (`--window 6 --lookup 3`, lossless exact verification, only 7 GPU expert slots used) held **75.6 tok/s** on fresh coding while jumping code edits to **99.7 tok/s** (+37% over plain `70.5-75.3`, beating every DSpark window). Promoted into `polystrata-inkling2-256k.json`.
+- **Unlocked Ada INT8 Tensor Core prefill on `inkling-2-mini` (`STRATA_PREFILL_NVFP4=w4a8` + `STRATA_INK_FAST_CTRL=1`, 2026-11-24).**
+  Found all 44 NVFP4 visits (`blk.0-19`) were defaulting to FP16 halves on Ada `sm_89` in `vendor/polystrata/engine/src/poly/mmq_own.cu`. Paired-control A/B (`ctl_1 -> w4a8+fast_ctrl -> ctl_2`, isolated profiles) jumped prefill from `632/751 -> 1,483 tok/s` (`pp2k`, +97%), `1,090/1,135 -> 2,036 tok/s` (`pp8k`, +79%), and `1,193/1,234 -> 2,153 tok/s` (`pp20k`, +74%) - now faster on prefill than Qwen3.8-Flash-Next (1,439-1,888 tok/s) with zero decode or VRAM penalty (`71.63 tok/s` steady, `55.8 tok/s` post-20k, `11,622 MiB`). Promoted into `polystrata-inkling2-256k.json`.
+- **Installed `.agents/skills/inference-optimisation/`, measured RTX 4070 roofline ceilings (`docs/rtx4070-inference-ceilings.md`), and ran a 3-way Inkling 2 Mini shootout (2026-11-24).**
+  Adapted `sybil-solutions/inference-optimisation-skill` into `.agents/skills/inference-optimisation/` wired to `llama-swap` handoff and `cpu-power-state.sh`. Measured real `yeti-cachy` silicon (`455.8 GB/s` VRAM D2D, `25.0 GB/s` PCIe H2D, `60.0 GB/s` DDR5, `60.5 TFLOPS` FP16 GEMM) and computed exact byte-per-token ceilings (`3.92 GB/tok` -> `114 tok/s` all-in-VRAM fantasy ceiling, `~83-95 tok/s` real 12 GB ceiling). Merged PolyStrata PRs `#296`, `#297`, `#301` (CUDA graph OOM retry), and `#313` (streaming Inkling 2 tool headers) into `vendor/polystrata` and ran an apples-to-apples shootout against Project Maya PR `#1208` (locally patched for `inkling2_loop`) and Strata `v0.2.21` (`strata-inkling 0.1.67`): PolyStrata won cleanly (**71.93 tok/s** coding decode, **1,194 / 1,317 tok/s** 5K/20K prefill vs Maya `#1208` **63.77 / 874 / 824** and Strata `v0.2.21` **46.83 / 833 / 818**).
+- **Bumped `inkling-2-mini` to elastic 256k context (`262144`), wired into Pi (`~/.pi/agent/models.json`), and documented 256k/512k/1M scaling (2026-11-24).**
+  Because Inkling 2 Mini is natively 1M-trained with only 8 full-attention KV slots (~16.5 KiB/tok FP8) and PolyStrata's `--vram-pool` grows KV on demand, raising `--max-context` to `262144` (`vendor/polystrata/polystrata-inkling2-256k.json`) adds only ~13 MiB static score buffer at boot while keeping short-context speed (~75 t/s) and fitting full 256k (~4.12 GiB KV + ~4.1 GiB GPU experts) cleanly in 12 GB VRAM. Documented the 512k/1M path (`--kv q4_0` / `--kv-resident` host-RAM KV streaming) in `docs/inkling-2-mini-optimization.md` §5.
+- **Promoted `inkling-2-mini` (128k elastic) to `vendor/polystrata` (`strata-poly`, branch `polystrata-4070`, `docs/inkling-2-mini-optimization.md`).**
+  After building custom elastic borrowed-cache prefill + visit-weighted loop budget + PR `#264` in
+  `vendor/llama.cpp-inkling2-lean` (68.66 t/s decode, 819.6 / 726.5 t/s prefill at 32k; kept as
+  `inkling-2-mini-llama` fallback), evaluated `jesdga95/basalt` (`sm_120` Blackwell-only) and built
+  `simplexai-labs/PolyStrata` (`strata-poly`) natively for Ada `sm_89` + AVX-VNNI with 4 merged
+  bit-exact Inkling 2 PRs (`#284` warp-per-row MMVQ, `#288` 6 fewer launches/layer, `#291` eager
+  kernel load, `#271` opt-in prestage kept off) plus pure-CPU `strata-vision`. On the exact same
+  full 4-bit `Inkling-2-Mini-UD-Q4_K_XL.gguf` with CUDA VMM `--vram-pool`, `--kv fp8`, `--loop-bf16`,
+  `--prompt-batch 2048`, `--lock-experts`, and no draft model (verified faster than DSpark on 12 GB),
+  `inkling-2-mini` now serves **full 128k context** at **74.65 t/s steady decode** (peak 76.9 t/s,
+  post-8k 75.7 t/s) and **1,135.6 t/s `pp2k` / 1,301.6 t/s `pp8k`** inside 11,620 MiB peak VRAM.
+  `vendor/strata-lean` remains strictly untouched for Qwen3.8-Flash-Next.
+- **Evaluated and rejected porting Strata `v0.2.20` `strata-inkling` into `strata-lean`.** Built the
+  standalone `strata-inkling 0.1.66` Ada `sm_89` binary from upstream `v0.2.20` and tested it on the
+  exact same `UD-Q4_K_XL` GGUF: prefill was strong (665.5 t/s at 2k, 685.6 t/s at 8k) with zero-cost
+  128k Auto Host KV Offload, but decode sat at 25.7 to 25.8 t/s (4.03 GB trunk leaving only 1,411 of
+  3,072 experts on GPU, plus GGUF DSpark tensor-name mismatch). Unsloth `b12651` is **2.56x faster on
+  decode**, so `vendor/strata-lean` stays strictly focused on Qwen3.8-Flash-Next.
+- **Evaluated and rejected upstream Strata `3a0e346db` (`STRATA_L2_PF=1`, 2026-11-21).** Ported and
+  bracket-benchmarked next-layer L2 prefetch in `vendor/strata-lean`: uncapped (139.1 MiB/layer into
+  the RTX 4070's 36 MiB L2) regressed to 69.43 t/s vs 73.10 t/s base, and an 8 MiB cap read 70.90 t/s.
+  Reverted from `vendor/strata-lean` and logged in `docs/strata-tuning-matrix.md`.
+- **Staged `nemotron-3.5-bolt` (74B-A9B 24GB VLM + `mmproj` + `LiLiCorr` drafter)** on `/mnt/media/models/`
+  with rebuilt `vendor/llama.cpp-master` (`b12621`, `e50c254a2`), download scripts in `maintenance/`,
+  and bench scripts in `bench-models/`.
+
 ### Changed (tracker and shared context)
 
 - **GitHub Issues is now the tracker.** Linear was retired on 2026-11-07. The eight

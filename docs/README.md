@@ -22,6 +22,9 @@ Architecture, quant formats, and speculative decoding details for Qwen3.8-Flash-
 - **[Qwen3.8-Flash-Next Internal Guide](qwen38-flash-next-internal.md)** - Canonical reference for Gold, MTP, Exp, and Platinum serving configurations.
 - **[PLE Table Precision & I/O](qwen3-8-flash-next-ple-precision.md)** - Unquantized Q8_0 PLE n-gram table offloading to NVMe, direct I/O vs mmap.
 - **[Variant Ranking & Quant Matrix](qwen38-flash-next-variant-ranking.md)** - Comparative analysis of Unsloth UD-IQ2_XS vs ISTA-DASLab IQ3_XXS vs IQ3_S.
+- **[Inkling 2 Mini Optimization Log](inkling-2-mini-optimization.md)** - Looped-core (`blk.6–17`) GPU placement, DSpark speculative decoding, and RTX 4070 12 GB tuning sweeps.
+- **[Inkling 2 Mini Personal Fine-Tuning Plan](inkling-2-mini-finetune-plan.md)** - End-to-end roadmap (Stage 0–4) for curating personal agent logs, running Unsloth QLoRA + DPO on the Colab burst lane, evaluating gains, and exporting GGUFs back to local `PolyStrata`.
+- **[Colab Burst Lane Plan](colab-burst-lane.md)** - On-demand Google Colab compute (`pro`/`ultra`, L4/A100/G4) for fine-tuning, oversized models, and non-evicting remote endpoints.
 - **[Decision Models Guide](decision-models.md)** - TypeSafe System One non-causal decision model runtimes (vLLM-SR d3-flash, Clef).
 
 ---
@@ -35,6 +38,7 @@ Day-to-day operations, service supervision, and benchmarking guides:
 - **[Bench Troubleshooting](bench-troubleshooting.md)** - Diagnosing SSD read thrashing, memory spills, and thermal throttling during sweeps.
 - **[Media Models Runbook](media-generation-runbook.md)** - ComfyUI integration (`comfyui_auto`), MiniMax-H3 video, and audio.cpp workflows.
 - **[Model Onboarding Playbook](model-onboarding-playbook.md)** - Step-by-step checklist for bringing a new model into `llama-swap.yaml`.
+- **[Agent Environment Retrospective (2026-11-25)](retro-2026-11-25.md)** - Session audit covering `AGENTS.md` truncation, `audit_models.py` multi-shard bug, missing serving/wiki guardrails, `llama-swap` auth wrapper, and `homelabbr` wiki deduplication.
 
 ---
 
@@ -64,3 +68,4 @@ Technical posts mirrored from and to `carteakey.dev`:
 - **[The Rise of Overfit Inference Engines](qwen3-8-flash-next-local-post.md)** - Local inference deep dive on Strata, MTP, and Qwen3.8-Flash-Next.
 - **[Strata Self-Tuning Post](strata-self-tuning-local-post.md)** - Draft blog post detailing automated tuning sweeps on consumer hardware.
 - **[Qwen 27B vs Flash-Next](qwen3-8-27b-vs-flash-next-local-post.md)** - Comparative study between dense 27B hybrid and MoE Flash-Next.
+- **[Optimizing Inkling 2 Mini on an RTX 4070](inkling-2-mini-local-post.md)** - From 5.9 to 65.8 tok/s with Unsloth `b12651` fusions, deduplicated GPU MoE LRU cache, DSpark, and a 70/30 miss split.

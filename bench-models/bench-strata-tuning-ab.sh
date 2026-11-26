@@ -148,6 +148,8 @@ arm_spec() { # label -> fills ARGS/ENV/MASK for one arm
     gr_up75)       ENV="STRATA_GR_UP75=1" ;;
     fuse_wait2)    ENV="STRATA_FUSE_WAIT=2" ;;
     df_ple)        ENV="STRATA_DF_PLE=1" ;;
+    l2_pf)         ENV="STRATA_L2_PF=1" ;;
+    l2_pf_8m)      ENV="STRATA_L2_PF=1 STRATA_L2_PF_MIB=8" ;;
     # The served baseline carries --kv-grow from 2026-10-29, so the Exact-switch arms stack on top of
     # it and their rows compare against the kv_grow control rows, not the 2026-10-28 base rows.
     kg)            ARGS="$KG" ;;
@@ -203,6 +205,8 @@ grnormfast    STRATA_GR_NORM_FAST=1
 gr_up75       STRATA_GR_UP75=1 (8-row-per-warp gr_up75_kernel for 3+ tokens)
 fuse_wait2    STRATA_FUSE_WAIT=2 (fold GPU plan host-flag wait into copy)
 df_ple        STRATA_DF_PLE=1 (batched PLE post-projection in verify window)
+l2_pf         STRATA_L2_PF=1 (BW-5 next-layer dense-weight L2 prefetch while waiting on CPU experts)
+l2_pf_8m      STRATA_L2_PF=1 STRATA_L2_PF_MIB=8 (BW-5 L2 prefetch capped at 8 MiB per layer)
 TXT
 }
 

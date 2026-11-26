@@ -1,6 +1,6 @@
 # L3MS
 
-`L3MS` (Local 3-Mode Model Stack) is a keyboard-first homelab inference stack and systems-engineering workbench. It runs 120B+ parameter MoE models at interactive speeds (70-76 tok/s steady decode) on a single consumer GPU (RTX 4070 12GB + 64GB DDR5) by pairing tiered memory offloading with custom CUDA kernels and dynamic expert caching.
+`L3MS` (Local 3-Mode Model Stack) is a keyboard-first homelab inference stack and systems-engineering workbench. It runs frontier MoE and dense models at interactive speeds (73.0–99.7 tok/s decode) on a single consumer GPU (RTX 4070 12 GB + i5-12600K + 64 GB DDR5-4800) by pairing tiered memory offloading with custom Ada `sm_89` CUDA kernels and dynamic expert caching.
 
 ```text
     __        _____       __  ___       _____
@@ -20,12 +20,12 @@ Language · Media · Decisions
 
 L3MS unifies three operational lanes under a single router ([`llama-swap`](llama-swap.yaml)) and an interactive Rust workbench ([`src/`](src/)):
 
-1. **Language (`strata-lean` & `llama.cpp`)**:
-   Runs **Qwen3.8-Flash-Next** (125B MoE + 51B n-gram table) on consumer silicon. Backed by [`carteakey/strata-lean`](docs/strata-lean.md) (a lean Ada `sm_89` fork with fused CUDA kernels), elastic K/V memory allocation (`--kv-grow`), dynamic VRAM expert caching (3,277 hot experts on GPU), and unquantized Q8_0 PLE tables offloaded to NVMe SSD.
+1. **Language (`strata-lean`, `polystrata-4070`, & `llama.cpp`)**:
+   Runs **Qwen3.8-Flash-Next** (125B MoE + 51B n-gram table, **73.0 t/s** steady decode on [`carteakey/strata-lean`](docs/strata-lean.md)), **Inkling 2 Mini** (26.4B-A5.4B coding + vision MoE, **77.5 t/s fresh / 99.7 t/s edits** on [`polystrata-4070`](docs/inkling-2-mini-optimization.md)), and **Qwen3.8-27B** (`qwen3-8-27b-iq3-xxs`, pure-VRAM dense 27B at **36.7 t/s @ 262k** context) under a clean two-tier residency model alongside E-core CPU utilities (`embeddinggemma-2`). See the [2026-11-26 Stack Audit & Redesign](docs/stack-audit-and-redesign-2026-11-26.md).
 2. **Media**:
-   Orchestrates ComfyUI image/video pipelines (MiniMax-H3) and audio.cpp speech/music models through router-managed GPU eviction, preventing VRAM collisions with resident language models.
+   Orchestrates ComfyUI image/video pipelines and audio.cpp speech/music models through router-managed GPU eviction, preventing VRAM collisions with resident language models.
 3. **Decisions**:
-   Hosts non-causal, typed System One decision models (`vllm-d3-flash`, `cloudflare-clef-flash`) for sub-10ms classification and routing via raw ubatch execution.
+   Hosts non-causal, typed System One decision models (`vllm-d3-flash`, `cloudflare-clef-flash`) via raw ubatch execution. On RTX 4070, these 9B decision models run in **~65–110 ms** for warm text requests (sub-10 ms decision latency requires ≤2B models).
 4. **Empirical Benchmarking & Self-Tuning**:
    Houses automated dark testing harnesses ([`bench-models/`](bench-models/)), system frontmatter logging, paired A/B ladders, and the [Strata Tuning Matrix](docs/strata-tuning-matrix.md) to evaluate runtime switches against strict identity and quality gates.
 
@@ -97,7 +97,9 @@ Language · Media · Decisions
 
 Their guides:
 
-- [Language: Strata Lean (Platinum Tier)](docs/strata-lean.md)
+- [Language: Strata Lean (Qwen3.8-Flash-Next)](docs/strata-lean.md)
+- [Language: PolyStrata (Inkling 2 Mini)](docs/inkling-2-mini-optimization.md)
+- [Stack Audit & Two-Tier Architecture](docs/stack-audit-and-redesign-2026-11-26.md)
 - [Media models](docs/media-models.md)
 - [Decision models](docs/decision-toolkit.md)
 
@@ -105,14 +107,19 @@ Setup scripts are in `maintenance/`, runtime manifests are `media-runtimes.json`
 and `decision-runtimes.json`, and model-specific wrappers are in `media-models/`
 and `decision-models/`.
 
-### Language lane: Strata Lean (`carteakey/strata-lean`)
+### Language lane: Primary Local Burst Tiers
 
-The primary local driver for coding and reasoning is **Qwen3.8-Flash-Next** (`qwen4exp`) served on the Platinum tier (`qwen38-flash-next-plat`). It runs on **[Strata Lean (`carteakey/strata-lean`)](https://github.com/carteakey/strata-lean)**, a custom Ada Lovelace (`sm_89`) fork optimized for 12 GB RTX 4070 cards:
-
-- **Throughput**: Sustained 70-79 t/s decode on real code and reasoning, up to 1,900+ t/s 8k prefill.
-- **Architecture**: Dynamic VRAM expert caching (3,277 hot experts on GPU with `--kv-grow`), native MTP speculative decoding (`--spec 4`), and unquantized Q8_0 PLE table streamed from NVMe.
-- **Strict Mathematical Routing**: `STRATA_ROUTE_TAIL_SKIP` defaults to OFF (0) to preserve exact mathematical routing with zero expert-dropping drift.
-- **Guide & Benchmarks**: Full details, progression numbers, and trade-offs are documented in [docs/strata-lean.md](docs/strata-lean.md).
+1. **Frontier MoE — `qwen38-flash-next-plat` (`strata-lean`, startup preload)**:
+   Runs **Qwen3.8-Flash-Next** on **[Strata Lean (`carteakey/strata-lean`)](https://github.com/carteakey/strata-lean)**, a lean Ada Lovelace (`sm_89`) fork optimized for RTX 4070 12 GB:
+   - **Throughput**: **73.0 t/s** steady decode, **1,136 / 1,439–1,888 t/s** pp2k/pp8k.
+   - **Architecture**: Unsloth `UD-IQ2_XS` + dynamic VRAM expert caching (`--kv-grow`, K8V4 128k), native MTP speculative decoding (Q2_0 draft head), unquantized `Q8_0` PLE table streamed from NVMe, and strict mathematical routing (`STRATA_ROUTE_TAIL_SKIP=0`).
+   - **Guide & Benchmarks**: [docs/strata-lean.md](docs/strata-lean.md) and [docs/strata-tuning-matrix.md](docs/strata-tuning-matrix.md).
+2. **Fast Coding + Vision MoE — `inkling-2-mini` (`polystrata-4070`)**:
+   Runs **Inkling 2 Mini 26.4B-A5.4B** (`UD-Q4_K_XL`) on `polystrata-4070` (`v0.2.20-poly.5` + `#313`) with a 256k elastic FP8 KV pool, Ada INT8 Tensor Core NVFP4 prefill (`STRATA_PREFILL_NVFP4=w4a8`), lossless prompt lookup (`--window 6 --lookup 3`), and pure-CPU `strata-vision`:
+   - **Throughput**: **77.5 t/s** fresh coding / **99.7 t/s** code edits, **1,833 / 2,296 / 2,270 t/s** pp2k/8k/20k.
+   - **Guide & Shootout**: [docs/inkling-2-mini-optimization.md](docs/inkling-2-mini-optimization.md).
+3. **Pure-VRAM Dense 27B — `qwen3-8-27b-iq3-xxs` (`llama.cpp`)**:
+   Holds the full 10.17 GiB **Qwen3.8-27B** (`UD-IQ3_XXS`) model plus 262k native context 100% inside 12 GB VRAM (**36.7 t/s**, zero DDR5 decode traffic). See [docs/qwen3-8-27b-local-post.md](docs/qwen3-8-27b-local-post.md) and [docs/stack-audit-and-redesign-2026-11-26.md](docs/stack-audit-and-redesign-2026-11-26.md).
 
 List the three native manifest catalogs without starting a model or contacting
 llama-swap:
@@ -173,8 +180,8 @@ client job IDs and atomic per-job cancellation contract. Stock servers without
 that contract are not supported by this foreground path. After verifying the
 server, explicitly set `L3MS_COMFY_SCOPED_JOBS=1`; this asserts compatibility,
 not GPU ownership. By default the CLI uses `LLAMA_SWAP_URL/comfyui` and
-`LLAMA_SWAP_API_KEY`; the TUI uses its confirmed Chat connection. An explicit
-`L2M2_COMFY_URL` selects a separate server and receives only
+`LLAMA_SWAP_API_KEY`; the TUI uses its confirmed Chat connection. Setting the
+legacy `L2M2_COMFY_URL` env alias selects a separate ComfyUI server and receives only
 `L3MS_COMFY_API_KEY`, never the router key.
 
 The toolkit setup pin (`20b46065`) implements this contract natively; no custom
@@ -558,18 +565,22 @@ Log view: `c` clears the activity log.
 - `docs/llama-swap-runbook.md`: install, start/stop, curl, add-a-model
 - `docs/model-onboarding-playbook.md`: end-to-end checklist for adding new model families
 - `docs/strata-lean.md`: Strata Lean fork architecture, benchmarks, and quality-speed trade-offs
+- `docs/inkling-2-mini-optimization.md`: Inkling 2 Mini PolyStrata sweeps and 5-engine shootout
+- `docs/stack-audit-and-redesign-2026-11-26.md`: Two-tier residency architecture, hardware diagnostics, and redesign plan
+- `maintenance/host-tuning-check.sh`: Read-only CachyOS, DDR5, CPU governor, THP, and VRAM audit script
 
 ## Serving
 
 Models are served by [llama-swap](https://github.com/mostlygeek/llama-swap) on
 a single OpenAI-compatible endpoint (`http://<host>:8080`). The daemon
-hot-swaps models on demand and exposes every entry in `llama-swap.yaml`
-under `/v1/models`. See `docs/llama-swap-runbook.md`.
+hot-swaps burst GPU models on demand and exposes every listed entry in
+`llama-swap.yaml` under `/v1/models` (short names route via native `aliases:`).
+See `docs/llama-swap-runbook.md`.
 
-The same endpoint serves on-demand embeddings through
-`nomic-embed-text-v1.5`. It starts on the first `/v1/embeddings` request and
-unloads after five idle minutes; see the runbook for the model path, task
-prefixes, and verification request.
+The same endpoint serves co-resident embeddings through `embeddinggemma-2`
+(`Q8_0`, 768 dimensions) pinned to CPU E-cores (`12-15`) in the non-exclusive
+`co-resident` group. It runs without evicting the active VRAM model and unloads
+after five idle minutes.
 
 ## Downloader CLI (direct)
 
