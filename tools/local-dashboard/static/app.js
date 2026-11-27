@@ -327,7 +327,7 @@
                     ${m.running ? '<span class="badge badge-green">RESIDENT</span>' : ""}
                   </div>
                   <div class="model-name">${escapeHtml(m.name)}</div>
-                  ${m.description ? `<p class="model-desc">${escapeHtml(m.description.slice(0, 175))}${m.description.length > 175 ? "…" : ""}</p>` : ""}
+                  ${m.description ? `<p class="model-desc">${escapeHtml(m.description)}</p>` : ""}
                   <div class="badge-row">
                     <span class="badge badge-blue">${escapeHtml(m.engine)}</span>
                     <span class="badge ${m.exclusive ? "" : "badge-green"}">${m.exclusive ? "exclusive" : "co-resident"}</span>

@@ -1230,8 +1230,8 @@ window.L3MS_DASHBOARD = {
   "embeddings": [
     {
       "id": "embeddinggemma-2",
-      "name": "EmbeddingGemma 2 (Q8_0, CPU E-cores, 768 dimensions)",
-      "description": "OpenAI-compatible embeddings for Lytte search by meaning. CPU-only and pinned to E-cores (12-15) in the non-exclusive co-resident group so it never evicts or contends with a burst model in VRAM; unloads after 5 minutes idle.",
+      "name": "EmbeddingGemma 2 (CPU Embeddings)",
+      "description": "Always-on semantic search embeddings (768-dim) on CPU E-cores. Zero VRAM, never evicts your active GPU model.",
       "engine": "llama.cpp-master",
       "tier": "co-resident",
       "device": "cpu",

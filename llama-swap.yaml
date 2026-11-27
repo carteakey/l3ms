@@ -69,8 +69,8 @@ models:
   # ===========================================================================
 
   "embeddinggemma-2":
-    name: "EmbeddingGemma 2 (Q8_0, CPU E-cores, 768 dimensions)"
-    description: "OpenAI-compatible embeddings for Lytte search by meaning. CPU-only and pinned to E-cores (12-15) in the non-exclusive co-resident group so it never evicts or contends with a burst model in VRAM; unloads after 5 minutes idle."
+    name: "EmbeddingGemma 2 (CPU Embeddings)"
+    description: "Always-on semantic search embeddings (768-dim) on CPU E-cores. Zero VRAM, never evicts your active GPU model."
     ttl: 300
     metadata:
       task: embeddings
@@ -92,8 +92,8 @@ models:
       --no-warmup
 
   "liquid-d1-2b":
-    name: "LiquidAI d1-2B Decision (Q8_0 + mmproj-Q8_0, CPU E-cores, /v1/systemone)"
-    description: "Zero-VRAM co-resident System One decision model (LFM3-VL-2B architecture) pinned to E-cores (12-15). Evaluates noul/choice/score schemas via POST /v1/systemone without ever evicting the active GPU LLM."
+    name: "LiquidAI d1-2B (CPU Triage)"
+    description: "Always-on 2B structured decision router (/v1/systemone) on CPU E-cores. Zero VRAM, never evicts your active GPU model."
     aliases:
       - "d1-2b"
       - "lfm3-d1"
@@ -114,8 +114,8 @@ models:
       --no-warmup
 
   "kokoro-82m":
-    name: "Kokoro 82M TTS (Q8_0, CPU E-cores, audio.cpp v0.9.6)"
-    description: "Zero-VRAM co-resident multilingual speech synthesis (54 preset voices) pinned to E-cores (12-15) via audio.cpp CPU backend. Never evicts the active GPU LLM."
+    name: "Kokoro 82M (Instant CPU TTS)"
+    description: "Always-on multilingual voice synthesis (54 preset voices) on CPU E-cores. Instant speech with zero GPU switchover."
     aliases:
       - "kokoro"
     ttl: 1800
@@ -134,8 +134,8 @@ models:
   # ===========================================================================
 
   "qwen38-flash-next-plat":
-    name: "Qwen3.8-Flash-Next Plat (Strata Lean, Unsloth UD-IQ2_XS, Q8_0 PLE, 128k ctx, 73.0 t/s)"
-    description: "Platinum: strata-lean with Unsloth Dynamic UD-IQ2_XS + dynamic expert VRAM caching + unquantized Q8_0 PLE n-gram table (54.4 GB on NVMe, 0 MiB VRAM overhead) + native MTP speculative decoding (Q2_0 draft head) + K8V4 KV cache + 128k --kv-grow context + 4-slot conversation cache (73.0 t/s steady decode, 1,136-1,888 t/s prefill)."
+    name: "Qwen3.8-Flash-Next Plat (Primary · 73 t/s)"
+    description: "Startup preload and primary 180B MoE model on Strata Lean. 128k context, 73 t/s decode, up to 1,888 t/s prefill."
     aliases:
       - "strata"
       - "plat"
@@ -154,8 +154,8 @@ models:
       --port ${inference_port}
 
   "qwen38-flash-next-plat-vision":
-    name: "Qwen3.8-Flash-Next Plat Vision (Strata Lean + strata-vision, Unsloth UD-IQ2_XS, Q8_0 PLE, mmproj-F16, 128k ctx)"
-    description: "Platinum Vision: strata-lean with Unsloth UD-IQ2_XS + native CPU-offloaded strata-vision image encoder (mmproj-F16) + full Q8_0 PLE table preserving 100% VRAM expert cache. Multimodal image understanding via OpenAI / Anthropic API."
+    name: "Qwen3.8-Flash-Next Plat Vision"
+    description: "Multimodal Qwen3.8-Flash-Next on Strata Lean with CPU-offloaded image encoding so VRAM stays dedicated to experts."
     aliases:
       - "strata-vision"
       - "plat-vision"
@@ -173,8 +173,8 @@ models:
       --port ${inference_port}
 
   "qwen38-flash-next-plat-abliterated":
-    name: "Qwen3.8-Flash-Next Plat Abliterated (Strata Lean, SC117 IQ3_XXS, Q8_0 PLE, 128k ctx, 70-76 t/s)"
-    description: "Platinum Abliterated: strata-lean with SC117 unaligned/uncensored weights + unquantized Q8_0 PLE n-gram table (54.4 GB on NVMe, 0 MiB VRAM overhead) + dynamic expert VRAM caching (3,086 hot experts in VRAM) + native MTP speculative decoding + K8V4 KV cache + 128k ctx + 4-slot conversation cache. 70-76 t/s steady decode."
+    name: "Qwen3.8-Flash-Next Plat Abliterated"
+    description: "Uncensored SC117 variant of Qwen3.8-Flash-Next on Strata Lean at 128k context (~62-76 t/s decode)."
     aliases:
       - "abliterated"
     ttl: 3600
@@ -189,8 +189,8 @@ models:
       --port ${inference_port}
 
   "qwen38-flash-next-plat-abliterated-vision":
-    name: "Qwen3.8-Flash-Next Plat Abliterated Vision (Strata Lean + strata-vision, mmproj-F16, SC117, Q8_0 PLE, 128k ctx)"
-    description: "Platinum Abliterated Vision: strata-lean uncensored/unaligned SC117 weights with native CPU-offloaded strata-vision image encoder (mmproj-F16) + unquantized Q8_0 PLE table preserving 100% VRAM expert cache. Multimodal image understanding."
+    name: "Qwen3.8-Flash-Next Plat Abliterated Vision"
+    description: "Uncensored SC117 Qwen3.8-Flash-Next on Strata Lean with CPU-offloaded multimodal image understanding."
     aliases:
       - "abliterated-vision"
     ttl: 3600
@@ -205,8 +205,8 @@ models:
       --port ${inference_port}
 
   "inkling-2-mini":
-    name: "Inkling 2 Mini 26.4B-A5.4B (PolyStrata, UD-Q4_K_XL + CPU Vision, 256k)"
-    description: "Thinking Machines Lab 26.4B MoE (3.4B/5.4B looped active) coding, agentic & vision model. Runs on PolyStrata polystrata-4070 (v0.2.20-poly.5 + #313, Ada sm_89 + AVX-VNNI) with CUDA VMM elastic 256k FP8 KV pool (--vram-pool --loop-bf16 --prompt-batch 2048 --lock-experts --window 6 --lookup 3), Ada INT8 Tensor Core NVFP4 prefill (STRATA_PREFILL_NVFP4=w4a8, STRATA_INK_FAST_CTRL=1, STRATA_INK_PRESTAGE=0), ~1,681 resident GPU experts, zero-VRAM CPU strata-vision, and 4-slot conversation cache (77.5 t/s fresh / 99.7 t/s edits, 1,833 / 2,296 / 2,270 t/s pp2k/8k/20k, 11.70 GB peak VRAM; see docs/inkling-2-mini-optimization.md)."
+    name: "Inkling 2 Mini (Coding + Vision · 78/100 t/s)"
+    description: "Primary fast coding, agentic, and vision MoE on PolyStrata. 256k context, 77.5 t/s fresh, 99.7 t/s edits, 2,296 t/s prefill."
     aliases:
       - "inkling-2-mini-128k"
     ttl: 3600
@@ -221,8 +221,8 @@ models:
       --port ${inference_port}
 
   "qwen3-8-27b-iq3-xxs":
-    name: "Qwen3.8-27B UD-IQ3_XXS (pure-VRAM dense 27B, 262k ctx, 36.7 t/s)"
-    description: "Dense 27B hybrid, 10.17 GiB. Pure-VRAM zero-DDR5-traffic language tier: holds 262k native ctx in 12 GB VRAM with q5_0/q4_1 KV at ~36.7 t/s. See docs/qwen3-8-27b-local-post.md. No MTP."
+    name: "Qwen3.8-27B (Pure VRAM · 37 t/s)"
+    description: "Dense 27B model fitting 100% inside 12 GB VRAM with 262k context and zero RAM spill (~36.7 t/s)."
     env:
       - "GGML_CUDA_GRAPH_OPT=1"
     proxy: http://127.0.0.1:${inference_port}
@@ -249,8 +249,8 @@ models:
   # ===========================================================================
 
   "qwen38-flash-next":
-    name: "Qwen3.8-Flash-Next (master b12073 d1044bc82, Unsloth UD-IQ2_XS + Q8_0 PLE, 96k ctx)"
-    description: "Gold: plain upstream master b12073 (d1044bc82) on Unsloth UD-IQ2_XS + Q8_0 PLE. 96k ctx, q8 KV, ngram-mod spec. Natively includes PR #29761, #29824, #29825, #30480, #29181, #30239, #29887, #30602, #30927, #31188, #31243, #31443. Reasoning: effort=xhigh, budget=4000. See docs/qwen38-flash-next-internal.md."
+    name: "Qwen3.8-Flash-Next (llama.cpp Fallback)"
+    description: "Upstream llama.cpp fallback for Qwen3.8-Flash-Next at 96k context (~23 t/s decode)."
     aliases:
       - "qwen38-flash-next-ple-q8"
       - "gold-q8"
@@ -276,8 +276,8 @@ models:
       --host 0.0.0.0 --port ${inference_port}
 
   "qwen38-flash-next-exp":
-    name: "Qwen3.8-Flash-Next EXP (b12100 + MoE Cache #30966 + MTP Fix #30592, Unsloth UD-IQ2_XS)"
-    description: "Experimental tier: llama.cpp b12100 with dynamic GPU MoE expert LRU caching (--moe-cache-mib 2048) + CPU-shared misses (#30966) + fused MoE MMQ on Unsloth UD-IQ2_XS + Q8_0 PLE. 65k ctx. See docs/qwen38-flash-next-internal.md."
+    name: "Qwen3.8-Flash-Next (llama.cpp MoE Cache)"
+    description: "Experimental llama.cpp fallback with GPU MoE expert caching at 65k context (~25 t/s decode)."
     env:
       - "GGML_CUDA_GRAPH_OPT=1"
     proxy: http://127.0.0.1:${inference_port}
@@ -301,8 +301,8 @@ models:
       --host 0.0.0.0 --port ${inference_port}
 
   "qwen38-flash-next-mtp":
-    name: "Qwen3.8-Flash-Next MTP (Unified QSA Sparsity V2 + PR #28243, shared-Q4_K_M, ncmoe 46)"
-    description: "Speculative tier: Unified QSA Sparsity Stack V2 (#28770 + #28699 + #28213 + #29166) + PR #28243 with unsloth mtp-Qwen3.8-Flash-Next-shared-Q4_K_M.gguf (1.78 GB) + NVMe row prefetching (#29599). Offloads 2 MoE layers to GPU (-ncmoe 46), 97-100% draft acceptance (2.76-2.93 tok/step), 25.3-27.06 t/s decode, 11.0 GB VRAM. See docs/qwen38-flash-next-internal.md."
+    name: "Qwen3.8-Flash-Next (llama.cpp MTP)"
+    description: "Speculative-decoding llama.cpp fallback using a shared MTP draft head (~21-27 t/s decode)."
     env:
       - "GGML_CUDA_GRAPH_OPT=1"
     proxy: http://127.0.0.1:${inference_port}
@@ -326,8 +326,8 @@ models:
       --host 0.0.0.0 --port ${inference_port}
 
   "qwen38-flash-next-vision":
-    name: "Qwen3.8-Flash-Next Vision (master b11619, mmproj-F16, 32k ctx, ncmoe 45)"
-    description: "Multimodal tier: plain upstream master b11619 with mmproj-F16 vision projector on Unsloth UD-IQ2_XS + Q8_0 PLE. Offloads 3 MoE layers to GPU (-ncmoe 45), 18.2-18.6 t/s @ 32k ctx, ub 1024, 10.8 GB VRAM (1.32 GB headroom for image activations/KV). See docs/qwen38-flash-next-internal.md."
+    name: "Qwen3.8-Flash-Next Vision (llama.cpp Fallback)"
+    description: "Multimodal upstream llama.cpp fallback with vision support at 32k context (~18 t/s decode)."
     env:
       - "GGML_CUDA_GRAPH_OPT=1"
     proxy: http://127.0.0.1:${inference_port}
@@ -349,8 +349,8 @@ models:
       --host 0.0.0.0 --port ${inference_port}
 
   "inkling-2-mini-llama":
-    name: "Inkling 2 Mini 26.4B-A5.4B (llama.cpp-inkling2-lean fallback, 32k)"
-    description: "Fallback llama.cpp engine: custom Ada sm_89 llama.cpp-inkling2-lean with elastic borrowed-cache prefill (LLAMA_MOE_CACHE_ELASTIC=1), visit-weighted loop budget (LLAMA_MOE_CACHE_VISIT_BUDGET=1), PR #264 CUDA MoE prompt kernels, 7,800 MiB GPU MoE LRU cache (--moe-cache-cpu-share 0.70), DSpark n=3 (--spec-draft-n-ubatch 256), and CPU-offloaded mmproj (~68.7 tok/s steady decode, ~820 tok/s pp2k, ~726 tok/s pp8k, 11.65 GB peak VRAM)."
+    name: "Inkling 2 Mini (llama.cpp Fallback · 69 t/s)"
+    description: "GGUF fallback for Inkling 2 Mini with MoE caching, DSpark drafting, and CPU vision at 32k context (~68.7 t/s)."
     env:
       - "LLAMA_MOE_CACHE_ELASTIC=1"
       - "LLAMA_MOE_CACHE_VISIT_BUDGET=1"
@@ -378,8 +378,8 @@ models:
   # Inkling 2 Mini 26.4B-A5.4B — Unbound v2.1 (abliterated; non-startup profile).
   # Sampling per model card: temp 0.6 / top_p 0.95 (thinking cap 4,096 is client-side max_tokens). No DRY.
   "inkling-2-mini-unbound-v2.1":
-    name: "Inkling 2 Mini 26.4B-A5.4B (Unbound v2.1 Q4_K_M, llama.cpp-inkling2-lean, 32k)"
-    description: "nokeepai Unbound v2.1 (conv-aware abliterated + self-distilled attention-patched GGUF). GGUF Q4_K_M 17.78 GB at /mnt/dev/models/nokeepai/Inkling-2-Mini-Unbound-GGUF, CPU-offloaded mmproj-F16 (same projector as the original). Non-startup profile: wake it explicitly. Sampling temp 0.6 / top_p 0.95, no DRY. Not yet benchmarked on this stack."
+    name: "Inkling 2 Mini Unbound v2.1"
+    description: "Abliterated Unbound v2.1 variant of Inkling 2 Mini with vision support at 32k context (unmeasured)."
     env:
       - "LLAMA_MOE_CACHE_ELASTIC=1"
       - "LLAMA_MOE_CACHE_VISIT_BUDGET=1"
@@ -403,10 +403,11 @@ models:
       --host 0.0.0.0 --port ${inference_port}
 
   "gemma-4-26b-qat":
-    name: "gemma-4-26B QAT (UD-Q4_K_XL, text, 131k ctx)"
+    name: "Gemma 4 26B QAT (69 t/s)"
     env:
       - "GGML_CUDA_GRAPH_OPT=1"
     proxy: http://127.0.0.1:${inference_port}
+    description: "Fast 26B QAT MoE model for general chat and writing at 128k context (~69 t/s decode)."
     cmd: |
       taskset -c ${cpu_range} ${llama_server}
       -m /home/kchauhan/models/unsloth/gemma-4-26B-A4B-it-qat-GGUF/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
@@ -425,10 +426,11 @@ models:
       --prio 2 --no-warmup
 
   "gemma-4-26b-qat-mtp":
-    name: "gemma-4-26B QAT + MTP (UD-Q4_K_XL + Assistant, 131k ctx)"
+    name: "Gemma 4 26B QAT + MTP (101 t/s)"
     env:
       - "GGML_CUDA_GRAPH_OPT=1"
     proxy: http://127.0.0.1:${inference_port}
+    description: "Fastest speculative-decoding Gemma 4 profile on this GPU at 128k context (~100.6 t/s decode)."
     cmd: |
       taskset -c ${cpu_range} ${llama_server}
       -m /home/kchauhan/models/unsloth/gemma-4-26B-A4B-it-qat-GGUF/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
@@ -451,8 +453,8 @@ models:
       --prio 2 --no-warmup
 
   "humanizer-12b":
-    name: "Humanizer 12B (Q6_K, Gemma 4 text rewriting)"
-    description: "Fine-tuned Gemma-4-12B text-completion rewrite model. Rewrites AI drafts to natural human voice preserving all facts, numbers, dates and names."
+    name: "Humanizer 12B (Rewrite · 29 t/s)"
+    description: "Fine-tuned Gemma 4 12B rewriter that turns AI drafts into natural prose while preserving facts and numbers."
     aliases:
       - "humanizer"
     proxy: http://127.0.0.1:${inference_port}
@@ -471,8 +473,8 @@ models:
       --host 0.0.0.0 --port ${inference_port}
 
   "nemotron-3.5-bolt":
-    name: "Nemotron 3.5 Bolt 74B-A9B (24GB IQ2 QAT + mmproj + LiLiCorr DFlash)"
-    description: "NVIDIA Nemotron 3.5 Bolt 74B-A9B hybrid Mamba-2/Transformer LatentMoE VLM (text, images, video) with LiLiCorr DFlash speculative decoding. Runs on llama.cpp master (b12621+) with auto-fit MoE RAM offload on RTX 4070 12 GB."
+    name: "Nemotron 3.5 Bolt 74B (VLM)"
+    description: "74B-A9B hybrid multimodal model (text, images, video) with DFlash speculative decoding and RAM offload."
     proxy: http://127.0.0.1:${inference_port}
     cmd: |
       taskset -c ${cpu_range} ${llama_master_server}
@@ -498,8 +500,8 @@ models:
   # ===========================================================================
 
   "comfyui_auto":
-    name: "ComfyUI v0.46.3 (Qwen-Image-2.1 · FLUX.3 Klein · MiniMax-H3 Image & Video)"
-    description: "ComfyUI v0.46.3 + ComfyUI-GGUF via /comfyui/. Low-VRAM flags; job submit, status, cancel and artifact routes are used by the L3MS media runner."
+    name: "ComfyUI (Image & Video Studio)"
+    description: "GPU image and video workflow server for Qwen-Image-2.1 Turbo, MiniMax-H3-Image Q4_K_M, and FLUX.3 Klein (/comfyui/)."
     cmd: >-
       /usr/bin/bash -c 'cd ${comfy_root}/vendor/ComfyUI &&
       exec ${comfy_root}/.venv-comfy/bin/python ${comfy_root}/vendor/ComfyUI/main.py
@@ -511,8 +513,8 @@ models:
     checkEndpoint: /system_stats
 
   "audiocpp_auto":
-    name: "audio.cpp v0.9.6 (Breeze-TTS-2 CUDA · Kokoro 82M)"
-    description: "Shared CUDA audio engine. Breeze standard/design, clone and streaming plus Kokoro TTS use /audiocpp/v1/audio/speech. Model ids and weights are configured in audiocpp-server.json."
+    name: "audio.cpp (Breeze-TTS-2 & Kokoro GPU)"
+    description: "Shared GPU speech engine serving Breeze-TTS-2 (TTS, voice clone, voice design, streaming) and Kokoro."
     cmd: >-
       ${audiocpp_server} --config ${env.L3MS_ROOT}/audiocpp-server.json
       --host 127.0.0.1 --port ${PORT} --no-ui
@@ -520,8 +522,8 @@ models:
     checkEndpoint: /health
 
   "ace-step-1.5":
-    name: "ACE-Step 1.5 Turbo Music (Q8_0, acestep.cpp CUDA sm_89)"
-    description: "Local stereo 48kHz music generation (Qwen3-Embedding 0.6B + 5Hz-LM 1.7B + v1.5 Turbo DiT Q8_0 + BF16 VAE, ~5.3 GiB) via acestep.cpp with embedded WebUI on :8089 and HTTP API via /upstream/ace-step-1.5/."
+    name: "ACE-Step 1.5 Turbo (Music Generation)"
+    description: "Local 48 kHz stereo music generator on GPU (~5.3 GiB VRAM) with built-in WebUI on :8089 and HTTP API."
     aliases:
       - "acestep"
       - "music"
@@ -537,8 +539,8 @@ models:
       --host 0.0.0.0 --port ${inference_port}
 
   "nemotron-3.5-transcribe":
-    name: "Nemotron 3.5 Transcribe 30B-A4B (IQ4_NL)"
-    description: "Speech transcription via speech.cpp with Vulkan GPU and CPU expert offload, VAD and speaker diarization. POST /v1/audio/transcriptions."
+    name: "Nemotron 3.5 Transcribe 30B (ASR)"
+    description: "Local speech-to-text transcription with voice activity detection and speaker diarization."
     useModelName: "NVIDIA-Nemotron-3.5-Transcribe-30B-A4B"
     unlisted: true
     cmd: >-
@@ -556,8 +558,8 @@ models:
   # ===========================================================================
 
   "vllm-d3-27b":
-    name: "vLLM-SR d3-27B Decision (Artemis Q3_K_S, high-accuracy /v1/systemone)"
-    description: "High-accuracy 27B System One decision model (Artemis-Q3_K_S, 12.26 GB) for RAG grounding and large multi-label schemas where 9B flash models degrade. Auto-fits ~50/64 layers into 12 GB VRAM with q8_0 KV and --parallel 1."
+    name: "vLLM-SR d3-27B (High-Precision Decisions)"
+    description: "27B structured decision model (/v1/systemone) for RAG grounding and complex multi-label schemas."
     aliases:
       - "d3-27b"
     metadata:
@@ -577,8 +579,8 @@ models:
       --host 0.0.0.0 --port ${inference_port}
 
   "vllm-d3-flash":
-    name: "vLLM-SR d3-flash 9B Decision (Q8_0 + mmproj-BF16, text+image)"
-    description: "Native decision model: choice / noul (yes-no) / score questions answered with probabilities via POST /v1/systemone (TypeSafe System One API). Image input via `images` data URLs (up to 1.6 MP each). Non-causal: whole prompt (images + state + question) must fit one ubatch, so ub = ctx = 8192 (~4 full-size images). 11.5 GB VRAM. Warm: ~0.11 s text (3 questions), ~1.7 s with one 1024x768 image + 4 questions (each question re-reads the image: 3.4k tokens)."
+    name: "vLLM-SR d3-flash 9B (Text + Image Decisions)"
+    description: "Fast 9B decision model (/v1/systemone) scoring choice, yes/no, and numeric questions with text or image input."
     metadata:
       task: decision
     proxy: http://127.0.0.1:${inference_port}
@@ -594,8 +596,8 @@ models:
       --host 0.0.0.0 --port ${inference_port}
 
   "cloudflare-clef-flash":
-    name: "Cloudflare Clef-Flash 9B Decision (Q4_K_M + mmproj-BF16, text+image)"
-    description: "Native decision model (clef): all questions of a request decided jointly in one pass, so images are read once. POST /v1/systemone with the model in the JSON body. Clef server is decision-only (no text generation). Whole prompt must fit one ubatch: ub = ctx = 8192. 8.9 GB VRAM. Warm: ~0.09 s text (3 questions), ~0.5 s with one 1024x768 image + 4 questions (1.1k tokens)."
+    name: "Cloudflare Clef-Flash 9B (Joint Decisions)"
+    description: "Single-pass 9B decision model (/v1/systemone) that scores all questions together (~0.5s with images)."
     metadata:
       task: decision
     proxy: http://127.0.0.1:${inference_port}
