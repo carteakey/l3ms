@@ -60,13 +60,16 @@ class DashboardDataTest(unittest.TestCase):
     def test_served_generation_profiles_match_dashboard_metadata(self):
         parsed = dashboard.parse_models((ROOT / "llama-swap.yaml").read_text())
         decisions = json.loads((ROOT / "decision-runtimes.json").read_text())
+        media = json.loads((ROOT / "media-runtimes.json").read_text())
         native_ids = {p["model"] for p in decisions["profiles"] if p["engine"] == "llamacpp"}
+        native_media_ids = {p["id"] for p in media["profiles"]}
         self.assertTrue(native_ids <= set(parsed))
         active = {
             key for key, model in parsed.items()
             if model.get("cmd") and not model.get("unlisted", False)
             and "--embedding" not in model["cmd"]
             and key not in native_ids
+            and key not in native_media_ids
             and not key.endswith("_auto")
         }
         metadata = json.loads((ROOT / "docs" / "dashboard-meta.json").read_text())
@@ -205,7 +208,7 @@ models:
         self.assertEqual(by_id["qwen3-8-27b-iq3-xxs"]["ramGb"], 0.0)
         self.assertNotIn("Preload", by_id["gemma-4-26b-qat-mtp"]["tags"])
         self.assertNotIn("startup preload", by_id["gemma-4-26b-qat-mtp"]["description"].lower())
-        self.assertEqual(len(payload["engines"]["engines"]), 9)
+        self.assertEqual(len(payload["engines"]["engines"]), 10)
         self.assertGreaterEqual(len(payload["inklingProgression"]), 8)
         self.assertEqual(payload["roofline"]["hardwareBaselines"][0]["measured"], 455.8)
 
@@ -232,9 +235,9 @@ models:
             json.loads((ROOT / "decision-runtimes.json").read_text()),
             metadata["decisions"],
         )
-        self.assertEqual(len(media), 11)
-        self.assertEqual(len(decisions), 9)
-        for profile_id in ("vllm-d3-flash", "cloudflare-clef-flash"):
+        self.assertEqual(len(media), 14)
+        self.assertEqual(len(decisions), 11)
+        for profile_id in ("liquid-d1-2b", "vllm-d3-27b", "vllm-d3-flash", "cloudflare-clef-flash"):
             native = next(profile for profile in decisions if profile["id"] == profile_id)
             self.assertEqual(native["engine"], "llamacpp")
             self.assertIsNone(native["experimentUrl"])

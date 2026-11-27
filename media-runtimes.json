@@ -2,6 +2,66 @@
   "schema_version": 1,
   "profiles": [
     {
+      "id": "kokoro-82m",
+      "name": "Kokoro 82M CPU speech (co-resident)",
+      "runtime": "audio.cpp",
+      "device": "cpu",
+      "variant": "Kokoro 82M Q8_0 GGUF (181 MiB), CPU E-cores (12-15), 54 voices",
+      "tasks": ["tts"],
+      "inputs": ["text"],
+      "status": "local",
+      "script": "media-models/generate-kokoro-82m.sh",
+      "description": "Zero-VRAM co-resident multilingual text-to-speech pinned to Alder Lake E-cores (12-15) via audio.cpp v0.9.6. Generates speech without evicting the active GPU LLM.",
+      "requirements": [
+        "audio.cpp v0.9.6 built with kokoro_tts loader",
+        "Kokoro-82M-GGUF/kokoro-82m-q8_0.gguf in /mnt/media/models/media/Kokoro-82M-GGUF"
+      ],
+      "notes": [
+        "Runs in llama-swap groups.co-resident alongside embeddinggemma-2 and liquid-d1-2b.",
+        "Also available directly via media-models/generate-kokoro-82m.sh."
+      ]
+    },
+    {
+      "id": "ace-step-1.5",
+      "name": "ACE-Step 1.5 Turbo music generation",
+      "runtime": "acestep.cpp",
+      "device": "cuda",
+      "variant": "ACE-Step 1.5 Turbo Q8_0 GGUF (5.3 GiB bundle, CUDA sm_89)",
+      "tasks": ["music"],
+      "inputs": ["text", "lyrics"],
+      "status": "local",
+      "script": "media-models/generate-ace-step-1.5.sh",
+      "description": "Fast local 48 kHz stereo song synthesis via ServeurpersoCom/acestep.cpp (Qwen3-Embedding 0.6B + 5Hz-LM 1.7B + v1.5 Turbo DiT Q8_0 + BF16 VAE). Served on demand by llama-swap with embedded WebUI on :8089.",
+      "requirements": [
+        "vendor/acestep.cpp/build/ace-server built with GGML_CUDA=ON sm_89",
+        "Serveurperso/ACE-Step-1.5-GGUF Turbo Q8_0 bundle in /mnt/media/models/media/ACE-Step-1.5"
+      ],
+      "notes": [
+        "Fits 100% inside 12 GB VRAM (~5.3 GiB weights).",
+        "Wake via llama-swap model id ace-step-1.5 (aliases: acestep, music) and open :8089 for the built-in WebUI."
+      ]
+    },
+    {
+      "id": "minimax-h3-image",
+      "name": "MiniMax-H3-Image photorealistic generation & editing",
+      "runtime": "ComfyUI",
+      "device": "cuda",
+      "variant": "Pruned 33.1B DiT Q4_K_M GGUF (10.78 GiB) + shared Qwen3-VL-32B NVFP4 + FP16 Image VAE",
+      "tasks": ["image"],
+      "inputs": ["text", "image"],
+      "status": "local",
+      "script": "media-models/generate-minimax-h3-image.sh",
+      "description": "High-realism text-to-image and multi-reference image editing via ComfyUI v0.46.3 + ComfyUI-GGUF using Abiray's Pruned Q4_K_M GGUF DiT and the shared Qwen3-VL-32B encoder already on disk.",
+      "requirements": [
+        "ComfyUI v0.46.3+ with ComfyUI-GGUF custom node installed",
+        "MiniMax-H3-Image-Pruned-Q4_K_M.gguf, minimax_h3_image_vae_fp16.safetensors, and qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
+      ],
+      "notes": [
+        "6 distilled denoising steps; ComfyUI --lowvram streams ~2-3 GB of DiT blocks over 25 GB/s PCIe Gen4 for near-lossless Q4 quality on 12 GB VRAM.",
+        "Workflow available at workflows/minimax-h3-image/image_minimax_h3_image_t2i_gguf.json."
+      ]
+    },
+    {
       "id": "minimax-h3",
       "name": "MiniMax H3 audio + video",
       "runtime": "audio.cpp",

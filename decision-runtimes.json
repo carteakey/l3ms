@@ -3,6 +3,36 @@
   "version": "1.0",
   "profiles": [
     {
+      "id": "liquid-d1-2b",
+      "name": "LiquidAI d1-2B (CPU E-cores, llama.cpp)",
+      "engine": "llamacpp",
+      "tier": "smol",
+      "type": "local",
+      "model": "liquid-d1-2b",
+      "backbone": "LFM3-VL-2B; Q8_0 + mmproj Q8_0 (CPU E-cores 12-15)",
+      "device": "cpu",
+      "fallback_device": "cpu",
+      "vram_gb": 0.0,
+      "expected_latency_ms": 1800,
+      "description": "Zero-VRAM co-resident /v1/systemone decision model pinned to CPU E-cores (12-15). Never evicts the resident GPU LLM; verified live on text triage (~1.8s on 4 E-cores).",
+      "entrypoint": "decision-models/runner.py"
+    },
+    {
+      "id": "vllm-d3-27b",
+      "name": "vLLM-SR d3-27B Artemis (Q3_K_S, llama.cpp)",
+      "engine": "llamacpp",
+      "tier": "big",
+      "type": "local",
+      "model": "vllm-d3-27b",
+      "backbone": "Qwen3.5-27B; Artemis-Q3_K_S (12.26 GB)",
+      "device": "cuda",
+      "fallback_device": "cuda",
+      "vram_gb": 11.1,
+      "expected_latency_ms": 150,
+      "description": "High-accuracy 27B /v1/systemone decision model for RAG grounding and large multi-label schemas where 9B flash models degrade. Auto-fits ~50/64 layers in 12 GB VRAM with q8_0 KV.",
+      "entrypoint": "decision-models/runner.py"
+    },
+    {
       "id": "vllm-d3-flash",
       "name": "vLLM-SR d3-flash 9B (llama.cpp)",
       "engine": "llamacpp",

@@ -52,7 +52,8 @@ macros:
   "polystrata_inkling2_config": "${env.L3MS_ROOT}/vendor/polystrata/polystrata-inkling2-256k.json"
 
   # media engines owned by llama-swap (reserved model ids audiocpp_auto / comfyui_auto)
-  "audiocpp_server":       "${env.L3MS_ROOT}/vendor/audio.cpp-955c872/build/bin/audiocpp_server"
+  "audiocpp_server":       "${env.L3MS_ROOT}/vendor/audio.cpp-v0.9.6/build/bin/audiocpp_server"
+  "acestep_server":        "${env.L3MS_ROOT}/vendor/acestep.cpp/build/ace-server"
   "speech_cpp_server":     "${env.HOME}/.local/share/lytte-nemotron/runtime/speech"
   "comfy_root":            "${env.L3MS_ROOT}"
 
@@ -89,6 +90,43 @@ models:
       --threads 4
       --host 0.0.0.0 --port ${PORT}
       --no-warmup
+
+  "liquid-d1-2b":
+    name: "LiquidAI d1-2B Decision (Q8_0 + mmproj-Q8_0, CPU E-cores, /v1/systemone)"
+    description: "Zero-VRAM co-resident System One decision model (LFM3-VL-2B architecture) pinned to E-cores (12-15). Evaluates noul/choice/score schemas via POST /v1/systemone without ever evicting the active GPU LLM."
+    aliases:
+      - "d1-2b"
+      - "lfm3-d1"
+    ttl: 1800
+    metadata:
+      task: decision
+    cmd: |
+      env CUDA_VISIBLE_DEVICES= taskset -c ${ecores} ${llama_master_server}
+      -m /home/kchauhan/models/liquid/d1-2B-GGUF/d1-2B-Q8_0.gguf
+      --mmproj /home/kchauhan/models/liquid/d1-2B-GGUF/mmproj-d1-2B-Q8_0.gguf
+      --no-mmproj-offload
+      --alias liquid-d1-2b
+      -ngl 0
+      -c 8192 --parallel 1
+      -b 8192 -ub 8192
+      -t 4
+      --host 0.0.0.0 --port ${PORT}
+      --no-warmup
+
+  "kokoro-82m":
+    name: "Kokoro 82M TTS (Q8_0, CPU E-cores, audio.cpp v0.9.6)"
+    description: "Zero-VRAM co-resident multilingual speech synthesis (54 preset voices) pinned to E-cores (12-15) via audio.cpp CPU backend. Never evicts the active GPU LLM."
+    aliases:
+      - "kokoro"
+    ttl: 1800
+    metadata:
+      task: tts
+    cmd: >-
+      env CUDA_VISIBLE_DEVICES= taskset -c ${ecores}
+      ${audiocpp_server} --config ${env.L3MS_ROOT}/audiocpp-kokoro-cpu.json
+      --host 127.0.0.1 --port ${PORT} --no-ui
+    proxy: http://127.0.0.1:${PORT}
+    checkEndpoint: /health
 
   # ===========================================================================
   # Primary Local Burst — Language & Vision
@@ -460,8 +498,8 @@ models:
   # ===========================================================================
 
   "comfyui_auto":
-    name: "ComfyUI (images · LTX video · YuE2 music)"
-    description: "ComfyUI via /comfyui/. Low-VRAM flags; job submit, status, cancel and artifact routes are used by the L3MS media runner."
+    name: "ComfyUI v0.46.3 (Qwen-Image-2.1 · FLUX.3 Klein · MiniMax-H3 Image & Video)"
+    description: "ComfyUI v0.46.3 + ComfyUI-GGUF via /comfyui/. Low-VRAM flags; job submit, status, cancel and artifact routes are used by the L3MS media runner."
     cmd: >-
       /usr/bin/bash -c 'cd ${comfy_root}/vendor/ComfyUI &&
       exec ${comfy_root}/.venv-comfy/bin/python ${comfy_root}/vendor/ComfyUI/main.py
@@ -473,13 +511,30 @@ models:
     checkEndpoint: /system_stats
 
   "audiocpp_auto":
-    name: "audio.cpp (Breeze TTS · HeartMuLa · MiniMax H3 audio)"
-    description: "Shared CUDA audio engine. Breeze standard/design, clone and streaming use /audiocpp/v1/audio/speech; HeartMuLa music and H3 audio use /audiocpp/v1/tasks/run. Model ids and weights are configured in audiocpp-server.json."
+    name: "audio.cpp v0.9.6 (Breeze-TTS-2 CUDA · Kokoro 82M)"
+    description: "Shared CUDA audio engine. Breeze standard/design, clone and streaming plus Kokoro TTS use /audiocpp/v1/audio/speech. Model ids and weights are configured in audiocpp-server.json."
     cmd: >-
       ${audiocpp_server} --config ${env.L3MS_ROOT}/audiocpp-server.json
       --host 127.0.0.1 --port ${PORT} --no-ui
     proxy: http://127.0.0.1:${PORT}
     checkEndpoint: /health
+
+  "ace-step-1.5":
+    name: "ACE-Step 1.5 Turbo Music (Q8_0, acestep.cpp CUDA sm_89)"
+    description: "Local stereo 48kHz music generation (Qwen3-Embedding 0.6B + 5Hz-LM 1.7B + v1.5 Turbo DiT Q8_0 + BF16 VAE, ~5.3 GiB) via acestep.cpp with embedded WebUI on :8089 and HTTP API via /upstream/ace-step-1.5/."
+    aliases:
+      - "acestep"
+      - "music"
+      - "ace-step-1.5-turbo"
+    ttl: 600
+    metadata:
+      task: music
+    proxy: http://127.0.0.1:${inference_port}
+    checkEndpoint: /health
+    cmd: >-
+      taskset -c ${cpu_range} ${acestep_server}
+      --models /home/kchauhan/models/media/ACE-Step-1.5
+      --host 0.0.0.0 --port ${inference_port}
 
   "nemotron-3.5-transcribe":
     name: "Nemotron 3.5 Transcribe 30B-A4B (IQ4_NL)"
@@ -499,6 +554,27 @@ models:
   # System One Decisions
   # Native typed decisions, not chat. POST /v1/systemone with model (swap v262+).
   # ===========================================================================
+
+  "vllm-d3-27b":
+    name: "vLLM-SR d3-27B Decision (Artemis Q3_K_S, high-accuracy /v1/systemone)"
+    description: "High-accuracy 27B System One decision model (Artemis-Q3_K_S, 12.26 GB) for RAG grounding and large multi-label schemas where 9B flash models degrade. Auto-fits ~50/64 layers into 12 GB VRAM with q8_0 KV and --parallel 1."
+    aliases:
+      - "d3-27b"
+    metadata:
+      task: decision
+    proxy: http://127.0.0.1:${inference_port}
+    cmd: |
+      taskset -c ${cpu_range} ${llama_master_server}
+      -m /home/kchauhan/models/turintech/d3-27B-Artemis-GGUF/d3-27B-Artemis-Q3_K_S.gguf
+      --alias vllm-d3-27b
+      --fit on --fit-ctx 8192 --fit-target 512
+      -fa on
+      -ctk q8_0 -ctv q8_0
+      -c 8192 --parallel 1
+      -b 8192 -ub 8192
+      -t 10 --threads-batch 12 --prio 2
+      --no-warmup
+      --host 0.0.0.0 --port ${inference_port}
 
   "vllm-d3-flash":
     name: "vLLM-SR d3-flash 9B Decision (Q8_0 + mmproj-BF16, text+image)"
@@ -545,6 +621,8 @@ groups:
     exclusive: false
     members:
       - "embeddinggemma-2"
+      - "liquid-d1-2b"
+      - "kokoro-82m"
 
 # ===========================================================================
 # Startup: preload the default so the first request is instant.

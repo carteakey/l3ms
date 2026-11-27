@@ -1161,6 +1161,73 @@ window.L3MS_DASHBOARD = {
   ],
   "media": [
     {
+      "id": "kokoro-82m",
+      "name": "Kokoro 82M CPU speech (co-resident)",
+      "runtime": "audio.cpp",
+      "device": "cpu",
+      "variant": "Kokoro 82M Q8_0 GGUF (181 MiB), CPU E-cores (12-15), 54 voices",
+      "status": "local",
+      "tasks": [
+        "tts"
+      ],
+      "modes": [
+        "Standard TTS (CPU E-cores)",
+        "54 Preset Voices"
+      ],
+      "tier": "co-resident",
+      "role": "Zero-VRAM Co-Resident CPU TTS",
+      "vramGb": 0.0,
+      "ramGb": 0.4,
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L5",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/audio-cpp-runtimes.md",
+      "experimentUrl": null
+    },
+    {
+      "id": "ace-step-1.5",
+      "name": "ACE-Step 1.5 Turbo music generation",
+      "runtime": "acestep.cpp",
+      "device": "cuda",
+      "variant": "ACE-Step 1.5 Turbo Q8_0 GGUF (5.3 GiB bundle, CUDA sm_89)",
+      "status": "local",
+      "tasks": [
+        "music"
+      ],
+      "modes": [
+        "Text2Music",
+        "Lyrics + Tags",
+        "Embedded :8089 WebUI"
+      ],
+      "tier": "burst",
+      "role": "Primary Local Music Turbo (48 kHz Stereo)",
+      "vramGb": 6.5,
+      "ramGb": 2.0,
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L25",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/stack-audit-and-redesign-2026-11-26.md",
+      "experimentUrl": null
+    },
+    {
+      "id": "minimax-h3-image",
+      "name": "MiniMax-H3-Image photorealistic generation & editing",
+      "runtime": "ComfyUI",
+      "device": "cuda",
+      "variant": "Pruned 33.1B DiT Q4_K_M GGUF (10.78 GiB) + shared Qwen3-VL-32B NVFP4 + FP16 Image VAE",
+      "status": "local",
+      "tasks": [
+        "image"
+      ],
+      "modes": [
+        "Text2Image",
+        "Multi-Ref Edit (Q4_K_M GGUF)"
+      ],
+      "tier": "burst",
+      "role": "Photorealism & Multi-Ref Image #2 (6 steps)",
+      "vramGb": 11.2,
+      "ramGb": 18.0,
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L45",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/comfyui-setup.md",
+      "experimentUrl": null
+    },
+    {
       "id": "minimax-h3",
       "name": "MiniMax H3 audio + video",
       "runtime": "audio.cpp",
@@ -1177,7 +1244,7 @@ window.L3MS_DASHBOARD = {
       "role": "Audio + Short Video (Experimental)",
       "vramGb": 10.5,
       "ramGb": 8.0,
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L5",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L65",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/media-generation-runbook.md",
       "experimentUrl": "https://github.com/carteakey/l3ms/blob/main/docs/experiments/h3-reference-baseline.md"
     },
@@ -1197,7 +1264,7 @@ window.L3MS_DASHBOARD = {
       "role": "Synchronized Video (Gated)",
       "vramGb": 11.0,
       "ramGb": 16.0,
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L28",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L88",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/media-generation-runbook.md",
       "experimentUrl": null
     },
@@ -1216,7 +1283,7 @@ window.L3MS_DASHBOARD = {
       "role": "Music Generation (ABC)",
       "vramGb": 10.0,
       "ramGb": 8.0,
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L50",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L110",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/yue2-setup.md",
       "experimentUrl": null
     },
@@ -1235,7 +1302,7 @@ window.L3MS_DASHBOARD = {
       "role": "Music Synthesis",
       "vramGb": 8.5,
       "ramGb": 4.0,
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L72",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L132",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/audio-cpp-runtimes.md",
       "experimentUrl": null
     },
@@ -1261,7 +1328,7 @@ window.L3MS_DASHBOARD = {
       "role": "Primary Speech & Voice Cloning",
       "vramGb": 6.5,
       "ramGb": 2.0,
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L94",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L154",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/audio-cpp-runtimes.md",
       "experimentUrl": "https://github.com/carteakey/l3ms/blob/main/docs/experiments/breeze-tts-2-baseline.md"
     },
@@ -1287,7 +1354,7 @@ window.L3MS_DASHBOARD = {
       "role": "Zero-VRAM CPU Speech",
       "vramGb": 0.0,
       "ramGb": 6.5,
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L119",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L179",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/cpu-native-workflows.md",
       "experimentUrl": "https://github.com/carteakey/l3ms/blob/main/docs/cpu-native-workflows.md"
     },
@@ -1308,7 +1375,7 @@ window.L3MS_DASHBOARD = {
       "role": "3D Scene & Mesh (MCP / Headless)",
       "vramGb": 4.0,
       "ramGb": 4.0,
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L139",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L199",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/blender-mcp-setup.md",
       "experimentUrl": null
     },
@@ -1327,7 +1394,7 @@ window.L3MS_DASHBOARD = {
       "role": "High-Step Image Base (25 steps)",
       "vramGb": 9.6,
       "ramGb": 4.0,
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L161",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L221",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/qwen-image-2.1-setup.md",
       "experimentUrl": "https://github.com/carteakey/l3ms/blob/main/docs/experiments/qwen-vs-krea2-comparison.md"
     },
@@ -1346,7 +1413,7 @@ window.L3MS_DASHBOARD = {
       "role": "Primary Image Turbo (8 steps)",
       "vramGb": 9.6,
       "ramGb": 4.0,
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L182",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L242",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/qwen-image-2.1-turbo-setup.md",
       "experimentUrl": "https://github.com/carteakey/l3ms/blob/main/docs/experiments/qwen-image-2.1-turbo-vs-base.md"
     },
@@ -1365,7 +1432,7 @@ window.L3MS_DASHBOARD = {
       "role": "Stylized Image Turbo LoRA (12 steps)",
       "vramGb": 10.2,
       "ramGb": 5.0,
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L203",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L263",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/krea-2-setup.md",
       "experimentUrl": "https://github.com/carteakey/l3ms/blob/main/docs/experiments/qwen-vs-krea2-comparison.md"
     },
@@ -1384,12 +1451,44 @@ window.L3MS_DASHBOARD = {
       "role": "Layout-Guided Image (16 steps)",
       "vramGb": 10.0,
       "ramGb": 6.0,
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L224",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/media-runtimes.json#L284",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/comfyui-setup.md",
       "experimentUrl": null
     }
   ],
   "decisions": [
+    {
+      "id": "liquid-d1-2b",
+      "name": "LiquidAI d1-2B (CPU E-cores, llama.cpp)",
+      "engine": "llamacpp",
+      "backbone": "LFM3-VL-2B; Q8_0 + mmproj Q8_0 (CPU E-cores 12-15)",
+      "kind": "local",
+      "device": "cpu",
+      "tier": "co-resident",
+      "role": "Zero-VRAM E-Core System One Router (2B Q8_0)",
+      "vramGb": 0.0,
+      "ramGb": 1.5,
+      "declaredLatencyMs": 1800,
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/decision-runtimes.json#L6",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/decision-models-cli.md",
+      "experimentUrl": null
+    },
+    {
+      "id": "vllm-d3-27b",
+      "name": "vLLM-SR d3-27B Artemis (Q3_K_S, llama.cpp)",
+      "engine": "llamacpp",
+      "backbone": "Qwen3.5-27B; Artemis-Q3_K_S (12.26 GB)",
+      "kind": "local",
+      "device": "cuda",
+      "tier": "burst",
+      "role": "High-Accuracy 27B Grounding & Schema Decision (Artemis Q3_K_S)",
+      "vramGb": 11.1,
+      "ramGb": 1.0,
+      "declaredLatencyMs": 150,
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/decision-runtimes.json#L21",
+      "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/decision-models-cli.md",
+      "experimentUrl": null
+    },
     {
       "id": "vllm-d3-flash",
       "name": "vLLM-SR d3-flash 9B (llama.cpp)",
@@ -1402,7 +1501,7 @@ window.L3MS_DASHBOARD = {
       "vramGb": 11.5,
       "ramGb": 1.0,
       "declaredLatencyMs": 110,
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/decision-runtimes.json#L6",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/decision-runtimes.json#L36",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/decision-models-cli.md",
       "experimentUrl": null
     },
@@ -1418,7 +1517,7 @@ window.L3MS_DASHBOARD = {
       "vramGb": 8.9,
       "ramGb": 1.0,
       "declaredLatencyMs": 65,
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/decision-runtimes.json#L21",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/decision-runtimes.json#L51",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/decision-models-cli.md",
       "experimentUrl": null
     },
@@ -1434,7 +1533,7 @@ window.L3MS_DASHBOARD = {
       "vramGb": 1.2,
       "ramGb": 1.0,
       "declaredLatencyMs": 17,
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/decision-runtimes.json#L36",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/decision-runtimes.json#L66",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/README.md",
       "experimentUrl": null
     },
@@ -1450,7 +1549,7 @@ window.L3MS_DASHBOARD = {
       "vramGb": 0.0,
       "ramGb": 1.5,
       "declaredLatencyMs": 1600,
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/decision-runtimes.json#L51",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/decision-runtimes.json#L81",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/docs/cpu-native-workflows.md",
       "experimentUrl": "https://github.com/carteakey/l3ms/blob/main/docs/cpu-native-workflows.md"
     },
@@ -1466,7 +1565,7 @@ window.L3MS_DASHBOARD = {
       "vramGb": 8.5,
       "ramGb": 1.0,
       "declaredLatencyMs": 70,
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/decision-runtimes.json#L66",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/decision-runtimes.json#L96",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/README.md",
       "experimentUrl": null
     },
@@ -1482,7 +1581,7 @@ window.L3MS_DASHBOARD = {
       "vramGb": 1.1,
       "ramGb": 1.0,
       "declaredLatencyMs": 13,
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/decision-runtimes.json#L81",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/decision-runtimes.json#L111",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/README.md",
       "experimentUrl": null
     },
@@ -1498,7 +1597,7 @@ window.L3MS_DASHBOARD = {
       "vramGb": 7.0,
       "ramGb": 1.0,
       "declaredLatencyMs": 51,
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/decision-runtimes.json#L96",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/decision-runtimes.json#L126",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/README.md",
       "experimentUrl": null
     },
@@ -1514,7 +1613,7 @@ window.L3MS_DASHBOARD = {
       "vramGb": 0.0,
       "ramGb": 0.0,
       "declaredLatencyMs": 350,
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/decision-runtimes.json#L111",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/decision-runtimes.json#L141",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/README.md",
       "experimentUrl": null
     },
@@ -1530,7 +1629,7 @@ window.L3MS_DASHBOARD = {
       "vramGb": 0.0,
       "ramGb": 0.0,
       "declaredLatencyMs": 300,
-      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/decision-runtimes.json#L125",
+      "sourceUrl": "https://github.com/carteakey/l3ms/blob/main/decision-runtimes.json#L155",
       "guideUrl": "https://github.com/carteakey/l3ms/blob/main/README.md",
       "experimentUrl": null
     }
@@ -1642,43 +1741,57 @@ window.L3MS_DASHBOARD = {
       },
       {
         "id": "ComfyUI",
-        "name": "ComfyUI (comfyui_auto)",
-        "role": "Image, Video & Music Diffusion Engine",
+        "name": "ComfyUI v0.46.3 (comfyui_auto)",
+        "role": "Image & Video Diffusion Engine",
         "targets": [
           "qwen-image-2.1-turbo",
           "qwen-image-2.1",
-          "flux-3-klein",
-          "krea-2",
-          "ltx-2.5",
-          "yue2-music"
+          "minimax-h3-image",
+          "flux-3-klein"
         ],
-        "arch": "PyTorch CUDA 13.5 \u00b7 Native INT8 ConvRot \u00b7 --lowvram --reserve-vram 1.0",
+        "arch": "PyTorch CUDA 13.5 \u00b7 Native INT8 ConvRot + ComfyUI-GGUF \u00b7 --lowvram --reserve-vram 1.0",
         "commitStack": [
-          "Pinned commit 20b46065ef (Qwen Image 2.1, FLUX.3 Klein, Krea 2, LTX-2.5, YuE2)",
-          "Native INT8 ConvRot weights (avoids ComfyUI-GGUF custom node breakage)",
+          "ComfyUI v0.46.3 + ComfyUI-GGUF custom node (gguf 0.19.0)",
+          "Native INT8 ConvRot for Qwen-Image-2.1 & FLUX.3 Klein",
+          "MiniMax-H3-Image Pruned Q4_K_M GGUF sharing Qwen3-VL-32B NVFP4 encoder",
           "Managed on-demand via llama-swap /comfyui/ route (auto-evicts resident LLM)"
         ],
-        "highlights": "Qwen Image 2.1 Turbo renders 1024x1024 in 8.83 s (8 steps, 9.6 GiB VRAM), sharing the Qwen3-VL INT8 text encoder and BF16 VAE.",
+        "highlights": "Qwen Image 2.1 Turbo renders 1024x1024 in 8.83 s (8 steps, 9.6 GiB VRAM); MiniMax-H3-Image Q4_K_M adds 6-step photorealism sharing the existing 32B encoder.",
         "policy": "Budget ~246 s cold start and treat batches as one blocking call with no concurrent LLM traffic."
       },
       {
-        "id": "audio.cpp",
-        "name": "audio.cpp (audiocpp_auto)",
-        "role": "Speech Synthesis, Voice Cloning & Audio Generation",
+        "id": "acestep.cpp",
+        "name": "acestep.cpp (ace-step-1.5)",
+        "role": "Dedicated Local Music Generation Engine (48 kHz Stereo)",
         "targets": [
-          "breeze-tts-2",
-          "breeze-tts-2-cpu",
-          "heartmula-music",
-          "minimax-h3"
+          "ace-step-1.5"
         ],
-        "arch": "CUDA 13.5 (BF16 rounding parity) + Explicit CPU Backend",
+        "arch": "Ada sm_89 CUDA 13.5 \u00b7 Pure C++ GGML (ace-server + embedded WebUI)",
         "commitStack": [
-          "audio.cpp release-0.6 (commit 955c872) audiocpp_server + audiocpp_cli",
-          "Breeze-TTS-2 Q8_0 (standard TTS, voice design, voice cloning, streaming)",
-          "HeartMuLa-oss-3B Q8_0 music & MiniMax-H3 staged Q4_K audio/video"
+          "ServeurpersoCom/acestep.cpp built with GGML_CUDA=ON sm_89 + GGML_NATIVE=ON",
+          "ACE-Step 1.5 Turbo Q8_0 bundle (Qwen3-Embedding 0.6B + 5Hz-LM 1.7B + Turbo DiT Q8_0 + BF16 VAE, 5.3 GiB)",
+          "Served via llama-swap on :8089 with built-in WebUI and /health + /synth HTTP API"
         ],
-        "highlights": "Serves OpenAI-compatible /audiocpp/v1/audio/speech and task APIs through llama-swap, plus a zero-VRAM explicit CPU path for Breeze-TTS-2.",
-        "policy": "Configured via audiocpp-server.json; memory saver enabled for 12 GB VRAM safety."
+        "highlights": "Synthesizes full stereo 48 kHz songs 1.7-1.9x faster than audio.cpp music paths while fitting 100% inside 12 GB VRAM.",
+        "policy": "Exclusive GPU switchover profile (600 s idle TTL); weights stored on /mnt/media."
+      },
+      {
+        "id": "audio.cpp",
+        "name": "audio.cpp v0.9.6 (audiocpp_auto + kokoro-82m)",
+        "role": "Speech Synthesis & Voice Cloning (CUDA + Co-Resident CPU)",
+        "targets": [
+          "kokoro-82m",
+          "breeze-tts-2",
+          "breeze-tts-2-cpu"
+        ],
+        "arch": "CUDA 13.5 sm_89 (Breeze-TTS-2) + E-Core CPU Backend (Kokoro 82M)",
+        "commitStack": [
+          "audio.cpp v0.9.6 custom build (breeze_tts + kokoro_tts loaders, CUDA sm_89 + native CPU)",
+          "Kokoro 82M Q8_0 (181 MiB, 54 voices) pinned to E-cores 12-15 in groups.co-resident (0 MiB VRAM)",
+          "Breeze-TTS-2 Q8_0 CUDA (standard TTS, voice design, voice cloning, streaming)"
+        ],
+        "highlights": "Kokoro 82M delivers instant speech without evicting the active GPU LLM; Breeze-TTS-2 handles voice cloning and design on demand.",
+        "policy": "Dual config: audiocpp-kokoro-cpu.json for zero-VRAM E-cores and audiocpp-server.json for CUDA burst."
       },
       {
         "id": "speech.cpp",

@@ -1,5 +1,32 @@
 {
   "media": {
+    "kokoro-82m": {
+      "guide": "docs/audio-cpp-runtimes.md",
+      "experiment": null,
+      "modes": ["Standard TTS (CPU E-cores)", "54 Preset Voices"],
+      "tier": "co-resident",
+      "role": "Zero-VRAM Co-Resident CPU TTS",
+      "vramGb": 0.0,
+      "ramGb": 0.4
+    },
+    "ace-step-1.5": {
+      "guide": "docs/stack-audit-and-redesign-2026-11-26.md",
+      "experiment": null,
+      "modes": ["Text2Music", "Lyrics + Tags", "Embedded :8089 WebUI"],
+      "tier": "burst",
+      "role": "Primary Local Music Turbo (48 kHz Stereo)",
+      "vramGb": 6.5,
+      "ramGb": 2.0
+    },
+    "minimax-h3-image": {
+      "guide": "docs/comfyui-setup.md",
+      "experiment": null,
+      "modes": ["Text2Image", "Multi-Ref Edit (Q4_K_M GGUF)"],
+      "tier": "burst",
+      "role": "Photorealism & Multi-Ref Image #2 (6 steps)",
+      "vramGb": 11.2,
+      "ramGb": 18.0
+    },
     "minimax-h3": {
       "guide": "docs/media-generation-runbook.md",
       "experiment": "docs/experiments/h3-reference-baseline.md",
@@ -92,6 +119,18 @@
     }
   },
   "decisions": {
+    "liquid-d1-2b": {
+      "guide": "docs/decision-models-cli.md",
+      "experiment": null,
+      "tier": "co-resident",
+      "role": "Zero-VRAM E-Core System One Router (2B Q8_0)"
+    },
+    "vllm-d3-27b": {
+      "guide": "docs/decision-models-cli.md",
+      "experiment": null,
+      "tier": "burst",
+      "role": "High-Accuracy 27B Grounding & Schema Decision (Artemis Q3_K_S)"
+    },
     "vllm-d3-flash": {
       "guide": "docs/decision-models-cli.md",
       "experiment": null,

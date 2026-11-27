@@ -105,43 +105,57 @@
     },
     {
       "id": "ComfyUI",
-      "name": "ComfyUI (comfyui_auto)",
-      "role": "Image, Video & Music Diffusion Engine",
+      "name": "ComfyUI v0.46.3 (comfyui_auto)",
+      "role": "Image & Video Diffusion Engine",
       "targets": [
         "qwen-image-2.1-turbo",
         "qwen-image-2.1",
-        "flux-3-klein",
-        "krea-2",
-        "ltx-2.5",
-        "yue2-music"
+        "minimax-h3-image",
+        "flux-3-klein"
       ],
-      "arch": "PyTorch CUDA 13.5 · Native INT8 ConvRot · --lowvram --reserve-vram 1.0",
+      "arch": "PyTorch CUDA 13.5 · Native INT8 ConvRot + ComfyUI-GGUF · --lowvram --reserve-vram 1.0",
       "commitStack": [
-        "Pinned commit 20b46065ef (Qwen Image 2.1, FLUX.3 Klein, Krea 2, LTX-2.5, YuE2)",
-        "Native INT8 ConvRot weights (avoids ComfyUI-GGUF custom node breakage)",
+        "ComfyUI v0.46.3 + ComfyUI-GGUF custom node (gguf 0.19.0)",
+        "Native INT8 ConvRot for Qwen-Image-2.1 & FLUX.3 Klein",
+        "MiniMax-H3-Image Pruned Q4_K_M GGUF sharing Qwen3-VL-32B NVFP4 encoder",
         "Managed on-demand via llama-swap /comfyui/ route (auto-evicts resident LLM)"
       ],
-      "highlights": "Qwen Image 2.1 Turbo renders 1024x1024 in 8.83 s (8 steps, 9.6 GiB VRAM), sharing the Qwen3-VL INT8 text encoder and BF16 VAE.",
+      "highlights": "Qwen Image 2.1 Turbo renders 1024x1024 in 8.83 s (8 steps, 9.6 GiB VRAM); MiniMax-H3-Image Q4_K_M adds 6-step photorealism sharing the existing 32B encoder.",
       "policy": "Budget ~246 s cold start and treat batches as one blocking call with no concurrent LLM traffic."
     },
     {
-      "id": "audio.cpp",
-      "name": "audio.cpp (audiocpp_auto)",
-      "role": "Speech Synthesis, Voice Cloning & Audio Generation",
+      "id": "acestep.cpp",
+      "name": "acestep.cpp (ace-step-1.5)",
+      "role": "Dedicated Local Music Generation Engine (48 kHz Stereo)",
       "targets": [
-        "breeze-tts-2",
-        "breeze-tts-2-cpu",
-        "heartmula-music",
-        "minimax-h3"
+        "ace-step-1.5"
       ],
-      "arch": "CUDA 13.5 (BF16 rounding parity) + Explicit CPU Backend",
+      "arch": "Ada sm_89 CUDA 13.5 · Pure C++ GGML (ace-server + embedded WebUI)",
       "commitStack": [
-        "audio.cpp release-0.6 (commit 955c872) audiocpp_server + audiocpp_cli",
-        "Breeze-TTS-2 Q8_0 (standard TTS, voice design, voice cloning, streaming)",
-        "HeartMuLa-oss-3B Q8_0 music & MiniMax-H3 staged Q4_K audio/video"
+        "ServeurpersoCom/acestep.cpp built with GGML_CUDA=ON sm_89 + GGML_NATIVE=ON",
+        "ACE-Step 1.5 Turbo Q8_0 bundle (Qwen3-Embedding 0.6B + 5Hz-LM 1.7B + Turbo DiT Q8_0 + BF16 VAE, 5.3 GiB)",
+        "Served via llama-swap on :8089 with built-in WebUI and /health + /synth HTTP API"
       ],
-      "highlights": "Serves OpenAI-compatible /audiocpp/v1/audio/speech and task APIs through llama-swap, plus a zero-VRAM explicit CPU path for Breeze-TTS-2.",
-      "policy": "Configured via audiocpp-server.json; memory saver enabled for 12 GB VRAM safety."
+      "highlights": "Synthesizes full stereo 48 kHz songs 1.7-1.9x faster than audio.cpp music paths while fitting 100% inside 12 GB VRAM.",
+      "policy": "Exclusive GPU switchover profile (600 s idle TTL); weights stored on /mnt/media."
+    },
+    {
+      "id": "audio.cpp",
+      "name": "audio.cpp v0.9.6 (audiocpp_auto + kokoro-82m)",
+      "role": "Speech Synthesis & Voice Cloning (CUDA + Co-Resident CPU)",
+      "targets": [
+        "kokoro-82m",
+        "breeze-tts-2",
+        "breeze-tts-2-cpu"
+      ],
+      "arch": "CUDA 13.5 sm_89 (Breeze-TTS-2) + E-Core CPU Backend (Kokoro 82M)",
+      "commitStack": [
+        "audio.cpp v0.9.6 custom build (breeze_tts + kokoro_tts loaders, CUDA sm_89 + native CPU)",
+        "Kokoro 82M Q8_0 (181 MiB, 54 voices) pinned to E-cores 12-15 in groups.co-resident (0 MiB VRAM)",
+        "Breeze-TTS-2 Q8_0 CUDA (standard TTS, voice design, voice cloning, streaming)"
+      ],
+      "highlights": "Kokoro 82M delivers instant speech without evicting the active GPU LLM; Breeze-TTS-2 handles voice cloning and design on demand.",
+      "policy": "Dual config: audiocpp-kokoro-cpu.json for zero-VRAM E-cores and audiocpp-server.json for CUDA burst."
     },
     {
       "id": "speech.cpp",

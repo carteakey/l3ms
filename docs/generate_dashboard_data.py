@@ -656,12 +656,13 @@ def main() -> None:
     decisions = decision_public_profiles(decision_manifest, stack_meta["decisions"])
     embeddings = embedding_public_profiles(parsed, groups)
 
-    # Router declarations for native decisions belong in the Decisions lane,
-    # never in the token-generation ranking.
+    # Router declarations for native decisions and media belong in their own
+    # lanes, never in the token-generation ranking.
     native_decision_ids = {
         profile["model"] for profile in decision_manifest["profiles"]
         if profile.get("engine") == "llamacpp"
     }
+    native_media_ids = {profile["id"] for profile in media}
     public_models = []
     active_ids = {
         model_id
@@ -672,6 +673,7 @@ def main() -> None:
         # and never enter the token-generation ranking.
         and "--embedding" not in model.get("cmd", "")
         and model_id not in native_decision_ids
+        and model_id not in native_media_ids
         # llama-swap-managed media engines (reserved *_auto ids) are not LLMs.
         and not model_id.endswith("_auto")
     }
