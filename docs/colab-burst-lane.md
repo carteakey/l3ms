@@ -63,8 +63,11 @@ by default. Always-on L4 ≈ 1,400 CU/month: that only fits `ultra` if it deposi
   - `pro`: **400.00 CU** (2026-11-26; looks like 2 × 200 rolled over).
   - `ultra`: **0.00 CU** (2026-11-26). Open question: is the account correct, has Colab been linked, is it a trial, or is the deposit stuck in sync?
 - [x] Auth works end to end: a `pro` T4 session allocated and terminated cleanly.
-- [ ] One `pro` L4 smoke test (`maintenance/colab/smoke-l4.sh pro`): `nvidia-smi` + `torch.cuda.get_device_capability()` == `(8, 9)`. First attempt got `503 Service Unavailable` on the L4 assign (no capacity; T4 fine), so the script retries with backoff.
+- [x] One `pro` L4 smoke test (`maintenance/colab/smoke-l4.sh pro`): `nvidia-smi` + `torch.cuda.get_device_capability()` == `(8, 9)`. First attempt got `503 Service Unavailable` on the L4 assign (no capacity; T4 fine), so the script retries with backoff.
   - 2026-11-26 run: L4 assigned after retries (332 s including backoff). **Measured rate: 2.33 CU/hr** (the guide said ~1.94), which puts `pro` at **~86 L4-h/month**. `colab exec` then failed with `RuntimeError: Connection was lost` and **hung with the VM allocated for ~1.5 h (3.65 CU lost)** until it was killed by hand. Fix: `exec` now runs under a hard `timeout`. The capability check is still unconfirmed.
+  - 2026-11-27 re-run: **PASS.** `NVIDIA L4, 23034 MiB, compute_cap 8.9`, torch `2.14.1+cu130` reports capability `(8, 9)`, so it matches the 4070's `sm_89`. 12 vCPU, 52 GiB RAM. Boot 45 s, 53 s wall, under 0.05 CU used.
+  - **CUDA mismatch:** the Colab VM runs driver `580.82.07` with nvcc `13.0`; the local machine has CUDA `13.5`. Binaries built locally against 13.5 will probably fail on Colab (driver too old). Build Strata/PolyStrata on the VM with its nvcc 13.0, or locally against CUDA 13.0.
+- [ ] G4 (Blackwell) on `pro`: `503 Service Unavailable` twice (2026-11-27). This can't tell no capacity apart from not included in the tier. Retry at an off-peak hour, then try `ultra` once it has a balance.
   - Lesson for Phase 2: every blocking `colab` call that runs while a VM is allocated needs a timeout. A CLI hang is a fourth way a VM can stay running.
 - [ ] Measure real CU/hr for L4 from the `colab usage` rate.
 
