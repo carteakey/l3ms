@@ -162,6 +162,8 @@ def _detect_engine(model_id: str, cmd_raw: str, cmd_resolved: str) -> str:
         return "comfyui"
     if "audiocpp" in hay or model_id == "audiocpp_auto":
         return "audio.cpp"
+    if "acestep" in hay or "ace-server" in hay or "ace-step" in model_id:
+        return "acestep.cpp"
     if "speech_cpp_server" in hay or "nemotron-3.5-transcribe" in model_id:
         return "speech.cpp"
     if "d3_server" in hay or "llama.cpp-d3" in hay:
@@ -179,7 +181,12 @@ def _classify_category(model_id: str, engine: str, metadata: dict[str, Any], gro
         return "Embeddings & Co-Resident"
     if task == "decision" or engine == "llama.cpp-d3":
         return "Decisions"
-    if engine in {"comfyui", "audio.cpp", "speech.cpp"}:
+    if task in {"music", "tts", "audio", "image", "video"} or engine in {
+        "comfyui",
+        "audio.cpp",
+        "speech.cpp",
+        "acestep.cpp",
+    }:
         return "Media & Audio"
     if engine in {"strata", "polystrata"}:
         return "Primary Tiers"
@@ -428,7 +435,12 @@ def parse_llama_swap_yaml(text: str, repo_root: Path | None = None) -> dict[str,
             kw in model_id.lower() for kw in ("qwen38", "qwen3-8", "inkling", "gemma", "nemotron", "strata", "plat", "abliterated")
         )
         task = str(entry["metadata"].get("task", "")).lower()
-        if task in {"embeddings", "decision"} or engine in {"comfyui", "audio.cpp", "speech.cpp"}:
+        if task in {"embeddings", "decision", "music", "tts", "audio", "image", "video"} or engine in {
+            "comfyui",
+            "audio.cpp",
+            "speech.cpp",
+            "acestep.cpp",
+        }:
             is_reasoning = False
 
         entry.update(
@@ -948,7 +960,7 @@ class RouterClient:
                 "error": None if ok else scrub_secrets(err or f"HTTP {status}", self._secrets_list()),
             }
 
-        if engine in {"audio.cpp", "speech.cpp"} or task == "decision":
+        if engine in {"audio.cpp", "speech.cpp", "acestep.cpp"} or task == "decision":
             status, body, err = self._http_request("GET", f"/upstream/{encoded}/health", timeout=timeout)
             elapsed_s = round(time.monotonic() - started, 2)
             ok = 200 <= status < 300

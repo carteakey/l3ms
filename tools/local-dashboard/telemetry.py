@@ -17,7 +17,7 @@ from typing import Any, Callable, Iterable
 
 DEFAULT_P_CORES = tuple(range(0, 12))
 DEFAULT_E_CORES = tuple(range(12, 16))
-DEFAULT_DF_TARGETS = ("/", "/home", "/mnt/dev")
+DEFAULT_DF_TARGETS = ("/", "/home", "/mnt/dev", "/mnt/media")
 
 # Inference process signatures to watch for NVMe spill via /proc/<pid>/io.
 INFERENCE_CMD_PATTERNS = (
@@ -25,6 +25,7 @@ INFERENCE_CMD_PATTERNS = (
     ("strata", re.compile(r"(?:^|/)(?:strata)(?:\s|$)|strata-lean/serve/server\.py")),
     ("llama-server", re.compile(r"(?:^|/)llama-server(?:\s|$)")),
     ("audiocpp", re.compile(r"(?:^|/)audiocpp_server(?:\s|$)")),
+    ("acestep", re.compile(r"(?:^|/)ace-server(?:\s|$)")),
     ("speech.cpp", re.compile(r"(?:^|/)speech(?:\s+serve\b)")),
     ("comfyui", re.compile(r"ComfyUI/main\.py")),
 )
