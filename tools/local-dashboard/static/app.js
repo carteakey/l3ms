@@ -143,10 +143,17 @@
       spill.className = "spill-badge ok";
     }
 
-    // Disks (local df -hlT)
+    // Disks (local df -hlT; deduplicate shared Btrfs subvolumes like / and /home)
     const disks = t.disks || [];
     if (disks.length) {
-      $("disk-strip").innerHTML = disks
+      const seenFs = new Set();
+      const uniqueDisks = disks.filter((d) => {
+        const key = `${d.filesystem}:${d.fstype}:${d.size}`;
+        if (seenFs.has(key)) return false;
+        seenFs.add(key);
+        return true;
+      });
+      $("disk-strip").innerHTML = uniqueDisks
         .map((d) => {
           const cls = d.critical ? "disk-chip crit" : d.warning ? "disk-chip warn" : "disk-chip";
           return `<span class="${cls}" title="${escapeHtml(d.filesystem)} (${escapeHtml(d.fstype)}) ${escapeHtml(d.avail)} free">${escapeHtml(d.mount)} ${d.use_pct}%</span>`;
@@ -253,7 +260,20 @@
     $("unlisted-count").textContent = String(r.unlisted_count || 0);
 
     const models = r.catalog || [];
-    const categories = ["All", ...new Set(models.map((m) => m.category))];
+    const CATEGORY_ORDER = [
+      "Primary Tiers",
+      "Embeddings & Co-Resident",
+      "Media & Audio",
+      "Decisions",
+      "Specialized LLMs",
+      "Fallback & Variants",
+    ];
+    const presentCats = [...new Set(models.map((m) => m.category))].sort((a, b) => {
+      const ia = CATEGORY_ORDER.indexOf(a);
+      const ib = CATEGORY_ORDER.indexOf(b);
+      return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+    });
+    const categories = ["All", ...presentCats];
     if (!categories.includes(state.category)) state.category = "All";
 
     $("category-filters").innerHTML = categories
@@ -278,9 +298,9 @@
     }
 
     const grouped = new Map();
-    for (const m of filtered) {
-      if (!grouped.has(m.category)) grouped.set(m.category, []);
-      grouped.get(m.category).push(m);
+    for (const cat of presentCats) {
+      const items = filtered.filter((m) => m.category === cat);
+      if (items.length) grouped.set(cat, items);
     }
 
     container.innerHTML = [...grouped.entries()]
@@ -332,6 +352,10 @@
               </article>`;
           })
           .join("");
+        const collapseGroup = cat === "Fallback & Variants" && state.category === "All" && !needle && !items.some((m) => m.running);
+        if (collapseGroup) {
+          return `<details class="group-disclosure surface"><summary class="group-disclosure-summary"><span>${escapeHtml(cat)} (${items.length})</span><span class="group-hint">click to expand fallbacks</span></summary><div class="model-grid group-disclosure-grid">${cards}</div></details>`;
+        }
         return `<div class="group-block"><div class="group-title">${escapeHtml(cat)} (${items.length})</div><div class="model-grid">${cards}</div></div>`;
       })
       .join("");

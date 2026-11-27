@@ -166,7 +166,7 @@ def _detect_engine(model_id: str, cmd_raw: str, cmd_resolved: str) -> str:
         return "acestep.cpp"
     if "speech_cpp_server" in hay or "nemotron-3.5-transcribe" in model_id:
         return "speech.cpp"
-    if "d3_server" in hay or "llama.cpp-d3" in hay:
+    if "d3_server" in hay or "llama.cpp-d3" in hay or model_id in {"liquid-d1-2b", "vllm-d3-27b", "vllm-d3-flash", "cloudflare-clef-flash"}:
         return "llama.cpp-d3"
     if "inkling2_server" in hay or "llama.cpp-inkling2" in hay:
         return "llama.cpp-inkling2"

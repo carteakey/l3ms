@@ -300,6 +300,27 @@ a:hover { color: var(--green); text-decoration: underline; }
   border-bottom: 1px solid var(--border);
   padding-bottom: 0.25rem;
 }
+.group-disclosure {
+  padding: 0;
+}
+.group-disclosure-summary {
+  list-style: none;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.65rem 0.85rem;
+  cursor: pointer;
+  color: var(--blue);
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.group-disclosure-summary::-webkit-details-marker { display: none; }
+.group-disclosure-summary:hover { background: var(--panel-light); color: var(--green); }
+.group-hint { color: var(--muted); font-weight: 600; letter-spacing: 0.06em; font-size: 0.62rem; }
+.group-disclosure-grid { padding: 0.75rem; border-top: 1px dashed var(--border); }
 .model-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
