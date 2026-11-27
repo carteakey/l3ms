@@ -1,6 +1,6 @@
 # L3MS
 
-`L3MS` (Local 3-Mode Model Stack) is a keyboard-first homelab inference stack and systems-engineering workbench. It runs frontier MoE and dense models at interactive speeds (73.0–99.7 tok/s decode) on a single consumer GPU (RTX 4070 12 GB + i5-12600K + 64 GB DDR5-4800) by pairing tiered memory offloading with custom Ada `sm_89` CUDA kernels and dynamic expert caching.
+`L3MS` (Local **M**ulti**M**odal**M**odel Stack) is a keyboard-first homelab inference stack and systems-engineering workbench. It runs frontier MoE and dense models at interactive speeds (73.0–99.7 tok/s decode) on a single consumer GPU (RTX 4070 12 GB + i5-12600K + 64 GB DDR5-4800) by pairing tiered memory offloading with custom Ada `sm_89` CUDA kernels and dynamic expert caching.
 
 ```text
     __        _____       __  ___       _____
@@ -10,7 +10,7 @@
 /_____/    /____/      /_/  /_/       /____/  
 ```
 
-`L` = Local · `3` = Three Inference Lanes · `M` = Models · `S` = Stack
+`L` = Local · `3M` = **M**ulti**M**odal**M**odel · `S` = Stack
 
 Language · Media · Decisions
 
