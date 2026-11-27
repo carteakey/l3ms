@@ -236,7 +236,7 @@ models:
             metadata["decisions"],
         )
         self.assertEqual(len(media), 14)
-        self.assertEqual(len(decisions), 11)
+        self.assertEqual(len(decisions), 4)
         for profile_id in ("liquid-d1-2b", "vllm-d3-27b", "vllm-d3-flash", "cloudflare-clef-flash"):
             native = next(profile for profile in decisions if profile["id"] == profile_id)
             self.assertEqual(native["engine"], "llamacpp")
@@ -250,16 +250,13 @@ models:
         self.assertEqual(cpu_breeze["modes"], ["Standard TTS (CPU)", "Offline voice design (CPU)",
                                              "Voice cloning (CPU)", "TTS chunks after completion (CPU)"])
         self.assertEqual(cpu_breeze["status"], "experimental-local")
-        cpu_nagi = next(profile for profile in decisions if profile["id"] == "nagi-smol-cpu")
-        self.assertEqual(cpu_nagi["kind"], "local")
-        self.assertEqual(cpu_nagi["device"], "cpu")
-        self.assertEqual(cpu_nagi["declaredLatencyMs"], 1600)
-        self.assertTrue(cpu_nagi["experimentUrl"].endswith("docs/cpu-native-workflows.md"))
+        cpu_d1 = next(profile for profile in decisions if profile["id"] == "liquid-d1-2b")
+        self.assertEqual(cpu_d1["kind"], "local")
+        self.assertEqual(cpu_d1["device"], "cpu")
+        self.assertEqual(cpu_d1["tier"], "co-resident")
+        self.assertEqual(cpu_d1["declaredLatencyMs"], 1800)
         h3 = next(profile for profile in media if profile["id"] == "minimax-h3")
         self.assertEqual(h3["status"], "experimental-local")
-        hosted = next(profile for profile in decisions if profile["id"] == "systemone")
-        self.assertEqual(hosted["kind"], "hosted")
-        self.assertIsNone(hosted["experimentUrl"])
         for profile in media + decisions:
             self.assertIn("#L", profile["sourceUrl"])
             self.assertNotIn("tps", profile)

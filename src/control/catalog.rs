@@ -925,6 +925,7 @@ mod tests {
             catalog.inspect(&key("media:breeze-tts-2")).unwrap().device,
             Some(Device::Cuda)
         );
-        assert!(catalog.inspect(&key("decisions:systemone")).is_some());
+        assert!(catalog.inspect(&key("decisions:liquid-d1-2b")).is_some());
+        assert!(catalog.inspect(&key("decisions:vllm-d3-27b")).is_some());
     }
 }

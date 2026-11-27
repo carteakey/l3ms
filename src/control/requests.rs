@@ -674,7 +674,7 @@ mod tests {
             }),
         };
         let decision = InferenceRequest::Decision {
-            profile: key(Lane::Decisions, "nagi-smol"),
+            profile: key(Lane::Decisions, "liquid-d1-2b"),
             state: serde_json::json!({"position": 1}),
             questions: serde_json::json!({"move": {"type":"choice", "criteria":{"yes":"Move", "no":"Stay"}}}).as_object().unwrap().clone(),
             images: Vec::new(),
@@ -820,7 +820,7 @@ mod tests {
         let catalog = catalog();
         let questions = serde_json::json!({"urgency":{"type":"score","instructions":"Assess urgency","range":[0,100]}});
         let request = InferenceRequest::Decision {
-            profile: key(Lane::Decisions, "nagi-smol"),
+            profile: key(Lane::Decisions, "liquid-d1-2b"),
             state: serde_json::json!({"alert":"test"}),
             questions: questions.as_object().unwrap().clone(),
             images: Vec::new(),
@@ -838,7 +838,7 @@ mod tests {
             serde_json::json!({"type":"choice"}),
         ] {
             let invalid = InferenceRequest::Decision {
-                profile: key(Lane::Decisions, "nagi-smol"),
+                profile: key(Lane::Decisions, "liquid-d1-2b"),
                 state: serde_json::json!({}),
                 questions: Map::from_iter([("question".into(), question)]),
                 images: Vec::new(),
@@ -866,7 +866,7 @@ mod tests {
         assert!(request.validate(&catalog).is_ok());
 
         let unsupported = InferenceRequest::Decision {
-            profile: key(Lane::Decisions, "nagi-smol"),
+            profile: key(Lane::Decisions, "vllm-d3-27b"),
             state: serde_json::json!({"message":"inspect this"}),
             questions: questions.clone(),
             images: vec![image.clone()],

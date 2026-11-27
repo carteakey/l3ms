@@ -23,8 +23,8 @@ def interpreter() -> str:
     return str(venv) if venv.exists() else sys.executable
 
 
-def build_command(profile_id: str, suite: str, iterations: int) -> list[str]:
-    manifest = json.loads((ROOT / "decision-runtimes.json").read_text())
+def build_command(profile_id: str, suite: str, iterations: int, manifest_path: Path | None = None) -> list[str]:
+    manifest = json.loads((manifest_path or (ROOT / "decision-runtimes.json")).read_text())
     profile = next((p for p in manifest["profiles"] if p["id"] == profile_id), None)
     if profile is None:
         raise SystemExit(f"unknown decision profile: {profile_id}")

@@ -142,48 +142,6 @@
       "experiment": null,
       "tier": "burst",
       "role": "Joint-Pass 9B Q4_K_M Decision (Text+Image)"
-    },
-    "nagi-smol": {
-      "guide": "README.md",
-      "experiment": null,
-      "tier": "burst",
-      "role": "Lightweight Encoder Classifier"
-    },
-    "nagi-smol-cpu": {
-      "guide": "docs/cpu-native-workflows.md",
-      "experiment": "docs/cpu-native-workflows.md",
-      "tier": "co-resident",
-      "role": "Zero-VRAM CPU Classifier"
-    },
-    "nagi-big": {
-      "guide": "README.md",
-      "experiment": null,
-      "tier": "burst",
-      "role": "4B Local Decision Adapter"
-    },
-    "laya-en": {
-      "guide": "README.md",
-      "experiment": null,
-      "tier": "burst",
-      "role": "Single-Pass ModernBERT Router"
-    },
-    "semif-openjev": {
-      "guide": "README.md",
-      "experiment": null,
-      "tier": "burst",
-      "role": "3B Logit-Readout Classifier"
-    },
-    "jev-api": {
-      "guide": "README.md",
-      "experiment": null,
-      "tier": "remote",
-      "role": "Hosted System One Alias"
-    },
-    "systemone": {
-      "guide": "README.md",
-      "experiment": null,
-      "tier": "remote",
-      "role": "Hosted TypeSafe System One API"
     }
   }
 }

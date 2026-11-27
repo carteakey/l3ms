@@ -538,12 +538,39 @@ mod tests {
             images: Vec::new(),
         }
     }
-    fn catalog() -> Catalog {
-        Catalog::load(env!("CARGO_MANIFEST_DIR")).unwrap()
+    fn catalog() -> (tempfile::TempDir, Catalog) {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("llama-swap.yaml"),
+            "models:\n  fixture:\n    cmd: fixture\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("media-runtimes.json"),
+            r#"{"schema_version":1,"profiles":[]}"#,
+        )
+        .unwrap();
+        let manifest = serde_json::json!({
+            "version": "1.0",
+            "profiles": [
+                {"id":"nagi-smol","name":"Nagi Fixture","engine":"nagi","type":"local","device":"cpu","model":"fixture/nagi","entrypoint":"decision-models/runner.py"},
+                {"id":"laya-en","name":"Laya Fixture","engine":"laya","type":"local","device":"cpu","model":"fixture/laya","entrypoint":"decision-models/runner.py"},
+                {"id":"semif-openjev","name":"SemIf Fixture","engine":"semif","type":"local","device":"cpu","model":"fixture/semif","entrypoint":"decision-models/runner.py"},
+                {"id":"jev-api","name":"Jev Fixture","engine":"jev","type":"api","device":"remote","model":"jev-latest","entrypoint":"decision-models/runner.py"}
+            ]
+        });
+        std::fs::write(
+            root.path().join("decision-runtimes.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let loaded = Catalog::load(root.path()).unwrap();
+        (root, loaded)
     }
 
     #[test]
     fn native_answers_and_latency_are_preserved_without_claiming_live_inference() {
+        let (_root, catalog) = catalog();
         for (profile, engine) in [
             ("nagi-smol", "nagi-native"),
             ("laya-en", "laya-native"),
@@ -554,7 +581,7 @@ mod tests {
                 &serde_json::json!({"engine":engine,"answers":answers,"latency_ms":17.25}),
             )
             .unwrap();
-            let decoded = decode_decision_result(&catalog(), &request(profile), &bytes).unwrap();
+            let decoded = decode_decision_result(&catalog, &request(profile), &bytes).unwrap();
             assert_eq!(decoded.native_latency, Some(Duration::from_micros(17250)));
             let InferenceResult::Decision { answers: actual } = decoded.result else {
                 panic!("wrong lane")
@@ -671,6 +698,7 @@ mod tests {
 
     #[test]
     fn synthetic_unknown_and_wrong_backend_labels_are_never_accepted() {
+        let (_root, catalog) = catalog();
         for engine in [
             "nagi-simulated (fixture)",
             "jev-api (simulated-wan)",
@@ -683,14 +711,14 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                decode_decision_result(&catalog(), &request("nagi-smol"), &bytes)
+                decode_decision_result(&catalog, &request("nagi-smol"), &bytes)
                     .err()
                     .unwrap(),
                 DecisionDecodeError::UnexpectedEngine
             );
         }
         assert_eq!(
-            decode_decision_result(&catalog(), &request("semif-openjev"), b"{}")
+            decode_decision_result(&catalog, &request("semif-openjev"), b"{}")
                 .err()
                 .unwrap(),
             DecisionDecodeError::UnexpectedEngine
@@ -699,6 +727,7 @@ mod tests {
 
     #[test]
     fn malformed_oversized_mismatched_and_invalid_results_fail_without_echoing_payload() {
+        let (_root, catalog) = catalog();
         for bytes in [
             b"sk-secret-invalid-json".to_vec(),
             b"x".repeat(MAX_RESULT_BYTES + 1),
@@ -707,7 +736,7 @@ mod tests {
             br#"{"engine":"nagi-native","answers":{"route":{"choice":"yes"}},"latency_ms":-1}"#
                 .to_vec(),
         ] {
-            let error = decode_decision_result(&catalog(), &request("nagi-smol"), &bytes)
+            let error = decode_decision_result(&catalog, &request("nagi-smol"), &bytes)
                 .err()
                 .unwrap();
             assert!(!error.to_string().contains("secret"));

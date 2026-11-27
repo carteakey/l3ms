@@ -593,7 +593,7 @@ mod tests {
             json!({"type": "choice", "criteria": {"yes": "Proceed", "no": "Stop"}}),
         );
         let draft = TaskFormDraft::new(
-            profile(super::super::catalog::Lane::Decisions, "nagi-smol"),
+            profile(super::super::catalog::Lane::Decisions, "vllm-d3-flash"),
             task("decision"),
             120_000,
             TaskFields::Decisions {
@@ -616,7 +616,7 @@ mod tests {
         };
         assert_eq!(
             selected,
-            profile(super::super::catalog::Lane::Decisions, "nagi-smol")
+            profile(super::super::catalog::Lane::Decisions, "vllm-d3-flash")
         );
         assert_eq!(state, json!({"ready": true}));
         assert_eq!(questions["route"]["type"], "choice");
@@ -909,7 +909,7 @@ mod tests {
             direct_error(build_direct_native(
                 &catalog,
                 TaskFormDraft::new(
-                    profile(super::super::catalog::Lane::Decisions, "nagi-smol"),
+                    profile(super::super::catalog::Lane::Decisions, "vllm-d3-flash"),
                     task("not-decision"),
                     30_000,
                     fields(),
@@ -921,7 +921,7 @@ mod tests {
             direct_error(build_direct_native(
                 &catalog,
                 TaskFormDraft::new(
-                    profile(super::super::catalog::Lane::Decisions, "nagi-smol"),
+                    profile(super::super::catalog::Lane::Decisions, "vllm-d3-flash"),
                     task("decision"),
                     30_000,
                     language_embedding_fields(),
@@ -934,7 +934,7 @@ mod tests {
                 direct_error(build_direct_native(
                     &catalog,
                     TaskFormDraft::new(
-                        profile(super::super::catalog::Lane::Decisions, "nagi-smol"),
+                        profile(super::super::catalog::Lane::Decisions, "vllm-d3-flash"),
                         task("decision"),
                         timeout_ms,
                         fields(),
@@ -947,7 +947,7 @@ mod tests {
             direct_error(build_direct_native(
                 &catalog,
                 TaskFormDraft::new(
-                    profile(super::super::catalog::Lane::Decisions, "nagi-smol"),
+                    profile(super::super::catalog::Lane::Decisions, "vllm-d3-flash"),
                     task("decision"),
                     30_000,
                     TaskFields::Decisions {

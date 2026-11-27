@@ -1,4 +1,6 @@
 import importlib.util
+import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -10,7 +12,19 @@ SPEC.loader.exec_module(bench)
 
 class BenchProfileTest(unittest.TestCase):
     def test_command_uses_the_manifest_engine_model_device_and_named_suite(self):
-        command = bench.build_command("nagi-smol-cpu", "routing-gate", 3)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest = Path(tmpdir) / "decision-runtimes.json"
+            manifest.write_text(json.dumps({
+                "version": "1.0",
+                "profiles": [{
+                    "id": "fixture-cpu",
+                    "engine": "nagi",
+                    "model": "fixture/model",
+                    "device": "cpu",
+                    "entrypoint": "decision-models/runner.py",
+                }],
+            }))
+            command = bench.build_command("fixture-cpu", "routing-gate", 3, manifest_path=manifest)
         joined = " ".join(command)
         self.assertIn("decision-models/runner.py", joined)
         for flag, value in [("--engine", "nagi"), ("--device", "cpu"), ("--iterations", "3")]:
@@ -18,14 +32,28 @@ class BenchProfileTest(unittest.TestCase):
         self.assertTrue(command[command.index("--bench-suite") + 1].endswith("suites/routing-gate.json"))
 
     def test_router_hosted_profiles_are_refused(self):
-        with self.assertRaises(SystemExit) as raised:
-            bench.build_command("vllm-d3-flash", "routing-gate", 1)
-        self.assertIn("llama-swap", str(raised.exception))
+        for profile_id in ("vllm-d3-flash", "liquid-d1-2b", "vllm-d3-27b"):
+            with self.subTest(profile=profile_id):
+                with self.assertRaises(SystemExit) as raised:
+                    bench.build_command(profile_id, "routing-gate", 1)
+                self.assertIn("llama-swap", str(raised.exception))
 
     def test_unknown_profile_or_suite_fails_before_running_anything(self):
-        for profile, suite in [("nope", "routing-gate"), ("nagi-smol-cpu", "no-such-suite")]:
-            with self.assertRaises(SystemExit):
-                bench.build_command(profile, suite, 1)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest = Path(tmpdir) / "decision-runtimes.json"
+            manifest.write_text(json.dumps({
+                "version": "1.0",
+                "profiles": [{
+                    "id": "fixture-cpu",
+                    "engine": "nagi",
+                    "model": "fixture/model",
+                    "device": "cpu",
+                    "entrypoint": "decision-models/runner.py",
+                }],
+            }))
+            for profile, suite in [("nope", "routing-gate"), ("fixture-cpu", "no-such-suite")]:
+                with self.assertRaises(SystemExit):
+                    bench.build_command(profile, suite, 1, manifest_path=manifest)
 
 
 if __name__ == "__main__":
