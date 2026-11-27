@@ -364,51 +364,159 @@
       font-size: .72rem;
     }
 
-    /* Primary Stack Spotlight Grid */
+    /* Active Stack Showcase Matrix (3-Tier Structured Table) */
     .spotlight-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(265px, 1fr));
+      gap: 1rem;
+    }
+
+    .tier-block {
+      border: 1px solid var(--border);
+      background: var(--panel);
+      box-shadow: inset 0 1px 0 #ffffff05;
+    }
+
+    .tier-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: .75rem;
+      flex-wrap: wrap;
+      padding: .62rem .9rem;
+      background: var(--panel-light);
+      border-bottom: 1px solid var(--border);
+      border-left: 3px solid var(--green);
+    }
+    .tier-head.tier-burst { border-left-color: var(--blue); }
+    .tier-head.tier-remote { border-left-color: var(--yellow); }
+
+    .tier-title {
+      font-size: .74rem;
+      font-weight: 800;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: #fff;
+    }
+    .tier-head.tier-co .tier-title { color: var(--green); }
+    .tier-head.tier-burst .tier-title { color: var(--blue); }
+    .tier-head.tier-remote .tier-title { color: var(--yellow); }
+
+    .tier-note {
+      font-size: .68rem;
+      color: var(--muted);
+    }
+
+    .matrix-cols {
+      display: grid;
+      grid-template-columns: 185px minmax(200px, 1.25fr) minmax(170px, .95fr) 138px minmax(185px, 1fr) 76px;
+      gap: .65rem;
+      align-items: center;
+    }
+
+    .matrix-head {
+      padding: .46rem .9rem;
+      border-bottom: 1px solid var(--border-bright);
+      background: #0c1417;
+      color: var(--muted);
+      font-size: .61rem;
+      font-weight: 800;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+    }
+
+    .stack-row {
+      border-bottom: 1px solid var(--border);
+    }
+    .stack-row:last-child { border-bottom: 0; }
+
+    .stack-row-details > summary {
+      list-style: none;
+      padding: .72rem .9rem;
+      cursor: pointer;
+      transition: background .12s;
+    }
+    .stack-row-details > summary::-webkit-details-marker { display: none; }
+    .stack-row-details > summary:hover { background: var(--panel-light); }
+
+    .row-slot {
+      font-size: .68rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+      color: var(--muted);
+    }
+
+    .row-model {
+      font-size: .84rem;
+      font-weight: 800;
+      color: #fff;
+      line-height: 1.25;
+    }
+
+    .row-engine {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: .22rem;
+    }
+    .row-quant {
+      font-size: .68rem;
+      color: var(--muted);
+    }
+
+    .row-mem {
+      font-size: .7rem;
+      color: var(--text);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .row-perf {
+      font-size: .78rem;
+      font-weight: 800;
+      color: var(--green);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .row-cta {
+      justify-self: end;
+      border: 1px solid var(--border-bright);
+      background: #0a1012;
+      color: var(--blue);
+      padding: .2rem .48rem;
+      font-size: .63rem;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      white-space: nowrap;
+    }
+    .stack-row-details[open] .row-cta {
+      border-color: var(--green);
+      color: var(--green);
+    }
+
+    .stack-row-body {
+      padding: .85rem .95rem;
+      background: #0a1012;
+      border-top: 1px dashed var(--border-bright);
+      display: grid;
       gap: .65rem;
     }
 
-    .spotlight-card {
-      padding: .85rem .9rem;
-      display: flex;
-      flex-direction: column;
-      gap: .38rem;
-      border-left: 3px solid var(--border-bright);
+    .stack-row-body .model-details {
+      padding: 0;
+      border-top: 0;
     }
-    .spotlight-card[data-tier="co-resident"] { border-left-color: var(--green); }
-    .spotlight-card[data-lane="language"] { border-left-color: var(--green); }
-    .spotlight-card[data-lane="media"] { border-left-color: var(--yellow); }
-    .spotlight-card[data-lane="decisions"] { border-left-color: var(--blue); }
-    .spotlight-card:hover { border-color: var(--border-bright); }
+
+    .catalog-body {
+      display: grid;
+      gap: .85rem;
+    }
 
     .spotlight-top {
       display: flex;
       justify-content: space-between;
       align-items: center;
       gap: .5rem;
-    }
-
-    .spotlight-card h3 {
-      margin: 0;
-      font-size: .88rem;
-      font-weight: 800;
-      color: #fff;
-      line-height: 1.25;
-    }
-
-    .spotlight-headline {
-      font-size: .82rem;
-      font-weight: 800;
-      color: var(--green);
-      font-variant-numeric: tabular-nums;
-    }
-
-    .spotlight-mem {
-      font-size: .68rem;
-      color: var(--muted);
     }
 
     /* Inline mini-details inside cards */
@@ -1096,6 +1204,14 @@
       .evidence-grid-two, .roofline-grid, .benchmark-layout, .model-details, .colab-accounts, .traffic-grid {
         grid-template-columns: 1fr;
       }
+      .matrix-head { display: none; }
+      .matrix-cols {
+        grid-template-columns: 1fr auto;
+        gap: .32rem .65rem;
+      }
+      .row-slot { grid-column: 1 / -1; }
+      .row-engine, .row-mem, .row-perf { grid-column: 1 / 2; }
+      .row-cta { grid-column: 2 / 3; grid-row: 2 / 4; align-self: center; }
     }
 
     @media (max-width: 820px) {
@@ -1222,144 +1338,156 @@
     <!-- [1] STACK -->
     <section class="tab-panel active" id="stack-panel" role="tabpanel" aria-labelledby="stack-tab" tabindex="0">
       <div class="section-head">
-        <h2 class="section-title">Primary Stack</h2>
-        <span class="section-sub">Default go-to profile for each workload</span>
+        <h2 class="section-title">Current Active Stack &amp; Performance</h2>
+        <span class="section-sub">Click any row for specs, benchmark evidence &amp; copyable serving recipes</span>
       </div>
       <div class="spotlight-grid" id="spotlight-grid"></div>
 
-      <div class="stack-toolbar surface" aria-label="Filter stack profiles">
-        <input class="search-input" id="stack-search" type="search" placeholder="Search models, engines, quants..." aria-label="Search stack profiles">
-        <div class="lane-switch" role="group" aria-label="Quick lane switcher">
-          <button class="lane-btn active" type="button" data-lane-view="All">All</button>
-          <button class="lane-btn" type="button" data-lane-view="Language">Language</button>
-          <button class="lane-btn" type="button" data-lane-view="Media">Media</button>
-          <button class="lane-btn" type="button" data-lane-view="Decisions">Decisions</button>
-          <button class="lane-btn" type="button" data-lane-view="Co-Resident">Co-Resident</button>
-        </div>
-        <div class="toolbar-meta">
-          <span id="stack-match-count">Showing --</span>
-          <button class="button" type="button" id="stack-reset">Reset</button>
-        </div>
+      <details class="lane-accordion" id="full-catalog-disclosure">
+        <summary>
+          <span class="summary-left">
+            <span class="summary-title">Full Manifest &amp; Fallback Catalog</span>
+            <span class="count-pill" id="full-catalog-count">42</span>
+            <span class="summary-sub">Search &amp; filter all ranked LLMs, fallbacks, unmeasured profiles, media &amp; decision manifests</span>
+          </span>
+          <span class="chevron" aria-hidden="true">&gt;</span>
+        </summary>
+        <div class="disclosure-body catalog-body">
+          <div class="stack-toolbar surface" aria-label="Filter stack profiles">
+            <input class="search-input" id="stack-search" type="search" placeholder="Search models, engines, quants..." aria-label="Search stack profiles">
+            <div class="lane-switch" role="group" aria-label="Quick lane switcher">
+              <button class="lane-btn active" type="button" data-lane-view="All">All</button>
+              <button class="lane-btn" type="button" data-lane-view="Language">Language</button>
+              <button class="lane-btn" type="button" data-lane-view="Media">Media</button>
+              <button class="lane-btn" type="button" data-lane-view="Decisions">Decisions</button>
+              <button class="lane-btn" type="button" data-lane-view="Co-Resident">Co-Resident</button>
+            </div>
+            <div class="toolbar-meta">
+              <span id="stack-match-count">Showing --</span>
+              <button class="button" type="button" id="stack-reset">Reset</button>
+            </div>
 
-        <details class="more-filters" id="more-filters">
-          <summary>More filters (Tier, Modality, Engine)</summary>
-          <div class="filter-rows">
-            <div class="filter-row">
-              <span class="filter-label">Tier</span>
-              <button class="filter active" type="button" data-tier="All">All</button>
-              <button class="filter" type="button" data-tier="co-resident">Co-Resident CPU</button>
-              <button class="filter" type="button" data-tier="burst">Exclusive GPU</button>
-              <button class="filter" type="button" data-tier="remote">Remote / Hosted</button>
-            </div>
-            <div class="filter-row">
-              <span class="filter-label">Modality</span>
-              <button class="filter active" type="button" data-modality="All">All</button>
-              <button class="filter" type="button" data-modality="Language">Language</button>
-              <button class="filter" type="button" data-modality="Vision">Vision</button>
-              <button class="filter" type="button" data-modality="Image">Image</button>
-              <button class="filter" type="button" data-modality="Video">Video</button>
-              <button class="filter" type="button" data-modality="Audio">Audio</button>
-              <button class="filter" type="button" data-modality="3D">3D</button>
-              <button class="filter" type="button" data-modality="Decisions">Decisions</button>
-              <button class="filter" type="button" data-modality="Embeddings">Embeddings</button>
-            </div>
-            <div class="filter-row">
-              <span class="filter-label">Engine</span>
-              <button class="filter active" type="button" data-engine="All">All</button>
-              <button class="filter" type="button" data-engine="strata-lean">strata-lean</button>
-              <button class="filter" type="button" data-engine="polystrata-4070">polystrata</button>
-              <button class="filter" type="button" data-engine="llama.cpp">llama.cpp</button>
-              <button class="filter" type="button" data-engine="comfyui">ComfyUI</button>
-              <button class="filter" type="button" data-engine="audio.cpp">audio.cpp</button>
-              <button class="filter" type="button" data-engine="speech.cpp">speech.cpp</button>
-              <button class="filter" type="button" data-engine="acestep.cpp">acestep.cpp</button>
-              <button class="filter" type="button" data-engine="blender">Blender</button>
-            </div>
+            <details class="more-filters" id="more-filters">
+              <summary>More filters (Tier, Modality, Engine)</summary>
+              <div class="filter-rows">
+                <div class="filter-row">
+                  <span class="filter-label">Tier</span>
+                  <button class="filter active" type="button" data-tier="All">All</button>
+                  <button class="filter" type="button" data-tier="co-resident">Co-Resident CPU</button>
+                  <button class="filter" type="button" data-tier="burst">Exclusive GPU</button>
+                  <button class="filter" type="button" data-tier="remote">Remote / Hosted</button>
+                </div>
+                <div class="filter-row">
+                  <span class="filter-label">Modality</span>
+                  <button class="filter active" type="button" data-modality="All">All</button>
+                  <button class="filter" type="button" data-modality="Language">Language</button>
+                  <button class="filter" type="button" data-modality="Vision">Vision</button>
+                  <button class="filter" type="button" data-modality="Image">Image</button>
+                  <button class="filter" type="button" data-modality="Video">Video</button>
+                  <button class="filter" type="button" data-modality="Audio">Audio</button>
+                  <button class="filter" type="button" data-modality="3D">3D</button>
+                  <button class="filter" type="button" data-modality="Decisions">Decisions</button>
+                  <button class="filter" type="button" data-modality="Embeddings">Embeddings</button>
+                </div>
+                <div class="filter-row">
+                  <span class="filter-label">Engine</span>
+                  <button class="filter active" type="button" data-engine="All">All</button>
+                  <button class="filter" type="button" data-engine="strata-lean">strata-lean</button>
+                  <button class="filter" type="button" data-engine="polystrata-4070">polystrata</button>
+                  <button class="filter" type="button" data-engine="llama.cpp">llama.cpp</button>
+                  <button class="filter" type="button" data-engine="comfyui">ComfyUI</button>
+                  <button class="filter" type="button" data-engine="audio.cpp">audio.cpp</button>
+                  <button class="filter" type="button" data-engine="speech.cpp">speech.cpp</button>
+                  <button class="filter" type="button" data-engine="acestep.cpp">acestep.cpp</button>
+                  <button class="filter" type="button" data-engine="blender">Blender</button>
+                </div>
+              </div>
+            </details>
           </div>
-        </details>
-      </div>
 
-      <!-- Language Measured -->
-      <div id="language-section">
-        <div class="section-head">
-          <h2 class="section-title">Language Models</h2>
-          <span class="section-sub">Ranked by steady decode tok/s · Click any row's Details button for evidence &amp; portable recipe</span>
-        </div>
-        <div class="table-shell surface desktop-table">
-          <table>
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>Model</th>
-                <th>Engine &amp; Context</th>
-                <th>Memory (12G / 64G)</th>
-                <th>Throughput</th>
-                <th>Details</th>
-              </tr>
-            </thead>
-            <tbody id="model-table-body"></tbody>
-          </table>
-        </div>
-        <div class="mobile-models" id="mobile-models"></div>
-      </div>
+          <!-- Language Measured -->
+          <div id="language-section">
+            <div class="section-head">
+              <h2 class="section-title">All Measured Language Profiles</h2>
+              <span class="section-sub">Ranked by steady decode tok/s · Click Details for evidence &amp; portable recipe</span>
+            </div>
+            <div class="table-shell surface desktop-table">
+              <table>
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Model</th>
+                    <th>Engine &amp; Context</th>
+                    <th>Memory (12G / 64G)</th>
+                    <th>Throughput</th>
+                    <th>Details</th>
+                  </tr>
+                </thead>
+                <tbody id="model-table-body"></tbody>
+              </table>
+            </div>
+            <div class="mobile-models" id="mobile-models"></div>
+          </div>
 
-      <!-- Unmeasured Language -->
-      <details class="lane-accordion" id="unmeasured-section">
-        <summary>
-          <span class="summary-left">
-            <span class="summary-title">Declared Language Profiles (Unmeasured)</span>
-            <span class="count-pill" id="unmeasured-count">0</span>
-            <span class="summary-sub">Active in llama-swap.yaml · recipes available, not ranked</span>
-          </span>
-          <span class="chevron" aria-hidden="true">&gt;</span>
-        </summary>
-        <div class="disclosure-body">
-          <div class="card-grid" id="unmeasured-list"></div>
-        </div>
-      </details>
+          <!-- Unmeasured Language -->
+          <details class="lane-accordion" id="unmeasured-section">
+            <summary>
+              <span class="summary-left">
+                <span class="summary-title">Declared Language Profiles (Unmeasured)</span>
+                <span class="count-pill" id="unmeasured-count">0</span>
+                <span class="summary-sub">Active in llama-swap.yaml · recipes available, not ranked</span>
+              </span>
+              <span class="chevron" aria-hidden="true">&gt;</span>
+            </summary>
+            <div class="disclosure-body">
+              <div class="card-grid" id="unmeasured-list"></div>
+            </div>
+          </details>
 
-      <!-- Co-Resident Embeddings -->
-      <details class="lane-accordion" id="embeddings-section">
-        <summary>
-          <span class="summary-left">
-            <span class="summary-title">Co-Resident Embeddings (0 GiB VRAM)</span>
-            <span class="count-pill" id="embeddings-count">0</span>
-            <span class="summary-sub">Pinned to E-cores 12-15 alongside active GPU workloads</span>
-          </span>
-          <span class="chevron" aria-hidden="true">&gt;</span>
-        </summary>
-        <div class="disclosure-body">
-          <div class="card-grid" id="embeddings-list"></div>
-        </div>
-      </details>
+          <!-- Co-Resident Embeddings -->
+          <details class="lane-accordion" id="embeddings-section">
+            <summary>
+              <span class="summary-left">
+                <span class="summary-title">Co-Resident Embeddings (0 GiB VRAM)</span>
+                <span class="count-pill" id="embeddings-count">0</span>
+                <span class="summary-sub">Pinned to E-cores 12-15 alongside active GPU workloads</span>
+              </span>
+              <span class="chevron" aria-hidden="true">&gt;</span>
+            </summary>
+            <div class="disclosure-body">
+              <div class="card-grid" id="embeddings-list"></div>
+            </div>
+          </details>
 
-      <!-- Media & Audio -->
-      <details class="lane-accordion" id="media-section">
-        <summary>
-          <span class="summary-left">
-            <span class="summary-title">Media &amp; Audio Profiles</span>
-            <span class="count-pill" id="media-count">0</span>
-            <span class="summary-sub">Image, video, TTS, ASR, music &amp; 3D via ComfyUI, audio.cpp, acestep.cpp &amp; speech.cpp</span>
-          </span>
-          <span class="chevron" aria-hidden="true">&gt;</span>
-        </summary>
-        <div class="disclosure-body">
-          <div class="card-grid" id="media-list"></div>
-        </div>
-      </details>
+          <!-- Media & Audio -->
+          <details class="lane-accordion" id="media-section">
+            <summary>
+              <span class="summary-left">
+                <span class="summary-title">Media &amp; Audio Profiles</span>
+                <span class="count-pill" id="media-count">0</span>
+                <span class="summary-sub">Image, video, TTS, ASR, music &amp; 3D via ComfyUI, audio.cpp, acestep.cpp &amp; speech.cpp</span>
+              </span>
+              <span class="chevron" aria-hidden="true">&gt;</span>
+            </summary>
+            <div class="disclosure-body">
+              <div class="card-grid" id="media-list"></div>
+            </div>
+          </details>
 
-      <!-- Decisions -->
-      <details class="lane-accordion" id="decisions-section">
-        <summary>
-          <span class="summary-left">
-            <span class="summary-title">Decision Profiles (/v1/systemone)</span>
-            <span class="count-pill" id="decisions-count">0</span>
-            <span class="summary-sub">Structured choice, noul &amp; score routing (CPU E-cores, GPU &amp; hosted)</span>
-          </span>
-          <span class="chevron" aria-hidden="true">&gt;</span>
-        </summary>
-        <div class="disclosure-body">
-          <div class="card-grid" id="decision-list"></div>
+          <!-- Decisions -->
+          <details class="lane-accordion" id="decisions-section">
+            <summary>
+              <span class="summary-left">
+                <span class="summary-title">Decision Profiles (/v1/systemone)</span>
+                <span class="count-pill" id="decisions-count">0</span>
+                <span class="summary-sub">Structured choice, noul &amp; score routing (CPU E-cores, GPU &amp; hosted)</span>
+              </span>
+              <span class="chevron" aria-hidden="true">&gt;</span>
+            </summary>
+            <div class="disclosure-body">
+              <div class="card-grid" id="decision-list"></div>
+            </div>
+          </details>
         </div>
       </details>
     </section>
@@ -1663,26 +1791,105 @@
       return true;
     }
 
+    function spotlightBody(item) {
+      const llm = models.find(m => m.id === item.modelId);
+      if (llm) return modelDetails(llm);
+
+      const embed = embeddingProfiles.find(e => e.id === item.modelId);
+      if (embed) {
+        return `
+          <p class="detail-desc">${escapeHtml(item.subline)}</p>
+          ${memoryBar(item.vramGb, item.ramGb, null)}
+          <div class="lane-links">
+            <a href="${escapeHtml(embed.sourceUrl)}">llama-swap profile</a>
+            <button class="button" type="button" data-copy="${escapeHtml(embed.id)}">Copy command</button>
+          </div>`;
+      }
+
+      const media = mediaProfiles.find(p => p.id === item.modelId);
+      const dec = decisionProfiles.find(p => p.id === item.modelId);
+      const ref = media || dec;
+      const linksHtml = ref ? `
+        <div class="lane-links">
+          <a href="${escapeHtml(ref.sourceUrl)}">Native profile</a>
+          <a href="${escapeHtml(ref.guideUrl)}">Setup guide</a>
+          ${ref.experimentUrl ? `<a href="${escapeHtml(ref.experimentUrl)}">Experiment</a>` : ""}
+        </div>` : `
+        <div class="lane-links">
+          <a href="https://github.com/carteakey/l3ms/blob/main/docs/colab-burst-lane.md">Colab burst plan</a>
+        </div>`;
+
+      return `
+        <p class="detail-desc">${escapeHtml(item.subline)}</p>
+        ${typeof item.vramGb === "number" ? memoryBar(item.vramGb, item.ramGb, null) : ""}
+        ${linksHtml}`;
+    }
+
     function renderSpotlight() {
       const items = dashboard.spotlight || [];
-      document.getElementById("spotlight-grid").innerHTML = items.map(item => `
-        <article class="spotlight-card surface" data-tier="${escapeHtml(item.tier)}" data-lane="${escapeHtml(item.lane)}">
-          <div class="spotlight-top">
-            <span class="label">${escapeHtml(item.slot)}</span>
-            <span class="badge ${badgeClass(item.engine)}">${escapeHtml(item.engine)}</span>
-          </div>
-          <h3>${escapeHtml(item.title)}</h3>
-          <div class="spotlight-headline">${escapeHtml(item.headline)}</div>
-          <div class="spotlight-mem">${escapeHtml(memoryCompact(item.vramGb, item.ramGb))}</div>
-          <details class="card-more">
-            <summary>Details</summary>
-            <div class="card-more-body">
-              <p class="card-role">${escapeHtml(item.subline)}</p>
-              ${memoryBar(item.vramGb, item.ramGb, null)}
+      const tiers = [
+        {
+          key: "co-resident",
+          cls: "tier-co",
+          title: "Tier 1 · Always-On CPU Co-Resident (0 GiB VRAM)",
+          note: "Pinned to E-cores 12-15 · never evicts your active GPU model",
+        },
+        {
+          key: "burst",
+          cls: "tier-burst",
+          title: "Tier 2 · Exclusive GPU Switchover (RTX 4070 12 GB · :8089)",
+          note: "One GPU engine owns 11.7 GiB VRAM on demand via llama-swap",
+        },
+        {
+          key: "remote",
+          cls: "tier-remote",
+          title: "Tier 3 · Remote Cloud Overflow",
+          note: "On-demand cloud GPUs without touching local VRAM",
+        },
+      ];
+
+      document.getElementById("spotlight-grid").innerHTML = tiers.map(group => {
+        const rows = items.filter(item => (item.tier || "burst") === group.key);
+        if (!rows.length) return "";
+        return `
+          <div class="tier-block">
+            <div class="tier-head ${group.cls}">
+              <span class="tier-title">${escapeHtml(group.title)}</span>
+              <span class="tier-note">${escapeHtml(group.note)}</span>
             </div>
-          </details>
-        </article>
-      `).join("");
+            <div class="matrix-head matrix-cols" aria-hidden="true">
+              <span>Slot</span>
+              <span>Model</span>
+              <span>Engine &amp; Quant</span>
+              <span>Footprint</span>
+              <span>Performance / Role</span>
+              <span style="text-align:right">Inspect</span>
+            </div>
+            ${rows.map(item => {
+              const hasRecipe = models.some(m => m.id === item.modelId);
+              const memText = typeof item.vramGb === "number"
+                ? memoryCompact(item.vramGb, item.ramGb)
+                : (item.quant || "Cloud VRAM");
+              return `
+                <article class="stack-row" data-tier="${escapeHtml(item.tier)}" data-lane="${escapeHtml(item.lane)}">
+                  <details class="stack-row-details">
+                    <summary class="matrix-cols">
+                      <span class="row-slot">${escapeHtml(item.slot)}</span>
+                      <span class="row-model">${escapeHtml(item.title)}</span>
+                      <span class="row-engine">
+                        <span class="badge ${badgeClass(item.engine)}">${escapeHtml(item.engine)}</span>
+                        ${item.quant ? `<span class="row-quant">${escapeHtml(item.quant)}</span>` : ""}
+                      </span>
+                      <span class="row-mem">${escapeHtml(memText)}</span>
+                      <span class="row-perf">${escapeHtml(item.headline)}</span>
+                      <span class="row-cta">${hasRecipe ? "Recipe +" : "Specs +"}</span>
+                    </summary>
+                    <div class="stack-row-body">${spotlightBody(item)}</div>
+                  </details>
+                </article>`;
+            }).join("")}
+          </div>`;
+      }).join("");
     }
 
     function modelDetails(model) {
@@ -2428,9 +2635,11 @@
     });
 
     /* Hydrate & Initial Render */
+    const activeSlots = (dashboard.spotlight || []).length;
     const totalServed = models.length + unmeasuredModels.length + embeddingProfiles.length + mediaProfiles.length + decisionProfiles.length;
-    document.getElementById("profile-count").textContent = totalServed;
-    document.getElementById("tab-stack-count").textContent = totalServed;
+    document.getElementById("profile-count").textContent = `${activeSlots} active · ${totalServed} total`;
+    document.getElementById("tab-stack-count").textContent = activeSlots;
+    document.getElementById("full-catalog-count").textContent = totalServed;
     document.getElementById("system-gpu").textContent = dashboard.system.gpu;
     document.getElementById("system-cpu").textContent = dashboard.system.cpu;
     document.getElementById("system-ram").textContent = dashboard.system.ram;
