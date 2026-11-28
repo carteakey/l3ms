@@ -21,7 +21,7 @@ window.L3MS_DASHBOARD = {
       "quant": "Q8_0 (768-dim)",
       "tier": "co-resident",
       "headline": "0 GiB VRAM \u00b7 E-cores 12-15",
-      "subline": "Non-exclusive semantic search embeddings running permanently alongside the active GPU workload without ever evicting VRAM.",
+      "subline": "Always-on 768-dim semantic search embeddings running permanently on CPU E-cores without ever evicting GPU VRAM.",
       "vramGb": 0.0,
       "ramGb": 0.6
     },
@@ -34,7 +34,7 @@ window.L3MS_DASHBOARD = {
       "quant": "Q8_0 (CPU E-cores)",
       "tier": "co-resident",
       "headline": "0 GiB VRAM \u00b7 /v1/systemone",
-      "subline": "Always-on structured triage and routing on E-cores 12-15 (2.2 GB on /mnt/media) so fast decisions never evict your resident LLM.",
+      "subline": "Always-on 2B structured triage and routing (/v1/systemone) on CPU E-cores so fast decisions never evict your active GPU model.",
       "vramGb": 0.0,
       "ramGb": 2.2
     },
@@ -47,7 +47,7 @@ window.L3MS_DASHBOARD = {
       "quant": "Q8_0 (static eSpeak-ng)",
       "tier": "co-resident",
       "headline": "0 GiB VRAM \u00b7 Instant CPU TTS",
-      "subline": "Lightweight ~0.1 GB Q8_0 voice synthesis via audio.cpp v0.9.6 on E-cores 12-15 with zero GPU switchover.",
+      "subline": "Always-on multilingual voice synthesis (54 preset voices) on CPU E-cores for instant speech with zero GPU switchover.",
       "vramGb": 0.0,
       "ramGb": 0.1
     },
@@ -60,7 +60,7 @@ window.L3MS_DASHBOARD = {
       "quant": "UD-IQ2_XS + NVMe Q8_0 PLE",
       "tier": "burst",
       "headline": "73.0 t/s TG \u00b7 1,888 pp8k",
-      "subline": "Startup preload: 180B MoE on custom Ada sm_89 strata-lean, 128k elastic K8V4 KV, 2,949 GPU expert slots (72.4% hit), HC_Q8 + ADAPT_FETCH + MTP Q2_0.",
+      "subline": "Startup preload: 180B MoE on Strata Lean with NVMe-streamed PLE, 128k elastic context, and 2,949 GPU expert slots.",
       "vramGb": 11.6,
       "ramGb": 39.4
     },
@@ -73,7 +73,7 @@ window.L3MS_DASHBOARD = {
       "quant": "UD-Q4_K_XL + CPU Vision",
       "tier": "burst",
       "headline": "77.5 t/s fresh \u00b7 99.7 t/s edits",
-      "subline": "26.4B-A5.4B looped transformer on polystrata-4070 with 256k elastic FP8 KV, 2,296 t/s pp8k (Ada INT8 w4a8), lossless --lookup 3, and pure-CPU strata-vision.",
+      "subline": "Fast 26.4B coding and vision MoE on PolyStrata with 256k elastic FP8 context, prompt-lookup edits, and zero-VRAM CPU vision.",
       "vramGb": 11.7,
       "ramGb": 6.9
     },
@@ -86,7 +86,7 @@ window.L3MS_DASHBOARD = {
       "quant": "UD-IQ3_XXS \u00b7 262k ctx",
       "tier": "burst",
       "headline": "36.7 t/s \u00b7 0 GB RAM spill",
-      "subline": "10.17 GiB 100% resident in VRAM with native 262k context (q5_0 K / q4_1 V) and zero DDR5 decode traffic.",
+      "subline": "Dense 27B model fitting 100% in 10.2 GiB VRAM with native 262k context and zero host RAM spill.",
       "vramGb": 10.2,
       "ramGb": 0.0
     },
@@ -99,7 +99,7 @@ window.L3MS_DASHBOARD = {
       "quant": "UD-Q4_K_XL QAT + MTP",
       "tier": "burst",
       "headline": "100.6 t/s TG \u00b7 128k ctx",
-      "subline": "Fastest speculative-decoding Gemma 4 profile on this node with 60-82% MTP acceptance.",
+      "subline": "Fastest speculative-decoding Gemma 4 profile on this GPU, hitting 100.6 t/s with 60-82% draft acceptance.",
       "vramGb": 10.8,
       "ramGb": 6.4
     },
@@ -112,7 +112,7 @@ window.L3MS_DASHBOARD = {
       "quant": "INT8 ConvRot + Pruned Q4_K_M",
       "tier": "burst",
       "headline": "8.83 s / 1024px \u00b7 Photoreal Q4_K_M",
-      "subline": "Qwen-Image-2.1-Turbo native INT8 ConvRot (8 steps) + MiniMax-H3-Image Pruned Q4_K_M (shared Qwen3-VL-32B encoder via ComfyUI-GGUF) + FLUX.3 Klein.",
+      "subline": "Fast 8-step turbo generation with Qwen-Image-2.1 plus photorealistic multi-ref images via MiniMax-H3-Image Q4_K_M and FLUX.3 Klein.",
       "vramGb": 10.5,
       "ramGb": 4.0
     },
@@ -125,7 +125,7 @@ window.L3MS_DASHBOARD = {
       "quant": "Q8_0 TTS + 30B-A4B ASR",
       "tier": "burst",
       "headline": "TTS / Clone / Stream + 30B ASR",
-      "subline": "Breeze-TTS-2 Q8_0 (standard, clone, voice design, streaming) + Nemotron 3.5 Transcribe 30B-A4B with VAD and diarization.",
+      "subline": "Full-featured speech synthesis (standard, voice clone, voice design, streaming) paired with 30B speech-to-text transcription and diarization.",
       "vramGb": 6.5,
       "ramGb": 12.0
     },
@@ -138,7 +138,7 @@ window.L3MS_DASHBOARD = {
       "quant": "Q8_0 (~5.5 GB)",
       "tier": "burst",
       "headline": "Local Turbo Music Synthesis",
-      "subline": "Compiled vendor/acestep.cpp ace-server serving Q8_0 DiT + 1.7B LM + Qwen3-0.6B encoder on /mnt/media.",
+      "subline": "Local 48 kHz stereo music generation on GPU (~5.3 GiB VRAM) with an interactive web UI and HTTP API.",
       "vramGb": 6.0,
       "ramGb": 2.0
     },
@@ -151,7 +151,7 @@ window.L3MS_DASHBOARD = {
       "quant": "Artemis Q3_K_S (27B) + 9B",
       "tier": "burst",
       "headline": "27B & 9B /v1/systemone",
-      "subline": "27B Artemis-Q3_K_S for complex grounding and large schemas alongside 9B d3-flash & Clef-Flash (-c = -b = -ub = 8192).",
+      "subline": "High-accuracy 27B model for RAG grounding and large schemas alongside fast 9B text-and-image decision models.",
       "vramGb": 11.5,
       "ramGb": 1.5
     },
@@ -164,7 +164,7 @@ window.L3MS_DASHBOARD = {
       "quant": "Headless GPU Cycles",
       "tier": "burst",
       "headline": "Headless 3D & Rendering",
-      "subline": "Direct headless Blender 5.2 scene authoring and Cycles rendering via MCP.",
+      "subline": "Headless Blender 5.2 scene authoring and GPU Cycles rendering driven over MCP.",
       "vramGb": 4.0,
       "ramGb": 4.0
     },
@@ -177,7 +177,7 @@ window.L3MS_DASHBOARD = {
       "quant": "24-96 GB Cloud VRAM",
       "tier": "remote",
       "headline": "Heavy Video, 70B+ Evals & LoRA",
-      "subline": "Pay-per-CU remote burst lane with idle auto-shutdown; runs overflow workloads without evicting the local RTX 4070.",
+      "subline": "On-demand cloud GPU overflow (24-96 GB VRAM) with idle auto-shutdown for heavy video, 70B+ evals, and fine-tuning.",
       "vramGb": null,
       "ramGb": null
     }
@@ -185,7 +185,7 @@ window.L3MS_DASHBOARD = {
   "models": [
     {
       "displayName": "Gemma 4 26B QAT + MTP",
-      "summary": "Fastest speculative-decoding Gemma 4 profile on this node, pairing UD-Q4_K_XL QAT weights with an MTP draft head for 100.6 t/s peak profile throughput at 128k context.",
+      "summary": "Fastest speculative-decoding Gemma 4 profile on this GPU, pairing QAT weights with an MTP draft head for 100.6 t/s throughput at 128k context.",
       "role": "High-Speed QAT + MTP",
       "tier": "burst",
       "engine": "llama.cpp-master",
@@ -210,7 +210,7 @@ window.L3MS_DASHBOARD = {
       "benchmark": "mtp_bench_gemma.py",
       "id": "gemma-4-26b-qat-mtp",
       "name": "Gemma 4 26B QAT + MTP",
-      "description": "Fastest speculative-decoding Gemma 4 profile on this node, pairing UD-Q4_K_XL QAT weights with an MTP draft head for 100.6 t/s peak profile throughput at 128k context.",
+      "description": "Fastest speculative-decoding Gemma 4 profile on this GPU, pairing QAT weights with an MTP draft head for 100.6 t/s throughput at 128k context.",
       "preload": false,
       "aliases": [],
       "context": "128k",
@@ -232,8 +232,8 @@ window.L3MS_DASHBOARD = {
       "benchmarkUrl": "https://github.com/carteakey/l3ms/blob/main/mtp_bench_gemma.py"
     },
     {
-      "displayName": "Inkling 2 Mini 26.4B-A5.4B (polystrata-4070, UD-Q4_K_XL + CPU Vision)",
-      "summary": "Primary fast coding and vision MoE tier: Thinking Machines Lab 26.4B looped transformer (48 logical passes) on polystrata-4070 (v0.2.20-poly.5 + PR #313) with CUDA VMM 256k elastic FP8 KV, 1,678 resident GPU experts (8.1 GiB, ~95% hit), Ada INT8 Tensor Core prefill (STRATA_PREFILL_NVFP4=w4a8, STRATA_INK_FAST_CTRL=1), lossless prompt lookup (--window 6 --lookup 3), and zero-VRAM CPU strata-vision. Delivers 77.5 t/s fresh coding, 99.7 t/s code edits, and 1,833 / 2,296 / 2,270 t/s pp2k / pp8k / pp20k.",
+      "displayName": "Inkling 2 Mini",
+      "summary": "Primary fast coding, agentic, and vision MoE on PolyStrata with 256k elastic FP8 context and zero-VRAM CPU vision. Delivers 77.5 t/s fresh coding, 99.7 t/s on code edits, and 2,296 t/s prefill.",
       "role": "Fast Coding + Vision",
       "tier": "burst",
       "engine": "polystrata-4070",
@@ -264,8 +264,8 @@ window.L3MS_DASHBOARD = {
       ],
       "benchmark": "docs/inkling-2-mini-optimization.md",
       "id": "inkling-2-mini",
-      "name": "Inkling 2 Mini 26.4B-A5.4B (polystrata-4070, UD-Q4_K_XL + CPU Vision)",
-      "description": "Primary fast coding and vision MoE tier: Thinking Machines Lab 26.4B looped transformer (48 logical passes) on polystrata-4070 (v0.2.20-poly.5 + PR #313) with CUDA VMM 256k elastic FP8 KV, 1,678 resident GPU experts (8.1 GiB, ~95% hit), Ada INT8 Tensor Core prefill (STRATA_PREFILL_NVFP4=w4a8, STRATA_INK_FAST_CTRL=1), lossless prompt lookup (--window 6 --lookup 3), and zero-VRAM CPU strata-vision. Delivers 77.5 t/s fresh coding, 99.7 t/s code edits, and 1,833 / 2,296 / 2,270 t/s pp2k / pp8k / pp20k.",
+      "name": "Inkling 2 Mini",
+      "description": "Primary fast coding, agentic, and vision MoE on PolyStrata with 256k elastic FP8 context and zero-VRAM CPU vision. Delivers 77.5 t/s fresh coding, 99.7 t/s on code edits, and 2,296 t/s prefill.",
       "preload": false,
       "aliases": [
         "inkling-2-mini-128k"
@@ -342,8 +342,8 @@ window.L3MS_DASHBOARD = {
       "benchmarkUrl": "https://github.com/carteakey/l3ms/blob/main/docs/inkling-2-mini-optimization.md"
     },
     {
-      "displayName": "Qwen3.8-Flash-Next Plat (strata-lean, UD-IQ2_XS + Q8_0 PLE)",
-      "summary": "Startup preload and primary Frontier MoE tier: custom Ada sm_89 strata-lean fork running Unsloth Dynamic V3.1 UD-IQ2_XS with unquantized Q8_0 PLE streamed from NVMe. 2,949 GPU expert slots (72.4% hit rate) via STRATA_HC_Q8=1, STRATA_ADAPT_FETCH=1, STRATA_PREFILL_LEND_PCT=40, and STRATA_PREFILL_CPU_SHARE_MAX=3072. Delivers 73.0 t/s steady decode and 1,136 / 1,888 t/s pp2k / pp8k at 128k elastic K8V4 context.",
+      "displayName": "Qwen3.8-Flash-Next Plat",
+      "summary": "Startup preload and primary 180B MoE model on Strata Lean. Streams the Q8_0 PLE table from NVMe with 2,949 GPU expert slots at 128k context, delivering 73.0 t/s decode and up to 1,888 t/s prefill.",
       "role": "Frontier MoE (Preload)",
       "tier": "burst",
       "engine": "strata-lean",
@@ -374,8 +374,8 @@ window.L3MS_DASHBOARD = {
       ],
       "benchmark": "docs/strata-tuning-matrix.md",
       "id": "qwen38-flash-next-plat",
-      "name": "Qwen3.8-Flash-Next Plat (strata-lean, UD-IQ2_XS + Q8_0 PLE)",
-      "description": "Startup preload and primary Frontier MoE tier: custom Ada sm_89 strata-lean fork running Unsloth Dynamic V3.1 UD-IQ2_XS with unquantized Q8_0 PLE streamed from NVMe. 2,949 GPU expert slots (72.4% hit rate) via STRATA_HC_Q8=1, STRATA_ADAPT_FETCH=1, STRATA_PREFILL_LEND_PCT=40, and STRATA_PREFILL_CPU_SHARE_MAX=3072. Delivers 73.0 t/s steady decode and 1,136 / 1,888 t/s pp2k / pp8k at 128k elastic K8V4 context.",
+      "name": "Qwen3.8-Flash-Next Plat",
+      "description": "Startup preload and primary 180B MoE model on Strata Lean. Streams the Q8_0 PLE table from NVMe with 2,949 GPU expert slots at 128k context, delivering 73.0 t/s decode and up to 1,888 t/s prefill.",
       "aliases": [
         "strata",
         "plat",
@@ -457,7 +457,7 @@ window.L3MS_DASHBOARD = {
     },
     {
       "displayName": "Gemma 4 26B QAT",
-      "summary": "Gemma 4 26B QAT without speculative drafting; maintained as the baseline MTP control profile at 69.0 t/s.",
+      "summary": "Standard Gemma 4 26B QAT without speculative drafting; kept as a baseline comparison profile at 69.0 t/s and 128k context.",
       "role": "QAT Baseline Control",
       "tier": "burst",
       "engine": "llama.cpp-master",
@@ -481,7 +481,7 @@ window.L3MS_DASHBOARD = {
       "benchmark": "mtp_bench_gemma.py",
       "id": "gemma-4-26b-qat",
       "name": "Gemma 4 26B QAT",
-      "description": "Gemma 4 26B QAT without speculative drafting; maintained as the baseline MTP control profile at 69.0 t/s.",
+      "description": "Standard Gemma 4 26B QAT without speculative drafting; kept as a baseline comparison profile at 69.0 t/s and 128k context.",
       "preload": false,
       "aliases": [],
       "context": "128k",
@@ -503,8 +503,8 @@ window.L3MS_DASHBOARD = {
       "benchmarkUrl": "https://github.com/carteakey/l3ms/blob/main/mtp_bench_gemma.py"
     },
     {
-      "displayName": "Inkling 2 Mini 26.4B-A5.4B (llama.cpp-inkling2-lean fallback)",
-      "summary": "GGUF fallback engine for Inkling 2 Mini: custom Ada sm_89 llama.cpp-inkling2-lean with elastic borrowed-cache prefill (LLAMA_MOE_CACHE_ELASTIC=1), visit-weighted loop budget (LLAMA_MOE_CACHE_VISIT_BUDGET=1), PR #264 CUDA MoE prompt kernels, 7,800 MiB GPU MoE LRU cache (--moe-cache-cpu-share 0.70), DSpark n=3, and CPU-offloaded mmproj. Delivers 68.7 t/s steady decode and 820 / 727 t/s pp2k / pp8k at 32k.",
+      "displayName": "Inkling 2 Mini (llama.cpp Fallback)",
+      "summary": "GGUF fallback for Inkling 2 Mini with GPU MoE caching, DSpark speculative drafting, and CPU vision at 32k context. Delivers 68.7 t/s steady decode and 820 t/s prefill.",
       "role": "Coding Fallback (GGUF)",
       "tier": "burst",
       "engine": "llama.cpp-inkling2-lean",
@@ -533,8 +533,8 @@ window.L3MS_DASHBOARD = {
       ],
       "benchmark": "docs/inkling-2-mini-optimization.md",
       "id": "inkling-2-mini-llama",
-      "name": "Inkling 2 Mini 26.4B-A5.4B (llama.cpp-inkling2-lean fallback)",
-      "description": "GGUF fallback engine for Inkling 2 Mini: custom Ada sm_89 llama.cpp-inkling2-lean with elastic borrowed-cache prefill (LLAMA_MOE_CACHE_ELASTIC=1), visit-weighted loop budget (LLAMA_MOE_CACHE_VISIT_BUDGET=1), PR #264 CUDA MoE prompt kernels, 7,800 MiB GPU MoE LRU cache (--moe-cache-cpu-share 0.70), DSpark n=3, and CPU-offloaded mmproj. Delivers 68.7 t/s steady decode and 820 / 727 t/s pp2k / pp8k at 32k.",
+      "name": "Inkling 2 Mini (llama.cpp Fallback)",
+      "description": "GGUF fallback for Inkling 2 Mini with GPU MoE caching, DSpark speculative drafting, and CPU vision at 32k context. Delivers 68.7 t/s steady decode and 820 t/s prefill.",
       "preload": false,
       "aliases": [],
       "context": "32k",
@@ -556,8 +556,8 @@ window.L3MS_DASHBOARD = {
       "benchmarkUrl": "https://github.com/carteakey/l3ms/blob/main/docs/inkling-2-mini-optimization.md"
     },
     {
-      "displayName": "Qwen3.8-Flash-Next Plat Abliterated (strata-lean, SC117)",
-      "summary": "Platinum Abliterated peer: strata-lean with SC117 unaligned IQ3_XXS weights, Q8_0 PLE on NVMe, 3,086 hot GPU expert slots, native Q2_0 MTP, and elastic 128k K8V4 context. 62.2 t/s steady decode and 1,992 t/s pp8k.",
+      "displayName": "Qwen3.8-Flash-Next Plat Abliterated",
+      "summary": "Uncensored SC117 variant of Qwen3.8-Flash-Next on Strata Lean at 128k context, delivering 62.2 t/s steady decode and 1,992 t/s prefill.",
       "role": "Frontier MoE (Abliterated)",
       "tier": "burst",
       "engine": "strata-lean",
@@ -584,8 +584,8 @@ window.L3MS_DASHBOARD = {
       ],
       "benchmark": "bench-models/bench-qwen38-refresh-ab.sh",
       "id": "qwen38-flash-next-plat-abliterated",
-      "name": "Qwen3.8-Flash-Next Plat Abliterated (strata-lean, SC117)",
-      "description": "Platinum Abliterated peer: strata-lean with SC117 unaligned IQ3_XXS weights, Q8_0 PLE on NVMe, 3,086 hot GPU expert slots, native Q2_0 MTP, and elastic 128k K8V4 context. 62.2 t/s steady decode and 1,992 t/s pp8k.",
+      "name": "Qwen3.8-Flash-Next Plat Abliterated",
+      "description": "Uncensored SC117 variant of Qwen3.8-Flash-Next on Strata Lean at 128k context, delivering 62.2 t/s steady decode and 1,992 t/s prefill.",
       "preload": false,
       "aliases": [
         "abliterated"
@@ -660,8 +660,8 @@ window.L3MS_DASHBOARD = {
       "benchmarkUrl": "https://github.com/carteakey/l3ms/blob/main/bench-models/bench-qwen38-refresh-ab.sh"
     },
     {
-      "displayName": "Qwen3.8-Flash-Next Plat Vision (strata-lean + strata-vision)",
-      "summary": "Platinum multimodal peer: strata-lean paired with pure-CPU strata-vision image encoder (mmproj-F16) and Unsloth UD-IQ2_XS + Q8_0 PLE. Retains 100% of the GPU expert cache with zero VRAM loss for vision at 128k context.",
+      "displayName": "Qwen3.8-Flash-Next Plat Vision",
+      "summary": "Multimodal Qwen3.8-Flash-Next on Strata Lean with pure-CPU image encoding so 100% of VRAM stays dedicated to experts at 128k context (58.0 t/s).",
       "role": "Frontier MoE + Vision",
       "tier": "burst",
       "engine": "strata-lean",
@@ -688,8 +688,8 @@ window.L3MS_DASHBOARD = {
       ],
       "benchmark": "bench-models/bench_strata_long_horizon.py",
       "id": "qwen38-flash-next-plat-vision",
-      "name": "Qwen3.8-Flash-Next Plat Vision (strata-lean + strata-vision)",
-      "description": "Platinum multimodal peer: strata-lean paired with pure-CPU strata-vision image encoder (mmproj-F16) and Unsloth UD-IQ2_XS + Q8_0 PLE. Retains 100% of the GPU expert cache with zero VRAM loss for vision at 128k context.",
+      "name": "Qwen3.8-Flash-Next Plat Vision",
+      "description": "Multimodal Qwen3.8-Flash-Next on Strata Lean with pure-CPU image encoding so 100% of VRAM stays dedicated to experts at 128k context (58.0 t/s).",
       "preload": false,
       "aliases": [
         "strata-vision",
@@ -774,8 +774,8 @@ window.L3MS_DASHBOARD = {
       "benchmarkUrl": "https://github.com/carteakey/l3ms/blob/main/bench-models/bench_strata_long_horizon.py"
     },
     {
-      "displayName": "Qwen3.8-27B (UD-IQ3_XXS, Pure-VRAM Dense 27B)",
-      "summary": "Confirmed pure-VRAM dense 27B language tier: fits 100% in 10.17 GiB VRAM with native 262k context (q5_0 K / q4_1 V) and zero DDR5 decode traffic at 36.7 t/s. Chosen over smaller 9B models for strong dense factual precision and long-context stability.",
+      "displayName": "Qwen3.8-27B (Pure VRAM)",
+      "summary": "Dense 27B model fitting 100% inside 12 GB VRAM with native 262k context and zero RAM spill at 36.7 t/s. Chosen over smaller 9B models for strong factual precision and long-context stability.",
       "role": "Pure-VRAM Dense 27B",
       "tier": "burst",
       "engine": "llama.cpp-master",
@@ -799,8 +799,8 @@ window.L3MS_DASHBOARD = {
       ],
       "benchmark": "docs/qwen3-8-27b-local-post.md",
       "id": "qwen3-8-27b-iq3-xxs",
-      "name": "Qwen3.8-27B (UD-IQ3_XXS, Pure-VRAM Dense 27B)",
-      "description": "Confirmed pure-VRAM dense 27B language tier: fits 100% in 10.17 GiB VRAM with native 262k context (q5_0 K / q4_1 V) and zero DDR5 decode traffic at 36.7 t/s. Chosen over smaller 9B models for strong dense factual precision and long-context stability.",
+      "name": "Qwen3.8-27B (Pure VRAM)",
+      "description": "Dense 27B model fitting 100% inside 12 GB VRAM with native 262k context and zero RAM spill at 36.7 t/s. Chosen over smaller 9B models for strong factual precision and long-context stability.",
       "preload": false,
       "aliases": [],
       "context": "256k",
@@ -822,8 +822,8 @@ window.L3MS_DASHBOARD = {
       "benchmarkUrl": "https://github.com/carteakey/l3ms/blob/main/docs/qwen3-8-27b-local-post.md"
     },
     {
-      "displayName": "Humanizer 12B (Q6_K)",
-      "summary": "Fine-tuned Gemma-4-12B text-rewriting model from jialinyyzz/humanizer. Rewrites AI drafts to natural human voice while strictly preserving facts, numbers, dates, and names. 100% GPU offload (-ngl 99, 10.5 GB VRAM) at 8k context.",
+      "displayName": "Humanizer 12B",
+      "summary": "Fine-tuned Gemma 4 12B rewriter that turns AI drafts into natural human prose while preserving facts, numbers, dates, and names. Fits 100% in VRAM at 29.4 t/s.",
       "role": "Text Rewrite (Full VRAM)",
       "tier": "burst",
       "engine": "llama.cpp-master",
@@ -847,8 +847,8 @@ window.L3MS_DASHBOARD = {
       ],
       "benchmark": "bench-models/bench-llama-humanizer.sh",
       "id": "humanizer-12b",
-      "name": "Humanizer 12B (Q6_K)",
-      "description": "Fine-tuned Gemma-4-12B text-rewriting model from jialinyyzz/humanizer. Rewrites AI drafts to natural human voice while strictly preserving facts, numbers, dates, and names. 100% GPU offload (-ngl 99, 10.5 GB VRAM) at 8k context.",
+      "name": "Humanizer 12B",
+      "description": "Fine-tuned Gemma 4 12B rewriter that turns AI drafts into natural human prose while preserving facts, numbers, dates, and names. Fits 100% in VRAM at 29.4 t/s.",
       "preload": false,
       "aliases": [
         "humanizer"
@@ -872,8 +872,8 @@ window.L3MS_DASHBOARD = {
       "benchmarkUrl": "https://github.com/carteakey/l3ms/blob/main/bench-models/bench-llama-humanizer.sh"
     },
     {
-      "displayName": "Qwen3.8-Flash-Next EXP (llama.cpp MoE LRU Cache #30966)",
-      "summary": "Experimental llama.cpp fallback: b12100 with dynamic GPU MoE expert LRU caching (--moe-cache-mib 2048) and CPU-shared misses (#30966) + MTP fix (#30592). 24.53 t/s steady decode (26.99 t/s peak) in 11.5 GB VRAM.",
+      "displayName": "Qwen3.8-Flash-Next (llama.cpp MoE Cache)",
+      "summary": "Experimental llama.cpp fallback with dynamic GPU MoE expert caching at 65k context, delivering 24.5 t/s steady decode.",
       "role": "llama.cpp MoE Cache",
       "tier": "burst",
       "engine": "llama.cpp-master",
@@ -898,8 +898,8 @@ window.L3MS_DASHBOARD = {
       ],
       "benchmark": "bench-models/bench-qwen38-refresh-ab.sh",
       "id": "qwen38-flash-next-exp",
-      "name": "Qwen3.8-Flash-Next EXP (llama.cpp MoE LRU Cache #30966)",
-      "description": "Experimental llama.cpp fallback: b12100 with dynamic GPU MoE expert LRU caching (--moe-cache-mib 2048) and CPU-shared misses (#30966) + MTP fix (#30592). 24.53 t/s steady decode (26.99 t/s peak) in 11.5 GB VRAM.",
+      "name": "Qwen3.8-Flash-Next (llama.cpp MoE Cache)",
+      "description": "Experimental llama.cpp fallback with dynamic GPU MoE expert caching at 65k context, delivering 24.5 t/s steady decode.",
       "preload": false,
       "aliases": [],
       "context": "64k",
@@ -921,8 +921,8 @@ window.L3MS_DASHBOARD = {
       "benchmarkUrl": "https://github.com/carteakey/l3ms/blob/main/bench-models/bench-qwen38-refresh-ab.sh"
     },
     {
-      "displayName": "Qwen3.8-Flash-Next Gold (llama.cpp master b12073)",
-      "summary": "Plain upstream llama.cpp master fallback (b12073 d1044bc82). 22.77 t/s steady decode, 596 t/s pp8k at 96k q8_0 KV context with --fit on --fit-target 512 and ngram-mod speculation.",
+      "displayName": "Qwen3.8-Flash-Next (llama.cpp Fallback)",
+      "summary": "Plain upstream llama.cpp fallback at 96k context with n-gram speculation, delivering 22.8 t/s steady decode and 596 t/s prefill.",
       "role": "llama.cpp Gold Fallback",
       "tier": "burst",
       "engine": "llama.cpp-master",
@@ -947,8 +947,8 @@ window.L3MS_DASHBOARD = {
       ],
       "benchmark": "bench-models/bench-qwen38-refresh-ab.sh",
       "id": "qwen38-flash-next",
-      "name": "Qwen3.8-Flash-Next Gold (llama.cpp master b12073)",
-      "description": "Plain upstream llama.cpp master fallback (b12073 d1044bc82). 22.77 t/s steady decode, 596 t/s pp8k at 96k q8_0 KV context with --fit on --fit-target 512 and ngram-mod speculation.",
+      "name": "Qwen3.8-Flash-Next (llama.cpp Fallback)",
+      "description": "Plain upstream llama.cpp fallback at 96k context with n-gram speculation, delivering 22.8 t/s steady decode and 596 t/s prefill.",
       "preload": false,
       "aliases": [
         "qwen38-flash-next-ple-q8",
@@ -973,8 +973,8 @@ window.L3MS_DASHBOARD = {
       "benchmarkUrl": "https://github.com/carteakey/l3ms/blob/main/bench-models/bench-qwen38-refresh-ab.sh"
     },
     {
-      "displayName": "Qwen3.8-Flash-Next MTP (llama.cpp QSA Sparsity V2 + #28243)",
-      "summary": "Speculative llama.cpp fallback pairing Unified QSA Sparsity Stack V2 and compact 1.78 GB shared-Q4_K_M MTP draft head (-ncmoe 46). 20.65 t/s aggregate decode with 77-96% draft acceptance in 11.0 GB VRAM.",
+      "displayName": "Qwen3.8-Flash-Next (llama.cpp MTP)",
+      "summary": "Speculative-decoding llama.cpp fallback pairing QSA sparsity with a shared MTP draft head for 20.7 t/s decode.",
       "role": "llama.cpp MTP Fallback",
       "tier": "burst",
       "engine": "llama.cpp-master",
@@ -999,8 +999,8 @@ window.L3MS_DASHBOARD = {
       ],
       "benchmark": "bench-models/bench-llama-qwen38-flash-next-mtp.sh",
       "id": "qwen38-flash-next-mtp",
-      "name": "Qwen3.8-Flash-Next MTP (llama.cpp QSA Sparsity V2 + #28243)",
-      "description": "Speculative llama.cpp fallback pairing Unified QSA Sparsity Stack V2 and compact 1.78 GB shared-Q4_K_M MTP draft head (-ncmoe 46). 20.65 t/s aggregate decode with 77-96% draft acceptance in 11.0 GB VRAM.",
+      "name": "Qwen3.8-Flash-Next (llama.cpp MTP)",
+      "description": "Speculative-decoding llama.cpp fallback pairing QSA sparsity with a shared MTP draft head for 20.7 t/s decode.",
       "preload": false,
       "aliases": [],
       "context": "16k",
@@ -1022,8 +1022,8 @@ window.L3MS_DASHBOARD = {
       "benchmarkUrl": "https://github.com/carteakey/l3ms/blob/main/bench-models/bench-llama-qwen38-flash-next-mtp.sh"
     },
     {
-      "displayName": "Qwen3.8-Flash-Next Vision (llama.cpp master)",
-      "summary": "Multimodal llama.cpp fallback with mmproj-F16 projector and 3 MoE layers on GPU (-ncmoe 45). 18.4 t/s at 32k context in 10.8 GB VRAM.",
+      "displayName": "Qwen3.8-Flash-Next Vision (llama.cpp Fallback)",
+      "summary": "Multimodal upstream llama.cpp fallback with vision support at 32k context, delivering 18.4 t/s decode.",
       "role": "llama.cpp Vision Fallback",
       "tier": "burst",
       "engine": "llama.cpp-master",
@@ -1050,8 +1050,8 @@ window.L3MS_DASHBOARD = {
       ],
       "benchmark": "bench-models/bench-llama-qwen38-flash-next-build-ab.sh",
       "id": "qwen38-flash-next-vision",
-      "name": "Qwen3.8-Flash-Next Vision (llama.cpp master)",
-      "description": "Multimodal llama.cpp fallback with mmproj-F16 projector and 3 MoE layers on GPU (-ncmoe 45). 18.4 t/s at 32k context in 10.8 GB VRAM.",
+      "name": "Qwen3.8-Flash-Next Vision (llama.cpp Fallback)",
+      "description": "Multimodal upstream llama.cpp fallback with vision support at 32k context, delivering 18.4 t/s decode.",
       "preload": false,
       "aliases": [],
       "context": "32k",
@@ -1076,8 +1076,8 @@ window.L3MS_DASHBOARD = {
   "unmeasured": [
     {
       "id": "qwen38-flash-next-plat-abliterated-vision",
-      "name": "Qwen3.8-Flash-Next Plat Abliterated Vision (strata-lean)",
-      "description": "Platinum Abliterated Vision peer: strata-lean with SC117 unaligned IQ3_XXS weights, Q8_0 PLE, and pure-CPU strata-vision image encoder (mmproj-F16) at 128k context. Declared in llama-swap.yaml; no throughput has been measured for this profile yet.",
+      "name": "Qwen3.8-Flash-Next Plat Abliterated Vision",
+      "description": "Uncensored SC117 Qwen3.8-Flash-Next on Strata Lean with CPU-offloaded multimodal vision at 128k context. Declared in llama-swap.yaml; not benchmarked yet.",
       "role": "Abliterated Vision MoE",
       "tier": "burst",
       "engine": "strata-lean",
@@ -1167,8 +1167,8 @@ window.L3MS_DASHBOARD = {
     },
     {
       "id": "inkling-2-mini-unbound-v2.1",
-      "name": "Inkling 2 Mini Unbound v2.1 (Q4_K_M, llama.cpp-inkling2-lean)",
-      "description": "Conv-aware abliterated and self-distilled attention-patched GGUF (17.78 GB) running on llama.cpp-inkling2-lean with 7,800 MiB elastic MoE LRU cache and CPU-offloaded mmproj-F16 at 32k context. Declared in llama-swap.yaml; not yet benchmarked on this stack.",
+      "name": "Inkling 2 Mini Unbound v2.1",
+      "description": "Abliterated Unbound v2.1 variant of Inkling 2 Mini with GPU MoE caching and CPU vision at 32k context. Declared in llama-swap.yaml; not benchmarked yet.",
       "role": "Unbound Coding + Vision",
       "tier": "burst",
       "engine": "llama.cpp-inkling2-lean",
@@ -1198,8 +1198,8 @@ window.L3MS_DASHBOARD = {
     },
     {
       "id": "nemotron-3.5-bolt",
-      "name": "Nemotron 3.5 Bolt 74B-A9B (24GB IQ2 QAT + LiLiCorr DFlash)",
-      "description": "NVIDIA Nemotron 3.5 Bolt 74B-A9B hybrid Mamba-2/Transformer LatentMoE VLM (text, images, video) with LiLiCorr DFlash speculative decoding on llama.cpp master (b12621+) with auto-fit RAM offload at 64k context. Declared in llama-swap.yaml; not yet benchmarked on this stack.",
+      "name": "Nemotron 3.5 Bolt 74B",
+      "description": "Hybrid 74B-A9B multimodal model (text, images, video) with DFlash speculative decoding and automatic RAM offload at 64k context. Declared in llama-swap.yaml; not benchmarked yet.",
       "role": "Hybrid VLM + DFlash",
       "tier": "burst",
       "engine": "llama.cpp-master",
